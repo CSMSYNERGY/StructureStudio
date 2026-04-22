@@ -1,0 +1,1322 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:680px;margin:0 auto}</style>
+</head><body><div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const {useState,useRef,useCallback,useEffect}=React;
+
+// ─── DEFAULT CONFIG (Junior Barns) ───
+// To use a different client: load their JSON config and pass to <StructureStudio config={clientConfig} />
+const DEFAULT_CONFIG = {"clientId": "junior-barns", "webhookUrl": "https://csmsynergy.app.n8n.cloud/webhook/96317c82-f0af-4f10-b452-6399a196f840", "branding": {"companyName": "Junior Barns", "tagline": "Design & Quote", "accentColor": "#D97706", "headerBg": "linear-gradient(135deg, #1E293B 0%, #334155 100%)", "logo": null}, "contactFields": ["name", "email", "phone", "street", "city", "state", "zip"], "buildingStyles": [{"value": "Econo", "label": "Econo", "img": "data:image/jpeg;base64,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", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16"]}, {"value": "Urban", "label": "Urban", "img": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABIMDRANCxIQDhAUExIVGywdGxgYGzYnKSAsQDlEQz85Pj1HUGZXR0thTT0+WXlaYWltcnNyRVV9hnxvhWZwcm7/2wBDARMUFBsXGzQdHTRuST5Jbm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm7/wAARCAB4AHgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDhqKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKlt7aW6lEcKFm9u1a6Wlppag3JE9z/cHRaTdhpXMOiukRdOvhyv2eT0cDB/pUc+hhOfK3L6xn+lLmQWOforUfS48fK7A+hqF9MkH3XU/XiqEUaKstYXC/8ALPP0NQtFIn3kYfUUAMooooAKKKKACiiigArSsdIeZPPum8i3HOW6n6Vno2x1bGcEHFacVzPqt0wmYYClgo6L9KTGi016safZ9Mj8qPvJ/E1NgsScs/J681at7VUHSrWJF4UR4wD93/69ZXNUrFQWi7cY547VLGJrYkwSEDP3TyPyqxmf++o+iL/hTWLtIiSNK3Oc8bR/9fmkNsQ3MExxeQbWH/LRP85qteRpBsMLiWOTvnkVceIEHikmtlFuDgcn+tNNicUZaXCEHIYBfUU9Z4myN44qZrZPT1pps0wcDrVcwuVELRQS9Vjb8qhk06BhnaV+hqwbEAEDvUZs2VMIxH0p8wuQoTaY68xMH9jwapujRth1Kn0IrZMU4wA59885pkglKkSIrjsCKfMTysx6KsXCRjdgbHHVc0VRJXrS0D/j9f8A65H+lZtaWgf8fz/9c2/pSew1udAoqQ9f+Aio1qRuv/ARWJuL607+A/7wpnrT/wDlmf8AeFAMaRwafMP9GX6/1pp70+b/AI9h9f600JlUj+tGODSn/Gj1oAaRTSOKeaQ9KAIyvNRsgqY9ajamBz2pDF9KPcfyFFLqn/IQl/D+QorVGDKtaWg/8fzf9c2/pWbWjoX/AB/N/wBc2pPYa3OgWpAzoxwQQVBwwziolNSE9P8AdFYmxJ5snPEf/fP/ANemsrO4lZyNpxsHC898etJnrTwf3Z/3hQFgPeny/wDHsPr/AFqM/wAVPl/49R9f600DK5/xo7GkP+NL60AIaQ9KDSHpQA09aY1O701qYjA1T/kIS/h/IUUap/yEJPw/kKK1RiypWjof/H8f+ubVnU+KWSF98TFW6ZFDBHWKal2MwBUEjaK5hdVulH+tyfdRThrFyDk7D+BH9az5Wa86Om2Pz8ppGk2MIyr5bkHbxx71gLr069VH4MRUo8QueHiJH+//APWpcrDmRunvT5f+PX8f61ipr8b5zA447MDT38Q25i2CGXPvihJjbReP+NHY1jSa8f8AlnAP+BNmq761dN90on0X/GnysXMjoD1prkKvzED6nFczJf3Mn3p3/A4qBmZjliT9afKLnOke9toz806fgc1Wk1W2X7u9voMVh0U+UXOya7nFxctKF2g44P0oqGiqICiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD/2Q==", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16", "8x20", "10x12", "10x16", "10x20", "10x24"]}, {"value": "Northwood", "label": "Northwood", "img": "data:image/jpeg;base64,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", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16"]}, {"value": "Farmland", "label": "Farmland", "img": "data:image/jpeg;base64,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", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16"]}], "defaultSizes": ["8x8", "8x10", "8x12", "8x14", "8x16"], "options": [{"id": "paint", "label": "Paint Option", "type": "counter", "options": ["No Paint", "Painted"]}], "layoutItems": {"singleDoor": {"label": "Single Door (36\")", "width": 3, "height": 0.5, "color": "#D97706", "wallOnly": true, "wallSnap": false, "icon": "🚪", "shortLabel": "SD"}, "doubleDoor": {"label": "Double Door (60\")", "width": 5, "height": 0.5, "color": "#B45309", "wallOnly": true, "wallSnap": false, "icon": "🚪🚪", "shortLabel": "DD"}, "window": {"label": "Window", "width": 3, "height": 0.5, "color": "#0EA5E9", "wallOnly": true, "wallSnap": false, "icon": "🪟", "shortLabel": "W"}, "workbench": {"label": "Workbench", "width": 4, "height": 2, "color": "#8B5E3C", "wallOnly": false, "wallSnap": true, "icon": "🔧", "shortLabel": "WB"}, "loft": {"label": "Loft Area", "width": 6, "height": 4, "color": "#7C3AED", "wallOnly": false, "wallSnap": false, "icon": "⬆️", "shortLabel": "LF"}, "ramp": {"label": "Ramp", "width": 3, "height": 3, "color": "#78716C", "wallOnly": false, "wallSnap": false, "doorSnap": true, "icon": "⬛", "shortLabel": "RAMP"}, "roughOpening": {"label": "Rough Opening", "width": 3, "height": 0.5, "color": "#000000", "wallOnly": true, "wallSnap": false, "icon": "⬜", "shortLabel": "RO"}}};
+
+// ─── STRUCTURE STUDIO ENGINE ───
+const WALL_THICKNESS = 6;
+
+function getWallFromClick(x, y, pW, pH, mg) {
+  const ix = x - mg, iy = y - mg, t = 20;
+  if (iy <= t) return "north";
+  if (iy >= pH - t) return "south";
+  if (ix <= t) return "west";
+  if (ix >= pW - t) return "east";
+  return null;
+}
+
+function snapToWall(wall, cx, cy, iW, iH, pW, pH, mg) {
+  const hw = iW / 2;
+  switch (wall) {
+    case "north": return { x: Math.max(mg + hw, Math.min(cx, mg + pW - hw)), y: mg, rotation: 0, wall };
+    case "south": return { x: Math.max(mg + hw, Math.min(cx, mg + pW - hw)), y: mg + pH, rotation: 0, wall };
+    case "west":  return { x: mg, y: Math.max(mg + hw, Math.min(cy, mg + pH - hw)), rotation: 90, wall };
+    case "east":  return { x: mg + pW, y: Math.max(mg + hw, Math.min(cy, mg + pH - hw)), rotation: 90, wall };
+    default: return { x: cx, y: cy, rotation: 0, wall: null };
+  }
+}
+
+function snapToWallInterior(wall, cx, cy, iW, iH, pW, pH, mg) {
+  switch (wall) {
+    case "north": return { x: Math.max(mg + iW / 2, Math.min(cx, mg + pW - iW / 2)), y: mg + iH / 2, rotation: 0, wall };
+    case "south": return { x: Math.max(mg + iW / 2, Math.min(cx, mg + pW - iW / 2)), y: mg + pH - iH / 2, rotation: 0, wall };
+    case "west":  return { x: mg + iH / 2, y: Math.max(mg + iW / 2, Math.min(cy, mg + pH - iW / 2)), rotation: 90, wall };
+    case "east":  return { x: mg + pW - iH / 2, y: Math.max(mg + iW / 2, Math.min(cy, mg + pH - iW / 2)), rotation: 90, wall };
+    default: return { x: cx, y: cy, rotation: 0, wall: null };
+  }
+}
+
+function getNearestWall(x, y, pW, pH, mg) {
+  const d = [Math.abs(y - mg), Math.abs(y - (mg + pH)), Math.abs(x - mg), Math.abs(x - (mg + pW))];
+  const m = Math.min(...d);
+  return ["north", "south", "west", "east"][d.indexOf(m)];
+}
+
+function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
+  if (!ni.wall) return false;
+  const niw = nc.width * sc;
+  for (const it of existing) {
+    const c = itemTypes[it.type];
+    if (!c || !c.wallOnly || it.type === "window") continue;
+    // Only check doors on the same wall
+    if (it.wall !== ni.wall) continue;
+    const iw = c.width * sc;
+    // Check overlap along the wall axis
+    if (ni.wall === "north" || ni.wall === "south") {
+      if (Math.abs(ni.x - it.x) < (niw / 2) + (iw / 2) + 4) return true;
+    } else {
+      if (Math.abs(ni.y - it.y) < (niw / 2) + (iw / 2) + 4) return true;
+    }
+  }
+  return false;
+}
+
+function parseSize(s) {
+  if (!s) return null;
+  const m = s.match(/(\d+)\s*x\s*(\d+)/i);
+  return m ? { w: parseInt(m[1]), h: parseInt(m[2]) } : null;
+}
+
+// Check if a loft (edges in ft) has both ends of at least one axis attached to walls or other lofts
+function checkLoftAttached(l, r, t, b, bldgW, bldgH, otherLoftEdges) {
+  const tol = 0.3;
+  const atWall = (val, wallVal) => Math.abs(val - wallVal) < tol;
+  const touchesLoft = (edge, oKey, pMin, pMax, opMin, opMax) =>
+    otherLoftEdges.some((o) => Math.abs(edge - o[oKey]) < tol && pMin < o[opMax] - tol && pMax > o[opMin] + tol);
+
+  const leftOk = atWall(l, 0) || touchesLoft(l, "r", t, b, "t", "b");
+  const rightOk = atWall(r, bldgW) || touchesLoft(r, "l", t, b, "t", "b");
+  if (leftOk && rightOk) return true;
+
+  const topOk = atWall(t, 0) || touchesLoft(t, "b", l, r, "l", "r");
+  const bottomOk = atWall(b, bldgH) || touchesLoft(b, "t", l, r, "l", "r");
+  if (topOk && bottomOk) return true;
+
+  return false;
+}
+
+// Determine which positional wall (north/south/east/west) is the FRONT
+// based on door placement. Double door wins over single door.
+function getFrontWall(items) {
+  const doubleDoors = items.filter((i) => i.type === "doubleDoor" && i.wall);
+  if (doubleDoors.length > 0) return doubleDoors[0].wall;
+  const singleDoors = items.filter((i) => i.type === "singleDoor" && i.wall);
+  if (singleDoors.length > 0) return singleDoors[0].wall;
+  return null;
+}
+
+// Map a positional wall to a display label (FRONT/BACK/LEFT/RIGHT)
+// based on which wall is currently FRONT. Returns null if no front set.
+// LEFT/RIGHT are determined from outside the building looking at the front.
+function getDisplayLabel(positionalWall, frontWall) {
+  if (!frontWall || !positionalWall) return null;
+  const map = {
+    north: { north: "FRONT", south: "BACK",  west: "LEFT",  east: "RIGHT" },
+    south: { south: "FRONT", north: "BACK",  east: "LEFT",  west: "RIGHT" },
+    east:  { east: "FRONT",  west: "BACK",   south: "LEFT", north: "RIGHT" },
+    west:  { west: "FRONT",  east: "BACK",   north: "LEFT", south: "RIGHT" },
+  };
+  return map[frontWall][positionalWall];
+}
+
+let idCounter = 1;
+
+// ─── MAIN COMPONENT ───
+function StructureStudio({ config = DEFAULT_CONFIG }) {
+  const C = config;
+  const ITEMS = C.layoutItems;
+  const accent = C.branding.accentColor || "#D97706";
+
+  const [sel, setSel] = useState(() => {
+    const init = { style: "", size: "" };
+    C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
+    return init;
+  });
+
+  const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+  const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
+  const [customOptions, setCustomOptions] = useState([]);
+  const [roDimensions, setRoDimensions] = useState({});
+  const [bldgW, setShedW] = useState(10);
+  const [bldgH, setShedH] = useState(12);
+  const [activeTool, setActiveTool] = useState(null);
+  const [items, setItems] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [dragging, setDragging] = useState(null);
+  const [resizing, setResizing] = useState(null);
+  const [showExport, setShowExport] = useState(false);
+  const [exportUrl, setExportUrl] = useState(null);
+  const [configOpen, setConfigOpen] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [toast, setToast] = useState(null);
+  const svgRef = useRef(null);
+
+  // PostMessage listener
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.data && e.data.type === "structureConfig") {
+        const d = e.data;
+        setSel((p) => { const n = { ...p }; Object.keys(d).forEach((k) => { if (k !== "type" && k in n) n[k] = d[k]; }); return n; });
+        if (d.name || d.phone || d.email) {
+          setContact((p) => ({ ...p, name: d.name || p.name, phone: d.phone || p.phone, email: d.email || p.email, street: d.street || p.street, city: d.city || p.city, state: d.state || p.state, zip: d.zip || p.zip }));
+        }
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  // Auto-update building size
+  useEffect(() => {
+    const p = parseSize(sel.size);
+    if (p) { setShedW(p.w); setShedH(p.h); setItems([]); setSelectedId(null); }
+  }, [sel.size]);
+
+  const mg = 60;
+  const scale = Math.min((560 - mg * 2) / bldgW, (460 - mg * 2) / bldgH);
+  const pW = bldgW * scale, pH = bldgH * scale;
+  const cW = pW + mg * 2, cH = pH + mg * 2;
+
+  // Get sizes for selected style
+  const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
+  const sizeOpts = selectedStyle ? selectedStyle.sizes : (C.defaultSizes || []);
+  const frontWall = getFrontWall(items);
+  // Detect unattached lofts for warning banner
+  const lofts = items.filter((i) => i.type === "loft");
+  const unattachedLofts = lofts.filter((lf) => {
+    const w = (lf.widthFt || 6) / 2, h = (lf.heightFt || 4) / 2;
+    const cx = (lf.x - mg) / scale, cy = (lf.y - mg) / scale;
+    const others = lofts.filter((o) => o.id !== lf.id).map((o) => {
+      const ow = (o.widthFt || 6) / 2, oh = (o.heightFt || 4) / 2;
+      const ocx = (o.x - mg) / scale, ocy = (o.y - mg) / scale;
+      return { l: ocx - ow, r: ocx + ow, t: ocy - oh, b: ocy + oh };
+    });
+    return !checkLoftAttached(cx - w, cx + w, cy - h, cy + h, bldgW, bldgH, others);
+  });
+
+  // ─── INTERACTION HANDLERS ───
+  const getSvgPt = useCallback((e) => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const r = svg.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (cx - r.left) * (cW / r.width), y: (cy - r.top) * (cH / r.height) };
+  }, [cW, cH]);
+
+  const handleClick = useCallback((e) => {
+    if (dragging) return;
+    const pt = getSvgPt(e);
+    if (!activeTool) {
+      const hit = [...items].reverse().find((it) => {
+        const c = ITEMS[it.type]; if (!c) return false;
+        const iw = c.width * scale; const ih = c.height * scale;
+        const rot = it.rotation === 90; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2;
+        return Math.abs(pt.x - it.x) < hw + 5 && Math.abs(pt.y - it.y) < hh + 5;
+      });
+      setSelectedId(hit ? hit.id : null); return;
+    }
+    const cfg = ITEMS[activeTool]; if (!cfg) return;
+    const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
+    const wall = getWallFromClick(pt.x, pt.y, pW, pH, mg);
+
+    // Door-snap items (ramp): find nearest door and snap to its outside
+    if (cfg.doorSnap) {
+      const doors = items.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor");
+      if (doors.length === 0) {
+        setToast("Place a door first, then add a ramp to it.");
+        setTimeout(() => setToast(null), 5000);
+        return;
+      }
+      // Find closest door to click
+      let closest = null; let minDist = Infinity;
+      doors.forEach((d) => { const dx = pt.x - d.x; const dy = pt.y - d.y; const dist = Math.sqrt(dx * dx + dy * dy); if (dist < minDist) { minDist = dist; closest = d; } });
+      if (!closest) return;
+      // Check if this door already has a ramp
+      const existingRamp = items.find((i) => i.type === "ramp" && i.snapDoorId === closest.id);
+      if (existingRamp) {
+        setToast("This door already has a ramp. Delete it first to replace.");
+        setTimeout(() => setToast(null), 5000);
+        return;
+      }
+      const doorCfg = ITEMS[closest.type];
+      const doorW = doorCfg ? doorCfg.width : 3;
+      const rampDepth = 3; // 3ft deep
+      const rampDepthPx = rampDepth * scale;
+      const rampWidthPx = doorW * scale;
+      let rx, ry, rot;
+      if (closest.wall === "north") { rx = closest.x; ry = mg - rampDepthPx / 2; rot = 0; }
+      else if (closest.wall === "south") { rx = closest.x; ry = mg + pH + rampDepthPx / 2; rot = 0; }
+      else if (closest.wall === "west") { rx = mg - rampDepthPx / 2; ry = closest.y; rot = 90; }
+      else if (closest.wall === "east") { rx = mg + pW + rampDepthPx / 2; ry = closest.y; rot = 90; }
+      else return;
+      const ni = { id: idCounter++, type: activeTool, x: rx, y: ry, rotation: rot, wall: closest.wall, widthFt: doorW, heightFt: rampDepth, snapDoorId: closest.id };
+      setItems((p) => [...p, ni]);
+      setActiveTool(null);
+      setToast(null);
+      return;
+    }
+
+    if (cfg.wallOnly && !wall) return;
+    let ni;
+    if (cfg.wallSnap) {
+      const clickedWall = wall || getNearestWall(pt.x, pt.y, pW, pH, mg);
+      const sn = snapToWallInterior(clickedWall, pt.x, pt.y, iwPx, ihPx, pW, pH, mg);
+      const candidate = { id: idCounter, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+      const others = items.filter((i) => i.id !== candidate.id);
+      if (checkDoorCollision(candidate, cfg, others, ITEMS, scale)) {
+        setToast("A door is blocking this wall! Try clicking a different wall, or move the door first.");
+        setTimeout(() => setToast(null), 5000);
+        return;
+      }
+      // Check workbench overlap on same wall during placement
+      const isH = sn.wall === "north" || sn.wall === "south";
+      const candPos = isH ? sn.x : sn.y;
+      const candHalf = cfg.width * scale / 2;
+      for (const ob of others) {
+        if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
+        const obW = (ob.widthFt || ITEMS[ob.type].width) * scale / 2;
+        const obPos = isH ? ob.x : ob.y;
+        if (Math.abs(candPos - obPos) < candHalf + obW - 2) {
+          setToast("Another workbench is in the way. Try a different spot on the wall.");
+          setTimeout(() => setToast(null), 4000);
+          return;
+        }
+      }
+      ni = candidate;
+      idCounter++;
+    } else if (activeTool === "loft") {
+      // Auto-span wall-to-wall (full building width), positioned at click Y
+      const loftH = cfg.height; // default 4ft
+      const cyFtRound = Math.max(loftH / 2, Math.min(Math.round((pt.y - mg) / scale), bldgH - loftH / 2));
+      const cxFt = bldgW / 2;
+      const nL = 0, nR = bldgW, nT = cyFtRound - loftH / 2, nB = cyFtRound + loftH / 2;
+      // Prevent overlap with other lofts
+      const otherLofts = items.filter((i) => i.type === "loft");
+      for (const o of otherLofts) {
+        const ow = (o.widthFt || cfg.width) / 2, oh = (o.heightFt || cfg.height) / 2;
+        const ocx = (o.x - mg) / scale, ocy = (o.y - mg) / scale;
+        if (nL < ocx + ow - 0.1 && nR > ocx - ow + 0.1 && nT < ocy + oh - 0.1 && nB > ocy - oh + 0.1) {
+          setToast("Can't place a loft overlapping another loft. Move the existing one or click a different spot.");
+          setTimeout(() => setToast(null), 4000);
+          return;
+        }
+      }
+      ni = { id: idCounter++, type: "loft", x: mg + cxFt * scale, y: mg + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH };
+    } else if (wall) {
+      const sn = snapToWall(wall, pt.x, pt.y, iwPx, ihPx, pW, pH, mg);
+      ni = { id: idCounter++, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+    } else {
+      const x = Math.max(mg + iwPx / 2, Math.min(pt.x, mg + pW - iwPx / 2));
+      const y = Math.max(mg + ihPx / 2, Math.min(pt.y, mg + pH - ihPx / 2));
+      ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height };
+    }
+    setItems((p) => [...p, ni]);
+    setActiveTool(null);
+    setToast(null);
+  }, [activeTool, dragging, getSvgPt, items, mg, pW, pH, scale, ITEMS]);
+
+  const onPtrDown = useCallback((e, item) => {
+    e.stopPropagation(); if (activeTool) return;
+    setSelectedId(item.id);
+    const cfg = ITEMS[item.type];
+    if (resizing || (cfg && cfg.doorSnap)) return; // don't drag ramps or while resizing
+    const pt = getSvgPt(e);
+    setDragging({ id: item.id, ox: pt.x - item.x, oy: pt.y - item.y, startX: item.x, startY: item.y });
+  }, [activeTool, getSvgPt, resizing, ITEMS]);
+
+  const startResize = useCallback((e, item, handle) => {
+    e.preventDefault();
+    const pt = getSvgPt(e);
+    setResizing({ id: item.id, handle, startPt: pt, origWidthFt: item.widthFt, origHeightFt: item.heightFt, origX: item.x, origY: item.y });
+  }, [getSvgPt]);
+
+  const getResizeBounds = useCallback((item) => {
+    const isHoriz = item.wall === "north" || item.wall === "south";
+    const wallLen = isHoriz ? bldgW : bldgH;
+    
+    let minEdge = 0; // wall start in ft
+    let maxEdge = wallLen; // wall end in ft
+    
+    // Find obstacles on same wall
+    items.forEach((other) => {
+      if (other.id === item.id || other.wall !== item.wall) return;
+      const oCfg = ITEMS[other.type];
+      if (!oCfg) return;
+      const oW = other.widthFt || oCfg.width;
+      const oPos = isHoriz ? (other.x - mg) / scale : (other.y - mg) / scale;
+      const oLeft = oPos - oW / 2;
+      const oRight = oPos + oW / 2;
+      
+      const itemPos = isHoriz ? (item.x - mg) / scale : (item.y - mg) / scale;
+      if (oRight <= itemPos) minEdge = Math.max(minEdge, oRight);
+      if (oLeft >= itemPos) maxEdge = Math.min(maxEdge, oLeft);
+    });
+    
+    return { minEdge, maxEdge, isHoriz };
+  }, [items, ITEMS, bldgW, bldgH, mg, scale]);
+
+  const onPtrMove = useCallback((e) => {
+    if (resizing) {
+      const pt = getSvgPt(e);
+      const it = items.find((i) => i.id === resizing.id);
+      if (!it) return;
+
+      // Loft: free-floating 4-sided resize with collision
+      if (it.type === "loft") {
+        const hd = resizing.handle;
+        const mouseXft = Math.round((pt.x - mg) / scale);
+        const mouseYft = Math.round((pt.y - mg) / scale);
+        const origCxFt = (resizing.origX - mg) / scale;
+        const origCyFt = (resizing.origY - mg) / scale;
+        const origW = resizing.origWidthFt;
+        const origH = resizing.origHeightFt;
+        let oL = Math.round(origCxFt - origW / 2), oR = oL + origW;
+        let oT = Math.round(origCyFt - origH / 2), oB = oT + origH;
+        let nL = oL, nR = oR, nT = oT, nB = oB;
+        if (hd === "right") nR = Math.max(oL + 2, Math.min(mouseXft, bldgW));
+        else if (hd === "left") nL = Math.min(oR - 2, Math.max(mouseXft, 0));
+        else if (hd === "bottom") nB = Math.max(oT + 2, Math.min(mouseYft, bldgH));
+        else if (hd === "top") nT = Math.min(oB - 2, Math.max(mouseYft, 0));
+
+        // Check overlap with other lofts — clamp edge if it would overlap
+        const otherLofts = items.filter((i) => i.type === "loft" && i.id !== resizing.id);
+        for (const o of otherLofts) {
+          const ow = (o.widthFt || 6) / 2, oh = (o.heightFt || 4) / 2;
+          const ocx = (o.x - mg) / scale, ocy = (o.y - mg) / scale;
+          const olL = ocx - ow, olR = ocx + ow, olT = ocy - oh, olB = ocy + oh;
+          // Only clamp if the other dimensions overlap (2D check)
+          if (nT < olB && nB > olT) { // vertically overlapping
+            if (hd === "right" && nR > olL && oL < olL) nR = Math.round(olL);
+            if (hd === "left" && nL < olR && oR > olR) nL = Math.round(olR);
+          }
+          if (nL < olR && nR > olL) { // horizontally overlapping
+            if (hd === "bottom" && nB > olT && oT < olT) nB = Math.round(olT);
+            if (hd === "top" && nT < olB && oB > olB) nT = Math.round(olB);
+          }
+        }
+
+        const nW = Math.max(2, nR - nL), nH = Math.max(2, nB - nT);
+        setItems((p) => p.map((i) => i.id === resizing.id ? {
+          ...i, widthFt: nW, heightFt: nH,
+          x: mg + (nL + nR) / 2 * scale,
+          y: mg + (nT + nB) / 2 * scale,
+        } : i));
+        return;
+      }
+
+      // Workbench: wall-snapped 1D resize
+      const isHoriz = it.wall === "north" || it.wall === "south";
+      
+      // Compute mouse position in feet from wall origin
+      const mouseFt = isHoriz ? (pt.x - mg) / scale : (pt.y - mg) / scale;
+      const mouseFtSnapped = Math.round(mouseFt);
+      
+      // Original edges - snap to integer feet
+      const origCenterFt = isHoriz ? (resizing.origX - mg) / scale : (resizing.origY - mg) / scale;
+      const origLeft = Math.round(origCenterFt - resizing.origWidthFt / 2);
+      const origRight = origLeft + resizing.origWidthFt;
+      
+      const origItem = { ...it, x: resizing.origX, y: resizing.origY, widthFt: resizing.origWidthFt };
+      const { minEdge, maxEdge } = getResizeBounds(origItem);
+      
+      let newLeft = origLeft, newRight = origRight;
+      
+      if (resizing.handle === "max") {
+        // Dragging the high-coordinate edge (right or bottom)
+        newRight = Math.max(origLeft + 2, Math.min(mouseFtSnapped, Math.floor(maxEdge)));
+      } else {
+        // Dragging the low-coordinate edge (left or top)
+        newLeft = Math.min(origRight - 2, Math.max(mouseFtSnapped, Math.ceil(minEdge)));
+      }
+      
+      const newWidthFt = newRight - newLeft;
+      const newCenterFt = (newLeft + newRight) / 2;
+      const newPos = mg + newCenterFt * scale;
+      
+      setItems((p) => p.map((i) => i.id === resizing.id ? { 
+        ...i, 
+        widthFt: newWidthFt, 
+        x: isHoriz ? newPos : i.x, 
+        y: isHoriz ? i.y : newPos 
+      } : i));
+      return;
+    }
+    if (!dragging) return;
+    const pt = getSvgPt(e);
+    const it = items.find((i) => i.id === dragging.id);
+    if (!it) return;
+    const cfg = ITEMS[it.type]; if (!cfg) return;
+    const rx = pt.x - dragging.ox; const ry = pt.y - dragging.oy;
+    const iWidthFt = it.widthFt || cfg.width;
+    if (cfg.wallOnly) {
+      const w = getWallFromClick(rx, ry, pW, pH, mg);
+      if (w) { const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mg); setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i)); }
+    } else if (cfg.wallSnap) {
+      const nw = getNearestWall(rx, ry, pW, pH, mg);
+      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mg);
+      const cand = { ...it, ...sn };
+      // Check collision with doors AND other workbenches on same wall
+      const others = items.filter((i) => i.id !== dragging.id);
+      if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)) return;
+      // Check workbench overlap on same wall
+      const isH = sn.wall === "north" || sn.wall === "south";
+      const candPos = isH ? sn.x : sn.y;
+      const candHalf = iWidthFt * scale / 2;
+      for (const ob of others) {
+        if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
+        const obW = (ob.widthFt || ITEMS[ob.type].width) * scale / 2;
+        const obPos = isH ? ob.x : ob.y;
+        if (Math.abs(candPos - obPos) < candHalf + obW - 2) return; // overlap
+      }
+      setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
+    } else {
+      const iHeightFt = it.heightFt || cfg.height;
+      const halfW = iWidthFt / 2, halfH = iHeightFt / 2;
+      const snapFt = 1; // snap threshold in feet
+
+      // Convert desired position to feet
+      let cxFt = (rx - mg) / scale;
+      let cyFt = (ry - mg) / scale;
+
+      // Round to integer feet
+      cxFt = Math.round(cxFt);
+      cyFt = Math.round(cyFt);
+
+      // Snap edges to walls
+      if (cxFt - halfW < snapFt) cxFt = halfW;
+      else if (cxFt + halfW > bldgW - snapFt) cxFt = bldgW - halfW;
+      if (cyFt - halfH < snapFt) cyFt = halfH;
+      else if (cyFt + halfH > bldgH - snapFt) cyFt = bldgH - halfH;
+
+      // Snap edges to other lofts
+      if (it.type === "loft") {
+        const otherLofts = items.filter((i) => i.type === "loft" && i.id !== dragging.id);
+        let l = cxFt - halfW, r = cxFt + halfW, t = cyFt - halfH, b = cyFt + halfH;
+        for (const o of otherLofts) {
+          const oW = (o.widthFt || cfg.width) / 2, oH = (o.heightFt || cfg.height) / 2;
+          const oCx = (o.x - mg) / scale, oCy = (o.y - mg) / scale;
+          const oL = oCx - oW, oR = oCx + oW, oT = oCy - oH, oB = oCy + oH;
+          if (t < oB && b > oT) {
+            if (Math.abs(r - oL) < snapFt) cxFt = oL - halfW;
+            else if (Math.abs(l - oR) < snapFt) cxFt = oR + halfW;
+          }
+          if (l < oR && r > oL) {
+            if (Math.abs(b - oT) < snapFt) cyFt = oT - halfH;
+            else if (Math.abs(t - oB) < snapFt) cyFt = oB + halfH;
+          }
+          l = cxFt - halfW; r = cxFt + halfW; t = cyFt - halfH; b = cyFt + halfH;
+        }
+
+        // Constrain to building
+        cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
+        cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+
+        // Check overlap — reject if overlapping any loft
+        const fL = cxFt - halfW, fR = cxFt + halfW, fT = cyFt - halfH, fB = cyFt + halfH;
+        for (const o of otherLofts) {
+          const oW2 = (o.widthFt || cfg.width) / 2, oH2 = (o.heightFt || cfg.height) / 2;
+          const oCx2 = (o.x - mg) / scale, oCy2 = (o.y - mg) / scale;
+          if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) return;
+        }
+
+        // Validate attachment — both ends of at least one axis must touch walls or other lofts
+        const olEdges = otherLofts.map((o) => {
+          const ow = (o.widthFt || cfg.width) / 2, oh = (o.heightFt || cfg.height) / 2;
+          const ox = (o.x - mg) / scale, oy = (o.y - mg) / scale;
+          return { l: ox - ow, r: ox + ow, t: oy - oh, b: oy + oh };
+        });
+        if (!checkLoftAttached(fL, fR, fT, fB, bldgW, bldgH, olEdges)) {
+          setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x: mg + cxFt * scale, y: mg + cyFt * scale } : i));
+          return;
+        }
+      } else {
+        cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
+        cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+      }
+
+      const x = mg + cxFt * scale;
+      const y = mg + cyFt * scale;
+      setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x, y } : i));
+    }
+  }, [dragging, resizing, getSvgPt, items, mg, pW, pH, scale, ITEMS, getResizeBounds]);
+
+  const onPtrUp = useCallback(() => { setDragging(null); setResizing(null); }, []);
+
+  useEffect(() => {
+    if (dragging || resizing) {
+      window.addEventListener("mousemove", onPtrMove); window.addEventListener("mouseup", onPtrUp);
+      window.addEventListener("touchmove", onPtrMove, { passive: false }); window.addEventListener("touchend", onPtrUp);
+      return () => { window.removeEventListener("mousemove", onPtrMove); window.removeEventListener("mouseup", onPtrUp); window.removeEventListener("touchmove", onPtrMove); window.removeEventListener("touchend", onPtrUp); };
+    }
+  }, [dragging, resizing, onPtrMove, onPtrUp]);
+
+  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId)); setSelectedId(null); } };
+  const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap)) return i; return { ...i, rotation: (i.rotation + 90) % 360 }; })); };
+  const clearAll = () => { setItems([]); setSelectedId(null); };
+
+  // ─── PNG GENERATION (shared by export & submit) ───
+  const generatePNG = () => {
+    const canvas = document.createElement("canvas"); const dpr = 2;
+    const extraH = 140; // extra height below canvas for customer/options text
+    canvas.width = cW * dpr; canvas.height = (cH + extraH) * dpr;
+    const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
+    ctx.fillStyle = "#FFF"; ctx.fillRect(0, 0, cW, cH + extraH);
+    ctx.strokeStyle = "#E8ECF1"; ctx.lineWidth = 0.5;
+    for (let fx = 0; fx <= bldgW; fx++) { const x = mg + fx * scale; ctx.beginPath(); ctx.moveTo(x, mg); ctx.lineTo(x, mg + pH); ctx.stroke(); }
+    for (let fy = 0; fy <= bldgH; fy++) { const y = mg + fy * scale; ctx.beginPath(); ctx.moveTo(mg, y); ctx.lineTo(mg + pW, y); ctx.stroke(); }
+    ctx.strokeStyle = "#1E293B"; ctx.lineWidth = WALL_THICKNESS; ctx.strokeRect(mg, mg, pW, pH);
+    ctx.fillStyle = "#475569"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`${bldgW} ft`, mg + pW / 2, mg - 14); ctx.fillText(`${bldgW} ft`, mg + pW / 2, mg + pH + 24);
+    ctx.save(); ctx.translate(mg - 20, mg + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+    ctx.save(); ctx.translate(mg + pW + 24, mg + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+    if (frontWall) {
+      ctx.fillStyle = "#94A3B8"; ctx.font = "11px sans-serif";
+      ctx.fillText(getDisplayLabel("north", frontWall), mg + pW / 2, mg - 30);
+      ctx.fillText(getDisplayLabel("south", frontWall), mg + pW / 2, mg + pH + 40);
+      ctx.save(); ctx.translate(mg - 38, mg + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(getDisplayLabel("west", frontWall), 0, 0); ctx.restore();
+      ctx.save(); ctx.translate(mg + pW + 42, mg + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(getDisplayLabel("east", frontWall), 0, 0); ctx.restore();
+    }
+
+    items.forEach((item) => {
+      const cfg = ITEMS[item.type]; if (!cfg) return;
+      const itemW = item.widthFt || cfg.width;
+      const itemH = item.heightFt || cfg.height;
+      const iw = itemW * scale; const ih = itemH * scale;
+      ctx.save(); ctx.translate(item.x, item.y); ctx.rotate((item.rotation * Math.PI) / 180);
+      if (item.type === "loft") {
+        ctx.fillStyle = cfg.color + "25"; ctx.strokeStyle = cfg.color; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+        ctx.fillRect(-iw / 2, -ih / 2, iw, ih); ctx.strokeRect(-iw / 2, -ih / 2, iw, ih); ctx.setLineDash([]);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(-iw / 2, -ih / 2, iw, ih); ctx.clip();
+        ctx.strokeStyle = cfg.color + "40"; ctx.lineWidth = 1;
+        for (let d = -iw; d < iw + ih; d += 12) { ctx.beginPath(); ctx.moveTo(-iw / 2 + d, -ih / 2); ctx.lineTo(-iw / 2 + d - ih, ih / 2); ctx.stroke(); }
+        ctx.restore();
+      } else if (cfg.wallOnly) {
+        // Rounded rect for door/window bar (matches SVG rx=1)
+        const barH = 10, barR = 1;
+        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : cfg.color;
+        ctx.beginPath();
+        ctx.moveTo(-iw / 2 + barR, -barH / 2);
+        ctx.lineTo(iw / 2 - barR, -barH / 2);
+        ctx.quadraticCurveTo(iw / 2, -barH / 2, iw / 2, -barH / 2 + barR);
+        ctx.lineTo(iw / 2, barH / 2 - barR);
+        ctx.quadraticCurveTo(iw / 2, barH / 2, iw / 2 - barR, barH / 2);
+        ctx.lineTo(-iw / 2 + barR, barH / 2);
+        ctx.quadraticCurveTo(-iw / 2, barH / 2, -iw / 2, barH / 2 - barR);
+        ctx.lineTo(-iw / 2, -barH / 2 + barR);
+        ctx.quadraticCurveTo(-iw / 2, -barH / 2, -iw / 2 + barR, -barH / 2);
+        ctx.fill();
+        if (item.type === "roughOpening") { ctx.strokeStyle = "#000000"; ctx.lineWidth = 1.5; ctx.stroke(); }
+        if (item.type === "singleDoor") {
+          ctx.strokeStyle = cfg.color + "60"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+          const out = item.wall === "north" || item.wall === "east";
+          ctx.beginPath(); ctx.arc(-iw / 2, 0, iw * 0.8, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); ctx.setLineDash([]);
+        } else if (item.type === "doubleDoor") {
+          ctx.strokeStyle = cfg.color + "60"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+          const out = item.wall === "north" || item.wall === "east";
+          const r = iw * 0.4;
+          // Left leaf: hinge at left edge of door
+          ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke();
+          // Right leaf: hinge at right edge of door
+          ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
+          ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
+        } else if (item.type === "window") {
+          ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
+          [0, -iw / 4, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -4); ctx.lineTo(lx, 4); ctx.stroke(); });
+        }
+      } else {
+        ctx.fillStyle = cfg.color + "30"; ctx.strokeStyle = cfg.color; ctx.lineWidth = 2;
+        ctx.fillRect(-iw / 2, -ih / 2, iw, ih); ctx.strokeRect(-iw / 2, -ih / 2, iw, ih);
+      }
+      ctx.fillStyle = "#1E293B"; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center";
+      if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "8px sans-serif"; ctx.fillText("Workbench", 0, 12); }
+      else if (item.type === "ramp") { ctx.fillText("RAMP", 0, 4); }
+      else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "9px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 13); ctx.globalAlpha = 1; }
+      else {
+        const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
+        ctx.fillText(cfg.shortLabel, 0, lblY);
+      }
+      ctx.restore();
+    });
+
+    const customerName = contact.name || "Customer";
+    const customerAddr = [contact.street, contact.city, contact.state, contact.zip].filter(Boolean).join(", ");
+    let textY = cH + 16;
+
+    // Line 1: Name (left) | Size + Style (right)
+    ctx.fillStyle = "#1E293B"; ctx.font = "bold 12px sans-serif";
+    ctx.textAlign = "left"; ctx.fillText(customerName, mg, textY);
+    ctx.textAlign = "right"; ctx.fillText(`${bldgW}×${bldgH}  ${sel.style || ""}`, mg + pW, textY);
+    textY += 14;
+
+    // Line 2: Contact info
+    ctx.fillStyle = "#64748B"; ctx.font = "10px sans-serif"; ctx.textAlign = "left";
+    let infoLine = [contact.phone, contact.email].filter(Boolean).join("  •  ");
+    if (infoLine) { ctx.fillText(infoLine, mg, textY); textY += 12; }
+    if (customerAddr) { ctx.fillText(customerAddr, mg, textY); textY += 14; }
+
+    // Build bullet list of all placed items + paint
+    const bullets = [];
+    if (sel.paint === "Painted") {
+      const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
+      bullets.push(`Painted — Body: ${body}, Trim: ${trim}`);
+    } else { bullets.push("No Paint"); }
+    const sdCount = items.filter((i) => i.type === "singleDoor").length;
+    const ddCount = items.filter((i) => i.type === "doubleDoor").length;
+    if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
+    if (ddCount > 0) bullets.push(`Double Door${ddCount > 1 ? " ×" + ddCount : ""}`);
+    const winCount = items.filter((i) => i.type === "window").length;
+    if (winCount > 0) bullets.push(`Window${winCount > 1 ? "s ×" + winCount : ""}`);
+    items.filter((i) => i.type === "workbench").forEach((wb) => bullets.push(`${wb.widthFt}ft Workbench`));
+    const loftCount = items.filter((i) => i.type === "loft").length;
+    if (loftCount > 0) bullets.push(`Loft${loftCount > 1 ? " ×" + loftCount : ""}`);
+    const rampCount = items.filter((i) => i.type === "ramp").length;
+    if (rampCount > 0) bullets.push(`Ramp${rampCount > 1 ? " ×" + rampCount : ""}`);
+    items.filter((i) => i.type === "roughOpening").forEach((ro) => {
+      const d = (roDimensions[ro.id] || "").trim();
+      bullets.push(d ? `Rough Opening — ${d}` : "Rough Opening");
+    });
+    // Custom options (only those with a name)
+    customOptions.forEach((co) => {
+      if (co.name && co.name.trim()) {
+        const q = co.qty && parseInt(co.qty) > 0 ? ` (×${co.qty})` : "";
+        bullets.push(co.name.trim() + q);
+      }
+    });
+
+    // Render 2 columns
+    if (bullets.length > 0) {
+      textY += 4;
+      ctx.fillStyle = "#334155"; ctx.font = "10px sans-serif"; ctx.textAlign = "left";
+      const colW = (cW - mg * 2) / 2;
+      const half = Math.ceil(bullets.length / 2);
+      for (let i = 0; i < Math.max(half, bullets.length - half); i++) {
+        if (i < half) ctx.fillText("•  " + bullets[i], mg, textY);
+        if (i + half < bullets.length) ctx.fillText("•  " + bullets[i + half], mg + colW, textY);
+        textY += 13;
+      }
+    }
+
+    return canvas.toDataURL("image/png");
+  };
+
+  const exportPNG = () => {
+    const url = generatePNG();
+    setExportUrl(url); setShowExport(true);
+  };
+
+  // ─── SUBMIT QUOTE ───
+  const submitQuote = async () => {
+    if (!contact.name || !contact.email || !contact.phone) {
+      setSubmitError("Please fill in Name, Email, and Phone.");
+      return;
+    }
+    if (!sel.style || !sel.size) {
+      setSubmitError("Please select a Building Style and Size.");
+      return;
+    }
+
+    setSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      const floorPlanImage = generatePNG();
+
+      const payload = {
+        source: "StructureStudio",
+        clientId: C.clientId,
+        contact: {
+          name: contact.name,
+          email: contact.email,
+          phone: contact.phone,
+          street: contact.street,
+          city: contact.city,
+          state: contact.state,
+          zip: contact.zip,
+        },
+        selections: {
+          buildingStyle: sel.style,
+          buildingSize: sel.size,
+          paint: sel.paint || "No Paint",
+          ...(sel.paint === "Painted" ? { paintBodyColor: paintColors.body || "TBD", paintTrimColor: paintColors.trim || "TBD" } : {}),
+        },
+        floorPlanItems: items.map((item) => {
+          const displayLabel = getDisplayLabel(item.wall, frontWall);
+          return {
+            type: item.type,
+            wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
+            ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
+          };
+        }),
+        itemSummary: {
+          singleDoors: items.filter((i) => i.type === "singleDoor").length,
+          doubleDoors: items.filter((i) => i.type === "doubleDoor").length,
+          windows: items.filter((i) => i.type === "window").length,
+          workbenches: items.filter((i) => i.type === "workbench").map((i) => {
+            const lbl = getDisplayLabel(i.wall, frontWall);
+            return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
+          }),
+          lofts: items.filter((i) => i.type === "loft").length,
+          ramp: items.filter((i) => i.type === "ramp").length > 0 ? "yes" : "no",
+        },
+        customOptions: customOptions.filter((co) => co.name && co.name.trim()).map((co) => ({
+          name: co.name.trim(),
+          qty: co.qty ? parseInt(co.qty) || 0 : 0,
+          amount: co.amount ? parseFloat(co.amount) || 0 : 0,
+        })),
+        roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro) => ({
+          name: "Rough Opening",
+          dimensions: (roDimensions[ro.id] || "").trim(),
+          qty: 1,
+          amount: 100,
+        })),
+        floorPlanImage,
+        submittedAt: new Date().toISOString(),
+      };
+
+      const webhookUrl = C.webhookUrl || "https://csmsynergy.app.n8n.cloud/webhook/96317c82-f0af-4f10-b452-6399a196f840";
+
+      const resp = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!resp.ok) throw new Error(`Server responded ${resp.status}`);
+      setSubmitted(true);
+    } catch (err) {
+      setSubmitError("Something went wrong submitting your quote. Please try again.");
+      console.error("Submit error:", err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const downloadPNG = () => { if (!exportUrl) return; const a = document.createElement("a"); a.href = exportUrl; const nameSlug = contact.name.trim().replace(/\s+/g, "-").toLowerCase() || "customer"; a.download = `structurestudio-${nameSlug}-${bldgW}x${bldgH}.png`; a.click(); };
+
+  // ─── STYLES ───
+  const S = {
+    sel: { border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 13, fontWeight: 600, background: "#FFF", minWidth: 90 },
+    lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" },
+    btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }),
+    card: (active) => ({
+      cursor: "pointer", borderRadius: 10, overflow: "hidden", transition: "all 0.2s",
+      border: `3px solid ${active ? accent : "#E2E8F0"}`,
+      boxShadow: active ? `0 0 0 2px ${accent}, 0 4px 12px ${accent}40` : "0 2px 8px rgba(0,0,0,0.06)",
+      transform: active ? "scale(1.03)" : "scale(1)",
+    }),
+    cardLabel: (active) => ({
+      padding: "6px 8px", textAlign: "center", fontWeight: 700, fontSize: 11,
+      background: active ? "#FFFBEB" : "#FAFBFC", color: active ? "#92400E" : "#334155",
+    }),
+    check: { position: "absolute", top: 4, right: 4, width: 20, height: 20, borderRadius: 99, background: accent, display: "flex", alignItems: "center", justifyContent: "center", color: "#FFF", fontSize: 11, fontWeight: 800 },
+    pill: (active) => ({
+      padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 13, transition: "all 0.15s",
+      border: `2px solid ${active ? accent : "#E2E8F0"}`,
+      background: active ? "#FFFBEB" : "#FAFBFC", color: active ? "#92400E" : "#334155",
+      boxShadow: active ? `0 0 0 2px ${accent}` : "none",
+    }),
+  };
+
+  // ─── OPTION RENDERER ───
+  const renderOption = (opt) => {
+    if (opt.type === "image_cards") {
+      return (
+        <div key={opt.id} style={{ marginBottom: 14 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {opt.choices.map((ch) => {
+              const active = sel[opt.id] === ch.value;
+              return (
+                <div key={ch.value} onClick={() => setSel((p) => ({ ...p, [opt.id]: ch.value }))} style={{ ...S.card(active), width: 130, flex: "0 0 auto" }}>
+                  {ch.img ? (
+                    <div style={{ position: "relative" }}>
+                      <img src={ch.img} alt={ch.label} style={{ width: "100%", height: 85, objectFit: "cover", display: "block" }} />
+                      {active && <div style={S.check}>✓</div>}
+                    </div>
+                  ) : (
+                    <div style={{ height: 85, background: active ? "#FEF3C7" : "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: active ? "#92400E" : "#64748B", position: "relative" }}>
+                      {ch.label.includes("None") || ch.label.includes("No ") ? "None" : ch.label}
+                      {active && <div style={S.check}>✓</div>}
+                    </div>
+                  )}
+                  <div style={S.cardLabel(active)}>{ch.label}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+    if (opt.type === "counter") {
+      const isPaint = opt.id === "paint";
+      const isPainted = isPaint && sel[opt.id] === "Painted";
+      const hasImage = !!opt.img;
+      return (
+        <div key={opt.id} style={{ marginBottom: 14 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
+            {hasImage && (
+              <div style={{ flex: "0 0 auto", width: 100, borderRadius: 10, overflow: "hidden", border: "2px solid #E2E8F0" }}>
+                <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6, flexWrap: hasImage ? "wrap" : "nowrap", flex: 1, alignItems: "center", maxWidth: hasImage ? "calc(100% - 110px)" : undefined }}>
+              {opt.options.map((o) => (
+                <div key={o} onClick={() => { setSel((p) => ({ ...p, [opt.id]: o })); if (isPaint && o === "No Paint") setPaintColors({ body: "", trim: "" }); }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+              ))}
+              {isPainted && (
+                <>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
+                    Body:
+                    <input type="text" value={paintColors.body} onChange={(e) => setPaintColors((p) => ({ ...p, body: e.target.value }))}
+                      placeholder="Enter color or TBD"
+                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
+                    Trim:
+                    <input type="text" value={paintColors.trim} onChange={(e) => setPaintColors((p) => ({ ...p, trim: e.target.value }))}
+                      placeholder="Enter color or TBD"
+                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
+                  </label>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // ─── RENDER ───
+  return (
+    <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: "100vh" }}>
+      {/* Header */}
+      <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>SS</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>StructureStudio</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.companyName} — {C.branding.tagline || "Design & Quote"}</div>
+        </div>
+        <button onClick={() => setConfigOpen(!configOpen)} style={{ ...S.btn(configOpen ? "#FFF" : "rgba(255,255,255,0.15)", configOpen ? "#1E293B" : "#FFF"), border: "1px solid rgba(255,255,255,0.25)" }}>
+          {configOpen ? "▴ Hide" : "▾ Show"} Options
+        </button>
+      </div>
+
+      {/* Configuration Panel */}
+      {configOpen && (
+        <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
+          {/* Contact Fields */}
+          <div style={{ marginBottom: 18 }}>
+            <span style={{ ...S.lbl, display: "block", marginBottom: 10, fontSize: 12 }}>Customer Information</span>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+              {C.contactFields.includes("name") && (
+                <div style={{ flex: "1 1 180px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Name *</span>
+                  <input type="text" value={contact.name} onChange={(e) => setContact((p) => ({ ...p, name: e.target.value }))} placeholder="Full Name" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              )}
+              {C.contactFields.includes("email") && (
+                <div style={{ flex: "1 1 200px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Email *</span>
+                  <input type="email" value={contact.email} onChange={(e) => setContact((p) => ({ ...p, email: e.target.value }))} placeholder="email@example.com" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              )}
+              {C.contactFields.includes("phone") && (
+                <div style={{ flex: "1 1 140px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *</span>
+                  <input type="tel" value={contact.phone} onChange={(e) => setContact((p) => ({ ...p, phone: e.target.value }))} placeholder="(555) 555-5555" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              )}
+            </div>
+            {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                {C.contactFields.includes("street") && (
+                  <div style={{ flex: "2 1 200px" }}>
+                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Street Address</span>
+                    <input type="text" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </div>
+                )}
+                {C.contactFields.includes("city") && (
+                  <div style={{ flex: "1 1 130px" }}>
+                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>City</span>
+                    <input type="text" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </div>
+                )}
+                {C.contactFields.includes("state") && (
+                  <div style={{ flex: "0 1 80px" }}>
+                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State</span>
+                    <input type="text" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} placeholder="ST" maxLength={2} style={{ ...S.sel, width: "100%", boxSizing: "border-box", textTransform: "uppercase" }} />
+                  </div>
+                )}
+                {C.contactFields.includes("zip") && (
+                  <div style={{ flex: "0 1 100px" }}>
+                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Zip</span>
+                    <input type="text" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value }))} placeholder="00000" maxLength={10} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={{ height: 1, background: "#E2E8F0", marginBottom: 14 }} />
+
+          {/* Building Styles */}
+          <div style={{ marginBottom: 14 }}>
+            <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {C.buildingStyles.map((s) => {
+                const active = sel.style === s.value;
+                return (
+                  <div key={s.value} onClick={() => setSel((p) => ({ ...p, style: s.value, size: "" }))}
+                    style={{ ...S.card(active), flex: "1 1 120px", maxWidth: 160 }}>
+                    <div style={{ position: "relative" }}>
+                      <img src={s.img} alt={s.label} style={{ width: "100%", height: 100, objectFit: "cover", display: "block" }} />
+                      {active && <div style={S.check}>✓</div>}
+                    </div>
+                    <div style={S.cardLabel(active)}>{s.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Building Size */}
+          {sizeOpts.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {sizeOpts.map((s) => <div key={s} onClick={() => setSel((p) => ({ ...p, size: s }))} style={S.pill(sel.size === s)}>{s}</div>)}
+              </div>
+            </div>
+          )}
+
+          {/* Dynamic Options */}
+          {C.options.map((opt) => renderOption(opt))}
+
+          {/* Custom/Additional Options */}
+          <div style={{ marginTop: 6 }}>
+            <div style={{ ...S.lbl, marginBottom: 8 }}>Additional Options</div>
+            {customOptions.map((row, idx) => {
+              const invalid = !row.name || !row.name.trim();
+              return (
+                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
+                  <input type="text" value={row.name} placeholder="Item name (required)"
+                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
+                    style={{ flex: "1 1 55%", minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
+                  <input type="number" value={row.qty} placeholder="Qty"
+                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: e.target.value } : r))}
+                    style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
+                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
+                    <input type="number" value={row.amount} placeholder="0.00"
+                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
+                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                  </div>
+                  <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
+                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
+                </div>
+              );
+            })}
+            <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
+              style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              + Add Custom Option
+            </button>
+          </div>
+
+          {items.filter((i) => i.type === "roughOpening").length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings ($100 each)</div>
+              {items.filter((i) => i.type === "roughOpening").map((ro) => {
+                const dim = roDimensions[ro.id] || "";
+                const invalid = !dim.trim();
+                return (
+                  <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 600, color: "#334155", minWidth: 110 }}>Rough Opening</span>
+                    <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
+                      onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
+                      style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
+                    <span style={{ fontSize: 12, color: "#64748B", fontWeight: 600 }}>$100</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {unattachedLofts.length > 0 && (
+        <div style={{ background: "#FEF3C7", borderBottom: "1px solid #FCD34D", padding: "10px 16px", fontSize: 12, color: "#92400E" }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ Loft support warning — {unattachedLofts.length} loft{unattachedLofts.length > 1 ? "s" : ""} not properly supported</div>
+          <div style={{ fontWeight: 500 }}>Each loft must have <b>both ends</b> of at least one axis (left+right OR top+bottom) resting on a wall or another loft. Adjust position or size to fix.</div>
+        </div>
+      )}
+
+      {/* Tool Palette */}
+      <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
+        {Object.entries(ITEMS).map(([key, cfg]) => (
+            <button key={key} onClick={() => { setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
+                background: activeTool === key ? cfg.color : "#F8FAFC",
+                color: activeTool === key ? "#FFF" : "#334155",
+                border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
+              }}>
+              <span style={{ fontSize: 14 }}>{cfg.icon}</span>{cfg.label}
+              {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
+            </button>
+        ))}
+        {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          {selectedId && (
+            <>
+              <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
+              <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
+            </>
+          )}
+          <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>
+          <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
+        </div>
+      </div>
+
+      {/* SVG Canvas */}
+      <div style={{ display: "flex", justifyContent: "center", padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+        <svg ref={svgRef} viewBox={`0 0 ${cW} ${cH}`}
+          style={{ width: "100%", maxWidth: cW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none" }}
+          onClick={handleClick}>
+          <rect x={mg} y={mg} width={pW} height={pH} fill="#FAFBFD" />
+          {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mg + i * scale} y1={mg} x2={mg + i * scale} y2={mg + pH} stroke="#E8ECF1" strokeWidth={0.5} />)}
+          {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mg} y1={mg + i * scale} x2={mg + pW} y2={mg + i * scale} stroke="#E8ECF1" strokeWidth={0.5} />)}
+          <rect x={mg} y={mg} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} />
+          <text x={mg + pW / 2} y={mg - 16} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mg + pW / 2} y={mg + pH + 26} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mg - 20} y={mg + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(-90,${mg - 20},${mg + pH / 2})`}>{bldgH} ft</text>
+          <text x={mg + pW + 24} y={mg + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(90,${mg + pW + 24},${mg + pH / 2})`}>{bldgH} ft</text>
+          {frontWall && (
+            <>
+              <text x={mg + pW / 2} y={mg - 32} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
+              <text x={mg + pW / 2} y={mg + pH + 42} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
+              <text x={mg - 38} y={mg + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mg - 38},${mg + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
+              <text x={mg + pW + 42} y={mg + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mg + pW + 42},${mg + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
+            </>
+          )}
+
+          {items.map((item) => {
+            const cfg = ITEMS[item.type]; if (!cfg) return null;
+            const itemW = item.widthFt || cfg.width;
+            const itemH = item.heightFt || cfg.height;
+            const iw = itemW * scale; const ih = itemH * scale; const isSel = item.id === selectedId;
+            const isWB = item.type === "workbench";
+            return (
+              <g key={item.id} transform={`translate(${item.x},${item.y}) rotate(${item.rotation})`}
+                onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)} style={{ cursor: activeTool ? "crosshair" : "grab" }}>
+                {isSel && <rect x={-iw / 2 - 4} y={(cfg.wallOnly ? -8 : -ih / 2) - 4} width={iw + 8} height={(cfg.wallOnly ? 16 : ih) + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={3} />}
+                {item.type === "loft" ? (
+                  <>
+                    <defs><clipPath id={`loftClip${item.id}`}><rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} rx={2} /></clipPath></defs>
+                    <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + "18"} stroke={cfg.color} strokeWidth={2} strokeDasharray="6 4" rx={2} />
+                    <g opacity={0.15} clipPath={`url(#loftClip${item.id})`}>{Array.from({ length: Math.ceil((iw + ih) / 10) + 2 }, (_, d) => <line key={d} x1={-iw / 2 + d * 10} y1={-ih / 2} x2={-iw / 2 + d * 10 - ih} y2={ih / 2} stroke={cfg.color} strokeWidth={1} />)}</g>
+                    <text x={0} y={4} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">LOFT</text>
+                    <text x={0} y={16} textAnchor="middle" fill={cfg.color} fontSize={9} opacity={0.7}>{itemW}×{itemH} ft</text>
+                    {isSel && (() => {
+                      const hz = Math.min(Math.max(ih / 4, 14), 24, ih * 0.4);
+                      const vz = Math.min(Math.max(iw / 4, 14), 24, iw * 0.4);
+                      return (
+                        <>
+                          <rect x={-vz / 2} y={-ih / 2 - 1} width={vz} height={hz / 2 + 1} fill="transparent" style={{ cursor: "ns-resize" }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "top"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "top"); }} />
+                          <rect x={-vz / 2} y={ih / 2 - hz / 2} width={vz} height={hz / 2 + 1} fill="transparent" style={{ cursor: "ns-resize" }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "bottom"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "bottom"); }} />
+                          <rect x={-iw / 2 - 1} y={-hz / 2} width={vz / 2 + 1} height={hz} fill="transparent" style={{ cursor: "ew-resize" }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "left"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "left"); }} />
+                          <rect x={iw / 2 - vz / 2} y={-hz / 2} width={vz / 2 + 1} height={hz} fill="transparent" style={{ cursor: "ew-resize" }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "right"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "right"); }} />
+                          <line x1={-vz / 3} y1={-ih / 2} x2={vz / 3} y2={-ih / 2} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={-vz / 3} y1={ih / 2} x2={vz / 3} y2={ih / 2} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={-iw / 2} y1={-hz / 3} x2={-iw / 2} y2={hz / 3} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={iw / 2} y1={-hz / 3} x2={iw / 2} y2={hz / 3} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                        </>
+                      );
+                    })()}
+                  </>
+                ) : cfg.wallOnly ? (
+                  <>
+                    {item.type === "roughOpening" ? (
+                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill="#FFFFFF" stroke="#000000" strokeWidth={1.5} rx={1} />
+                    ) : (
+                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={cfg.color} rx={1} />
+                    )}
+                    {item.type === "singleDoor" && (() => {
+                      const r = iw * 0.8, out = item.wall === "north" || item.wall === "east";
+                      return <path d={`M ${-iw / 2 + r} 0 A ${r} ${r} 0 0 ${out ? 0 : 1} ${-iw / 2} ${out ? -r : r}`} fill="none" stroke={cfg.color + "60"} strokeWidth={1.5} strokeDasharray="4 3" />;
+                    })()}
+                    {item.type === "doubleDoor" && (() => {
+                      const r = iw * 0.4, out = item.wall === "north" || item.wall === "east";
+                      const s = out ? -1 : 1;
+                      return (
+                        <>
+                          <path d={`M ${-iw / 2 + r} 0 A ${r} ${r} 0 0 ${out ? 0 : 1} ${-iw / 2} ${s * r}`} fill="none" stroke={cfg.color + "60"} strokeWidth={1.5} strokeDasharray="4 3" />
+                          <path d={`M ${iw / 2 - r} 0 A ${r} ${r} 0 0 ${out ? 1 : 0} ${iw / 2} ${s * r}`} fill="none" stroke={cfg.color + "60"} strokeWidth={1.5} strokeDasharray="4 3" />
+                          <line x1={0} y1={-5} x2={0} y2={5} stroke="#FFF" strokeWidth={1.5} />
+                        </>
+                      );
+                    })()}
+                    {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
+                    <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{cfg.shortLabel}</text>
+                  </>
+                ) : (
+                  <>
+                    <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + "30"} stroke={cfg.color} strokeWidth={2} rx={2} />
+                    {item.type === "ramp" ? (
+                      <text x={0} y={4} textAnchor="middle" fill={cfg.color} fontSize={9} fontWeight="700">RAMP</text>
+                    ) : isWB ? (
+                      <>
+                        <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
+                        <text x={0} y={13} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>Workbench</text>
+                      </>
+                    ) : (
+                      <>
+                        <text x={0} y={2} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">{cfg.shortLabel}</text>
+                        <text x={0} y={14} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>{itemW}×{itemH}</text>
+                      </>
+                    )}
+                    {isWB && isSel && (() => {
+                      const isHoriz = item.wall === "north" || item.wall === "south";
+                      const cursor = isHoriz ? "ew-resize" : "ns-resize";
+                      const endZoneW = Math.min(Math.max(iw / 4, 16), 30, iw * 0.45);
+                      const handleX1 = -iw / 2 + endZoneW / 2;
+                      const handleX2 = iw / 2 - endZoneW / 2;
+                      return (
+                        <>
+                          <rect x={-iw / 2 + 1} y={-ih / 2 + 1} width={endZoneW - 2} height={ih - 2}
+                            fill="#3B82F618" stroke="#3B82F680" strokeWidth={1.5} pointerEvents="none" rx={2} />
+                          <rect x={iw / 2 - endZoneW + 1} y={-ih / 2 + 1} width={endZoneW - 2} height={ih - 2}
+                            fill="#3B82F618" stroke="#3B82F680" strokeWidth={1.5} pointerEvents="none" rx={2} />
+                          <text x={handleX1} y={5} textAnchor="middle" fill="#3B82F6" fontSize={14} fontWeight="700" pointerEvents="none">◄</text>
+                          <text x={handleX2} y={5} textAnchor="middle" fill="#3B82F6" fontSize={14} fontWeight="700" pointerEvents="none">►</text>
+                          <rect x={-iw / 2} y={-ih / 2} width={endZoneW} height={ih}
+                            fill="transparent" style={{ cursor }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "min"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "min"); }} />
+                          <rect x={iw / 2 - endZoneW} y={-ih / 2} width={endZoneW} height={ih}
+                            fill="transparent" style={{ cursor }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "max"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "max"); }} />
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
+              </g>
+            );
+          })}
+          {resizing && (() => {
+            const ri = items.find((i) => i.id === resizing.id);
+            if (!ri) return null;
+            return (
+              <g transform={`translate(${ri.x},${ri.y - 28})`}>
+                <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
+                <text x={0} y={4} textAnchor="middle" fill="#FFF" fontSize={13} fontWeight="700">{ri.widthFt} ft</text>
+              </g>
+            );
+          })()}
+        </svg>
+      </div>
+
+      {/* Submit Bar */}
+      {!submitted && (
+        <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "16px 20px" }}>
+          {submitError && (
+            <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#DC2626", fontSize: 13, fontWeight: 600 }}>
+              {submitError}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+            <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
+              Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.
+            </p>
+            <button
+              onClick={submitQuote}
+              disabled={submitting}
+              style={{
+                background: submitting ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 10,
+                padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
+                letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
+                transition: "all 0.2s", minWidth: 160,
+              }}
+            >
+              {submitting ? "Submitting..." : "Get Quote"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Success Screen */}
+      {submitted && (
+        <div style={{ background: "#F0FDF4", borderTop: "2px solid #BBF7D0", padding: "32px 20px", textAlign: "center" }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
+          <h3 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700, color: "#166534" }}>Quote Request Submitted!</h3>
+          <p style={{ margin: 0, fontSize: 14, color: "#15803D", maxWidth: 400, marginLeft: "auto", marginRight: "auto" }}>
+            Thank you, {contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.
+          </p>
+          <button
+            onClick={() => { setSubmitted(false); setItems([]); setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; }); setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" }); setPaintColors({ body: "", trim: "" }); setCustomOptions([]); setRoDimensions({}); }}
+            style={{ ...S.btn("#166534", "#FFF"), marginTop: 20, padding: "10px 24px", fontSize: 14 }}
+          >
+            Start New Quote
+          </button>
+        </div>
+      )}
+      {toast && (
+        <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "90%" }}>
+          <div style={{
+            background: "#FFFBEB", border: "2px solid #F59E0B", borderRadius: 12, padding: "14px 20px",
+            boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 12, alignItems: "flex-start",
+          }}>
+            <span style={{ fontSize: 24, lineHeight: 1, flexShrink: 0 }}>⚠️</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: "#92400E", marginBottom: 4 }}>Can't place here</div>
+              <div style={{ fontSize: 13, color: "#A16207", lineHeight: 1.4 }}>{toast}</div>
+            </div>
+            <button onClick={() => setToast(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#92400E", flexShrink: 0, padding: 0 }}>✕</button>
+          </div>
+        </div>
+      )}
+
+      {showExport && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
+          <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>StructureStudio Export</h3>
+              <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
+            </div>
+            {exportUrl && (
+              <>
+                <img src={exportUrl} alt="Floor Plan" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0" }} />
+                <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+                  <button onClick={downloadPNG} style={{ flex: 1, ...S.btn("#1E293B", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PNG</button>
+                  <button onClick={() => { fetch(exportUrl).then((r) => r.blob()).then((b) => { navigator.clipboard.write([new ClipboardItem({ "image/png": b })]).catch(() => {}); }); }}
+                    style={{ flex: 1, ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: 10, fontSize: 14 }}>📋 Copy</button>
+                </div>
+                <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, textAlign: "center" }}>Download and attach to your GHL estimate or invoice</p>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+window.addEventListener("message",(e)=>{if(e.data&&e.data.type==="structureConfig"){const root=ReactDOM.createRoot(document.getElementById("root"));root.render(<StructureStudio config={e.data.config}/>);}});
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<StructureStudio/>);
+</script></body></html>
