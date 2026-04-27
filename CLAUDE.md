@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 StructureStudio is a single-file React component (a floor-plan designer + quote builder for custom sheds/barns) delivered as two parallel artifacts:
 
 - `StructureStudio.jsx` — ES-module React source (`import { useState, ... } from "react"`; default export `StructureStudio`). Consumed by hosts that have their own build.
-- `StructureStudio.html` — self-contained, zero-build drop-in: loads React 18 UMD + ReactDOM + **Babel-standalone** from CDN and inlines the whole component in `<script type="text/babel">`. Opens directly in a browser; no bundler, no package.json, no tests, no lint config.
+- `index.html` — self-contained, zero-build drop-in: loads React 18 UMD + ReactDOM + **Babel-standalone** from CDN and inlines the whole component in `<script type="text/babel">`. Opens directly in a browser; no bundler, no package.json, no tests, no lint config. This is also the file Netlify serves at the site root.
 
 **Both files contain the same component body.** The only structural differences:
 1. HTML top: `const {useState,useRef,useCallback,useEffect}=React;` instead of `import ... from "react";`
@@ -15,7 +15,7 @@ StructureStudio is a single-file React component (a floor-plan designer + quote 
 
 Any non-trivial edit must be mirrored in both files or the HTML deliverable will drift from the JSX source. There is no generator — they are hand-maintained siblings.
 
-There is no build/run/test command. To sanity-check a change, open `StructureStudio.html` in a browser.
+There is no build/run/test command. To sanity-check a change, open `index.html` in a browser.
 
 ## Runtime configuration model
 

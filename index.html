@@ -15,40 +15,71 @@ const DEFAULT_CONFIG = {"clientId": "junior-barns", "webhookUrl": "https://csmsy
 // ─── STRUCTURE STUDIO ENGINE ───
 const WALL_THICKNESS = 6;
 
-function getWallFromClick(x, y, pW, pH, mg) {
-  const ix = x - mg, iy = y - mg, t = 20;
-  if (iy <= t) return "north";
-  if (iy >= pH - t) return "south";
-  if (ix <= t) return "west";
-  if (ix >= pW - t) return "east";
-  return null;
+// Built-in annotation tools that are merged into ITEMS for every client.
+// Distinct from `layoutItems` in config (which the client controls): these
+// are universal drawing aids — a free-text note and a freeform line.
+const BUILT_IN_TOOLS = {
+  textNote: { label: "Note", color: "#0F172A", icon: "📝", shortLabel: "Note", noteType: true, width: 4, height: 1 },
+  line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
+};
+
+// Closest point distance from (px,py) to the segment (x1,y1)-(x2,y2)
+function _distToSeg(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq ? ((px - x1) * dx + (py - y1) * dy) / lenSq : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = x1 + t * dx, cy = y1 + t * dy;
+  return Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
 }
 
-function snapToWall(wall, cx, cy, iW, iH, pW, pH, mg) {
+// Treat each wall as a line segment; pick the wall closest to the click.
+// Returns null only when the click is too far from any wall to be reasonable.
+function getWallFromClick(x, y, pW, pH, mgX, mgY) {
+  const ix = x - mgX, iy = y - mgY, T = 80;
+  const walls = [
+    { wall: "north", d: _distToSeg(ix, iy, 0, 0, pW, 0) },
+    { wall: "south", d: _distToSeg(ix, iy, 0, pH, pW, pH) },
+    { wall: "west",  d: _distToSeg(ix, iy, 0, 0, 0, pH) },
+    { wall: "east",  d: _distToSeg(ix, iy, pW, 0, pW, pH) },
+  ];
+  walls.sort((a, b) => a.d - b.d);
+  return walls[0].d <= T ? walls[0].wall : null;
+}
+
+function snapToWall(wall, cx, cy, iW, iH, pW, pH, mgX, mgY) {
   const hw = iW / 2;
   switch (wall) {
-    case "north": return { x: Math.max(mg + hw, Math.min(cx, mg + pW - hw)), y: mg, rotation: 0, wall };
-    case "south": return { x: Math.max(mg + hw, Math.min(cx, mg + pW - hw)), y: mg + pH, rotation: 0, wall };
-    case "west":  return { x: mg, y: Math.max(mg + hw, Math.min(cy, mg + pH - hw)), rotation: 90, wall };
-    case "east":  return { x: mg + pW, y: Math.max(mg + hw, Math.min(cy, mg + pH - hw)), rotation: 90, wall };
+    case "north": return { x: Math.max(mgX + hw, Math.min(cx, mgX + pW - hw)), y: mgY, rotation: 0, wall };
+    case "south": return { x: Math.max(mgX + hw, Math.min(cx, mgX + pW - hw)), y: mgY + pH, rotation: 0, wall };
+    case "west":  return { x: mgX, y: Math.max(mgY + hw, Math.min(cy, mgY + pH - hw)), rotation: 90, wall };
+    case "east":  return { x: mgX + pW, y: Math.max(mgY + hw, Math.min(cy, mgY + pH - hw)), rotation: 90, wall };
     default: return { x: cx, y: cy, rotation: 0, wall: null };
   }
 }
 
-function snapToWallInterior(wall, cx, cy, iW, iH, pW, pH, mg) {
+function snapToWallInterior(wall, cx, cy, iW, iH, pW, pH, mgX, mgY) {
   switch (wall) {
-    case "north": return { x: Math.max(mg + iW / 2, Math.min(cx, mg + pW - iW / 2)), y: mg + iH / 2, rotation: 0, wall };
-    case "south": return { x: Math.max(mg + iW / 2, Math.min(cx, mg + pW - iW / 2)), y: mg + pH - iH / 2, rotation: 0, wall };
-    case "west":  return { x: mg + iH / 2, y: Math.max(mg + iW / 2, Math.min(cy, mg + pH - iW / 2)), rotation: 90, wall };
-    case "east":  return { x: mg + pW - iH / 2, y: Math.max(mg + iW / 2, Math.min(cy, mg + pH - iW / 2)), rotation: 90, wall };
+    case "north": return { x: Math.max(mgX + iW / 2, Math.min(cx, mgX + pW - iW / 2)), y: mgY + iH / 2, rotation: 0, wall };
+    case "south": return { x: Math.max(mgX + iW / 2, Math.min(cx, mgX + pW - iW / 2)), y: mgY + pH - iH / 2, rotation: 0, wall };
+    case "west":  return { x: mgX + iH / 2, y: Math.max(mgY + iW / 2, Math.min(cy, mgY + pH - iW / 2)), rotation: 90, wall };
+    case "east":  return { x: mgX + pW - iH / 2, y: Math.max(mgY + iW / 2, Math.min(cy, mgY + pH - iW / 2)), rotation: 90, wall };
     default: return { x: cx, y: cy, rotation: 0, wall: null };
   }
 }
 
-function getNearestWall(x, y, pW, pH, mg) {
-  const d = [Math.abs(y - mg), Math.abs(y - (mg + pH)), Math.abs(x - mg), Math.abs(x - (mg + pW))];
-  const m = Math.min(...d);
-  return ["north", "south", "west", "east"][d.indexOf(m)];
+// Always returns a wall — used as a fallback when the click is ambiguous or far
+// from the plan. Uses segment distance so corner clicks resolve to the closer side.
+function getNearestWall(x, y, pW, pH, mgX, mgY) {
+  const ix = x - mgX, iy = y - mgY;
+  const walls = [
+    { wall: "north", d: _distToSeg(ix, iy, 0, 0, pW, 0) },
+    { wall: "south", d: _distToSeg(ix, iy, 0, pH, pW, pH) },
+    { wall: "west",  d: _distToSeg(ix, iy, 0, 0, 0, pH) },
+    { wall: "east",  d: _distToSeg(ix, iy, pW, 0, pW, pH) },
+  ];
+  walls.sort((a, b) => a.d - b.d);
+  return walls[0].wall;
 }
 
 function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
@@ -123,7 +154,7 @@ let idCounter = 1;
 // ─── MAIN COMPONENT ───
 function StructureStudio({ config = DEFAULT_CONFIG }) {
   const C = config;
-  const ITEMS = C.layoutItems;
+  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
   const accent = C.branding.accentColor || "#D97706";
 
   const [sel, setSel] = useState(() => {
@@ -151,6 +182,10 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
   const [submitError, setSubmitError] = useState(null);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
+  // After a drag or resize gesture ends, the trailing click on the SVG
+  // would otherwise re-run the hit test and deselect the item if the cursor
+  // ended outside its bounds. This ref signals "ignore the click that follows".
+  const justGesturedRef = useRef(false);
 
   // PostMessage listener
   useEffect(() => {
@@ -173,10 +208,34 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     if (p) { setShedW(p.w); setShedH(p.h); setItems([]); setSelectedId(null); }
   }, [sel.size]);
 
-  const mg = 60;
-  const scale = Math.min((560 - mg * 2) / bldgW, (460 - mg * 2) / bldgH);
+  // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
+  // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
+  // so wherever they sit on screen is exactly where they print.
+  const PAGE_W = 850, PAGE_H = 1100;
+  const TEXT_AREA_H = 340;          // bottom band reserved for auto customer info
+  const TOP_LABEL_PAD = 30;         // space for size + FRONT labels above plan
+  const BOT_LABEL_PAD = 30;         // space for size + BACK labels below plan
+  const RAMP_SPACE_FT = 2;          // a ramp shows 2 ft past its wall (visual)
+  const visibleH = PAGE_H - TEXT_AREA_H;
+  // Plan dynamically scales: caps in three directions ensure a ramp fits
+  // both north and south plus 70% target sizing.
+  //   1) width ≤ 70% of page (so the plan never spans the full sheet)
+  //   2) height ≤ 70% of the visible top area
+  //   3) plan + 2 ramps + 2 label pads ≤ visibleH (so south + north ramps fit)
+  const scale = Math.min(
+    (PAGE_W * 0.70) / bldgW,
+    (visibleH * 0.70) / bldgH,
+    (visibleH - TOP_LABEL_PAD - BOT_LABEL_PAD) / (bldgH + 2 * RAMP_SPACE_FT)
+  );
   const pW = bldgW * scale, pH = bldgH * scale;
-  const cW = pW + mg * 2, cH = pH + mg * 2;
+  const mgX = (PAGE_W - pW) / 2;
+  // Top-bias: plan sits idealRoom from the top so a north ramp + labels fit.
+  // The third scale constraint guarantees there's also enough room for a south
+  // ramp + label below the plan.
+  const idealRoom = RAMP_SPACE_FT * scale + TOP_LABEL_PAD;
+  const mgY = idealRoom;
+  const cW = PAGE_W, cH = PAGE_H;
+  const TEXT_BAND_TOP = PAGE_H - TEXT_AREA_H;
 
   // Get sizes for selected style
   const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
@@ -186,10 +245,10 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
   const lofts = items.filter((i) => i.type === "loft");
   const unattachedLofts = lofts.filter((lf) => {
     const w = (lf.widthFt || 6) / 2, h = (lf.heightFt || 4) / 2;
-    const cx = (lf.x - mg) / scale, cy = (lf.y - mg) / scale;
+    const cx = (lf.x - mgX) / scale, cy = (lf.y - mgY) / scale;
     const others = lofts.filter((o) => o.id !== lf.id).map((o) => {
       const ow = (o.widthFt || 6) / 2, oh = (o.heightFt || 4) / 2;
-      const ocx = (o.x - mg) / scale, ocy = (o.y - mg) / scale;
+      const ocx = (o.x - mgX) / scale, ocy = (o.y - mgY) / scale;
       return { l: ocx - ow, r: ocx + ow, t: ocy - oh, b: ocy + oh };
     });
     return !checkLoftAttached(cx - w, cx + w, cy - h, cy + h, bldgW, bldgH, others);
@@ -202,16 +261,45 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     const r = svg.getBoundingClientRect();
     const cx = e.touches ? e.touches[0].clientX : e.clientX;
     const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    return { x: (cx - r.left) * (cW / r.width), y: (cy - r.top) * (cH / r.height) };
-  }, [cW, cH]);
+    // The SVG preserves aspect ratio, so the same scale factor applies to both
+    // axes. Use the X ratio for both — using cH on Y was wrong because the
+    // viewBox is cropped to TEXT_BAND_TOP, not the full page height.
+    const sx = cW / r.width;
+    return { x: (cx - r.left) * sx, y: (cy - r.top) * sx };
+  }, [cW]);
 
   const handleClick = useCallback((e) => {
     if (dragging) return;
+    // Swallow the click that fires immediately after a drag/resize gesture —
+    // otherwise the hit test below would deselect items the user just resized.
+    if (justGesturedRef.current) {
+      justGesturedRef.current = false;
+      return;
+    }
     const pt = getSvgPt(e);
     if (!activeTool) {
       const hit = [...items].reverse().find((it) => {
         const c = ITEMS[it.type]; if (!c) return false;
-        const iw = c.width * scale; const ih = c.height * scale;
+        if (c.lineType) {
+          // Distance from click to the line segment
+          const A = pt.x - it.x1, B = pt.y - it.y1;
+          const C2 = it.x2 - it.x1, D = it.y2 - it.y1;
+          const lenSq = C2 * C2 + D * D;
+          let t = lenSq ? (A * C2 + B * D) / lenSq : 0;
+          t = Math.max(0, Math.min(1, t));
+          const dx = pt.x - (it.x1 + t * C2), dy = pt.y - (it.y1 + t * D);
+          return Math.sqrt(dx * dx + dy * dy) < 8;
+        }
+        if (c.noteType) {
+          const w = it.widthPx || 160, h = it.heightPx || 40;
+          return Math.abs(pt.x - it.x) < w / 2 + 4 && Math.abs(pt.y - it.y) < h / 2 + 4;
+        }
+        // Use the item's actual stored size, not the config default — the
+        // workbench/loft/RO can be resized past their default and still need
+        // to be selectable at their visual bounds.
+        const iwFt = it.widthFt || c.width;
+        const ihFt = it.heightFt || c.height;
+        const iw = iwFt * scale, ih = ihFt * scale;
         const rot = it.rotation === 90; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2;
         return Math.abs(pt.x - it.x) < hw + 5 && Math.abs(pt.y - it.y) < hh + 5;
       });
@@ -219,7 +307,43 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     }
     const cfg = ITEMS[activeTool]; if (!cfg) return;
     const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
-    const wall = getWallFromClick(pt.x, pt.y, pW, pH, mg);
+    let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
+    // Wall-only items always go on a wall; if the click missed the threshold,
+    // fall back to the nearest wall so the placement still happens.
+    if (cfg.wallOnly && !wall) wall = getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+
+    // Annotation tools (note + line): free placement anywhere on the visible
+    // page area (above the auto info band), not just inside the plan rectangle.
+    if (cfg.noteType) {
+      const ni = {
+        id: idCounter++, type: activeTool,
+        x: Math.max(20, Math.min(pt.x, PAGE_W - 20)),
+        y: Math.max(20, Math.min(pt.y, TEXT_BAND_TOP - 20)),
+        rotation: 0, wall: null,
+        widthPx: 160, heightPx: 40,   // user-resizable box; text flows inside
+        text: "Note",
+      };
+      setItems((p) => [...p, ni]);
+      setSelectedId(ni.id);   // auto-select so the editor banner appears
+      setActiveTool(null);
+      setToast(null);
+      return;
+    }
+    if (cfg.lineType) {
+      const halfLenPx = (cfg.width / 2) * scale;
+      const cx = Math.max(20, Math.min(pt.x, PAGE_W - 20));
+      const cy = Math.max(20, Math.min(pt.y, TEXT_BAND_TOP - 20));
+      const ni = {
+        id: idCounter++, type: activeTool, wall: null,
+        x1: Math.max(0, cx - halfLenPx), y1: cy,
+        x2: Math.min(PAGE_W, cx + halfLenPx), y2: cy,
+      };
+      setItems((p) => [...p, ni]);
+      setSelectedId(ni.id);
+      setActiveTool(null);
+      setToast(null);
+      return;
+    }
 
     // Door-snap items (ramp): find nearest door and snap to its outside
     if (cfg.doorSnap) {
@@ -242,14 +366,14 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       }
       const doorCfg = ITEMS[closest.type];
       const doorW = doorCfg ? doorCfg.width : 3;
-      const rampDepth = 3; // 3ft deep
+      const rampDepth = RAMP_SPACE_FT; // visual ramp depth in feet
       const rampDepthPx = rampDepth * scale;
       const rampWidthPx = doorW * scale;
       let rx, ry, rot;
-      if (closest.wall === "north") { rx = closest.x; ry = mg - rampDepthPx / 2; rot = 0; }
-      else if (closest.wall === "south") { rx = closest.x; ry = mg + pH + rampDepthPx / 2; rot = 0; }
-      else if (closest.wall === "west") { rx = mg - rampDepthPx / 2; ry = closest.y; rot = 90; }
-      else if (closest.wall === "east") { rx = mg + pW + rampDepthPx / 2; ry = closest.y; rot = 90; }
+      if (closest.wall === "north") { rx = closest.x; ry = mgY - rampDepthPx / 2; rot = 0; }
+      else if (closest.wall === "south") { rx = closest.x; ry = mgY + pH + rampDepthPx / 2; rot = 0; }
+      else if (closest.wall === "west") { rx = mgX - rampDepthPx / 2; ry = closest.y; rot = 90; }
+      else if (closest.wall === "east") { rx = mgX + pW + rampDepthPx / 2; ry = closest.y; rot = 90; }
       else return;
       const ni = { id: idCounter++, type: activeTool, x: rx, y: ry, rotation: rot, wall: closest.wall, widthFt: doorW, heightFt: rampDepth, snapDoorId: closest.id };
       setItems((p) => [...p, ni]);
@@ -258,11 +382,11 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       return;
     }
 
-    if (cfg.wallOnly && !wall) return;
+    // (cfg.wallOnly is always assigned a wall above — no need to abort here)
     let ni;
     if (cfg.wallSnap) {
-      const clickedWall = wall || getNearestWall(pt.x, pt.y, pW, pH, mg);
-      const sn = snapToWallInterior(clickedWall, pt.x, pt.y, iwPx, ihPx, pW, pH, mg);
+      const clickedWall = wall || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      const sn = snapToWallInterior(clickedWall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
       const candidate = { id: idCounter, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
       const others = items.filter((i) => i.id !== candidate.id);
       if (checkDoorCollision(candidate, cfg, others, ITEMS, scale)) {
@@ -289,33 +413,33 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     } else if (activeTool === "loft") {
       // Auto-span wall-to-wall (full building width), positioned at click Y
       const loftH = cfg.height; // default 4ft
-      const cyFtRound = Math.max(loftH / 2, Math.min(Math.round((pt.y - mg) / scale), bldgH - loftH / 2));
+      const cyFtRound = Math.max(loftH / 2, Math.min(Math.round((pt.y - mgY) / scale), bldgH - loftH / 2));
       const cxFt = bldgW / 2;
       const nL = 0, nR = bldgW, nT = cyFtRound - loftH / 2, nB = cyFtRound + loftH / 2;
       // Prevent overlap with other lofts
       const otherLofts = items.filter((i) => i.type === "loft");
       for (const o of otherLofts) {
         const ow = (o.widthFt || cfg.width) / 2, oh = (o.heightFt || cfg.height) / 2;
-        const ocx = (o.x - mg) / scale, ocy = (o.y - mg) / scale;
+        const ocx = (o.x - mgX) / scale, ocy = (o.y - mgY) / scale;
         if (nL < ocx + ow - 0.1 && nR > ocx - ow + 0.1 && nT < ocy + oh - 0.1 && nB > ocy - oh + 0.1) {
           setToast("Can't place a loft overlapping another loft. Move the existing one or click a different spot.");
           setTimeout(() => setToast(null), 4000);
           return;
         }
       }
-      ni = { id: idCounter++, type: "loft", x: mg + cxFt * scale, y: mg + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH };
+      ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH };
     } else if (wall) {
-      const sn = snapToWall(wall, pt.x, pt.y, iwPx, ihPx, pW, pH, mg);
+      const sn = snapToWall(wall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
       ni = { id: idCounter++, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
     } else {
-      const x = Math.max(mg + iwPx / 2, Math.min(pt.x, mg + pW - iwPx / 2));
-      const y = Math.max(mg + ihPx / 2, Math.min(pt.y, mg + pH - ihPx / 2));
+      const x = Math.max(mgX + iwPx / 2, Math.min(pt.x, mgX + pW - iwPx / 2));
+      const y = Math.max(mgY + ihPx / 2, Math.min(pt.y, mgY + pH - ihPx / 2));
       ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height };
     }
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mg, pW, pH, scale, ITEMS]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS]);
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation(); if (activeTool) return;
@@ -323,13 +447,29 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     const cfg = ITEMS[item.type];
     if (resizing || (cfg && cfg.doorSnap)) return; // don't drag ramps or while resizing
     const pt = getSvgPt(e);
+    if (cfg && cfg.lineType) {
+      // Line is stored as two endpoints; track midpoint offset + half-deltas
+      // so a body drag translates both endpoints rigidly.
+      const midX = (item.x1 + item.x2) / 2, midY = (item.y1 + item.y2) / 2;
+      setDragging({
+        id: item.id, kind: "line",
+        ox: pt.x - midX, oy: pt.y - midY,
+        halfDx: (item.x2 - item.x1) / 2, halfDy: (item.y2 - item.y1) / 2,
+      });
+      return;
+    }
     setDragging({ id: item.id, ox: pt.x - item.x, oy: pt.y - item.y, startX: item.x, startY: item.y });
   }, [activeTool, getSvgPt, resizing, ITEMS]);
 
   const startResize = useCallback((e, item, handle) => {
     e.preventDefault();
     const pt = getSvgPt(e);
-    setResizing({ id: item.id, handle, startPt: pt, origWidthFt: item.widthFt, origHeightFt: item.heightFt, origX: item.x, origY: item.y });
+    setResizing({
+      id: item.id, handle, startPt: pt,
+      origWidthFt: item.widthFt, origHeightFt: item.heightFt,
+      origWidthPx: item.widthPx, origHeightPx: item.heightPx,
+      origX: item.x, origY: item.y,
+    });
   }, [getSvgPt]);
 
   const getResizeBounds = useCallback((item) => {
@@ -345,17 +485,17 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       const oCfg = ITEMS[other.type];
       if (!oCfg) return;
       const oW = other.widthFt || oCfg.width;
-      const oPos = isHoriz ? (other.x - mg) / scale : (other.y - mg) / scale;
+      const oPos = isHoriz ? (other.x - mgX) / scale : (other.y - mgY) / scale;
       const oLeft = oPos - oW / 2;
       const oRight = oPos + oW / 2;
       
-      const itemPos = isHoriz ? (item.x - mg) / scale : (item.y - mg) / scale;
+      const itemPos = isHoriz ? (item.x - mgX) / scale : (item.y - mgY) / scale;
       if (oRight <= itemPos) minEdge = Math.max(minEdge, oRight);
       if (oLeft >= itemPos) maxEdge = Math.min(maxEdge, oLeft);
     });
-    
+
     return { minEdge, maxEdge, isHoriz };
-  }, [items, ITEMS, bldgW, bldgH, mg, scale]);
+  }, [items, ITEMS, bldgW, bldgH, mgX, mgY, scale]);
 
   const onPtrMove = useCallback((e) => {
     if (resizing) {
@@ -363,13 +503,41 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       const it = items.find((i) => i.id === resizing.id);
       if (!it) return;
 
+      // Text-note resize: drag the bottom-right corner. The top-left stays
+      // pinned, so the box grows toward the cursor and the text reflows live.
+      if (it.type === "textNote") {
+        const tlX = resizing.origX - resizing.origWidthPx / 2;
+        const tlY = resizing.origY - resizing.origHeightPx / 2;
+        const newW = Math.max(80, Math.min(pt.x - tlX, PAGE_W - tlX - 4));
+        const newH = Math.max(28, Math.min(pt.y - tlY, TEXT_BAND_TOP - tlY - 4));
+        setItems((p) => p.map((i) => i.id === resizing.id ? {
+          ...i,
+          widthPx: newW,
+          heightPx: newH,
+          x: tlX + newW / 2,
+          y: tlY + newH / 2,
+        } : i));
+        return;
+      }
+
+      // Line endpoint drag: snap the endpoint to the cursor, clamped to the visible page area
+      if (it.type === "line") {
+        const newX = Math.max(0, Math.min(pt.x, PAGE_W));
+        const newY = Math.max(0, Math.min(pt.y, TEXT_BAND_TOP));
+        setItems((p) => p.map((i) => i.id === resizing.id ? {
+          ...i,
+          ...(resizing.handle === "ep1" ? { x1: newX, y1: newY } : { x2: newX, y2: newY }),
+        } : i));
+        return;
+      }
+
       // Loft: free-floating 4-sided resize with collision
       if (it.type === "loft") {
         const hd = resizing.handle;
-        const mouseXft = Math.round((pt.x - mg) / scale);
-        const mouseYft = Math.round((pt.y - mg) / scale);
-        const origCxFt = (resizing.origX - mg) / scale;
-        const origCyFt = (resizing.origY - mg) / scale;
+        const mouseXft = Math.round((pt.x - mgX) / scale);
+        const mouseYft = Math.round((pt.y - mgY) / scale);
+        const origCxFt = (resizing.origX - mgX) / scale;
+        const origCyFt = (resizing.origY - mgY) / scale;
         const origW = resizing.origWidthFt;
         const origH = resizing.origHeightFt;
         let oL = Math.round(origCxFt - origW / 2), oR = oL + origW;
@@ -384,7 +552,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         const otherLofts = items.filter((i) => i.type === "loft" && i.id !== resizing.id);
         for (const o of otherLofts) {
           const ow = (o.widthFt || 6) / 2, oh = (o.heightFt || 4) / 2;
-          const ocx = (o.x - mg) / scale, ocy = (o.y - mg) / scale;
+          const ocx = (o.x - mgX) / scale, ocy = (o.y - mgY) / scale;
           const olL = ocx - ow, olR = ocx + ow, olT = ocy - oh, olB = ocy + oh;
           // Only clamp if the other dimensions overlap (2D check)
           if (nT < olB && nB > olT) { // vertically overlapping
@@ -400,46 +568,48 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         const nW = Math.max(2, nR - nL), nH = Math.max(2, nB - nT);
         setItems((p) => p.map((i) => i.id === resizing.id ? {
           ...i, widthFt: nW, heightFt: nH,
-          x: mg + (nL + nR) / 2 * scale,
-          y: mg + (nT + nB) / 2 * scale,
+          x: mgX + (nL + nR) / 2 * scale,
+          y: mgY + (nT + nB) / 2 * scale,
         } : i));
         return;
       }
 
-      // Workbench: wall-snapped 1D resize
+      // Wall-attached 1D resize: workbench snaps to integer feet, rough
+      // opening resizes smoothly to whatever width the user drags to.
       const isHoriz = it.wall === "north" || it.wall === "south";
-      
-      // Compute mouse position in feet from wall origin
-      const mouseFt = isHoriz ? (pt.x - mg) / scale : (pt.y - mg) / scale;
-      const mouseFtSnapped = Math.round(mouseFt);
-      
-      // Original edges - snap to integer feet
-      const origCenterFt = isHoriz ? (resizing.origX - mg) / scale : (resizing.origY - mg) / scale;
-      const origLeft = Math.round(origCenterFt - resizing.origWidthFt / 2);
+      const isRO = it.type === "roughOpening";
+
+      // Mouse position in feet along the wall axis
+      const mouseFt = isHoriz ? (pt.x - mgX) / scale : (pt.y - mgY) / scale;
+      const mouseFtVal = isRO ? mouseFt : Math.round(mouseFt);
+
+      const origCenterFt = isHoriz ? (resizing.origX - mgX) / scale : (resizing.origY - mgY) / scale;
+      const origLeft = isRO
+        ? (origCenterFt - resizing.origWidthFt / 2)
+        : Math.round(origCenterFt - resizing.origWidthFt / 2);
       const origRight = origLeft + resizing.origWidthFt;
-      
+
       const origItem = { ...it, x: resizing.origX, y: resizing.origY, widthFt: resizing.origWidthFt };
       const { minEdge, maxEdge } = getResizeBounds(origItem);
-      
+
+      const minWidth = isRO ? 0.5 : 2;
+
       let newLeft = origLeft, newRight = origRight;
-      
       if (resizing.handle === "max") {
-        // Dragging the high-coordinate edge (right or bottom)
-        newRight = Math.max(origLeft + 2, Math.min(mouseFtSnapped, Math.floor(maxEdge)));
+        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, isRO ? maxEdge : Math.floor(maxEdge)));
       } else {
-        // Dragging the low-coordinate edge (left or top)
-        newLeft = Math.min(origRight - 2, Math.max(mouseFtSnapped, Math.ceil(minEdge)));
+        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, isRO ? minEdge : Math.ceil(minEdge)));
       }
-      
+
       const newWidthFt = newRight - newLeft;
       const newCenterFt = (newLeft + newRight) / 2;
-      const newPos = mg + newCenterFt * scale;
-      
-      setItems((p) => p.map((i) => i.id === resizing.id ? { 
-        ...i, 
-        widthFt: newWidthFt, 
-        x: isHoriz ? newPos : i.x, 
-        y: isHoriz ? i.y : newPos 
+      const newPos = (isHoriz ? mgX : mgY) + newCenterFt * scale;
+
+      setItems((p) => p.map((i) => i.id === resizing.id ? {
+        ...i,
+        widthFt: newWidthFt,
+        x: isHoriz ? newPos : i.x,
+        y: isHoriz ? i.y : newPos,
       } : i));
       return;
     }
@@ -448,14 +618,33 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     const it = items.find((i) => i.id === dragging.id);
     if (!it) return;
     const cfg = ITEMS[it.type]; if (!cfg) return;
+
+    // Line body drag: translate both endpoints by the same delta, clamped so
+    // neither endpoint leaves the visible page area.
+    if (dragging.kind === "line") {
+      const newMidX = pt.x - dragging.ox, newMidY = pt.y - dragging.oy;
+      const ahx = Math.abs(dragging.halfDx), ahy = Math.abs(dragging.halfDy);
+      const cMidX = Math.max(ahx, Math.min(newMidX, PAGE_W - ahx));
+      const cMidY = Math.max(ahy, Math.min(newMidY, TEXT_BAND_TOP - ahy));
+      setItems((p) => p.map((i) => i.id === dragging.id ? {
+        ...i,
+        x1: cMidX - dragging.halfDx, y1: cMidY - dragging.halfDy,
+        x2: cMidX + dragging.halfDx, y2: cMidY + dragging.halfDy,
+      } : i));
+      return;
+    }
+
     const rx = pt.x - dragging.ox; const ry = pt.y - dragging.oy;
     const iWidthFt = it.widthFt || cfg.width;
     if (cfg.wallOnly) {
-      const w = getWallFromClick(rx, ry, pW, pH, mg);
-      if (w) { const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mg); setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i)); }
+      // Always snap to nearest wall during drag so the door follows the mouse
+      // and doesn't get stuck off-wall.
+      const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
+      const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
+      setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
     } else if (cfg.wallSnap) {
-      const nw = getNearestWall(rx, ry, pW, pH, mg);
-      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mg);
+      const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
+      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
       const cand = { ...it, ...sn };
       // Check collision with doors AND other workbenches on same wall
       const others = items.filter((i) => i.id !== dragging.id);
@@ -472,13 +661,21 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       }
       setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
     } else {
+      // Notes drag anywhere on the visible page (no plan constraint)
+      if (cfg.noteType) {
+        const x = Math.max(20, Math.min(rx, PAGE_W - 20));
+        const y = Math.max(20, Math.min(ry, TEXT_BAND_TOP - 20));
+        setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x, y } : i));
+        return;
+      }
+
       const iHeightFt = it.heightFt || cfg.height;
       const halfW = iWidthFt / 2, halfH = iHeightFt / 2;
       const snapFt = 1; // snap threshold in feet
 
       // Convert desired position to feet
-      let cxFt = (rx - mg) / scale;
-      let cyFt = (ry - mg) / scale;
+      let cxFt = (rx - mgX) / scale;
+      let cyFt = (ry - mgY) / scale;
 
       // Round to integer feet
       cxFt = Math.round(cxFt);
@@ -496,7 +693,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         let l = cxFt - halfW, r = cxFt + halfW, t = cyFt - halfH, b = cyFt + halfH;
         for (const o of otherLofts) {
           const oW = (o.widthFt || cfg.width) / 2, oH = (o.heightFt || cfg.height) / 2;
-          const oCx = (o.x - mg) / scale, oCy = (o.y - mg) / scale;
+          const oCx = (o.x - mgX) / scale, oCy = (o.y - mgY) / scale;
           const oL = oCx - oW, oR = oCx + oW, oT = oCy - oH, oB = oCy + oH;
           if (t < oB && b > oT) {
             if (Math.abs(r - oL) < snapFt) cxFt = oL - halfW;
@@ -517,18 +714,18 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         const fL = cxFt - halfW, fR = cxFt + halfW, fT = cyFt - halfH, fB = cyFt + halfH;
         for (const o of otherLofts) {
           const oW2 = (o.widthFt || cfg.width) / 2, oH2 = (o.heightFt || cfg.height) / 2;
-          const oCx2 = (o.x - mg) / scale, oCy2 = (o.y - mg) / scale;
+          const oCx2 = (o.x - mgX) / scale, oCy2 = (o.y - mgY) / scale;
           if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) return;
         }
 
         // Validate attachment — both ends of at least one axis must touch walls or other lofts
         const olEdges = otherLofts.map((o) => {
           const ow = (o.widthFt || cfg.width) / 2, oh = (o.heightFt || cfg.height) / 2;
-          const ox = (o.x - mg) / scale, oy = (o.y - mg) / scale;
+          const ox = (o.x - mgX) / scale, oy = (o.y - mgY) / scale;
           return { l: ox - ow, r: ox + ow, t: oy - oh, b: oy + oh };
         });
         if (!checkLoftAttached(fL, fR, fT, fB, bldgW, bldgH, olEdges)) {
-          setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x: mg + cxFt * scale, y: mg + cyFt * scale } : i));
+          setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x: mgX + cxFt * scale, y: mgY + cyFt * scale } : i));
           return;
         }
       } else {
@@ -536,13 +733,18 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
       }
 
-      const x = mg + cxFt * scale;
-      const y = mg + cyFt * scale;
+      const x = mgX + cxFt * scale;
+      const y = mgY + cyFt * scale;
       setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x, y } : i));
     }
-  }, [dragging, resizing, getSvgPt, items, mg, pW, pH, scale, ITEMS, getResizeBounds]);
+  }, [dragging, resizing, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, getResizeBounds]);
 
-  const onPtrUp = useCallback(() => { setDragging(null); setResizing(null); }, []);
+  const onPtrUp = useCallback(() => {
+    setDragging(null);
+    setResizing(null);
+    // Mark this gesture so the trailing click doesn't deselect the item.
+    justGesturedRef.current = true;
+  }, []);
 
   useEffect(() => {
     if (dragging || resizing) {
@@ -553,34 +755,104 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
   const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId)); setSelectedId(null); } };
-  const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap)) return i; return { ...i, rotation: (i.rotation + 90) % 360 }; })); };
+  const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
   const clearAll = () => { setItems([]); setSelectedId(null); };
 
-  // ─── PNG GENERATION (shared by export & submit) ───
-  const generatePNG = () => {
-    const canvas = document.createElement("canvas"); const dpr = 2;
-    const extraH = 140; // extra height below canvas for customer/options text
-    canvas.width = cW * dpr; canvas.height = (cH + extraH) * dpr;
+  // ─── EXPORT RENDERING (shared by Export modal, PDF, and submit) ───
+  // The on-screen SVG already uses page coordinates (cW × cH = 850 × 1100),
+  // so the export is a straight 2× DPR rasterization — same scale, same mgX/mgY,
+  // same item positions. No coordinate conversion needed.
+  const renderExportCanvas = () => {
+    const dpr = 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = cW * dpr; canvas.height = cH * dpr;
     const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
-    ctx.fillStyle = "#FFF"; ctx.fillRect(0, 0, cW, cH + extraH);
+    ctx.fillStyle = "#FFF"; ctx.fillRect(0, 0, cW, cH);
+
+    // Grid + plan border
     ctx.strokeStyle = "#E8ECF1"; ctx.lineWidth = 0.5;
-    for (let fx = 0; fx <= bldgW; fx++) { const x = mg + fx * scale; ctx.beginPath(); ctx.moveTo(x, mg); ctx.lineTo(x, mg + pH); ctx.stroke(); }
-    for (let fy = 0; fy <= bldgH; fy++) { const y = mg + fy * scale; ctx.beginPath(); ctx.moveTo(mg, y); ctx.lineTo(mg + pW, y); ctx.stroke(); }
-    ctx.strokeStyle = "#1E293B"; ctx.lineWidth = WALL_THICKNESS; ctx.strokeRect(mg, mg, pW, pH);
+    for (let fx = 0; fx <= bldgW; fx++) { const x = mgX + fx * scale; ctx.beginPath(); ctx.moveTo(x, mgY); ctx.lineTo(x, mgY + pH); ctx.stroke(); }
+    for (let fy = 0; fy <= bldgH; fy++) { const y = mgY + fy * scale; ctx.beginPath(); ctx.moveTo(mgX, y); ctx.lineTo(mgX + pW, y); ctx.stroke(); }
+    ctx.strokeStyle = "#1E293B"; ctx.lineWidth = WALL_THICKNESS; ctx.strokeRect(mgX, mgY, pW, pH);
+
+    // Size labels
     ctx.fillStyle = "#475569"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(`${bldgW} ft`, mg + pW / 2, mg - 14); ctx.fillText(`${bldgW} ft`, mg + pW / 2, mg + pH + 24);
-    ctx.save(); ctx.translate(mg - 20, mg + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
-    ctx.save(); ctx.translate(mg + pW + 24, mg + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+    ctx.fillText(`${bldgW} ft`, mgX + pW / 2, mgY - 16);
+    ctx.fillText(`${bldgW} ft`, mgX + pW / 2, mgY + pH + 26);
+    ctx.save(); ctx.translate(mgX - 20, mgY + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+    ctx.save(); ctx.translate(mgX + pW + 24, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+
+    // FRONT/BACK/LEFT/RIGHT
     if (frontWall) {
-      ctx.fillStyle = "#94A3B8"; ctx.font = "11px sans-serif";
-      ctx.fillText(getDisplayLabel("north", frontWall), mg + pW / 2, mg - 30);
-      ctx.fillText(getDisplayLabel("south", frontWall), mg + pW / 2, mg + pH + 40);
-      ctx.save(); ctx.translate(mg - 38, mg + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(getDisplayLabel("west", frontWall), 0, 0); ctx.restore();
-      ctx.save(); ctx.translate(mg + pW + 42, mg + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(getDisplayLabel("east", frontWall), 0, 0); ctx.restore();
+      ctx.fillStyle = "#94A3B8"; ctx.font = "10px sans-serif";
+      ctx.fillText(getDisplayLabel("north", frontWall), mgX + pW / 2, mgY - 32);
+      ctx.fillText(getDisplayLabel("south", frontWall), mgX + pW / 2, mgY + pH + 42);
+      ctx.save(); ctx.translate(mgX - 38, mgY + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(getDisplayLabel("west", frontWall), 0, 0); ctx.restore();
+      ctx.save(); ctx.translate(mgX + pW + 42, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(getDisplayLabel("east", frontWall), 0, 0); ctx.restore();
     }
 
+    // Items render in page coordinates directly — same as the SVG.
     items.forEach((item) => {
       const cfg = ITEMS[item.type]; if (!cfg) return;
+
+      // Line: free-angle segment between two endpoints (page coords)
+      if (cfg.lineType) {
+        ctx.save();
+        ctx.strokeStyle = cfg.color; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(item.x1, item.y1);
+        ctx.lineTo(item.x2, item.y2);
+        ctx.stroke();
+        ctx.restore();
+        return;
+      }
+
+      // Text Note: resizable pill with word-wrapped text (page coords)
+      if (cfg.noteType) {
+        const text = (item.text || "").trim() || "Note";
+        const w = item.widthPx || 160;
+        const h = item.heightPx || 40;
+        const padX = 8;
+        ctx.save();
+        ctx.translate(item.x, item.y);
+        ctx.fillStyle = "#FFFBEB"; ctx.strokeStyle = cfg.color; ctx.lineWidth = 1.25;
+        const r = 4;
+        ctx.beginPath();
+        ctx.moveTo(-w / 2 + r, -h / 2);
+        ctx.lineTo(w / 2 - r, -h / 2);
+        ctx.quadraticCurveTo(w / 2, -h / 2, w / 2, -h / 2 + r);
+        ctx.lineTo(w / 2, h / 2 - r);
+        ctx.quadraticCurveTo(w / 2, h / 2, w / 2 - r, h / 2);
+        ctx.lineTo(-w / 2 + r, h / 2);
+        ctx.quadraticCurveTo(-w / 2, h / 2, -w / 2, h / 2 - r);
+        ctx.lineTo(-w / 2, -h / 2 + r);
+        ctx.quadraticCurveTo(-w / 2, -h / 2, -w / 2 + r, -h / 2);
+        ctx.fill(); ctx.stroke();
+        ctx.font = "600 12px sans-serif";
+        ctx.fillStyle = cfg.color; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        // Word-wrap to fit the box width
+        const maxW = w - padX * 2;
+        const words = text.split(/\s+/);
+        const lines = [];
+        let line = "";
+        for (const word of words) {
+          const test = line ? line + " " + word : word;
+          if (ctx.measureText(test).width > maxW && line) {
+            lines.push(line); line = word;
+          } else {
+            line = test;
+          }
+        }
+        if (line) lines.push(line);
+        const lineHeight = 14;
+        const totalH = lines.length * lineHeight;
+        let ly = -totalH / 2 + lineHeight / 2;
+        for (const ln of lines) { ctx.fillText(ln, 0, ly); ly += lineHeight; }
+        ctx.restore();
+        return;
+      }
+
+      // Plan-bound items: position is already in page coords; widths are in feet
       const itemW = item.widthFt || cfg.width;
       const itemH = item.heightFt || cfg.height;
       const iw = itemW * scale; const ih = itemH * scale;
@@ -630,34 +902,49 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         ctx.fillStyle = cfg.color + "30"; ctx.strokeStyle = cfg.color; ctx.lineWidth = 2;
         ctx.fillRect(-iw / 2, -ih / 2, iw, ih); ctx.strokeRect(-iw / 2, -ih / 2, iw, ih);
       }
-      ctx.fillStyle = "#1E293B"; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center";
-      if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "8px sans-serif"; ctx.fillText("Workbench", 0, 12); }
+      ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+      if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
       else if (item.type === "ramp") { ctx.fillText("RAMP", 0, 4); }
-      else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "9px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 13); ctx.globalAlpha = 1; }
+      else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
-        ctx.fillText(cfg.shortLabel, 0, lblY);
+        let label = cfg.shortLabel;
+        if (item.type === "roughOpening") {
+          const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
+          label = `RO-${idx + 1}`;
+        }
+        ctx.fillText(label, 0, lblY);
       }
       ctx.restore();
     });
 
+    // ─── Bottom text band ───
+    const TEXT_X = 36;
+    const TEXT_RIGHT = cW - 36;
+    const TEXT_W = TEXT_RIGHT - TEXT_X;
+    const textTop = TEXT_BAND_TOP;
+    let textY = textTop + 24;
+
+    // Separator
+    ctx.strokeStyle = "#E2E8F0"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(TEXT_X, textTop); ctx.lineTo(TEXT_RIGHT, textTop); ctx.stroke();
+
     const customerName = contact.name || "Customer";
     const customerAddr = [contact.street, contact.city, contact.state, contact.zip].filter(Boolean).join(", ");
-    let textY = cH + 16;
 
     // Line 1: Name (left) | Size + Style (right)
-    ctx.fillStyle = "#1E293B"; ctx.font = "bold 12px sans-serif";
-    ctx.textAlign = "left"; ctx.fillText(customerName, mg, textY);
-    ctx.textAlign = "right"; ctx.fillText(`${bldgW}×${bldgH}  ${sel.style || ""}`, mg + pW, textY);
-    textY += 14;
+    ctx.fillStyle = "#1E293B"; ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "left"; ctx.fillText(customerName, TEXT_X, textY);
+    ctx.textAlign = "right"; ctx.fillText(`${bldgW}×${bldgH}  ${sel.style || ""}`, TEXT_RIGHT, textY);
+    textY += 22;
 
-    // Line 2: Contact info
-    ctx.fillStyle = "#64748B"; ctx.font = "10px sans-serif"; ctx.textAlign = "left";
-    let infoLine = [contact.phone, contact.email].filter(Boolean).join("  •  ");
-    if (infoLine) { ctx.fillText(infoLine, mg, textY); textY += 12; }
-    if (customerAddr) { ctx.fillText(customerAddr, mg, textY); textY += 14; }
+    // Line 2-3: Contact info + address
+    ctx.fillStyle = "#64748B"; ctx.font = "13px sans-serif"; ctx.textAlign = "left";
+    const infoLine = [contact.phone, contact.email].filter(Boolean).join("  •  ");
+    if (infoLine) { ctx.fillText(infoLine, TEXT_X, textY); textY += 17; }
+    if (customerAddr) { ctx.fillText(customerAddr, TEXT_X, textY); textY += 19; }
 
-    // Build bullet list of all placed items + paint
+    // Build bullet list (paint + placed items + custom options)
     const bullets = [];
     if (sel.paint === "Painted") {
       const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
@@ -674,11 +961,12 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     if (loftCount > 0) bullets.push(`Loft${loftCount > 1 ? " ×" + loftCount : ""}`);
     const rampCount = items.filter((i) => i.type === "ramp").length;
     if (rampCount > 0) bullets.push(`Ramp${rampCount > 1 ? " ×" + rampCount : ""}`);
-    items.filter((i) => i.type === "roughOpening").forEach((ro) => {
+    items.filter((i) => i.type === "roughOpening").forEach((ro, idx) => {
       const d = (roDimensions[ro.id] || "").trim();
-      bullets.push(d ? `Rough Opening — ${d}` : "Rough Opening");
+      const label = `RO-${idx + 1}`;
+      bullets.push(d ? `${label} — ${d}` : label);
     });
-    // Custom options (only those with a name)
+    // Lines and notes are not bulleted — they already render at their position on the page.
     customOptions.forEach((co) => {
       if (co.name && co.name.trim()) {
         const q = co.qty && parseInt(co.qty) > 0 ? ` (×${co.qty})` : "";
@@ -686,25 +974,26 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       }
     });
 
-    // Render 2 columns
+    // 2-column bullets
     if (bullets.length > 0) {
-      textY += 4;
-      ctx.fillStyle = "#334155"; ctx.font = "10px sans-serif"; ctx.textAlign = "left";
-      const colW = (cW - mg * 2) / 2;
+      textY += 6;
+      ctx.fillStyle = "#334155"; ctx.font = "13px sans-serif"; ctx.textAlign = "left";
+      const colW = TEXT_W / 2;
       const half = Math.ceil(bullets.length / 2);
-      for (let i = 0; i < Math.max(half, bullets.length - half); i++) {
-        if (i < half) ctx.fillText("•  " + bullets[i], mg, textY);
-        if (i + half < bullets.length) ctx.fillText("•  " + bullets[i + half], mg + colW, textY);
-        textY += 13;
+      for (let i = 0; i < half; i++) {
+        ctx.fillText("•  " + bullets[i], TEXT_X, textY);
+        if (i + half < bullets.length) ctx.fillText("•  " + bullets[i + half], TEXT_X + colW, textY);
+        textY += 18;
       }
     }
 
-    return canvas.toDataURL("image/png");
+    return canvas;
   };
 
+  const generatePNG = () => renderExportCanvas().toDataURL("image/png");
+
   const exportPNG = () => {
-    const url = generatePNG();
-    setExportUrl(url); setShowExport(true);
+    setExportUrl(generatePNG()); setShowExport(true);
   };
 
   // ─── SUBMIT QUOTE ───
@@ -744,6 +1033,19 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
+          if (item.type === "line") {
+            const dxFt = (item.x2 - item.x1) / scale;
+            const dyFt = (item.y2 - item.y1) / scale;
+            return {
+              type: "line",
+              wall: null,
+              lengthFt: Math.round(Math.sqrt(dxFt * dxFt + dyFt * dyFt) * 100) / 100,
+              angleDeg: Math.round(Math.atan2(dyFt, dxFt) * 180 / Math.PI * 10) / 10,
+            };
+          }
+          if (item.type === "textNote") {
+            return { type: "textNote", wall: null, text: (item.text || "").trim() };
+          }
           return {
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
@@ -760,14 +1062,16 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
           }),
           lofts: items.filter((i) => i.type === "loft").length,
           ramp: items.filter((i) => i.type === "ramp").length > 0 ? "yes" : "no",
+          lines: items.filter((i) => i.type === "line").length,
+          notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
         },
         customOptions: customOptions.filter((co) => co.name && co.name.trim()).map((co) => ({
           name: co.name.trim(),
           qty: co.qty ? parseInt(co.qty) || 0 : 0,
           amount: co.amount ? parseFloat(co.amount) || 0 : 0,
         })),
-        roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro) => ({
-          name: "Rough Opening",
+        roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro, idx) => ({
+          name: `RO-${idx + 1}`,
           dimensions: (roDimensions[ro.id] || "").trim(),
           qty: 1,
           amount: 100,
@@ -795,6 +1099,71 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
   };
 
   const downloadPNG = () => { if (!exportUrl) return; const a = document.createElement("a"); a.href = exportUrl; const nameSlug = contact.name.trim().replace(/\s+/g, "-").toLowerCase() || "customer"; a.download = `structurestudio-${nameSlug}-${bldgW}x${bldgH}.png`; a.click(); };
+
+  // Build a single-page US-Letter PDF that embeds a JPEG of the canvas.
+  // Self-contained (no external library): the canvas is letter-shaped already, so
+  // the JPEG is stretched to fill the 612×792 pt page (8.5"×11" at 72 DPI).
+  const buildPdfFromJpegBytes = (jpegBytes, jpegW, jpegH) => {
+    const PT_W = 612, PT_H = 792;
+    const enc = new TextEncoder();
+    const contentStream = `q ${PT_W} 0 0 ${PT_H} 0 0 cm /Im0 Do Q\n`;
+    const contentBytes = enc.encode(contentStream);
+
+    const chunks = [];
+    let totalLen = 0;
+    const offsets = [];
+    const pushStr = (s) => { const b = enc.encode(s); chunks.push(b); totalLen += b.length; };
+    const pushBytes = (b) => { chunks.push(b); totalLen += b.length; };
+
+    // Header + binary marker so PDF readers treat the file as binary
+    pushStr("%PDF-1.4\n%\xC4\xE5\xF2\xE5\xEB\xA7\xF3\xA0\xD0\xC4\xC6\n");
+
+    offsets[1] = totalLen;
+    pushStr("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    offsets[2] = totalLen;
+    pushStr("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    offsets[3] = totalLen;
+    pushStr(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PT_W} ${PT_H}] /Resources << /XObject << /Im0 4 0 R >> /ProcSet [/PDF /ImageC] >> /Contents 5 0 R >>\nendobj\n`);
+
+    offsets[4] = totalLen;
+    pushStr(`4 0 obj\n<< /Type /XObject /Subtype /Image /Width ${jpegW} /Height ${jpegH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
+    pushBytes(jpegBytes);
+    pushStr("\nendstream\nendobj\n");
+
+    offsets[5] = totalLen;
+    pushStr(`5 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`);
+    pushBytes(contentBytes);
+    pushStr("endstream\nendobj\n");
+
+    const xrefOffset = totalLen;
+    let xref = "xref\n0 6\n0000000000 65535 f \n";
+    for (let i = 1; i <= 5; i++) xref += String(offsets[i]).padStart(10, "0") + " 00000 n \n";
+    pushStr(xref);
+    pushStr(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+
+    const out = new Uint8Array(totalLen);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return new Blob([out], { type: "application/pdf" });
+  };
+
+  const downloadPDF = () => {
+    const canvas = renderExportCanvas();
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    const bin = atob(dataUrl.split(",")[1]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = buildPdfFromJpegBytes(bytes, canvas.width, canvas.height);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const nameSlug = contact.name.trim().replace(/\s+/g, "-").toLowerCase() || "customer";
+    a.download = `structurestudio-${nameSlug}-${bldgW}x${bldgH}.pdf`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
 
   // ─── STYLES ───
   const S = {
@@ -1030,12 +1399,12 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
           {items.filter((i) => i.type === "roughOpening").length > 0 && (
             <div style={{ marginTop: 14 }}>
               <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings ($100 each)</div>
-              {items.filter((i) => i.type === "roughOpening").map((ro) => {
+              {items.filter((i) => i.type === "roughOpening").map((ro, idx) => {
                 const dim = roDimensions[ro.id] || "";
                 const invalid = !dim.trim();
                 return (
                   <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 600, color: "#334155", minWidth: 110 }}>Rough Opening</span>
+                    <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
                     <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
                       onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
                       style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
@@ -1083,33 +1452,146 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         </div>
       </div>
 
+      {/* Inline editor — appears when a Text Note is selected */}
+      {(() => {
+        const sel = selectedId ? items.find((i) => i.id === selectedId) : null;
+        if (!sel || sel.type !== "textNote") return null;
+        return (
+          <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FDE68A", padding: "10px 20px", display: "flex", gap: 10, alignItems: "center" }}>
+            <span style={{ ...S.lbl, fontSize: 11 }}>Note text:</span>
+            <input
+              type="text"
+              autoFocus
+              value={sel.text || ""}
+              placeholder="Type your note..."
+              onChange={(e) => {
+                const v = e.target.value;
+                setItems((p) => p.map((i) => i.id === sel.id ? { ...i, text: v } : i));
+              }}
+              style={{ flex: 1, border: "1px solid #FCD34D", borderRadius: 6, padding: "7px 10px", fontSize: 13, outline: "none", background: "#FFF" }}
+            />
+            <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
+          </div>
+        );
+      })()}
+
       {/* SVG Canvas */}
       <div style={{ display: "flex", justifyContent: "center", padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
-        <svg ref={svgRef} viewBox={`0 0 ${cW} ${cH}`}
+        <svg ref={svgRef} viewBox={`0 0 ${cW} ${TEXT_BAND_TOP}`}
           style={{ width: "100%", maxWidth: cW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none" }}
           onClick={handleClick}>
-          <rect x={mg} y={mg} width={pW} height={pH} fill="#FAFBFD" />
-          {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mg + i * scale} y1={mg} x2={mg + i * scale} y2={mg + pH} stroke="#E8ECF1" strokeWidth={0.5} />)}
-          {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mg} y1={mg + i * scale} x2={mg + pW} y2={mg + i * scale} stroke="#E8ECF1" strokeWidth={0.5} />)}
-          <rect x={mg} y={mg} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} />
-          <text x={mg + pW / 2} y={mg - 16} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
-          <text x={mg + pW / 2} y={mg + pH + 26} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
-          <text x={mg - 20} y={mg + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(-90,${mg - 20},${mg + pH / 2})`}>{bldgH} ft</text>
-          <text x={mg + pW + 24} y={mg + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(90,${mg + pW + 24},${mg + pH / 2})`}>{bldgH} ft</text>
+          {/* Visible page background — only the area above the auto info band */}
+          <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill="#FFF" />
+          {/* Plan rectangle and grid */}
+          <rect x={mgX} y={mgY} width={pW} height={pH} fill="#FAFBFD" />
+          {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mgX + i * scale} y1={mgY} x2={mgX + i * scale} y2={mgY + pH} stroke="#E8ECF1" strokeWidth={0.5} />)}
+          {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mgX} y1={mgY + i * scale} x2={mgX + pW} y2={mgY + i * scale} stroke="#E8ECF1" strokeWidth={0.5} />)}
+          <rect x={mgX} y={mgY} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} />
+          <text x={mgX + pW / 2} y={mgY - 16} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mgX + pW / 2} y={mgY + pH + 26} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mgX - 20} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(-90,${mgX - 20},${mgY + pH / 2})`}>{bldgH} ft</text>
+          <text x={mgX + pW + 24} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(90,${mgX + pW + 24},${mgY + pH / 2})`}>{bldgH} ft</text>
           {frontWall && (
             <>
-              <text x={mg + pW / 2} y={mg - 32} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
-              <text x={mg + pW / 2} y={mg + pH + 42} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
-              <text x={mg - 38} y={mg + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mg - 38},${mg + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
-              <text x={mg + pW + 42} y={mg + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mg + pW + 42},${mg + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
+              <text x={mgX + pW / 2} y={mgY - 32} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
+              <text x={mgX + pW / 2} y={mgY + pH + 42} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
+              <text x={mgX - 38} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mgX - 38},${mgY + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
+              <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
             </>
           )}
 
           {items.map((item) => {
             const cfg = ITEMS[item.type]; if (!cfg) return null;
+            const isSel = item.id === selectedId;
+
+            // ─── Line: rendered as a free-angle segment with two endpoint handles ───
+            if (cfg.lineType) {
+              const midX = (item.x1 + item.x2) / 2, midY = (item.y1 + item.y2) / 2;
+              return (
+                <g key={item.id} style={{ cursor: activeTool ? "crosshair" : "grab" }}>
+                  {/* Wide invisible hit zone makes the line easy to grab */}
+                  <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2}
+                    stroke="transparent" strokeWidth={14} strokeLinecap="round"
+                    onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)} />
+                  <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2}
+                    stroke={cfg.color} strokeWidth={isSel ? 3 : 2.5} strokeLinecap="round"
+                    pointerEvents="none" />
+                  {isSel && (
+                    <>
+                      <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2}
+                        stroke="#3B82F6" strokeWidth={1} strokeDasharray="4 3" pointerEvents="none" />
+                      {/* Endpoint handles: drag to change length and angle freely */}
+                      <circle cx={item.x1} cy={item.y1} r={7} fill="#FFF" stroke="#3B82F6" strokeWidth={2}
+                        style={{ cursor: "move" }}
+                        onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "ep1"); }}
+                        onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "ep1"); }} />
+                      <circle cx={item.x2} cy={item.y2} r={7} fill="#FFF" stroke="#3B82F6" strokeWidth={2}
+                        style={{ cursor: "move" }}
+                        onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "ep2"); }}
+                        onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "ep2"); }} />
+                    </>
+                  )}
+                  {/* Length label only while resizing/dragging */}
+                  {isSel && (resizing && resizing.id === item.id) && (() => {
+                    const lenFt = Math.sqrt(((item.x2 - item.x1) / scale) ** 2 + ((item.y2 - item.y1) / scale) ** 2);
+                    return (
+                      <g transform={`translate(${midX},${midY - 14})`} pointerEvents="none">
+                        <rect x={-26} y={-11} width={52} height={20} rx={5} fill="#1E293B" />
+                        <text x={0} y={3} textAnchor="middle" fill="#FFF" fontSize={11} fontWeight="700">{lenFt.toFixed(1)} ft</text>
+                      </g>
+                    );
+                  })()}
+                </g>
+              );
+            }
+
+            // ─── Text Note: resizable box with text that flows inside ───
+            if (cfg.noteType) {
+              const w = item.widthPx || 160;
+              const h = item.heightPx || 40;
+              return (
+                <g key={item.id} transform={`translate(${item.x},${item.y})`}
+                  onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)}
+                  style={{ cursor: activeTool ? "crosshair" : "grab" }}>
+                  {isSel && <rect x={-w / 2 - 4} y={-h / 2 - 4} width={w + 8} height={h + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={6} />}
+                  {/* Background pill */}
+                  <rect x={-w / 2} y={-h / 2} width={w} height={h} fill="#FFFBEB" stroke={cfg.color} strokeWidth={1.25} rx={4} />
+                  {/* HTML inside SVG — gives us native word-wrap */}
+                  <foreignObject x={-w / 2} y={-h / 2} width={w} height={h}>
+                    <div xmlns="http://www.w3.org/1999/xhtml" style={{
+                      width: "100%", height: "100%",
+                      padding: "4px 8px",
+                      boxSizing: "border-box",
+                      font: "600 12px sans-serif",
+                      color: cfg.color,
+                      lineHeight: 1.3,
+                      textAlign: "center",
+                      wordWrap: "break-word",
+                      overflowWrap: "break-word",
+                      overflow: "hidden",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>{item.text || "Note"}</div>
+                  </foreignObject>
+                  {/* Bottom-right corner resize handle (shown when selected) */}
+                  {isSel && (
+                    <>
+                      {/* Larger transparent click zone for forgiving grab */}
+                      <rect x={w / 2 - 14} y={h / 2 - 14} width={28} height={28}
+                        fill="transparent" style={{ cursor: "nwse-resize" }}
+                        onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "br"); }}
+                        onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "br"); }} />
+                      {/* Visible handle */}
+                      <rect x={w / 2 - 7} y={h / 2 - 7} width={14} height={14}
+                        fill="#3B82F6" stroke="#FFF" strokeWidth={1.5} rx={2} pointerEvents="none" />
+                    </>
+                  )}
+                </g>
+              );
+            }
+
             const itemW = item.widthFt || cfg.width;
             const itemH = item.heightFt || cfg.height;
-            const iw = itemW * scale; const ih = itemH * scale; const isSel = item.id === selectedId;
+            const iw = itemW * scale; const ih = itemH * scale;
             const isWB = item.type === "workbench";
             return (
               <g key={item.id} transform={`translate(${item.x},${item.y}) rotate(${item.rotation})`}
@@ -1123,8 +1605,8 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
                     <text x={0} y={4} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">LOFT</text>
                     <text x={0} y={16} textAnchor="middle" fill={cfg.color} fontSize={9} opacity={0.7}>{itemW}×{itemH} ft</text>
                     {isSel && (() => {
-                      const hz = Math.min(Math.max(ih / 4, 14), 24, ih * 0.4);
-                      const vz = Math.min(Math.max(iw / 4, 14), 24, iw * 0.4);
+                      const hz = Math.min(Math.max(ih / 3, 22), 36, ih * 0.5);
+                      const vz = Math.min(Math.max(iw / 3, 22), 36, iw * 0.5);
                       return (
                         <>
                           <rect x={-vz / 2} y={-ih / 2 - 1} width={vz} height={hz / 2 + 1} fill="transparent" style={{ cursor: "ns-resize" }}
@@ -1170,7 +1652,32 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
                       );
                     })()}
                     {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
-                    <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{cfg.shortLabel}</text>
+                    <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
+                      if (item.type !== "roughOpening") return cfg.shortLabel;
+                      const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
+                      return `RO-${idx + 1}`;
+                    })()}</text>
+                    {/* RO resize handles — drag end to change width freely */}
+                    {item.type === "roughOpening" && isSel && (() => {
+                      const cursor = (item.wall === "north" || item.wall === "south") ? "ew-resize" : "ns-resize";
+                      const endZoneW = Math.min(Math.max(iw / 5, 10), 22, iw * 0.4);
+                      return (
+                        <>
+                          <rect x={-iw / 2 + 1} y={-4} width={endZoneW - 2} height={8}
+                            fill="#3B82F640" stroke="#3B82F680" strokeWidth={1} pointerEvents="none" rx={1} />
+                          <rect x={iw / 2 - endZoneW + 1} y={-4} width={endZoneW - 2} height={8}
+                            fill="#3B82F640" stroke="#3B82F680" strokeWidth={1} pointerEvents="none" rx={1} />
+                          <rect x={-iw / 2 - 4} y={-9} width={endZoneW + 4} height={18}
+                            fill="transparent" style={{ cursor }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "min"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "min"); }} />
+                          <rect x={iw / 2 - endZoneW} y={-9} width={endZoneW + 4} height={18}
+                            fill="transparent" style={{ cursor }}
+                            onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "max"); }}
+                            onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "max"); }} />
+                        </>
+                      );
+                    })()}
                   </>
                 ) : (
                   <>
@@ -1220,7 +1727,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
           })}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
-            if (!ri) return null;
+            if (!ri || ri.type === "line") return null; // line shows its own length label inline
             return (
               <g transform={`translate(${ri.x},${ri.y - 28})`}>
                 <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
@@ -1302,11 +1809,12 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
               <>
                 <img src={exportUrl} alt="Floor Plan" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0" }} />
                 <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+                  <button onClick={downloadPDF} style={{ flex: 1, ...S.btn("#B91C1C", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PDF</button>
                   <button onClick={downloadPNG} style={{ flex: 1, ...S.btn("#1E293B", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PNG</button>
                   <button onClick={() => { fetch(exportUrl).then((r) => r.blob()).then((b) => { navigator.clipboard.write([new ClipboardItem({ "image/png": b })]).catch(() => {}); }); }}
                     style={{ flex: 1, ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: 10, fontSize: 14 }}>📋 Copy</button>
                 </div>
-                <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, textAlign: "center" }}>Download and attach to your GHL estimate or invoice</p>
+                <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, textAlign: "center" }}>8.5"×11" letter — attach to your GHL estimate or invoice</p>
               </>
             )}
           </div>
