@@ -1063,10 +1063,8 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     setSubmitError(null);
 
     try {
-      // 1. Render the export canvas once — used for both the data-URL payload
-      //    field (legacy) and the Storage upload (new).
+      // 1. Render the export canvas — uploaded to Storage; n8n fetches from imageUrl
       const canvas = renderExportCanvas();
-      const floorPlanImage = canvas.toDataURL("image/png");
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
       const shortCode = currentDesignIdRef.current || genShortCode();
@@ -1173,7 +1171,6 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
           qty: 1,
           amount: 100,
         })),
-        floorPlanImage,
         submittedAt: new Date().toISOString(),
       };
 

@@ -49,11 +49,13 @@ Adding a new item type usually means adding an entry to `layoutItems` + any new 
 
 `submitQuote()` POSTs JSON to `config.webhookUrl` (a CSM Synergy n8n workflow by default). Payload shape is consumed downstream, so treat it as a contract:
 
+- `designId` — short code (e.g. `SS-NR4DV8`) that keys the design in Supabase
+- `imageUrl` — public Storage URL of the rendered PNG; n8n fetches the image bytes from here when needed
+- `viewUrl` — `?id=...` URL on the deployed host (sales reps click this to reopen/edit)
 - `contact`, `selections` (`buildingStyle`, `buildingSize`, `paint`, optional paint colors)
 - `floorPlanItems[]` — raw list; each has `type`, `wall` (already mapped to front/back/left/right lowercase), and `lengthFt` for workbenches
 - `itemSummary` — rolled-up counts + workbench lengths
 - `customOptions[]` (only rows with a non-empty name are included)
 - `roughOpenings[]` — one entry per RO with its dimensions string
-- `floorPlanImage` — a full PNG data URL from `generatePNG()`
 
 If you rename or restructure these fields, the n8n workflow that turns them into estimates/emails breaks silently.
