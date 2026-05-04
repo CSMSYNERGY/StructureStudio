@@ -237,6 +237,9 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
   const ghlContactIdRef = useRef(null);
   const ghlEstimateIdRef = useRef(null);
   const ghlEstimateNumberRef = useRef(null);
+  // Mirrors ghlEstimateIdRef in state so the submit button can re-render its label
+  // ("Get Quote" vs "Resubmit for Updated Estimate") when a design loads.
+  const [hasExistingEstimate, setHasExistingEstimate] = useState(false);
 
   // Admin panel state — only used when isAdmin
   const [adminPwd, setAdminPwd] = useState("");
@@ -277,6 +280,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       ghlContactIdRef.current = data.ghl_contact_id || null;
       ghlEstimateIdRef.current = data.ghl_estimate_id || null;
       ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
+      setHasExistingEstimate(!!data.ghl_estimate_id);
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
       setSel(data.selections || {});
       setPaintColors(data.paint_colors || { body: "", trim: "" });
@@ -1263,7 +1267,10 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
 
       // Persist the returned GHL IDs so subsequent edits update the same estimate.
       if (result.contactId) ghlContactIdRef.current = result.contactId;
-      if (result.estimateId) ghlEstimateIdRef.current = result.estimateId;
+      if (result.estimateId) {
+        ghlEstimateIdRef.current = result.estimateId;
+        setHasExistingEstimate(true);
+      }
       if (result.estimateNumber) ghlEstimateNumberRef.current = result.estimateNumber;
 
       setSavedDesign({
@@ -1502,61 +1509,6 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       {/* Configuration Panel */}
       {configOpen && (
         <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
-          {/* Contact Fields */}
-          <div style={{ marginBottom: 18 }}>
-            <span style={{ ...S.lbl, display: "block", marginBottom: 10, fontSize: 12 }}>Customer Information</span>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
-              {C.contactFields.includes("name") && (
-                <div style={{ flex: "1 1 180px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Name *</span>
-                  <input type="text" value={contact.name} onChange={(e) => setContact((p) => ({ ...p, name: e.target.value }))} placeholder="Full Name" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                </div>
-              )}
-              {C.contactFields.includes("email") && (
-                <div style={{ flex: "1 1 200px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Email *</span>
-                  <input type="email" value={contact.email} onChange={(e) => setContact((p) => ({ ...p, email: e.target.value }))} placeholder="email@example.com" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                </div>
-              )}
-              {C.contactFields.includes("phone") && (
-                <div style={{ flex: "1 1 140px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *</span>
-                  <input type="tel" value={contact.phone} onChange={(e) => setContact((p) => ({ ...p, phone: e.target.value }))} placeholder="(555) 555-5555" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                </div>
-              )}
-            </div>
-            {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-                {C.contactFields.includes("street") && (
-                  <div style={{ flex: "2 1 200px" }}>
-                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Street Address</span>
-                    <input type="text" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </div>
-                )}
-                {C.contactFields.includes("city") && (
-                  <div style={{ flex: "1 1 130px" }}>
-                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>City</span>
-                    <input type="text" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </div>
-                )}
-                {C.contactFields.includes("state") && (
-                  <div style={{ flex: "0 1 80px" }}>
-                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State</span>
-                    <input type="text" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} placeholder="ST" maxLength={2} style={{ ...S.sel, width: "100%", boxSizing: "border-box", textTransform: "uppercase" }} />
-                  </div>
-                )}
-                {C.contactFields.includes("zip") && (
-                  <div style={{ flex: "0 1 100px" }}>
-                    <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Zip</span>
-                    <input type="text" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value }))} placeholder="00000" maxLength={10} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div style={{ height: 1, background: "#E2E8F0", marginBottom: 14 }} />
-
           {/* Building Styles */}
           <div style={{ marginBottom: 14 }}>
             <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
@@ -1962,6 +1914,61 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
         </svg>
       </div>
 
+      {/* Customer Information (above Submit Bar) */}
+      {!submitted && (
+        <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 10, fontSize: 12 }}>Customer Information</span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+            {C.contactFields.includes("name") && (
+              <div style={{ flex: "1 1 180px" }}>
+                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Name *</span>
+                <input type="text" value={contact.name} onChange={(e) => setContact((p) => ({ ...p, name: e.target.value }))} placeholder="Full Name" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+              </div>
+            )}
+            {C.contactFields.includes("email") && (
+              <div style={{ flex: "1 1 200px" }}>
+                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Email *</span>
+                <input type="email" value={contact.email} onChange={(e) => setContact((p) => ({ ...p, email: e.target.value }))} placeholder="email@example.com" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+              </div>
+            )}
+            {C.contactFields.includes("phone") && (
+              <div style={{ flex: "1 1 140px" }}>
+                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *</span>
+                <input type="tel" value={contact.phone} onChange={(e) => setContact((p) => ({ ...p, phone: e.target.value }))} placeholder="(555) 555-5555" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+              </div>
+            )}
+          </div>
+          {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              {C.contactFields.includes("street") && (
+                <div style={{ flex: "2 1 200px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Street Address</span>
+                  <input type="text" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              )}
+              {C.contactFields.includes("city") && (
+                <div style={{ flex: "1 1 130px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>City</span>
+                  <input type="text" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              )}
+              {C.contactFields.includes("state") && (
+                <div style={{ flex: "0 1 80px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State</span>
+                  <input type="text" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} placeholder="ST" maxLength={2} style={{ ...S.sel, width: "100%", boxSizing: "border-box", textTransform: "uppercase" }} />
+                </div>
+              )}
+              {C.contactFields.includes("zip") && (
+                <div style={{ flex: "0 1 100px" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Zip</span>
+                  <input type="text" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value }))} placeholder="00000" maxLength={10} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Submit Bar */}
       {!submitted && (
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "16px 20px" }}>
@@ -1972,7 +1979,9 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
           )}
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
-              Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.
+              {hasExistingEstimate
+                ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
+                : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
             </p>
             <button
               onClick={submitQuote}
@@ -1984,7 +1993,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
                 transition: "all 0.2s", minWidth: 160,
               }}
             >
-              {submitting ? "Submitting..." : "Get Quote"}
+              {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
             </button>
           </div>
         </div>
@@ -2046,6 +2055,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
               ghlContactIdRef.current = null;
               ghlEstimateIdRef.current = null;
               ghlEstimateNumberRef.current = null;
+              setHasExistingEstimate(false);
               window.history.replaceState({}, "", window.location.pathname);
             }}
             style={{ ...S.btn("#166534", "#FFF"), marginTop: 20, padding: "10px 24px", fontSize: 14 }}
