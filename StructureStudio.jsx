@@ -1136,19 +1136,25 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     setSubmitError(null);
 
     try {
-      // 1. Render the export canvas — uploaded to Storage; n8n fetches from imageUrl
+      // 1. Render the export canvas — wrapped in a single-page letter PDF and uploaded to
+      //    Storage. The submit-estimate Edge Function attaches that PDF to the GHL estimate.
       const canvas = renderExportCanvas();
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
       const shortCode = currentDesignIdRef.current || genShortCode();
-      const filePath = `${shortCode}.png`;
+      const filePath = `${shortCode}.pdf`;
 
-      // 3. Upload the PNG to the floor-plans bucket (overwrites if it already exists)
-      const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+      // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
+      //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
+      const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+      const jpegBin = atob(jpegDataUrl.split(",")[1]);
+      const jpegBytes = new Uint8Array(jpegBin.length);
+      for (let i = 0; i < jpegBin.length; i++) jpegBytes[i] = jpegBin.charCodeAt(i);
+      const blob = buildPdfFromJpegBytes(jpegBytes, canvas.width, canvas.height);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
-        .upload(filePath, blob, { upsert: true, contentType: "image/png", cacheControl: "0" });
-      if (upErr) throw new Error(`Image upload failed: ${upErr.message}`);
+        .upload(filePath, blob, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
+      if (upErr) throw new Error(`PDF upload failed: ${upErr.message}`);
 
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
       const imageUrl = urlData.publicUrl;
