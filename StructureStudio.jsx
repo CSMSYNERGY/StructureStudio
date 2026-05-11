@@ -1904,7 +1904,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
             return (
               <g transform={`translate(${ri.x},${ri.y - 28})`}>
                 <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
-                <text x={0} y={4} textAnchor="middle" fill="#FFF" fontSize={13} fontWeight="700">{ri.widthFt} ft</text>
+                <text x={0} y={4} textAnchor="middle" fill="#FFF" fontSize={13} fontWeight="700">{Math.round(ri.widthFt * 10) / 10} ft</text>
               </g>
             );
           })()}
