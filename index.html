@@ -878,7 +878,8 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     }
 
     // Items render in page coordinates directly — same as the SVG.
-    items.forEach((item) => {
+    // Ramps render first so other items (workbench, doors, etc) sit on top of them.
+    [...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).forEach((item) => {
       const cfg = ITEMS[item.type]; if (!cfg) return;
 
       // Line: free-angle segment between two endpoints (page coords)
@@ -985,7 +986,9 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
           [0, -iw / 4, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -4); ctx.lineTo(lx, 4); ctx.stroke(); });
         }
       } else {
-        ctx.fillStyle = cfg.color + "30"; ctx.strokeStyle = cfg.color; ctx.lineWidth = 2;
+        ctx.fillStyle = cfg.color + (item.type === "ramp" ? "12" : "30");
+        ctx.strokeStyle = cfg.color + (item.type === "ramp" ? "80" : "FF");
+        ctx.lineWidth = item.type === "ramp" ? 1.5 : 2;
         ctx.fillRect(-iw / 2, -ih / 2, iw, ih); ctx.strokeRect(-iw / 2, -ih / 2, iw, ih);
       }
       ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
@@ -1682,7 +1685,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
             </>
           )}
 
-          {items.map((item) => {
+          {[...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).map((item) => {
             const cfg = ITEMS[item.type]; if (!cfg) return null;
             const isSel = item.id === selectedId;
 
@@ -1863,7 +1866,7 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
                   </>
                 ) : (
                   <>
-                    <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + "30"} stroke={cfg.color} strokeWidth={2} rx={2} />
+                    <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + (item.type === "ramp" ? "12" : "30")} stroke={cfg.color + (item.type === "ramp" ? "80" : "FF")} strokeWidth={item.type === "ramp" ? 1.5 : 2} rx={2} />
                     {item.type === "ramp" ? (
                       <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">RAMP</text>
                     ) : isWB ? (
