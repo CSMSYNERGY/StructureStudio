@@ -981,7 +981,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
       }
       ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
       if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
-      else if (item.type === "ramp") { ctx.fillText("RAMP", 0, (item.wall === "south" || item.wall === "west") ? (ih / 2 - 4) : (-ih / 2 + 11)); }
+      else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText("RAMP", -iw / 2 + 5, 4); }
       else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
@@ -1856,7 +1856,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
                   <>
                     <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + "30"} stroke={cfg.color} strokeWidth={2} rx={2} />
                     {item.type === "ramp" ? (
-                      <text x={0} y={(item.wall === "south" || item.wall === "west") ? (ih / 2 - 4) : (-ih / 2 + 9)} textAnchor="middle" fill={cfg.color} fontSize={9} fontWeight="700">RAMP</text>
+                      <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">RAMP</text>
                     ) : isWB ? (
                       <>
                         <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
