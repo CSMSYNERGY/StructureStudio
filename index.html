@@ -861,22 +861,6 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
     for (let fy = 0; fy <= bldgH; fy++) { const y = mgY + fy * scale; ctx.beginPath(); ctx.moveTo(mgX, y); ctx.lineTo(mgX + pW, y); ctx.stroke(); }
     ctx.strokeStyle = "#1E293B"; ctx.lineWidth = WALL_THICKNESS; ctx.strokeRect(mgX, mgY, pW, pH);
 
-    // Size labels
-    ctx.fillStyle = "#475569"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(`${bldgW} ft`, mgX + pW / 2, mgY - 16);
-    ctx.fillText(`${bldgW} ft`, mgX + pW / 2, mgY + pH + 26);
-    ctx.save(); ctx.translate(mgX - 20, mgY + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
-    ctx.save(); ctx.translate(mgX + pW + 24, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
-
-    // FRONT/BACK/LEFT/RIGHT
-    if (frontWall) {
-      ctx.fillStyle = "#94A3B8"; ctx.font = "10px sans-serif";
-      ctx.fillText(getDisplayLabel("north", frontWall), mgX + pW / 2, mgY - 32);
-      ctx.fillText(getDisplayLabel("south", frontWall), mgX + pW / 2, mgY + pH + 42);
-      ctx.save(); ctx.translate(mgX - 38, mgY + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(getDisplayLabel("west", frontWall), 0, 0); ctx.restore();
-      ctx.save(); ctx.translate(mgX + pW + 42, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(getDisplayLabel("east", frontWall), 0, 0); ctx.restore();
-    }
-
     // Items render in page coordinates directly — same as the SVG.
     // Ramps render first so other items (workbench, doors, etc) sit on top of them.
     [...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).forEach((item) => {
@@ -1006,6 +990,20 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
       }
       ctx.restore();
     });
+
+    // Size labels + FRONT/BACK/LEFT/RIGHT — drawn after items so a centered ramp doesn't paint over the building chrome.
+    ctx.fillStyle = "#475569"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`${bldgW} ft`, mgX + pW / 2, mgY - 16);
+    ctx.fillText(`${bldgW} ft`, mgX + pW / 2, mgY + pH + 26);
+    ctx.save(); ctx.translate(mgX - 20, mgY + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+    ctx.save(); ctx.translate(mgX + pW + 24, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(`${bldgH} ft`, 0, 0); ctx.restore();
+    if (frontWall) {
+      ctx.fillStyle = "#94A3B8"; ctx.font = "10px sans-serif";
+      ctx.fillText(getDisplayLabel("north", frontWall), mgX + pW / 2, mgY - 32);
+      ctx.fillText(getDisplayLabel("south", frontWall), mgX + pW / 2, mgY + pH + 42);
+      ctx.save(); ctx.translate(mgX - 38, mgY + pH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(getDisplayLabel("west", frontWall), 0, 0); ctx.restore();
+      ctx.save(); ctx.translate(mgX + pW + 42, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(getDisplayLabel("east", frontWall), 0, 0); ctx.restore();
+    }
 
     // ─── Bottom text band ───
     const TEXT_X = 36;
@@ -1672,18 +1670,6 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
           {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mgX + i * scale} y1={mgY} x2={mgX + i * scale} y2={mgY + pH} stroke="#E8ECF1" strokeWidth={0.5} />)}
           {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mgX} y1={mgY + i * scale} x2={mgX + pW} y2={mgY + i * scale} stroke="#E8ECF1" strokeWidth={0.5} />)}
           <rect x={mgX} y={mgY} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} />
-          <text x={mgX + pW / 2} y={mgY - 16} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
-          <text x={mgX + pW / 2} y={mgY + pH + 26} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
-          <text x={mgX - 20} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(-90,${mgX - 20},${mgY + pH / 2})`}>{bldgH} ft</text>
-          <text x={mgX + pW + 24} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(90,${mgX + pW + 24},${mgY + pH / 2})`}>{bldgH} ft</text>
-          {frontWall && (
-            <>
-              <text x={mgX + pW / 2} y={mgY - 32} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
-              <text x={mgX + pW / 2} y={mgY + pH + 42} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
-              <text x={mgX - 38} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mgX - 38},${mgY + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
-              <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
-            </>
-          )}
 
           {[...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).map((item) => {
             const cfg = ITEMS[item.type]; if (!cfg) return null;
@@ -1910,6 +1896,19 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
               </g>
             );
           })}
+          {/* Building dimension + FRONT/BACK/LEFT/RIGHT labels — rendered AFTER items so a centered ramp doesn't paint over the building chrome. */}
+          <text x={mgX + pW / 2} y={mgY - 16} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mgX + pW / 2} y={mgY + pH + 26} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mgX - 20} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(-90,${mgX - 20},${mgY + pH / 2})`}>{bldgH} ft</text>
+          <text x={mgX + pW + 24} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(90,${mgX + pW + 24},${mgY + pH / 2})`}>{bldgH} ft</text>
+          {frontWall && (
+            <>
+              <text x={mgX + pW / 2} y={mgY - 32} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
+              <text x={mgX + pW / 2} y={mgY + pH + 42} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
+              <text x={mgX - 38} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mgX - 38},${mgY + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
+              <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
+            </>
+          )}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
             if (!ri || ri.type === "line") return null; // line shows its own length label inline
