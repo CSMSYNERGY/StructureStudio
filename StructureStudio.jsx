@@ -1257,8 +1257,11 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
       // Call the submit-estimate Edge Function. It looks up the GHL credentials for
       // this clientId in Supabase (admin-configured), then either creates a new GHL
       // estimate or updates the existing one for this design and emails it.
+      // betaMode (detected from the deploy host) makes the Edge Function redirect the
+      // estimate email to the internal QA inbox instead of the customer.
+      const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
-        body: payload,
+        body: { ...payload, betaMode },
       });
       if (fnErr) throw new Error(fnErr.message || "Submit failed");
       if (!result?.ok) throw new Error(result?.error || "Submit failed");
