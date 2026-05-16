@@ -169,6 +169,16 @@ function genShortCode() {
   return `SS-${s}`;
 }
 
+// ─── Per-option building-style scoping ───
+// An option may declare `buildingStyles: ["Urban", "Northwood"]` to limit when
+// it's shown. Without that field (or with an empty array) the option always
+// applies. Unrestricted options also show before any style is picked; scoped
+// options hide until the user picks a style they target.
+function isOptionApplicable(opt, styleValue) {
+  if (!opt || !Array.isArray(opt.buildingStyles) || opt.buildingStyles.length === 0) return true;
+  return !!styleValue && opt.buildingStyles.includes(styleValue);
+}
+
 // ─── MAIN COMPONENT ───
 function StructureStudioInner({ config = DEFAULT_CONFIG }) {
   const C = config;
@@ -187,6 +197,29 @@ function StructureStudioInner({ config = DEFAULT_CONFIG }) {
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
+
+  // Options the user currently sees. Options without scoping are always in the
+  // list; scoped options join/leave as the user picks/changes building style.
+  const visibleOptions = useMemo(
+    () => C.options.filter((o) => isOptionApplicable(o, sel.style)),
+    [C.options, sel.style]
+  );
+
+  // When the building style changes, snap any now-inapplicable option back to
+  // its default so a stale "Painted" (etc.) selection can't be silently sent
+  // along in the submit payload.
+  useEffect(() => {
+    setSel((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      C.options.forEach((opt) => {
+        if (isOptionApplicable(opt, prev.style)) return;
+        const def = opt.type === "counter" ? opt.options[0] : "";
+        if (next[opt.id] !== def) { next[opt.id] = def; changed = true; }
+      });
+      return changed ? next : prev;
+    });
+  }, [sel.style, C.options]);
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
   const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
@@ -1552,8 +1585,8 @@ function StructureStudioInner({ config = DEFAULT_CONFIG }) {
             </div>
           )}
 
-          {/* Dynamic Options */}
-          {C.options.map((opt) => renderOption(opt))}
+          {/* Dynamic Options (filtered by selected building style — see isOptionApplicable) */}
+          {visibleOptions.map((opt) => renderOption(opt))}
 
           {/* Custom/Additional Options */}
           <div style={{ marginTop: 6 }}>

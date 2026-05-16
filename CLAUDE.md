@@ -27,6 +27,8 @@ The component is white-labeled per client. `DEFAULT_CONFIG` (Junior Barns) is ba
 
 Config shape (see `DEFAULT_CONFIG` for the canonical example): `clientId`, `webhookUrl`, `branding`, `contactFields[]`, `buildingStyles[]` (each with its own `sizes[]`), `defaultSizes[]`, `options[]` (dynamic option renderers — currently `counter` and `image_cards` types), and `layoutItems{}` (the palette of placeable items). Changing client behavior normally means editing config, not code.
 
+Each entry in `options[]` may optionally declare `buildingStyles: ["Urban", "Northwood"]` to limit when it appears. Without that field the option always shows (the default). Visibility is computed by `isOptionApplicable(opt, sel.style)`; on style change, values of options that just became inapplicable are reset to their default so they don't leak into the submit payload.
+
 ## Architectural concepts
 
 **Coordinate system.** The floor plan is stored in feet (`bldgW`, `bldgH`, `widthFt`, `heightFt`, and item positions converted from px). All on-screen geometry is `feet * scale + mg`, where `scale` is recomputed from `bldgW/bldgH` on every render and `mg` is a fixed margin. When adding geometry, work in feet and convert at the edges.
