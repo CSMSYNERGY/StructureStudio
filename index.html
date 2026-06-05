@@ -1961,9 +1961,12 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
                 </div>
               )}
               {C.contactFields.includes("state") && (
-                <div style={{ flex: "0 1 80px" }}>
+                <div style={{ flex: "1 1 160px" }}>
                   <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State</span>
-                  <input type="text" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} placeholder="ST" maxLength={2} style={{ ...S.sel, width: "100%", boxSizing: "border-box", textTransform: "uppercase" }} />
+                  <select value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="">Select state…</option>
+                    {["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"].map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
                 </div>
               )}
               {C.contactFields.includes("zip") && (
