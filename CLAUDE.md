@@ -19,13 +19,17 @@ There is no build/run/test command. To sanity-check a change, open `index.html` 
 
 ## Runtime configuration model
 
-The component is white-labeled per client. `DEFAULT_CONFIG` (Junior Barns) is baked into the top of the file, but callers override it three ways:
+The component is white-labeled per client. There is **no in-source copy** of any client's config — the source of truth is the `public.client_configs` table in Supabase (one row per `client_id`, `config` is JSONB). The wrapper component fetches the config on every page load.
 
-1. React prop: `<StructureStudio config={clientConfig} />`
-2. `postMessage` from a parent frame: `{ type: "structureConfig", config: {...} }` — the HTML file's bottom listener re-renders the root when this arrives. A separate listener inside the component also accepts `{ type: "structureConfig", <flat fields> }` to prefill selections and contact info without a full re-render.
-3. Direct edit of `DEFAULT_CONFIG`.
+Resolution order, in the wrapper:
 
-Config shape (see `DEFAULT_CONFIG` for the canonical example): `clientId`, `webhookUrl`, `branding`, `contactFields[]`, `buildingStyles[]` (each with its own `sizes[]`), `defaultSizes[]`, `options[]` (dynamic option renderers — currently `counter` and `image_cards` types), and `layoutItems{}` (the palette of placeable items). Changing client behavior normally means editing config, not code.
+1. React prop: `<StructureStudio config={clientConfig} />` — wins, no fetch. Used by the `postMessage` re-render path in `index.html` and by hosts that supply their own config.
+2. `?client=<id>` URL param — picks which `client_configs` row to fetch. Omitted → fetch `DEFAULT_CLIENT_ID` (the tenant this deploy is set up for; currently `junior-barns`).
+3. On fetch failure (network error or unknown `client_id`) the wrapper renders an error screen with a retry button — it does NOT silently fall back to another tenant's config.
+
+A separate `postMessage` listener inside the inner component handles `{ type: "structureConfig", <flat fields> }` to prefill selections and contact info without a full re-render.
+
+Config shape (see any row in `client_configs.config` for an example): `clientId`, `webhookUrl`, `branding`, `contactFields[]`, `buildingStyles[]` (each with its own `sizes[]`), `defaultSizes[]`, `options[]` (dynamic option renderers — currently `counter` and `image_cards` types), and `layoutItems{}` (the palette of placeable items). Changing client behavior normally means editing the DB row, not code.
 
 Each entry in `options[]` may optionally declare `buildingStyles: ["Urban", "Northwood"]` to limit when it appears. Without that field the option always shows (the default). Visibility is computed by `isOptionApplicable(opt, sel.style)`; on style change, values of options that just became inapplicable are reset to their default so they don't leak into the submit payload.
 
