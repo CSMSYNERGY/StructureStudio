@@ -2163,10 +2163,15 @@ function StructureStudioInner({ config }) {
 // in-source copy of any client. Resolution order:
 //   1. `config` prop (e.g. supplied by the postMessage re-render below) wins and
 //      is used as-is, no fetch.
-//   2. `?client=<id>` URL param picks which row to fetch. Default: DEFAULT_CLIENT_ID
-//      (this Netlify site's tenant).
-//   3. On fetch failure (network, missing row) we render an error screen with a
-//      retry button rather than silently falling back to a wrong-tenant default.
+//   2. `?client=<id>` URL param — explicit override, wins over hostname.
+//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns". Skipped
+//      for the apex, IPs, localhost, .pages.dev project roots, and the reserved
+//      "beta" subdomain (which is the beta-deploy alias, not a tenant).
+//   4. `?id=<short_code>` share-link — look up the owning tenant from the
+//      `designs` row so a rep clicking someone else's link gets the right config.
+//   5. Fallback: DEFAULT_CLIENT_ID.
+//   On fetch failure (network, missing row) we render an error screen with a
+//   retry button rather than silently falling back to a wrong-tenant default.
 function StructureStudio({ config: configProp = null }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
@@ -2176,11 +2181,43 @@ function StructureStudio({ config: configProp = null }) {
   useEffect(() => {
     if (state.status !== "loading") return;
     if (typeof window === "undefined") return;
-    const clientId = new URLSearchParams(window.location.search).get("client") || DEFAULT_CLIENT_ID;
+    const params = new URLSearchParams(window.location.search);
+    let clientId = params.get("client");
+    const designShortCode = params.get("id");
+    // Subdomain path: derive client_id from the first DNS label when the host
+    // has 3+ labels and it isn't an IP. "beta" is reserved for the beta deploy.
+    if (!clientId) {
+      const host = window.location.hostname;
+      if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+        const parts = host.split(".");
+        if (parts.length >= 3) {
+          const sub = parts[0].toLowerCase();
+          if (sub && sub !== "beta") clientId = sub;
+        }
+      }
+    }
     let cancelled = false;
     (async () => {
       try {
         const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        // Share-link path: ?id=<short_code> without ?client= or subdomain means
+        // a rep opened someone else's saved design. The design row records which
+        // tenant owns it; we look that up so the right config wraps the inner load.
+        if (!clientId && designShortCode) {
+          const { data: design, error: dErr } = await sb
+            .from("designs")
+            .select("client_id")
+            .eq("short_code", designShortCode)
+            .single();
+          if (cancelled) return;
+          if (dErr || !design?.client_id) {
+            console.warn(`Design "${designShortCode}" not found while resolving client; using default.`, dErr);
+            clientId = DEFAULT_CLIENT_ID;
+          } else {
+            clientId = design.client_id;
+          }
+        }
+        if (!clientId) clientId = DEFAULT_CLIENT_ID;
         const { data, error } = await sb
           .from("client_configs")
           .select("config")
@@ -2196,7 +2233,7 @@ function StructureStudio({ config: configProp = null }) {
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);
-        setState({ status: "error", clientId, message: e?.message || "Network error." });
+        setState({ status: "error", clientId: clientId || DEFAULT_CLIENT_ID, message: e?.message || "Network error." });
       }
     })();
     return () => { cancelled = true; };

@@ -4,7 +4,8 @@ A config-driven white-label React floor plan designer and quote builder for cust
 
 ## Live demo
 
-- **Junior Barns (default config):** deployed URL will appear here after first Netlify build
+- **Production:** https://structurestudio.app (per-tenant subdomains: e.g. https://juniorbarns.structurestudio.app)
+- **Beta:** https://beta.structurestudio.app
 
 ## How it works
 
@@ -29,7 +30,7 @@ See `CLAUDE.md` for full architecture notes.
 
 ## Deployment
 
-Deployed via Netlify from the `main` branch. Pushes to `main` auto-deploy.
+Deployed via Cloudflare Pages from the `main` branch (production) and `beta` branch (beta preview at `beta.structurestudio.app`). Pushes auto-deploy. Per-tenant subdomains (`<client_id>.structurestudio.app`) are served by the same Pages project via wildcard DNS; the wrapper component picks the `client_configs` row to load from the first DNS label.
 
 ---
 

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 StructureStudio is a single-file React component (a floor-plan designer + quote builder for custom sheds/barns) delivered as two parallel artifacts:
 
 - `StructureStudio.jsx` — ES-module React source (`import { useState, ... } from "react"`; default export `StructureStudio`). Consumed by hosts that have their own build.
-- `index.html` — self-contained, zero-build drop-in: loads React 18 UMD + ReactDOM + **Babel-standalone** from CDN and inlines the whole component in `<script type="text/babel">`. Opens directly in a browser; no bundler, no package.json, no tests, no lint config. This is also the file Netlify serves at the site root.
+- `index.html` — self-contained, zero-build drop-in: loads React 18 UMD + ReactDOM + **Babel-standalone** from CDN and inlines the whole component in `<script type="text/babel">`. Opens directly in a browser; no bundler, no package.json, no tests, no lint config. This is also the file Cloudflare Pages serves at the site root.
 
 **Both files contain the same component body.** The only structural differences:
 1. HTML top: `const {useState,useRef,useCallback,useEffect}=React;` instead of `import ... from "react";`
@@ -24,8 +24,11 @@ The component is white-labeled per client. There is **no in-source copy** of any
 Resolution order, in the wrapper:
 
 1. React prop: `<StructureStudio config={clientConfig} />` — wins, no fetch. Used by the `postMessage` re-render path in `index.html` and by hosts that supply their own config.
-2. `?client=<id>` URL param — picks which `client_configs` row to fetch. Omitted → fetch `DEFAULT_CLIENT_ID` (the tenant this deploy is set up for; currently `junior-barns`).
-3. On fetch failure (network error or unknown `client_id`) the wrapper renders an error screen with a retry button — it does NOT silently fall back to another tenant's config.
+2. `?client=<id>` URL param — explicit override, wins over hostname.
+3. **Subdomain** — `juniorbarns.structurestudio.app` → `client_id = "juniorbarns"`. Only fires for hosts with 3+ DNS labels that aren't IPs (skips apex `structurestudio.app`, `localhost`, IP addresses, and `<project>.pages.dev` project roots). `beta` is reserved (it's the beta-deploy alias, not a tenant) and falls through.
+4. `?id=<short_code>` share-link — without a `?client=` or client subdomain, look up the owning `client_id` from the `designs` row so a sales rep clicking someone else's share link gets that tenant's branding/config.
+5. Fallback: `DEFAULT_CLIENT_ID` (currently `junior-barns`).
+6. On fetch failure (network error or unknown `client_id`) the wrapper renders an error screen with a retry button — it does NOT silently fall back to another tenant's config.
 
 A separate `postMessage` listener inside the inner component handles `{ type: "structureConfig", <flat fields> }` to prefill selections and contact info without a full re-render.
 
