@@ -34,5 +34,3 @@ Deployed via Netlify from the `main` branch. Pushes to `main` auto-deploy.
 ---
 
 **Maintained by:** CSM Synergy
-
-<!-- deploy-webhook-test: 2026-06-10 -->
