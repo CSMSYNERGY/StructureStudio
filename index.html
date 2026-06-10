@@ -2184,17 +2184,17 @@ function StructureStudio({ config: configProp = null }) {
     const params = new URLSearchParams(window.location.search);
     let clientId = params.get("client");
     const designShortCode = params.get("id");
-    // Subdomain path: derive client_id from the first DNS label when the host
-    // has 3+ labels and it isn't an IP. "beta" is reserved for the beta deploy.
+    // Tenant path: only derive a client_id from <sub>.structurestudio.app.
+    // Anything else (apex, *.netlify.app deploy/preview hosts, localhost, IPs,
+    // env labels) falls back to DEFAULT_CLIENT_ID — so a deploy hostname is
+    // never mistaken for a tenant.
     if (!clientId) {
       const host = window.location.hostname;
-      if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-        const parts = host.split(".");
-        if (parts.length >= 3) {
-          const sub = parts[0].toLowerCase();
-          const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
-          if (sub && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
-        }
+      const BASE = "structurestudio.app";
+      const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
+      if (host.endsWith("." + BASE)) {
+        const sub = host.slice(0, host.length - BASE.length - 1).toLowerCase();
+        if (sub && !sub.includes(".") && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
       }
     }
     let cancelled = false;
