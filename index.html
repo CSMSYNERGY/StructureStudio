@@ -292,9 +292,13 @@ function StructureStudio({ config = DEFAULT_CONFIG }) {
   // a plain text field.
   const attachStreetAutocomplete = useCallback((node) => {
     if (!node || !C.googleMapsApiKey) return;
-    loadGoogleMapsPlaces(C.googleMapsApiKey).then((google) => {
+    loadGoogleMapsPlaces(C.googleMapsApiKey).then(async (google) => {
       if (!node.isConnected) return;
-      const ac = new google.maps.places.Autocomplete(node, {
+      // loading=async means the bootstrap onload fires before the places library
+      // finishes loading. importLibrary returns a Promise that resolves once the
+      // library is ready, so we await it before constructing Autocomplete.
+      const { Autocomplete } = await google.maps.importLibrary("places");
+      const ac = new Autocomplete(node, {
         types: ["address"],
         componentRestrictions: { country: "us" },
         fields: ["address_components"],
