@@ -2183,7 +2183,8 @@ export default function StructureStudio({ config: configProp = null }) {
         const parts = host.split(".");
         if (parts.length >= 3) {
           const sub = parts[0].toLowerCase();
-          if (sub && sub !== "beta") clientId = sub;
+          const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
+          if (sub && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
         }
       }
     }
