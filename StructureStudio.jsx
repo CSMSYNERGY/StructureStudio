@@ -176,7 +176,11 @@ function loadGoogleMapsPlaces(apiKey) {
   if (_googleMapsLoadPromise) return _googleMapsLoadPromise;
   _googleMapsLoadPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places&loading=async&v=weekly`;
+    // libraries=places preloads the Places library so google.maps.places.Autocomplete
+    // is ready synchronously when script.onload fires. Do NOT add loading=async — it
+    // changes the bootstrap to a dynamic-import path that ignores libraries= and only
+    // exposes importLibrary, which conflicts with the direct-access pattern below.
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places&v=weekly`;
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(window.google);
@@ -283,13 +287,9 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
   // a plain text field.
   const attachStreetAutocomplete = useCallback((node) => {
     if (!node || !C.googleMapsApiKey) return;
-    loadGoogleMapsPlaces(C.googleMapsApiKey).then(async (google) => {
+    loadGoogleMapsPlaces(C.googleMapsApiKey).then((google) => {
       if (!node.isConnected) return;
-      // loading=async means the bootstrap onload fires before the places library
-      // finishes loading. importLibrary returns a Promise that resolves once the
-      // library is ready, so we await it before constructing Autocomplete.
-      const { Autocomplete } = await google.maps.importLibrary("places");
-      const ac = new Autocomplete(node, {
+      const ac = new google.maps.places.Autocomplete(node, {
         types: ["address"],
         componentRestrictions: { country: "us" },
         fields: ["address_components"],
