@@ -12,15 +12,19 @@ const { createClient } = window.supabase;
 
 // ─── Supabase project ───
 // Single shared project across all white-label tenants. The anon key is browser-safe
-// (read-only via RLS); the service-role key never leaves the Edge Functions.
+// (RLS + capability RPCs); the service-role key never leaves the Edge Functions.
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 
+// Address-autocomplete key used when a tenant's config row doesn't carry its own
+// googleMapsApiKey.
+const DEFAULT_GOOGLE_MAPS_API_KEY = "AIzaSyDEKe7mODI2xKnUQ5-z7L0ZZnUfBgE6dok";
+
 // ─── Default tenant ───
-// When no ?client= URL param is present, the loader fetches this client's config
-// from public.client_configs. The Junior Barns row in that table is the source
-// of truth for its branding, building styles, options, etc. — there is no in-source
-// copy. To change Junior Barns, edit the row, not this file.
+// When neither ?client= nor a tenant subdomain nor a design owner resolves a
+// client, the loader fetches this client's config from public.client_configs.
+// There is no in-source config copy — the table row is the source of truth.
+// To change Junior Barns, edit the row, not this file.
 const DEFAULT_CLIENT_ID = "junior-barns";
 
 // ─── STRUCTURE STUDIO ENGINE ───
@@ -162,13 +166,57 @@ function getDisplayLabel(positionalWall, frontWall) {
 
 let idCounter = 1;
 
-// 6-char short code in format SS-XXXXXX. Alphabet drops 0/O/I/1 to avoid
-// look-alikes when read aloud or shared. ~1B combinations.
+// 10-char short code in format SS-XXXXXXXXXX. Alphabet drops 0/O/I/1 to avoid
+// look-alikes when read aloud or shared. 32^10 ≈ 2^50 combinations — the code is
+// the capability for loading/saving a design via the RPCs, so it must not be
+// guessable. (Legacy 6-char codes from before the RPC data path still load fine.)
 const _SHORT_ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function genShortCode() {
   let s = "";
-  for (let i = 0; i < 6; i++) s += _SHORT_ALPHA[Math.floor(Math.random() * _SHORT_ALPHA.length)];
+  for (let i = 0; i < 10; i++) s += _SHORT_ALPHA[Math.floor(Math.random() * _SHORT_ALPHA.length)];
   return `SS-${s}`;
+}
+
+// Progressive US phone formatter: "8163003600" -> "(816) 300-3600".
+// Caps at 10 digits; partial inputs format as "(816", "(816) 30", etc.
+// Display only — strip back to digits before sending to GHL.
+function formatPhoneDisplay(v) {
+  const d = (v || "").replace(/\D/g, "").slice(0, 10);
+  if (d.length === 0) return "";
+  if (d.length <= 3) return `(${d}`;
+  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+// Lazy-load Google Maps JS API via the official inline bootstrap loader. Resolves
+// to window.google. Rejects if no key. Idempotent: returns the same promise on
+// subsequent calls.
+//
+// The bootstrap snippet (from Google's docs) synchronously installs
+// window.google.maps.importLibrary, then defers the actual script download until
+// importLibrary is first called. This is the only supported way to reach
+// PlaceAutocompleteElement and other Places API (New) entry points; passing
+// loading=async or libraries=places in the URL is NOT enough to expose
+// importLibrary in practice.
+// See: https://developers.google.com/maps/documentation/javascript/load-maps-js-api
+let _googleMapsLoadPromise = null;
+function loadGoogleMapsPlaces(apiKey) {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (!apiKey) return Promise.reject(new Error("Google Maps API key not configured"));
+  if (window.google && window.google.maps && typeof window.google.maps.importLibrary === "function") {
+    return Promise.resolve(window.google);
+  }
+  if (_googleMapsLoadPromise) return _googleMapsLoadPromise;
+  _googleMapsLoadPromise = new Promise((resolve, reject) => {
+    try {
+      ((g)=>{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={});var d=b.maps||(b.maps={}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src=`https://maps.${c}apis.com/maps/api/js?`+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))})({key: apiKey, v: "weekly"});
+      resolve(window.google);
+    } catch (err) {
+      _googleMapsLoadPromise = null;
+      reject(err);
+    }
+  });
+  return _googleMapsLoadPromise;
 }
 
 // ─── Per-option building-style scoping ───
@@ -264,7 +312,8 @@ function StructureStudioInner({ config }) {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // ─── Supabase client (browser-safe anon key) ───
+  // ─── Supabase client (browser-safe anon key, baked-in — config rows can't
+  // redirect the data connection) ───
   const supabase = useMemo(() => createClient(SUPABASE_URL, SUPABASE_ANON_KEY), []);
 
   // Tracks the design currently being edited (set on load via ?id=, then on save)
@@ -290,6 +339,84 @@ function StructureStudioInner({ config }) {
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
 
+  // Google Places "search for address" widget that auto-fills the four address
+  // fields below it. Uses google.maps.places.PlaceAutocompleteElement (Places API
+  // New) — the replacement for the deprecated Autocomplete class. The element
+  // brings its own input + dropdown; we mount it into a container <div> and
+  // listen for gmp-select. On selection we resolve the chosen place's address
+  // components and populate street / city / state / zip. When the key is empty,
+  // this is a no-op and the container renders empty (the row hides itself).
+  const attachStreetAutocomplete = useCallback((container) => {
+    const mapsKey = C.googleMapsApiKey || DEFAULT_GOOGLE_MAPS_API_KEY;
+    if (!container || !mapsKey) return;
+    loadGoogleMapsPlaces(mapsKey).then(async (google) => {
+      if (!container.isConnected) return;
+      const { PlaceAutocompleteElement } = await google.maps.importLibrary("places");
+      const pa = new PlaceAutocompleteElement({ includedRegionCodes: ["us"] });
+      pa.style.width = "100%";
+      pa.style.display = "block";
+      container.replaceChildren(pa);
+
+      // Reach into the open shadow root and inject styles that make the input
+      // match S.sel (border, radius, padding, font, height), and strip any
+      // wrapper border/shadow Google paints around it. The shadow may not be
+      // attached on the same frame the element is constructed, so retry on rAF.
+      const restyleShadow = () => {
+        if (!pa.shadowRoot) { requestAnimationFrame(restyleShadow); return; }
+        if (pa.shadowRoot.querySelector('style[data-ss="input-style"]')) return;
+        const styleEl = document.createElement("style");
+        styleEl.setAttribute("data-ss", "input-style");
+        styleEl.textContent = `
+          input {
+            border: 1px solid #CBD5E1 !important;
+            border-radius: 6px !important;
+            padding: 5px 8px !important;
+            font-size: 13px !important;
+            font-weight: 600 !important;
+            background: #FFF !important;
+            box-sizing: border-box !important;
+            width: 100% !important;
+            min-height: 30px !important;
+            height: auto !important;
+            outline: none !important;
+            box-shadow: none !important;
+          }
+          div[class*="container"], div[class*="wrapper"], div[class*="surface"], div[class*="border"] {
+            border: none !important;
+            box-shadow: none !important;
+            background: transparent !important;
+            padding: 0 !important;
+          }
+        `;
+        pa.shadowRoot.appendChild(styleEl);
+      };
+      requestAnimationFrame(restyleShadow);
+
+      pa.addEventListener("gmp-select", async (ev) => {
+        const place = ev.placePrediction.toPlace();
+        await place.fetchFields({ fields: ["addressComponents"] });
+        const comps = place.addressComponents || [];
+        const find = (type) => {
+          const c = comps.find((x) => (x.types || []).includes(type));
+          return c ? (c.longText || c.shortText || "") : "";
+        };
+        const street = [find("street_number"), find("route")].filter(Boolean).join(" ");
+        const city = find("locality") || find("sublocality") || find("postal_town");
+        const state = find("administrative_area_level_1"); // full state name to match <select> options
+        const zip = (find("postal_code") || "").replace(/\D/g, "").slice(0, 5);
+        setContact((p) => ({
+          ...p,
+          ...(street ? { street } : {}),
+          ...(city ? { city } : {}),
+          ...(state ? { state } : {}),
+          ...(zip ? { zip } : {}),
+        }));
+      });
+    }).catch((err) => {
+      console.warn("[StructureStudio] Google Maps autocomplete unavailable:", err.message);
+    });
+  }, [C.googleMapsApiKey]);
+
   // Auto-update building size. Only clear items when the user *changes* the
   // size (not on first set, and not when loading a saved design).
   useEffect(() => {
@@ -311,7 +438,10 @@ function StructureStudioInner({ config }) {
     if (!id) return;
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase.from("designs").select("*").eq("short_code", id).single();
+      // Capability RPC: returns the one row matching the code (or nothing).
+      // Direct table reads are blocked for the anon key after cutover.
+      const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
+      const data = Array.isArray(rows) ? rows[0] : rows;
       if (cancelled || error || !data) return;
       currentDesignIdRef.current = data.short_code;
       // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
@@ -1167,8 +1297,22 @@ function StructureStudioInner({ config }) {
 
   // ─── SUBMIT QUOTE ───
   const submitQuote = async () => {
-    if (!contact.name || !contact.email || !contact.phone) {
-      setSubmitError("Please fill in Name, Email, and Phone.");
+    // Validate every contact field that's enabled in the config. Address fields
+    // are required because downstream tax calc needs the full address.
+    const FIELD_LABEL = { name: "Name", email: "Email", phone: "Phone", street: "Street Address", city: "City", state: "State", zip: "Zip" };
+    const missing = ["name", "email", "phone", "street", "city", "state", "zip"]
+      .filter((f) => C.contactFields.includes(f) && !String(contact[f] || "").trim())
+      .map((f) => FIELD_LABEL[f]);
+    if (missing.length > 0) {
+      setSubmitError(`Please fill in: ${missing.join(", ")}.`);
+      return;
+    }
+    if (C.contactFields.includes("phone") && contact.phone.replace(/\D/g, "").length !== 10) {
+      setSubmitError("Phone number must be 10 digits.");
+      return;
+    }
+    if (C.contactFields.includes("zip") && !/^\d{5}$/.test(contact.zip)) {
+      setSubmitError("Zip must be 5 digits.");
       return;
     }
     if (!sel.style || !sel.size) {
@@ -1207,28 +1351,33 @@ function StructureStudioInner({ config }) {
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
       const imageUrl = urlData.publicUrl;
 
-      // 4. Upsert the design row (insert on first save, update on subsequent saves)
-      const designRow = {
-        short_code: shortCode,
-        client_id: C.clientId,
-        contact,
-        selections: sel,
-        paint_colors: paintColors,
-        items,
-        custom_options: customOptions,
-        ro_dimensions: roDimensions,
-        bldg_w: bldgW,
-        bldg_h: bldgH,
-        image_url: imageUrl,
-      };
-      const { error: dbErr } = await supabase
-        .from("designs")
-        .upsert(designRow, { onConflict: "short_code" });
+      // 4. Save the design row via the capability RPC (insert on first save,
+      //    update on subsequent saves; keyed by the unguessable short code).
+      //    The RPC also pins client_id — a saved design can never be re-homed
+      //    to a different tenant.
+      const { error: dbErr } = await supabase.rpc("save_design", {
+        p_code: shortCode,
+        p_client_id: C.clientId,
+        p_contact: contact,
+        p_selections: sel,
+        p_paint_colors: paintColors,
+        p_items: items,
+        p_custom_options: customOptions,
+        p_ro_dimensions: roDimensions,
+        p_bldg_w: bldgW,
+        p_bldg_h: bldgH,
+        p_image_url: imageUrl,
+      });
       if (dbErr) throw new Error(`Save failed: ${dbErr.message}`);
 
-      // 5. Update the URL so a refresh / share-link reopens the same design
-      const viewUrl = `${window.location.origin}${window.location.pathname}?id=${shortCode}`;
-      window.history.replaceState({}, "", `?id=${shortCode}`);
+      // 5. Update the URL so a refresh / share-link reopens the same design.
+      //    Keep the ?client= tenant param so the link reopens with the right branding.
+      const shareParams = new URLSearchParams();
+      const tenantParam = new URLSearchParams(window.location.search).get("client");
+      if (tenantParam) shareParams.set("client", tenantParam);
+      shareParams.set("id", shortCode);
+      const viewUrl = `${window.location.origin}${window.location.pathname}?${shareParams.toString()}`;
+      window.history.replaceState({}, "", `?${shareParams.toString()}`);
       currentDesignIdRef.current = shortCode;
 
       const payload = {
@@ -1241,7 +1390,8 @@ function StructureStudioInner({ config }) {
         contact: {
           name: contact.name,
           email: contact.email,
-          phone: contact.phone,
+          // Strip display formatting; n8n/GHL store raw digits.
+          phone: contact.phone.replace(/\D/g, ""),
           street: contact.street,
           city: contact.city,
           state: contact.state,
@@ -1304,8 +1454,10 @@ function StructureStudioInner({ config }) {
       // Call the submit-estimate Edge Function. It looks up the GHL credentials for
       // this clientId in Supabase (admin-configured), then either creates a new GHL
       // estimate or updates the existing one for this design and emails it.
-      // betaMode (detected from the deploy host) makes the Edge Function redirect the
-      // estimate email to the internal QA inbox instead of the customer.
+      // betaMode (detected from the deploy host, e.g. beta.structurestudio.app or a
+      // beta--* branch preview) makes the Edge Function redirect the estimate email
+      // to the internal QA inbox instead of the customer. The per-client beta_mode
+      // switch in client_settings does the same thing server-side.
       const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
         body: { ...payload, betaMode },
@@ -1983,37 +2135,43 @@ function StructureStudioInner({ config }) {
             {C.contactFields.includes("phone") && (
               <div style={{ flex: "1 1 140px" }}>
                 <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *</span>
-                <input type="tel" value={contact.phone} onChange={(e) => setContact((p) => ({ ...p, phone: e.target.value }))} placeholder="(555) 555-5555" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <input type="tel" inputMode="tel" autoComplete="tel" value={formatPhoneDisplay(contact.phone)} onChange={(e) => setContact((p) => ({ ...p, phone: formatPhoneDisplay(e.target.value) }))} placeholder="(555) 555-5555" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
               </div>
             )}
           </div>
+          {(C.googleMapsApiKey || DEFAULT_GOOGLE_MAPS_API_KEY) && C.contactFields.includes("street") && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <span style={{ ...S.lbl, fontSize: 10, whiteSpace: "nowrap" }}>Search for address</span>
+              <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "stretch", boxSizing: "border-box" }} />
+            </div>
+          )}
           {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
               {C.contactFields.includes("street") && (
                 <div style={{ flex: "2 1 200px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Street Address</span>
-                  <input type="text" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Street Address *</span>
+                  <input type="text" autoComplete="street-address" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </div>
               )}
               {C.contactFields.includes("city") && (
                 <div style={{ flex: "1 1 130px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>City</span>
-                  <input type="text" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>City *</span>
+                  <input type="text" autoComplete="address-level2" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </div>
               )}
               {C.contactFields.includes("state") && (
                 <div style={{ flex: "1 1 160px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State</span>
-                  <select value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State *</span>
+                  <select autoComplete="address-level1" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box", color: contact.state ? undefined : "#94A3B8" }}>
                     <option value="">Select state…</option>
-                    {["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"].map((s) => <option key={s} value={s}>{s}</option>)}
+                    {["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"].map((s) => <option key={s} value={s} style={{ color: "#1E293B" }}>{s}</option>)}
                   </select>
                 </div>
               )}
               {C.contactFields.includes("zip") && (
                 <div style={{ flex: "0 1 100px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Zip</span>
-                  <input type="text" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value }))} placeholder="00000" maxLength={10} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Zip *</span>
+                  <input type="text" inputMode="numeric" autoComplete="postal-code" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value.replace(/\D/g, "").slice(0, 5) }))} placeholder="00000" maxLength={5} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </div>
               )}
             </div>
@@ -2158,20 +2316,33 @@ function StructureStudioInner({ config }) {
   );
 }
 
-// ─── Client-config loader (entry component) ───
-// Every page load fetches the config from public.client_configs — there is no
-// in-source copy of any client. Resolution order:
-//   1. `config` prop (e.g. supplied by the postMessage re-render below) wins and
-//      is used as-is, no fetch.
+// ─── Client-config loader (default export) ───
+// Every page load fetches the tenant's config from public.client_configs — there
+// is no in-source copy of any client. Resolution order:
+//   1. `config` prop (e.g. supplied by index.html's postMessage re-render handler)
+//      wins and is used as-is, no fetch.
 //   2. `?client=<id>` URL param — explicit override, wins over hostname.
-//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns". Skipped
-//      for the apex, IPs, localhost, .pages.dev project roots, and the reserved
-//      "beta" subdomain (which is the beta-deploy alias, not a tenant).
-//   4. `?id=<short_code>` share-link — look up the owning tenant from the
-//      `designs` row so a rep clicking someone else's link gets the right config.
+//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns". Skipped for
+//      the apex, IPs, localhost, *.pages.dev / *.netlify.app deploy hosts, and the
+//      reserved env labels (www/beta/dev/staging/app).
+//   4. `?id=<short_code>` share-link — the design row records its owning tenant;
+//      resolved via the load_design RPC (NOT a direct table read — that dies at
+//      cutover) so a rep clicking someone else's link gets that tenant's branding.
 //   5. Fallback: DEFAULT_CLIENT_ID.
-//   On fetch failure (network, missing row) we render an error screen with a
-//   retry button rather than silently falling back to a wrong-tenant default.
+// On fetch failure (network error or unknown client_id) we render an error screen
+// with a retry button rather than silently falling back to a wrong-tenant config.
+// The fetched config's clientId is always forced to the row key so a config blob
+// can never point a tenant's designs at another tenant.
+
+// A partial config row (e.g. branding-only) would crash the designer mid-render,
+// so fail loud on the error screen instead. Every row must be authored complete —
+// see the onboarding runbook in CLAUDE.md.
+const REQUIRED_CONFIG_KEYS = ["branding", "contactFields", "buildingStyles", "defaultSizes", "options", "layoutItems"];
+
+// Cutover marker: lets us verify from the deployed site which data path this
+// bundle uses (multi-tenant RPC vs. legacy direct table access).
+console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
+
 function StructureStudio({ config: configProp = null }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
@@ -2184,10 +2355,9 @@ function StructureStudio({ config: configProp = null }) {
     const params = new URLSearchParams(window.location.search);
     let clientId = params.get("client");
     const designShortCode = params.get("id");
-    // Tenant path: only derive a client_id from <sub>.structurestudio.app.
-    // Anything else (apex, *.netlify.app deploy/preview hosts, localhost, IPs,
-    // env labels) falls back to DEFAULT_CLIENT_ID — so a deploy hostname is
-    // never mistaken for a tenant.
+    // Tenant subdomains: only derive a client_id from <sub>.structurestudio.app.
+    // Anything else (apex, *.pages.dev / *.netlify.app deploy hosts, localhost,
+    // IPs, env labels) falls through — a deploy hostname is never a tenant.
     if (!clientId) {
       const host = window.location.hostname;
       const BASE = "structurestudio.app";
@@ -2201,17 +2371,14 @@ function StructureStudio({ config: configProp = null }) {
     (async () => {
       try {
         const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        // Share-link path: ?id=<short_code> without ?client= or subdomain means
-        // a rep opened someone else's saved design. The design row records which
-        // tenant owns it; we look that up so the right config wraps the inner load.
+        // Share-link path: ?id=<short_code> without ?client= or a tenant subdomain
+        // means someone opened a saved design's bare link. The design row records
+        // which tenant owns it; look that up so the right config wraps the load.
         if (!clientId && designShortCode) {
-          const { data: design, error: dErr } = await sb
-            .from("designs")
-            .select("client_id")
-            .eq("short_code", designShortCode)
-            .single();
+          const { data: rows, error: dErr } = await sb.rpc("load_design", { p_code: designShortCode });
+          const design = Array.isArray(rows) ? rows[0] : rows;
           if (cancelled) return;
-          if (dErr || !design?.client_id) {
+          if (dErr || !design || !design.client_id) {
             console.warn(`Design "${designShortCode}" not found while resolving client; using default.`, dErr);
             clientId = DEFAULT_CLIENT_ID;
           } else {
@@ -2223,18 +2390,23 @@ function StructureStudio({ config: configProp = null }) {
           .from("client_configs")
           .select("config")
           .eq("client_id", clientId)
-          .single();
+          .maybeSingle();
         if (cancelled) return;
-        if (error || !data?.config) {
+        if (error || !data || !data.config) {
           console.warn(`Could not load config for client "${clientId}":`, error);
-          setState({ status: "error", clientId, message: error?.message || "Configuration not found." });
-        } else {
-          setState({ status: "ready", config: data.config });
+          setState({ status: "error", clientId, message: (error && error.message) || "Configuration not found." });
+          return;
         }
+        const missing = REQUIRED_CONFIG_KEYS.filter((k) => !data.config[k]);
+        if (missing.length > 0) {
+          setState({ status: "error", clientId, message: `Configuration row is incomplete (missing: ${missing.join(", ")}).` });
+          return;
+        }
+        setState({ status: "ready", config: { ...data.config, clientId } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);
-        setState({ status: "error", clientId: clientId || DEFAULT_CLIENT_ID, message: e?.message || "Network error." });
+        setState({ status: "error", clientId: clientId || DEFAULT_CLIENT_ID, message: (e && e.message) || "Network error." });
       }
     })();
     return () => { cancelled = true; };
