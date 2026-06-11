@@ -2030,9 +2030,9 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
             )}
           </div>
           {C.googleMapsApiKey && C.contactFields.includes("street") && (
-            <div style={{ marginBottom: 10 }}>
-              <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Search for address</span>
-              <div ref={attachStreetAutocomplete} style={{ width: "100%" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <span style={{ ...S.lbl, fontSize: 10, whiteSpace: "nowrap" }}>Search for address</span>
+              <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, minHeight: 38, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", padding: "0 4px", display: "flex", alignItems: "center", boxSizing: "border-box" }} />
             </div>
           )}
           {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
