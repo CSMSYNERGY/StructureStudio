@@ -164,12 +164,17 @@ function formatPhoneDisplay(v) {
   return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
 }
 
-// Lazy-load Google Maps JS API bootstrap. Idempotent: returns the same promise on
-// subsequent calls. Resolves to window.google. Rejects if no key. We deliberately
-// load with loading=async and NO libraries= param: this is the modern bootstrap
-// that exposes google.maps.importLibrary(), which is the only supported way to
-// fetch the Places library now that PlaceAutocompleteElement (the replacement
-// for the deprecated Autocomplete class) is served by Places API (New).
+// Lazy-load Google Maps JS API via the official inline bootstrap loader. Resolves
+// to window.google. Rejects if no key. Idempotent: returns the same promise on
+// subsequent calls.
+//
+// The bootstrap snippet (from Google's docs) synchronously installs
+// window.google.maps.importLibrary, then defers the actual script download until
+// importLibrary is first called. This is the only supported way to reach
+// PlaceAutocompleteElement and other Places API (New) entry points; passing
+// loading=async or libraries=places in the URL is NOT enough to expose
+// importLibrary in practice.
+// See: https://developers.google.com/maps/documentation/javascript/load-maps-js-api
 let _googleMapsLoadPromise = null;
 function loadGoogleMapsPlaces(apiKey) {
   if (typeof window === "undefined") return Promise.reject(new Error("no window"));
@@ -179,13 +184,13 @@ function loadGoogleMapsPlaces(apiKey) {
   }
   if (_googleMapsLoadPromise) return _googleMapsLoadPromise;
   _googleMapsLoadPromise = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&loading=async`;
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve(window.google);
-    script.onerror = () => { _googleMapsLoadPromise = null; reject(new Error("Failed to load Google Maps")); };
-    document.head.appendChild(script);
+    try {
+      ((g)=>{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={});var d=b.maps||(b.maps={}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src=`https://maps.${c}apis.com/maps/api/js?`+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))})({key: apiKey, v: "weekly"});
+      resolve(window.google);
+    } catch (err) {
+      _googleMapsLoadPromise = null;
+      reject(err);
+    }
   });
   return _googleMapsLoadPromise;
 }
@@ -2032,7 +2037,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
           {C.googleMapsApiKey && C.contactFields.includes("street") && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <span style={{ ...S.lbl, fontSize: 10, whiteSpace: "nowrap" }}>Search for address</span>
-              <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, minHeight: 38, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", padding: "0 4px", display: "flex", alignItems: "center", boxSizing: "border-box" }} />
+              <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "stretch", boxSizing: "border-box" }} />
             </div>
           )}
           {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
