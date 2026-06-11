@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio — Business Portal</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:920px;margin:0 auto}</style>
+</head><body><div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+const { createClient } = window.supabase;
+
+// ─── StructureStudio Business Portal ───
+// Standalone owner-facing page (login + dashboard). Unlike index.html /
+// StructureStudio.jsx — which are hand-mirrored siblings — this file has no
+// .jsx twin: it is only ever served by Netlify, never embedded by hosts.
+//
+// Auth: Supabase email/password. Each owner account maps to one client via the
+// client_users table; RLS confines every query to that tenant's rows. Secrets
+// (the GHL API key) never reach this page — settings reads/writes go through
+// the portal-settings edge function, which masks on read and is write-only for
+// the key.
+
+const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const ACCENT = "#D97706";
+const S = {
+  page: { minHeight: "100vh", display: "flex", flexDirection: "column" },
+  header: { background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  badge: { background: ACCENT, borderRadius: 8, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16, flexShrink: 0 },
+  card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
+  h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
+  lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
+  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
+  btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
+  err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  th: { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "2px solid #E2E8F0", whiteSpace: "nowrap" },
+  td: { fontSize: 13, color: "#1E293B", padding: "10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "top" },
+};
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+  catch { return iso; }
+}
+
+// ─── Login ───
+function LoginView({ onRecoverySent }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [info, setInfo] = useState(null);
+
+  const signIn = async (e) => {
+    e.preventDefault();
+    setError(null); setInfo(null); setBusy(true);
+    const { error: err } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+    if (err) setError(err.message === "Invalid login credentials" ? "Wrong email or password." : err.message);
+    // success: onAuthStateChange in PortalApp takes over
+  };
+
+  const forgot = async () => {
+    setError(null); setInfo(null);
+    if (!email.trim()) { setError("Enter your email above first, then click “Forgot password” again."); return; }
+    setBusy(true);
+    const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    setBusy(false);
+    if (err) setError(err.message);
+    else setInfo("Password reset email sent — check your inbox (it can take a minute).");
+  };
+
+  return (
+    <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
+      <div style={S.card}>
+        <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Business Login</div>
+        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your leads, designs, and settings.</p>
+        {error && <div style={S.err}>{error}</div>}
+        {info && <div style={S.okMsg}>{info}</div>}
+        <form onSubmit={signIn}>
+          <div style={{ marginBottom: 12 }}>
+            <span style={S.lbl}>Email</span>
+            <input style={S.input} type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@yourbusiness.com" />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <span style={S.lbl}>Password</span>
+            <input style={S.input} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+          </div>
+          <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Signing in…" : "Sign In"}</button>
+        </form>
+        <button onClick={forgot} disabled={busy} style={{ ...S.btn("transparent", "#64748B"), width: "100%", marginTop: 8, fontSize: 12 }}>Forgot password?</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Password reset (arrived via recovery email link) ───
+function ResetPasswordView({ onDone }) {
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (pw1.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (pw1 !== pw2) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    const { error: err } = await sb.auth.updateUser({ password: pw1 });
+    setBusy(false);
+    if (err) setError(err.message);
+    else onDone();
+  };
+
+  return (
+    <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
+      <div style={S.card}>
+        <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Set a New Password</div>
+        {error && <div style={S.err}>{error}</div>}
+        <form onSubmit={save}>
+          <div style={{ marginBottom: 12 }}>
+            <span style={S.lbl}>New password</span>
+            <input style={S.input} type="password" autoComplete="new-password" value={pw1} onChange={(e) => setPw1(e.target.value)} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <span style={S.lbl}>Confirm password</span>
+            <input style={S.input} type="password" autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          </div>
+          <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save Password"}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Share link card ───
+function ShareLinkCard({ clientId }) {
+  const [copied, setCopied] = useState(false);
+  const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}`;
+  const copy = () => {
+    navigator.clipboard.writeText(link).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Your Customer Design Link</div>
+      <p style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Share this link with customers (or embed it on your website). Every design submitted through it lands in your list below.</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input style={{ ...S.input, flex: "1 1 280px", fontFamily: "monospace", fontSize: 12 }} readOnly value={link} onFocus={(e) => e.target.select()} />
+        <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy"}</button>
+        <a href={link} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Open ↗</a>
+      </div>
+    </div>
+  );
+}
+
+// ─── Designs table ───
+function DesignsTable({ clientId }) {
+  const [rows, setRows] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data, error: err } = await sb
+      .from("designs")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+      .order("created_at", { ascending: false });
+    if (err) { setError(err.message); setRows([]); return; }
+    setRows(data || []);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Designs &amp; Leads {rows ? `(${rows.length})` : ""}</div>
+        <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+      </div>
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
+      )}
+      {rows && rows.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Contact</th>
+              <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Actions</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => {
+                const c = r.contact || {}; const sel = r.selections || {};
+                const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
+                return (
+                  <tr key={r.short_code}>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.created_at)}</td>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{c.name || "—"}</td>
+                    <td style={S.td}>
+                      <div>{c.email || ""}</div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
+                    </td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{[sel.style, sel.size].filter(Boolean).join(" ") || "—"}</td>
+                    <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                      {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Settings (via portal-settings edge function; API key is write-only) ───
+function SettingsView() {
+  const [status, setStatus] = useState(null);   // response of action:"status"
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // GHL credential inputs are intentionally NOT prefilled: location id + API key
+  // come back masked/withheld, so prefilling would save the mask back. Leave
+  // blank = keep current value.
+  const [ghlLocationId, setGhlLocationId] = useState("");
+  const [ghlApiKey, setGhlApiKey] = useState("");
+  const [form, setForm] = useState({
+    ghlPipelineId: "", ghlStageSendQuoteId: "",
+    businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
+    addr1: "", addrCity: "", addrState: "", addrZip: "",
+    quoteTerms: "", betaMode: false, betaEmail: "",
+  });
+  const set = (k) => (e) => {
+    const v = e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e;
+    setForm((p) => ({ ...p, [k]: v }));
+  };
+
+  useEffect(() => {
+    (async () => {
+      const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+      if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+      setStatus(data);
+      const a = data.businessAddress || {};
+      setForm({
+        ghlPipelineId: data.ghlPipelineId || "",
+        ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
+        businessName: data.businessName || "",
+        businessPhone: data.businessPhone || "",
+        businessWebsite: data.businessWebsite || "",
+        businessLogoUrl: data.businessLogoUrl || "",
+        addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
+        quoteTerms: data.quoteTerms || "",
+        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "",
+      });
+    })();
+  }, []);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setError(null); setSaved(false); setBusy(true);
+    const hasAddr = form.addr1 || form.addrCity || form.addrState || form.addrZip;
+    const body = {
+      action: "save",
+      ghlPipelineId: form.ghlPipelineId,
+      ghlStageSendQuoteId: form.ghlStageSendQuoteId,
+      businessName: form.businessName,
+      businessPhone: form.businessPhone,
+      businessWebsite: form.businessWebsite,
+      businessLogoUrl: form.businessLogoUrl,
+      businessAddress: hasAddr ? { addressLine1: form.addr1, city: form.addrCity, state: form.addrState, postalCode: form.addrZip, countryCode: "US" } : null,
+      quoteTerms: form.quoteTerms,
+      betaMode: form.betaMode,
+      betaEmail: form.betaEmail,
+    };
+    if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
+    if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    setBusy(false);
+    if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+    setSaved(true);
+    setGhlApiKey(""); setGhlLocationId("");
+    // refresh masked status
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
+
+  return (
+    <form onSubmit={save}>
+      {error && <div style={S.err}>{error}</div>}
+      {saved && <div style={S.okMsg}>Settings saved.</div>}
+
+      <div style={S.card}>
+        <div style={S.h2}>GoHighLevel Connection</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+          {status && status.configured
+            ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
+            : <>Not connected yet. Estimates can't be sent until a GHL Location ID and API key are saved.</>}
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+          <div><span style={S.lbl}>GHL Location ID</span>
+            <input style={S.input} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
+          <div><span style={S.lbl}>GHL API Key</span>
+            <input style={S.input} type="password" autoComplete="off" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
+          <div><span style={S.lbl}>Pipeline ID (optional)</span>
+            <input style={S.input} value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
+          <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
+            <input style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Business Details (shown on estimates)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <div><span style={S.lbl}>Business name</span><input style={S.input} value={form.businessName} onChange={set("businessName")} /></div>
+          <div><span style={S.lbl}>Phone</span><input style={S.input} value={form.businessPhone} onChange={set("businessPhone")} placeholder="+17075551234" /></div>
+          <div><span style={S.lbl}>Website</span><input style={S.input} value={form.businessWebsite} onChange={set("businessWebsite")} placeholder="yourbusiness.com" /></div>
+          <div><span style={S.lbl}>Logo URL</span><input style={S.input} value={form.businessLogoUrl} onChange={set("businessLogoUrl")} placeholder="https://…/logo.png" /></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div><span style={S.lbl}>Street address</span><input style={S.input} value={form.addr1} onChange={set("addr1")} /></div>
+          <div><span style={S.lbl}>City</span><input style={S.input} value={form.addrCity} onChange={set("addrCity")} /></div>
+          <div><span style={S.lbl}>State</span><input style={S.input} value={form.addrState} onChange={set("addrState")} /></div>
+          <div><span style={S.lbl}>Zip</span><input style={S.input} value={form.addrZip} onChange={set("addrZip")} /></div>
+        </div>
+        <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
+          <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Testing</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B", marginBottom: 10 }}>
+          <input type="checkbox" checked={form.betaMode} onChange={set("betaMode")} />
+          Beta mode — estimate emails go to the test inbox below instead of customers
+        </label>
+        <div style={{ maxWidth: 320 }}><span style={S.lbl}>Test inbox</span>
+          <input style={S.input} type="email" value={form.betaEmail} onChange={set("betaEmail")} placeholder="you@yourbusiness.com" /></div>
+      </div>
+
+      <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
+    </form>
+  );
+}
+
+// ─── Dashboard shell ───
+function Dashboard({ session }) {
+  const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
+  const [tab, setTab] = useState("designs");
+
+  useEffect(() => {
+    (async () => {
+      const { data: mapping, error } = await sb.from("client_users").select("client_id, role").maybeSingle();
+      if (error || !mapping) { setTenant("none"); return; }
+      let businessName = mapping.client_id;
+      const { data: cfg } = await sb.from("client_configs").select("config").eq("client_id", mapping.client_id).maybeSingle();
+      if (cfg && cfg.config && cfg.config.branding && cfg.config.branding.companyName) {
+        businessName = cfg.config.branding.companyName;
+      }
+      setTenant({ clientId: mapping.client_id, businessName });
+    })();
+  }, [session]);
+
+  const signOut = () => sb.auth.signOut();
+
+  if (tenant === null) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
+  }
+  if (tenant === "none") {
+    return (
+      <div style={{ maxWidth: 420, margin: "60px auto", padding: "0 16px" }}>
+        <div style={{ ...S.card, textAlign: "center" }}>
+          <div style={{ ...S.h2, fontSize: 16 }}>No business linked to this account</div>
+          <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Your login works, but it isn't connected to a business yet. Contact CSM Synergy to finish your setup.</p>
+          <button onClick={signOut} style={S.btn("#1E293B", "#FFF")}>Sign Out</button>
+        </div>
+      </div>
+    );
+  }
+
+  const tabBtn = (id, label) => (
+    <button onClick={() => setTab(id)} style={{
+      ...S.btn(tab === id ? "#FFF" : "transparent", tab === id ? "#1E293B" : "#CBD5E1"),
+      borderRadius: "8px 8px 0 0", padding: "10px 18px",
+    }}>{label}</button>
+  );
+
+  return (
+    <div>
+      <div style={{ background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", padding: "0 24px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 0 12px" }}>
+          <div style={S.badge}>SS</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 800, fontSize: 17, color: "#FFF" }}>{tenant.businessName}</div>
+            <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal · {session.user.email}</div>
+          </div>
+          <button onClick={signOut} style={{ ...S.btn("rgba(255,255,255,0.1)", "#E2E8F0"), border: "1px solid rgba(255,255,255,0.2)" }}>Sign Out</button>
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {tabBtn("designs", "Designs & Leads")}
+          {tabBtn("settings", "Settings")}
+        </div>
+      </div>
+      <div style={{ padding: "20px 24px" }}>
+        {tab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
+        {tab === "settings" && <SettingsView />}
+      </div>
+    </div>
+  );
+}
+
+// ─── App root: session + recovery routing ───
+function PortalApp() {
+  const [session, setSession] = useState(undefined); // undefined = booting
+  const [recovery, setRecovery] = useState(false);
+
+  useEffect(() => {
+    // A recovery-email link lands here with #…type=recovery. supabase-js
+    // exchanges the token automatically (detectSessionInUrl); we just route
+    // to the set-password view.
+    if (window.location.hash.includes("type=recovery")) setRecovery(true);
+    sb.auth.getSession().then(({ data }) => setSession(data.session || null));
+    const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
+      setSession(sess || null);
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) {
+    return <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading…</div>;
+  }
+  if (session && recovery) return <ResetPasswordView onDone={() => { setRecovery(false); window.location.hash = ""; }} />;
+  if (!session) return (
+    <div>
+      <div style={S.header}>
+        <div style={S.badge}>SS</div>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 17 }}>StructureStudio</div>
+          <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal</div>
+        </div>
+      </div>
+      <LoginView />
+    </div>
+  );
+  return <Dashboard session={session} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<PortalApp />);
+</script></body></html>
