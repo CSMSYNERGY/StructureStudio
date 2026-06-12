@@ -59,7 +59,7 @@ The component is white-labeled per client. There is **no in-source copy** of any
 2. `?client=<id>` URL param — explicit override, wins over hostname.
 3. **Subdomain** — `juniorbarns.structurestudio.app` → `client_id = "juniorbarns"`. Only fires for `<sub>.structurestudio.app`; the apex, IPs, localhost, `*.pages.dev`/`*.netlify.app` deploy hosts, and the reserved env labels (`www`/`beta`/`dev`/`staging`/`app`) all fall through — a deploy hostname is never a tenant.
 4. `?id=<short_code>` share-link — without a `?client=` or tenant subdomain, the owning `client_id` is looked up via the `load_design` RPC so a rep clicking someone else's link gets that tenant's branding/config.
-5. Fallback: `DEFAULT_CLIENT_ID` (currently `junior-barns`).
+5. Bare product root (no tenant and no `?id=`) → **redirects to `/portal.html`** — the business portal is the landing page; owners copy their customer design link from the dashboard. `DEFAULT_CLIENT_ID` (currently `junior-barns`) remains only as the branding fallback when an `?id=` owner lookup fails. Note: the operator `?admin=1` panel therefore needs a tenant in the URL, e.g. `?client=junior-barns&admin=1`.
 6. On fetch failure (network error, unknown `client_id`, or an incomplete row missing one of `REQUIRED_CONFIG_KEYS`) the wrapper renders an error screen with a retry button — it does NOT silently fall back to another tenant's config.
 
 A separate `postMessage` listener inside the inner component handles `{ type: "structureConfig", <flat fields> }` to prefill selections and contact info without a full re-render.

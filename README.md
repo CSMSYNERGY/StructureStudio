@@ -12,7 +12,7 @@ A config-driven, multi-tenant floor plan designer and quote builder for custom s
 Each customer (a shed business) is a **tenant** with:
 
 - A **public designer link** — `https://<client_id>.structurestudio.app` (or `https://<site>/?client=<client_id>`) — branded with their config. Shoppers design a building and submit for a quote; no login required.
-- A **business portal** — `https://<site>/portal.html` — where the owner logs in to see their submitted designs/leads, copy their customer link, and manage their GoHighLevel + business settings. Row Level Security guarantees each business only ever sees its own data.
+- A **business portal** — `https://<site>/portal.html` (also where the bare site root redirects) — where the owner logs in to see their submitted designs/leads, copy their customer link, and manage their GoHighLevel + business settings. Row Level Security guarantees each business only ever sees its own data.
 
 The designer is a **single-file React component** delivered as two parallel artifacts:
 
