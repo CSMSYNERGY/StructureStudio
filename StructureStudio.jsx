@@ -2358,6 +2358,13 @@ export default function StructureStudio({ config: configProp = null }) {
         if (sub && !sub.includes(".") && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
       }
     }
+    // Bare product root: no tenant link (?client= / subdomain) and no design code.
+    // This isn't any tenant's page — it's where business owners land, so send
+    // them to the portal; they copy their customer design link from the dashboard.
+    if (!clientId && !designShortCode) {
+      window.location.replace("/portal.html");
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
