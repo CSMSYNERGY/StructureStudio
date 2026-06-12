@@ -344,44 +344,33 @@ function StructureStudioInner({ config }) {
       if (!container.isConnected) return;
       const { PlaceAutocompleteElement } = await google.maps.importLibrary("places");
       const pa = new PlaceAutocompleteElement({ includedRegionCodes: ["us"] });
+      // Google's gmp-place-autocomplete now uses a CLOSED shadow root, so its
+      // inner input can't be styled from here (pa.shadowRoot is null). The HOST
+      // element is stylable from outside, though: give it the same light-gray
+      // border/radius as S.sel and pin its height to the sibling address fields
+      // so the search box lines up with them instead of Google's tall default.
       pa.style.width = "100%";
       pa.style.display = "block";
+      pa.style.boxSizing = "border-box";
+      pa.style.border = "1px solid #CBD5E1";
+      pa.style.borderRadius = "6px";
+      // Font properties inherit across the closed shadow boundary (Google's inner
+      // input uses font: inherit), so set them on the host to match S.sel.
+      pa.style.fontFamily = "Arial, sans-serif";
+      pa.style.fontSize = "13px";
+      pa.style.fontWeight = "600";
+      pa.style.color = "#000";
       container.replaceChildren(pa);
 
-      // Reach into the open shadow root and inject styles that make the input
-      // match S.sel (border, radius, padding, font, height), and strip any
-      // wrapper border/shadow Google paints around it. The shadow may not be
-      // attached on the same frame the element is constructed, so retry on rAF.
-      const restyleShadow = () => {
-        if (!pa.shadowRoot) { requestAnimationFrame(restyleShadow); return; }
-        if (pa.shadowRoot.querySelector('style[data-ss="input-style"]')) return;
-        const styleEl = document.createElement("style");
-        styleEl.setAttribute("data-ss", "input-style");
-        styleEl.textContent = `
-          input {
-            border: 1px solid #CBD5E1 !important;
-            border-radius: 6px !important;
-            padding: 5px 8px !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            background: #FFF !important;
-            box-sizing: border-box !important;
-            width: 100% !important;
-            min-height: 30px !important;
-            height: auto !important;
-            outline: none !important;
-            box-shadow: none !important;
-          }
-          div[class*="container"], div[class*="wrapper"], div[class*="surface"], div[class*="border"] {
-            border: none !important;
-            box-shadow: none !important;
-            background: transparent !important;
-            padding: 0 !important;
-          }
-        `;
-        pa.shadowRoot.appendChild(styleEl);
+      let sizeTries = 0;
+      const sizeToFields = () => {
+        const ref = document.querySelector('input[autocomplete="street-address"], input[autocomplete="postal-code"], input[autocomplete="address-level2"]');
+        const h = ref ? Math.round(ref.getBoundingClientRect().height) : 0;
+        if (h) { pa.style.height = h + "px"; return; }
+        if (sizeTries++ < 20) requestAnimationFrame(sizeToFields);
+        else pa.style.height = "28px";
       };
-      requestAnimationFrame(restyleShadow);
+      requestAnimationFrame(sizeToFields);
 
       pa.addEventListener("gmp-select", async (ev) => {
         const place = ev.placePrediction.toPlace();
