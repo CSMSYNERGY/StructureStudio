@@ -1,12 +1,20 @@
 # Supabase Cutover & Migration Handoff
 
-**Prepared 2026-06-12; updated 2026-06-13** with the per-tenant isolation work
+> ## ✅ CUTOVER COMPLETE — 2026-06-14
+> The new multi-tenant frontend is deployed to **production** (`main` → `structurestudio.app`)
+> and the full cutover ran: migrations `000`/`005`/`012`/`013`/`014`/`015` are **applied to
+> live**. Verified: every public table has RLS on with **zero anon-readable policies** — anon
+> reaches data only via `get_config`/`get_catalog`/`load_design`. No data lost (38 designs, 3
+> configs; backups in `D:\CSM Synergy\ss_backup_*`). **Task 1 (cutover) and Task 3 (apply new
+> migrations) are DONE.** The ONLY remaining item is **Task 2 — reconcile migration history**
+> (bookkeeping; ⚠ do NOT `supabase db push` until it's done). Optional cleanup: re-path the
+> pre-cutover floor-plan files under `{client_id}/` (Task 3 step 2 — old root files still work).
+
+**Prepared 2026-06-12; updated 2026-06-14.** The per-tenant isolation work
 (migrations `000`/`012`/`013`/`014`/`015`, the `005` storage edit, and the
-`get_config` front-end swap). State below was verified read-only against the live
-DB (`jzeamjbhdrsbygdnphbm`). Outstanding tasks: (1) the RLS **cutover**,
-(2) reconciling the **migration history**, and (3) applying this change set's
-**new migrations** (Task 3). Task 1 and the config lockdown in Task 3 share one
-precondition: the new front-end must be live on **production** first.
+`get_config` front-end swap) is now **fully applied to** the live DB
+(`jzeamjbhdrsbygdnphbm`). The only outstanding task is (2) reconciling the
+**migration history** (see Task 2). Tasks 1 and 3 are complete (banner above).
 
 > You'll need your own access. Either `supabase login` (browser flow) or a
 > Personal Access Token (Account → Access Tokens) for the Management API. The

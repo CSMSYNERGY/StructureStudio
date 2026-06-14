@@ -45,11 +45,11 @@ Edge functions (sources mirrored in `supabase/functions/`, deployed via Supabase
 - `portal-settings` — owner-facing settings read/save. JWT-authenticated: `verify_jwt` alone is NOT auth (the anon key passes the gateway) — the function resolves a real user via `auth.getUser()` and maps it through `client_users`; `client_id` is never trusted from the body. The GHL API key is write-only (masked status, absent/empty never blanks it).
 - `admin-save-settings` — operator bootstrap tool behind the shared `ADMIN_PASSWORD` secret (used by the designer's `?admin=1` panel).
 
-SQL migrations live in `supabase/migrations/`. `001`–`011` are live; `000` + `012`–`014` are additive / lock only the inert catalog and are **safe to apply but not yet applied**; **`005_cutover.sql` and `015_config_rls_scope.sql` are cutover-gated** (apply only after the new frontend is on production). See below and `CUTOVER_HANDOFF.md`. ⚠ Never `supabase db push` until the migration history is reconciled — it would re-run `008`–`011`'s `DROP TABLE … recreate` and wipe the catalog; hand-apply via the SQL Editor.
+SQL migrations live in `supabase/migrations/`. `000`–`015` are **all applied to live** (`000`/`005`/`012`/`013`/`014`/`015` were hand-applied via `supabase db query --linked` on 2026-06-14, NOT via `db push`, so they are **not recorded in `supabase_migrations`**). ⚠ Never `supabase db push` until the migration history is reconciled (see `CUTOVER_HANDOFF.md` Task 2) — it would re-run `008`–`011`'s `DROP TABLE … recreate` and wipe the catalog; hand-apply via the SQL Editor.
 
-### ⚠ Cutover state (read before touching RLS)
+### ✅ Cutover state — COMPLETE (2026-06-14)
 
-Three anon-open surfaces are **still in place** because the live site is built from GitHub `main`, which may still serve the old direct-table frontend: `designs_anon_all` on `public.designs`, `floor_plans_public_all` on storage, and the anon public-read on `client_configs`. After the new frontend (config via the `get_config` RPC; PDFs written under `{client_id}/`) is deployed to **production** (verify the console marker `[StructureStudio] multi-tenant build` on the live site), run `005_cutover.sql` **and** `015_config_rls_scope.sql` to drop them + re-path storage. Until then, anon can still read all designs and all configs — the cutover is the step that actually enforces isolation against the anon key. The catalog lockdown (`012`) is safe to apply earlier (those tables are inert).
+The cutover is **done**. The multi-tenant frontend (config via `get_config`, designs via `load_design`/`save_design`, PDFs under `{client_id}/`) is deployed to **production** (`structurestudio.app`, built from `main`), and `005_cutover.sql` + `015_config_rls_scope.sql` are applied. Verified live: **every public table has RLS on and zero anon-readable policies** — anon reaches data only through the capability RPCs (`get_config`/`get_catalog`/`load_design`); `designs_anon_all` and `floor_plans_public_all` are dropped; `client_configs` is owner-scoped. Storage writes require the `{client_id}/SS-….pdf` shape (no anon delete, no bucket listing). Pre-cutover floor-plan files remain at the bucket root (still publicly readable); re-pathing them under `{client_id}/` via COPY is optional cleanup (see `CUTOVER_HANDOFF.md` Task 3).
 
 ## Runtime configuration model
 
@@ -111,7 +111,7 @@ Adding a new item type usually means adding an entry to `layoutItems` + any new 
 
 The edge function returns GHL ids (`contactId`, `estimateId`, `estimateNumber`, `opportunityId`) which the component stores in refs — a resubmit becomes an update of the same estimate. If you rename or restructure these fields, the estimate flow breaks silently.
 
-## Cutover checklist (run once, after deploying the new frontend)
+## Cutover checklist (✅ COMPLETED 2026-06-14 — kept for reference)
 
 1. Open the live site; confirm the console logs `[StructureStudio] multi-tenant build: config-loader + RPC data path`, that config now loads via `/rest/v1/rpc/get_config` (not `/rest/v1/client_configs`), and a `?id=` load hits `/rest/v1/rpc/load_design` in devtools Network.
 2. Apply `005_cutover.sql` (drops `designs_anon_all` + `floor_plans_public_all`, adds client-prefixed storage policies) **and** `015_config_rls_scope.sql` (revokes anon read on `client_configs`, adds owner-scoped read). Then re-path existing storage files under `{client_id}/` via **copy** (never move/delete) and update `designs.image_url` — see `CUTOVER_HANDOFF.md` Task 3.
