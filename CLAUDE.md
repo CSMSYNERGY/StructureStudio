@@ -23,9 +23,9 @@ There is no build/run/test command. To sanity-check a change, serve the folder (
 
 Each customer (a shed business, e.g. Junior Barns) is a **tenant** identified by a `client_id` slug:
 
-- **Public designer link** per tenant: `https://<client_id>.structurestudio.app` or `https://<site>/?client=<client_id>`. The config-loader wrapper (bottom of the component files, default export `StructureStudio`) fetches the tenant's row from `client_configs` (public read) **before** mounting `StructureStudioInner` (several `useState` initializers read config once on mount). There is **no in-source config** — every row must be complete (`REQUIRED_CONFIG_KEYS` is enforced; a partial row gets the error screen, not a crash). The baked-in `SUPABASE_URL`/`SUPABASE_ANON_KEY` constants are the only data connection — config rows can't redirect it — and `clientId` is forced to the row's key.
+- **Public designer link** per tenant: `https://<client_id>.structurestudio.app` or `https://<site>/?client=<client_id>`. The config-loader wrapper (bottom of the component files, default export `StructureStudio`) fetches the tenant's config via the `get_config` RPC — a capability read keyed by `client_id`, **not** a direct `client_configs` table query (anon can no longer bulk-read every tenant's config) — **before** mounting `StructureStudioInner` (several `useState` initializers read config once on mount). There is **no in-source config** — every row must be complete (`REQUIRED_CONFIG_KEYS` is enforced; a partial row gets the error screen, not a crash). The baked-in `SUPABASE_URL`/`SUPABASE_ANON_KEY` constants are the only data connection — config rows can't redirect it — and `clientId` is forced to the row's key.
 - **Owner login** via `portal.html`: Supabase email/password auth. The `client_users` table maps `auth.users` → `client_id`; RLS policy `designs_owner_select` (`client_id = current_client_id()`) confines every authenticated query to the owner's tenant. End shed-shoppers never log in.
-- **Data isolation**: tenants cannot see each other's designs, settings, or configs. Do not weaken the RLS policies or the RPC checks below.
+- **Data isolation**: every table is `client_id`-keyed and no tenant/user reads another's rows. The anon browser never does a direct table SELECT — designs go through `load_design`/`save_design`, config through `get_config`, catalog through `get_catalog` (all SECURITY DEFINER, keyed by `client_id`/`short_code`); authenticated owners are RLS-confined to `current_client_id()`; `client_settings` is service-role only. Do not weaken these RLS policies or RPC checks.
 
 ### Designs data path (capability model)
 
@@ -38,18 +38,18 @@ The browser **never reads/writes the `designs` table directly** (legacy direct a
 
 ### Supabase backend (project `jzeamjbhdrsbygdnphbm`)
 
-Tables: `designs` (per-design row, `client_id` column), `client_settings` (**service-role only** — GHL creds + business identity + quote terms + beta switch; never browser-readable), `client_configs` (public-read white-label config), `client_users` (auth user → tenant mapping).
+Tables: `designs` (per-design row, `client_id` column), `client_settings` (**service-role only** — GHL creds + business identity + quote terms + beta switch + `show_pricing`; never browser-readable), `client_configs` (per-tenant white-label config; read via the `get_config` RPC with owner-scoped RLS — **not** anon public-read after cutover), `client_users` (auth user → tenant mapping), and the per-tenant **catalog/pricing** tables `building_styles` / `building_sizes` / `colors` / `layout_item_pricing` (private-by-default, owner-scoped RLS; the public designer reads them via the `get_catalog` RPC, which **omits all price fields unless the tenant's `show_pricing` is on**). NULL-base-price contract: `base_price IS NULL` = not-yet-priced ⇒ the size is `active=false` and not offered; `0` = included/free; `>0` = priced.
 
 Edge functions (sources mirrored in `supabase/functions/`, deployed via Supabase MCP — **redeploy after editing the checked-in source**):
 - `submit-estimate` — creates/updates the GHL contact, opportunity, estimate, and emails it. Business identity (name/phone/website/address/logo/terms) comes from `client_settings.business_*`; beta mode (`beta_mode`/`beta_email` or request `betaMode`) redirects the estimate email to a test inbox.
 - `portal-settings` — owner-facing settings read/save. JWT-authenticated: `verify_jwt` alone is NOT auth (the anon key passes the gateway) — the function resolves a real user via `auth.getUser()` and maps it through `client_users`; `client_id` is never trusted from the body. The GHL API key is write-only (masked status, absent/empty never blanks it).
 - `admin-save-settings` — operator bootstrap tool behind the shared `ADMIN_PASSWORD` secret (used by the designer's `?admin=1` panel).
 
-SQL migrations live in `supabase/migrations/` (001–004 applied; **005_cutover.sql is NOT applied** — see below).
+SQL migrations live in `supabase/migrations/`. `001`–`011` are live; `000` + `012`–`014` are additive / lock only the inert catalog and are **safe to apply but not yet applied**; **`005_cutover.sql` and `015_config_rls_scope.sql` are cutover-gated** (apply only after the new frontend is on production). See below and `CUTOVER_HANDOFF.md`. ⚠ Never `supabase db push` until the migration history is reconciled — it would re-run `008`–`011`'s `DROP TABLE … recreate` and wipe the catalog; hand-apply via the SQL Editor.
 
 ### ⚠ Cutover state (read before touching RLS)
 
-The legacy open policies (`designs_anon_all` on `public.designs`, `floor_plans_public_all` on storage) are **still in place** because the live site is built from GitHub `main`, which may still serve the old direct-table frontend. After the new frontend is pushed and deployed (verify the console marker `[StructureStudio] multi-tenant build` on the live site), run `supabase/migrations/005_cutover.sql` to drop them. Until then, anon can still read all designs — the cutover is the step that actually enforces isolation against the anon key.
+Three anon-open surfaces are **still in place** because the live site is built from GitHub `main`, which may still serve the old direct-table frontend: `designs_anon_all` on `public.designs`, `floor_plans_public_all` on storage, and the anon public-read on `client_configs`. After the new frontend (config via the `get_config` RPC; PDFs written under `{client_id}/`) is deployed to **production** (verify the console marker `[StructureStudio] multi-tenant build` on the live site), run `005_cutover.sql` **and** `015_config_rls_scope.sql` to drop them + re-path storage. Until then, anon can still read all designs and all configs — the cutover is the step that actually enforces isolation against the anon key. The catalog lockdown (`012`) is safe to apply earlier (those tables are inert).
 
 ## Runtime configuration model
 
@@ -97,7 +97,7 @@ Adding a new item type usually means adding an entry to `layoutItems` + any new 
 
 ## Submit flow
 
-`submitQuote()`: validates contact/selections → renders the canvas → wraps the JPEG into a single-page PDF client-side → uploads to the `floor-plans` storage bucket as `{shortCode}.pdf` → saves the design via the `save_design` RPC → updates the URL to `?client=<id>&id=<code>` → invokes the `submit-estimate` edge function. Payload shape is consumed downstream, so treat it as a contract:
+`submitQuote()`: validates contact/selections → renders the canvas → wraps the JPEG into a single-page PDF client-side → uploads to the `floor-plans` storage bucket as `{clientId}/{shortCode}.pdf` (per-tenant prefix; the cutover storage policy enforces this shape) → saves the design via the `save_design` RPC → updates the URL to `?client=<id>&id=<code>` → invokes the `submit-estimate` edge function. Payload shape is consumed downstream, so treat it as a contract:
 
 - `designId` — short code (e.g. `SS-NR4DV8XK2P`) that keys the design in Supabase
 - `imageUrl` — public Storage URL of the rendered PDF
@@ -113,8 +113,8 @@ The edge function returns GHL ids (`contactId`, `estimateId`, `estimateNumber`, 
 
 ## Cutover checklist (run once, after deploying the new frontend)
 
-1. Open the live site; confirm the console logs `[StructureStudio] multi-tenant build: config-loader + RPC data path` and a `?id=` load hits `/rest/v1/rpc/load_design` in devtools Network.
-2. Apply `supabase/migrations/005_cutover.sql` (drops `designs_anon_all` + `floor_plans_public_all`, adds scoped storage policies).
-3. Smoke: load an old `?id=` design; submit a new design on `?client=junior-barns`; portal lists it; resubmit updates the same estimate.
-4. Negative: from a console with only the anon key, `from("designs").select("*")` returns zero rows; storage upload to a non-code filename fails.
+1. Open the live site; confirm the console logs `[StructureStudio] multi-tenant build: config-loader + RPC data path`, that config now loads via `/rest/v1/rpc/get_config` (not `/rest/v1/client_configs`), and a `?id=` load hits `/rest/v1/rpc/load_design` in devtools Network.
+2. Apply `005_cutover.sql` (drops `designs_anon_all` + `floor_plans_public_all`, adds client-prefixed storage policies) **and** `015_config_rls_scope.sql` (revokes anon read on `client_configs`, adds owner-scoped read). Then re-path existing storage files under `{client_id}/` via **copy** (never move/delete) and update `designs.image_url` — see `CUTOVER_HANDOFF.md` Task 3.
+3. Smoke: load an old `?id=` design; submit a new design on `?client=junior-barns` (PDF lands at `floor-plans/junior-barns/SS-….pdf`); portal lists it; resubmit updates the same estimate.
+4. Negative: from a console with only the anon key, `from("designs").select("*")`, `from("client_configs").select("*")`, and `from("building_styles").select("*")` all return zero rows; `rpc("get_config",{p_client_id:"junior-barns"})` returns the config; storage upload to a non-prefixed/non-code filename fails.
 5. Run the Supabase security advisors and clear anything new.

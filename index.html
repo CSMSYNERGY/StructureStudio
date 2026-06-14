@@ -1323,7 +1323,9 @@ function StructureStudioInner({ config }) {
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
       const shortCode = currentDesignIdRef.current || genShortCode();
-      const filePath = `${shortCode}.pdf`;
+      // Store the PDF under a per-tenant prefix ({client_id}/<code>.pdf) so every
+      // file is tagged to its tenant; the cutover storage policy enforces this shape.
+      const filePath = `${C.clientId}/${shortCode}.pdf`;
 
       // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
@@ -2382,23 +2384,25 @@ function StructureStudio({ config: configProp = null }) {
           }
         }
         if (!clientId) clientId = DEFAULT_CLIENT_ID;
-        const { data, error } = await sb
-          .from("client_configs")
-          .select("config")
-          .eq("client_id", clientId)
-          .maybeSingle();
+        // Fetch this tenant's config via the get_config RPC (capability read),
+        // not a direct client_configs table query: anon can no longer bulk-read
+        // every tenant's config — only the one client_id it asks for. The RPC is
+        // SECURITY DEFINER, so it keeps working after the table's anon SELECT is
+        // revoked at cutover. Returns the config jsonb, or null for an unknown
+        // client (→ the error screen, same as a missing row used to do).
+        const { data: cfg, error } = await sb.rpc("get_config", { p_client_id: clientId });
         if (cancelled) return;
-        if (error || !data || !data.config) {
+        if (error || !cfg) {
           console.warn(`Could not load config for client "${clientId}":`, error);
           setState({ status: "error", clientId, message: (error && error.message) || "Configuration not found." });
           return;
         }
-        const missing = REQUIRED_CONFIG_KEYS.filter((k) => !data.config[k]);
+        const missing = REQUIRED_CONFIG_KEYS.filter((k) => !cfg[k]);
         if (missing.length > 0) {
           setState({ status: "error", clientId, message: `Configuration row is incomplete (missing: ${missing.join(", ")}).` });
           return;
         }
-        setState({ status: "ready", config: { ...data.config, clientId } });
+        setState({ status: "ready", config: { ...cfg, clientId } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);
