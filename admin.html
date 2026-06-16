@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio — Operator Admin</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC;color:#1E293B}#root{max-width:1040px;margin:0 auto}</style>
+</head><body><div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const { createClient } = window.supabase;
+
+// ─── StructureStudio Operator Admin ───
+// Standalone app-creator page (no .jsx twin, like portal.html). Assigns master
+// building styles + layout items to each client, and manages the global master
+// catalog. Gated by the shared ADMIN_PASSWORD edge-function secret — entered
+// here, held only in memory, sent with every admin-catalog call. The anon key
+// is used solely to invoke the edge function; ALL data work happens server-side
+// (service role) in the admin-catalog function.
+
+const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const ACCENT = "#92400E";
+const S = {
+  header: { background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  badge: { background: ACCENT, borderRadius: 8, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 15 },
+  wrap: { padding: 20 },
+  card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 18, marginBottom: 14 },
+  h2: { fontSize: 14, fontWeight: 800, letterSpacing: 0.3, marginBottom: 10 },
+  lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 },
+  input: { border: "1px solid #CBD5E1", borderRadius: 6, padding: "7px 9px", fontSize: 13, fontWeight: 600, background: "#FFF", boxSizing: "border-box" },
+  btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
+  tab: (on) => ({ padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155" }),
+  pill: (on) => ({ padding: "6px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? "#FFFBEB" : "#FFF", color: on ? ACCENT : "#64748B" }),
+  err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  ok:  { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  row: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" },
+};
+
+function api(action, password, body) {
+  return sb.functions.invoke("admin-catalog", { body: { action, adminPassword: password, ...(body || {}) } })
+    .then(({ data, error }) => {
+      if (error) throw new Error(error.message || "request failed");
+      if (data && data.error) throw new Error(data.error);
+      return data;
+    });
+}
+
+function AdminApp() {
+  const [pwd, setPwd] = useState("");
+  const [authed, setAuthed] = useState(false);
+  const [clients, setClients] = useState([]);
+  const [master, setMaster] = useState(null);
+  const [sel, setSel] = useState("");
+  const [cat, setCat] = useState(null);
+  const [tab, setTab] = useState("items");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
+
+  const login = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const c = await api("list_clients", pwd);
+      const m = await api("get_master", pwd);
+      setClients(c.clients || []); setMaster(m); setAuthed(true);
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  const loadClient = async (cid) => {
+    setSel(cid); setCat(null); if (!cid) return;
+    setBusy(true);
+    try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
+    catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  const act = async (action, body, ok) => {
+    setBusy(true); setMsg(null);
+    try {
+      await api(action, pwd, body);
+      if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));
+      const m = await api("get_master", pwd); setMaster(m);
+      flash({ ok: ok || "Saved" });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+
+  if (!authed) {
+    return (
+      <div>
+        <div style={S.header}><div style={S.badge}>SS</div><div style={{ fontWeight: 800 }}>Operator Admin</div></div>
+        <div style={{ ...S.wrap, maxWidth: 420 }}>
+          <div style={S.card}>
+            <div style={S.h2}>🔒 Enter operator password</div>
+            {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+            <input type="password" value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="ADMIN_PASSWORD"
+              onKeyDown={(e) => e.key === "Enter" && pwd && login()} style={{ ...S.input, width: "100%", marginBottom: 10 }} />
+            <button onClick={login} disabled={busy || !pwd} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "…" : "Unlock"}</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const styleAssigned = (key) => (cat?.buildingStyles || []).some((s) => s.key === key && s.active);
+  const itemAssigned  = (key) => (cat?.clientLayoutItems || []).some((i) => i.item_key === key && i.active);
+
+  return (
+    <div>
+      <div style={S.header}><div style={S.badge}>SS</div><div style={{ fontWeight: 800 }}>Operator Admin</div>
+        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} clients</div></div>
+      <div style={S.wrap}>
+        {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+        {msg && msg.ok && <div style={S.ok}>{msg.ok}</div>}
+
+        <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={S.lbl}>Client</span>
+          <select value={sel} onChange={(e) => loadClient(e.target.value)} style={{ ...S.input, minWidth: 240 }}>
+            <option value="">— select a client —</option>
+            {clients.map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id} ({c.client_id})</option>)}
+          </select>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
+            <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
+            <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Catalog</div>
+          </div>
+        </div>
+
+        {tab === "master" && master && (
+          <div style={S.card}>
+            <div style={S.h2}>🧱 Master layout items</div>
+            {master.layoutItemTypes.map((it) => (
+              <div key={it.item_key} style={S.row}>
+                <span style={{ fontSize: 16 }}>{it.icon}</span>
+                <b style={{ minWidth: 120 }}>{it.item_key}</b>
+                <span style={{ color: "#64748B" }}>{it.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>
+                  {it.default_width}×{it.default_height}ft {it.wall_only ? "· wallOnly" : ""}{it.wall_snap ? "· wallSnap" : ""}{it.door_snap ? "· doorSnap" : ""}{it.active ? "" : " · INACTIVE"}
+                </span>
+              </div>
+            ))}
+            <div style={{ ...S.h2, marginTop: 18 }}>🏠 Master building styles</div>
+            {master.buildingStyleCatalog.map((st) => (
+              <div key={st.key} style={S.row}>
+                <b style={{ minWidth: 120 }}>{st.key}</b>
+                <span style={{ color: "#64748B" }}>{st.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>
+                  {master.catalogSizes.filter((z) => z.style_key === st.key).length} default sizes{st.active ? "" : " · INACTIVE"}
+                </span>
+              </div>
+            ))}
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Editing master defs affects every client via inheritance. (Add/edit forms can be wired to <code>save_master_item</code> / <code>save_master_style</code>.)</div>
+          </div>
+        )}
+
+        {tab !== "master" && !sel && <div style={S.card}>Select a client above to manage their styles and items.</div>}
+
+        {tab === "items" && sel && cat && master && (
+          <div style={S.card}>
+            <div style={S.h2}>Layout items for <span style={{ color: ACCENT }}>{sel}</span></div>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Tick the placeable items this client gets.</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {master.layoutItemTypes.map((it) => {
+                const on = itemAssigned(it.item_key);
+                return (
+                  <div key={it.item_key} style={S.pill(on)}
+                    onClick={() => !busy && act("toggle_item", { clientId: sel, itemKey: it.item_key, active: !on }, on ? "Removed" : "Added")}>
+                    <span style={{ marginRight: 6 }}>{it.icon}</span>{it.label} {on ? "✓" : ""}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab === "styles" && sel && cat && master && (
+          <div style={S.card}>
+            <div style={S.h2}>Building styles for <span style={{ color: ACCENT }}>{sel}</span></div>
+            {master.buildingStyleCatalog.map((st) => {
+              const on = styleAssigned(st.key);
+              const row = (cat.buildingStyles || []).find((s) => s.key === st.key);
+              const sizes = row ? (cat.buildingSizes || []).filter((z) => z.style_id === row.id) : [];
+              return (
+                <div key={st.key} style={{ borderBottom: "1px solid #F1F5F9", padding: "10px 0" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={S.pill(on)} onClick={() => !busy && act(on ? "unassign_style" : "assign_style", { clientId: sel, styleKey: st.key }, on ? "Unassigned" : "Assigned")}>
+                      {on ? "✓ Assigned" : "Assign"}
+                    </div>
+                    <b style={{ minWidth: 110 }}>{st.key}</b><span style={{ color: "#64748B" }}>{st.label}</span>
+                  </div>
+                  {on && sizes.length > 0 && (
+                    <div style={{ marginTop: 8, paddingLeft: 10 }}>
+                      <span style={S.lbl}>Sizes &amp; base prices</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                        {sizes.map((z) => (
+                          <span key={z.id} style={{ fontSize: 12, padding: "3px 8px", borderRadius: 6, background: z.active ? "#F1F5F9" : "#FEF2F2", color: z.active ? "#334155" : "#B91C1C" }}>
+                            {z.label}: {z.base_price == null ? "—" : "$" + z.base_price}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<AdminApp />);
+</script>
+</body></html>
