@@ -1638,7 +1638,9 @@ function StructureStudioInner({ config }) {
     <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: "100vh" }}>
       {/* Header */}
       <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>SS</div>
+        {C.branding.logo
+          ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
+          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>SS</div>}
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>StructureStudio</div>
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.companyName} — {C.branding.tagline || "Design & Quote"}</div>

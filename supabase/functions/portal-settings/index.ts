@@ -75,6 +75,12 @@ Deno.serve(async (req: Request) => {
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);
+    // Designer branding lives in client_configs (drives the public ?client= link).
+    const { data: cfg } = await admin
+      .from("client_configs")
+      .select("company_name, tagline, logo_url, accent_color, header_bg")
+      .eq("client_id", clientId)
+      .maybeSingle();
     return json({
       ok: true,
       clientId,
@@ -93,6 +99,14 @@ Deno.serve(async (req: Request) => {
       betaMode: Boolean(data?.beta_mode),
       betaEmail: data?.beta_email ?? null,
       updatedAt: data?.updated_at ?? null,
+      // designer branding (client_configs)
+      branding: {
+        companyName: cfg?.company_name ?? null,
+        tagline: cfg?.tagline ?? null,
+        logoUrl: cfg?.logo_url ?? null,
+        accentColor: cfg?.accent_color ?? null,
+        headerBg: cfg?.header_bg ?? null,
+      },
     });
   }
 
@@ -131,6 +145,39 @@ Deno.serve(async (req: Request) => {
       .upsert(updates, { onConflict: "client_id" });
     if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
     return json({ ok: true });
+  }
+
+  // Designer branding save → writes client_configs (the public ?client= link).
+  // Optionally uploads a logo image (base64) to the public 'branding' bucket.
+  if (action === "save_branding") {
+    const trimOrNull = (v: unknown) => { const s = String(v ?? "").trim(); return s ? s : null; };
+    const updates: Record<string, unknown> = {};
+    if ("companyName" in payload) updates.company_name = trimOrNull(payload.companyName);
+    if ("tagline" in payload)     updates.tagline      = trimOrNull(payload.tagline);
+    if ("accentColor" in payload) updates.accent_color = trimOrNull(payload.accentColor);
+    if ("headerBg" in payload)    updates.header_bg    = trimOrNull(payload.headerBg);
+
+    if (typeof payload.logoBase64 === "string" && payload.logoBase64.trim()) {
+      const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
+      const ct = String(payload.logoContentType || "image/png");
+      const ext = (ct.split("/")[1] || "png").split("+")[0].replace(/[^a-z0-9]/gi, "") || "png";
+      let bytes: Uint8Array;
+      try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
+      catch { return json({ error: "Invalid logo data." }, 400); }
+      if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
+      const path = `${clientId}/logo-${Date.now()}.${ext}`;
+      const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+      if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
+      const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+      updates.logo_url = pub.publicUrl;
+    } else if ("logoUrl" in payload) {
+      updates.logo_url = trimOrNull(payload.logoUrl); // allow setting/clearing by URL
+    }
+
+    if (Object.keys(updates).length === 0) return json({ error: "Nothing to save." }, 400);
+    const { error: upErr } = await admin.from("client_configs").update(updates).eq("client_id", clientId);
+    if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
+    return json({ ok: true, logoUrl: updates.logo_url ?? null });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);

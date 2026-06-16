@@ -243,10 +243,38 @@ function SettingsView() {
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "",
+    // designer branding (client_configs — drives the public ?client= link)
+    brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
   const set = (k) => (e) => {
     const v = e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e;
     setForm((p) => ({ ...p, [k]: v }));
+  };
+  // Branding logo upload state (separate save → client_configs via save_branding)
+  const [logoDataUrl, setLogoDataUrl] = useState("");   // new upload preview/payload
+  const [logoCt, setLogoCt] = useState("");
+  const [currentLogo, setCurrentLogo] = useState(null);  // saved logo from status
+  const [brandBusy, setBrandBusy] = useState(false);
+  const [brandMsg, setBrandMsg] = useState(null);
+  const onLogoFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 2_000_000) { setBrandMsg({ err: "Logo must be under 2MB." }); return; }
+    const r = new FileReader();
+    r.onload = () => { setLogoDataUrl(r.result); setLogoCt(f.type || "image/png"); setBrandMsg(null); };
+    r.readAsDataURL(f);
+  };
+  const saveBranding = async () => {
+    setBrandBusy(true); setBrandMsg(null);
+    const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
+      accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+    if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    setBrandBusy(false);
+    if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
+    setBrandMsg({ ok: "Branding saved — your designer link now reflects it." });
+    if (data.logoUrl) setCurrentLogo(data.logoUrl);
+    setLogoDataUrl(""); setLogoCt("");
   };
 
   useEffect(() => {
@@ -255,6 +283,8 @@ function SettingsView() {
       if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
       setStatus(data);
       const a = data.businessAddress || {};
+      const b = data.branding || {};
+      setCurrentLogo(b.logoUrl || null);
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
@@ -265,6 +295,8 @@ function SettingsView() {
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
         betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "",
+        brandName: b.companyName || "", brandTagline: b.tagline || "",
+        brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
     })();
   }, []);
@@ -322,6 +354,40 @@ function SettingsView() {
           <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
             <input style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
         </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Designer Branding (your customer link)</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+          Shown on your public designer link.{status && status.clientId && <> <a href={`/?client=${status.clientId}`} target="_blank" rel="noreferrer" style={{ color: ACCENT, fontWeight: 700 }}>Preview ↗</a></>}
+        </p>
+        {brandMsg && brandMsg.err && <div style={S.err}>{brandMsg.err}</div>}
+        {brandMsg && brandMsg.ok && <div style={S.okMsg}>{brandMsg.ok}</div>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} /></div>
+          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} placeholder="Design & Quote" /></div>
+          <div><span style={S.lbl}>Accent color</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
+              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} /></div></div>
+          <div><span style={S.lbl}>Header background</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
+              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} /></div></div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <span style={S.lbl}>Logo</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ width: 96, height: 64, borderRadius: 8, border: "1px solid #E2E8F0", background: form.brandHeaderBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+              {(logoDataUrl || currentLogo)
+                ? <img src={logoDataUrl || currentLogo} alt="logo" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+                : <span style={{ color: "#94A3B8", fontSize: 11 }}>no logo</span>}
+            </div>
+            <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
+          </div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / SVG / WebP, under 2MB. Preview shows it on your header color.</div>
+        </div>
+        <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
       </div>
 
       <div style={S.card}>
