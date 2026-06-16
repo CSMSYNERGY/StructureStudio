@@ -412,7 +412,11 @@ Deno.serve(async (req: Request) => {
 
   const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
   const estimateName = `${firstName} - ${style} ${size}`.trim();
-  const uniqueSequence = Math.floor(10000 + Math.random() * 90000);
+  // Collision-resistant invoice sequence: low 8 digits of the epoch-ms clock
+  // (unique within any ~28h window) + 2 random digits to cover two submissions
+  // landing in the same millisecond. Replaces a plain 5-digit random, which by
+  // the birthday bound collided after only a few hundred estimates.
+  const uniqueSequence = (Date.now() % 100_000_000) * 100 + Math.floor(Math.random() * 100);
 
   const finalPayload: any = {
     altId: dynamicLocationId,

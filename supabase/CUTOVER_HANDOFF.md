@@ -1,20 +1,30 @@
 # Supabase Cutover & Migration Handoff
 
-> ## ✅ CUTOVER COMPLETE — 2026-06-14
-> The new multi-tenant frontend is deployed to **production** (`main` → `structurestudio.app`)
-> and the full cutover ran: migrations `000`/`005`/`012`/`013`/`014`/`015` are **applied to
-> live**. Verified: every public table has RLS on with **zero anon-readable policies** — anon
-> reaches data only via `get_config`/`get_catalog`/`load_design`. No data lost (38 designs, 3
-> configs; backups in `D:\CSM Synergy\ss_backup_*`). **Task 1 (cutover) and Task 3 (apply new
-> migrations) are DONE.** The ONLY remaining item is **Task 2 — reconcile migration history**
-> (bookkeeping; ⚠ do NOT `supabase db push` until it's done). Optional cleanup: re-path the
-> pre-cutover floor-plan files under `{client_id}/` (Task 3 step 2 — old root files still work).
+> ## ✅ CUTOVER COMPLETE — 2026-06-14 · catalog refactor + cleanup — 2026-06-16
+> The multi-tenant frontend is live and the full cutover ran: migrations
+> `000`/`005`/`012`/`013`/`014`/`015` are **applied to live**. Since then the
+> **per-client catalog refactor** also landed and is verified live: `016`–`021`
+> — master catalog tables + RLS (`016`/`017`), seed/reconcile from the existing
+> configs (`018`), `get_config` rebuilt to read the relational tables instead of
+> the jsonb blob (`019`), the `client_configs.building_styles`/`layout_items`
+> columns **dropped** (`020`), and the public `branding` storage bucket (`021`).
+> The two rollback backup tables (`client_configs_bak_20260615`,
+> `client_configs_styleitem_backup`) were exported to `D:\CSM Synergy\ss_archive_*`
+> and **dropped 2026-06-16**. Verified live: every public table has RLS on with
+> **zero anon-readable policies** — anon reaches data only via
+> `get_config`/`get_catalog`/`load_design`. No data lost. **The ONLY remaining
+> item is Task 2 — reconcile migration history** (bookkeeping; ⚠ never
+> `supabase db push` until it's done — it would re-run the `008`–`011` and `016`+
+> `DROP/recreate` migrations and wipe the seeded catalog). Optional cleanup:
+> re-path the pre-cutover floor-plan files under `{client_id}/` (Task 3 step 2 —
+> old root files still work).
 
-**Prepared 2026-06-12; updated 2026-06-14.** The per-tenant isolation work
-(migrations `000`/`012`/`013`/`014`/`015`, the `005` storage edit, and the
-`get_config` front-end swap) is now **fully applied to** the live DB
-(`jzeamjbhdrsbygdnphbm`). The only outstanding task is (2) reconciling the
-**migration history** (see Task 2). Tasks 1 and 3 are complete (banner above).
+**Prepared 2026-06-12; updated 2026-06-16.** The per-tenant isolation work
+(migrations `000`/`005`/`012`/`013`/`014`/`015`, the `get_config` front-end swap)
+**and** the per-client catalog refactor (`016`–`021`) are now **fully applied to**
+the live DB (`jzeamjbhdrsbygdnphbm`), and the two backup tables have been dropped.
+The only outstanding task is (2) reconciling the **migration history** (see
+Task 2). Tasks 1 and 3 are complete (banner above).
 
 > You'll need your own access. Either `supabase login` (browser flow) or a
 > Personal Access Token (Account → Access Tokens) for the Management API. The
@@ -24,21 +34,21 @@
 
 ## Verified current state
 
-- **All expected tables exist and are seeded.** `designs` (38 rows),
-  `client_configs` (3), `client_settings` (3), `client_users` (2), plus the
-  catalog/pricing tables `building_styles` (4), `building_sizes` (34),
-  `colors` (2), `layout_item_pricing` (8). Migrations 006–010 are live; `011`
-  (building_sizes client_id) also landed on live — as **two** migrations (an
-  additive add then a recreate-reorder), see Task 2.
-- **RLS is enabled on every table** — but see the open policies below.
-- **The cutover has NOT run.** These legacy open policies are still live:
-  | Policy | Object | Grant | Effect |
-  |---|---|---|---|
-  | `designs_anon_all` | `public.designs` | `ALL` to `anon`, `qual = true` | anon key can read/write/delete **all** designs across all tenants |
-  | `floor_plans_public_all` | `storage.objects` | `ALL` to `public` | anyone can read/write/delete any file in `floor-plans` |
-
-  Until these are dropped, tenant isolation is **not** enforced against the anon
-  key, even though the `load_design`/`save_design` RPCs exist.
+- **All expected tables exist and are seeded.** `designs`, `client_configs` (3),
+  `client_settings` (3), `client_users` (2), the catalog/pricing tables
+  `building_styles`/`building_sizes`/`colors`/`layout_item_pricing`, and the
+  master-catalog tables `layout_item_types` (7), `building_style_catalog` (4) +
+  `building_style_catalog_sizes`, and `client_layout_items` (21 assignments).
+- **RLS is enabled on every table with zero anon-readable policies.** The legacy
+  open policies `designs_anon_all` and `floor_plans_public_all` have been
+  **dropped**, and anon read on `client_configs` is **revoked**. Storage exposes
+  only the code-shaped `floor_plans_code_insert`/`floor_plans_code_update`
+  policies. Anon reaches data only through `get_config`/`get_catalog`/`load_design`;
+  authenticated owners are RLS-confined to their own `current_client_id()`.
+- **`get_config` builds the config blob from the relational tables** (`016`–`019`):
+  `buildingStyles` from `building_styles`+`building_sizes`, `layoutItems` from
+  `client_layout_items`⨝`layout_item_types`. The old `client_configs.building_styles`/
+  `layout_items` jsonb columns were dropped in `020`.
 
 ---
 
@@ -116,10 +126,19 @@ green from-zero replay needs them backfilled via `db pull`.
 | `012_catalog_rls_scope` *(new)* | *(none — apply)* |
 | `013_deactivate_unpriced_sizes` *(new)* | *(none — apply)* |
 | `014_get_config_rpc` *(new)* | *(none — apply)* |
-| `015_config_rls_scope` *(new)* | *(none — cutover-gated, apply with Task 1)* |
+| `015_config_rls_scope` *(new)* | *(none — applied with the cutover)* |
+| `016_catalog_master` *(new)* | *(none — applied; master catalog tables)* |
+| `017_catalog_master_rls` *(new)* | *(none — applied; master-table RLS lockdown)* |
+| `018_catalog_master_seed` *(new)* | *(none — applied; seed + reconcile)* |
+| `019_get_config_from_tables` *(new)* | *(none — applied; `get_config` reads tables)* |
+| `020_drop_config_style_item_cols` *(new)* | *(none — applied; ⚠ drops jsonb cols)* |
+| `021_branding_bucket` *(new)* | *(none — applied; `branding` storage bucket)* |
 
 Note `011` collapses what live recorded as two migrations; when reconciling,
-mark BOTH remote versions applied for the single repo file.
+mark BOTH remote versions applied for the single repo file. `016`–`021` were
+hand-applied via `db query` (not recorded in `supabase_migrations`) — mark them
+applied during reconciliation. ⚠ `018` re-seeds and `020` drops columns, so a
+blind `db push` re-running them would corrupt the catalog; reconcile first.
 
 ### Recommended approach
 1. **Back up first:**
@@ -175,8 +194,8 @@ The new front-end (config-loader reads via `get_config`, uploads to
 `{client_id}/<code>.pdf`) is on **beta** and verified against live `get_config`
 (designer loads). Deploy to **production** before Group B.
 
-### Group B — CUTOVER-GATED (apply only after the new front-end is live on production)
-Run together with Task 1:
+### Group B — CUTOVER-GATED  ✅ APPLIED TO LIVE 2026-06-14
+Ran together with Task 1 (kept below for reference):
 1. `005_cutover.sql` (now also requires the client-prefixed storage path) and
    `015_config_rls_scope.sql` (revokes anon's `client_configs` read).
 2. **Re-path existing storage files via COPY (never move/delete):** for each
