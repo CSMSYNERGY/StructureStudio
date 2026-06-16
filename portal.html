@@ -367,9 +367,11 @@ function Dashboard({ session }) {
       const { data: mapping, error } = await sb.from("client_users").select("client_id, role").maybeSingle();
       if (error || !mapping) { setTenant("none"); return; }
       let businessName = mapping.client_id;
-      const { data: cfg } = await sb.from("client_configs").select("config").eq("client_id", mapping.client_id).maybeSingle();
-      if (cfg && cfg.config && cfg.config.branding && cfg.config.branding.companyName) {
-        businessName = cfg.config.branding.companyName;
+      // client_configs is now column-structured (no monolithic `config` blob);
+      // read the dedicated company_name column for the dashboard heading.
+      const { data: cfg } = await sb.from("client_configs").select("company_name").eq("client_id", mapping.client_id).maybeSingle();
+      if (cfg && cfg.company_name) {
+        businessName = cfg.company_name;
       }
       setTenant({ clientId: mapping.client_id, businessName });
     })();
