@@ -276,6 +276,23 @@ function SettingsView() {
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
     setLogoDataUrl(""); setLogoCt("");
   };
+  // Business-logo (estimates) upload → uploads to the branding bucket and fills
+  // the Logo URL field with the public URL; persisted by the normal Save action.
+  const [bizLogoBusy, setBizLogoBusy] = useState(false);
+  const onBizLogoFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 2_000_000) { setError("Logo must be under 2MB."); return; }
+    const r = new FileReader();
+    r.onload = async () => {
+      setBizLogoBusy(true); setError(null);
+      const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "upload_logo", kind: "business", logoBase64: r.result, logoContentType: f.type || "image/png" } });
+      setBizLogoBusy(false);
+      if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+      setForm((p) => ({ ...p, businessLogoUrl: data.url }));
+    };
+    r.readAsDataURL(f);
+  };
 
   useEffect(() => {
     (async () => {
@@ -396,7 +413,17 @@ function SettingsView() {
           <div><span style={S.lbl}>Business name</span><input style={S.input} value={form.businessName} onChange={set("businessName")} /></div>
           <div><span style={S.lbl}>Phone</span><input style={S.input} value={form.businessPhone} onChange={set("businessPhone")} placeholder="+17075551234" /></div>
           <div><span style={S.lbl}>Website</span><input style={S.input} value={form.businessWebsite} onChange={set("businessWebsite")} placeholder="yourbusiness.com" /></div>
-          <div><span style={S.lbl}>Logo URL</span><input style={S.input} value={form.businessLogoUrl} onChange={set("businessLogoUrl")} placeholder="https://…/logo.png" /></div>
+          <div><span style={S.lbl}>Logo URL</span>
+            <input style={S.input} value={form.businessLogoUrl} onChange={set("businessLogoUrl")} placeholder="https://…/logo.png" />
+            <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: ACCENT, cursor: bizLogoBusy ? "wait" : "pointer" }}>
+                {bizLogoBusy ? "Uploading…" : "⬆ Upload image"}
+                <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={onBizLogoFile} disabled={bizLogoBusy} style={{ display: "none" }} />
+              </label>
+              <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste a URL above</span>
+              {form.businessLogoUrl && <img src={form.businessLogoUrl} alt="" style={{ height: 24, maxWidth: 90, objectFit: "contain", borderRadius: 4, border: "1px solid #E2E8F0" }} />}
+            </div>
+          </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
           <div><span style={S.lbl}>Street address</span><input style={S.input} value={form.addr1} onChange={set("addr1")} /></div>

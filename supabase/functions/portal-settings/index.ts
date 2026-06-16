@@ -180,5 +180,25 @@ Deno.serve(async (req: Request) => {
     return json({ ok: true, logoUrl: updates.logo_url ?? null });
   }
 
+  // Upload-only: store an image in the 'branding' bucket and return its public
+  // URL (no DB write). Used by the "Upload image" buttons; the returned URL is
+  // placed into a form field and persisted by the normal save action.
+  if (action === "upload_logo") {
+    if (typeof payload.logoBase64 !== "string" || !payload.logoBase64.trim()) return json({ error: "No logo data." }, 400);
+    const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.logoContentType || "image/png");
+    const ext = (ct.split("/")[1] || "png").split("+")[0].replace(/[^a-z0-9]/gi, "") || "png";
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
+    catch { return json({ error: "Invalid logo data." }, 400); }
+    if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
+    const prefix = payload.kind === "business" ? "biz-logo" : "logo";
+    const path = `${clientId}/${prefix}-${Date.now()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
   return json({ error: `Unknown action "${action}".` }, 400);
 });
