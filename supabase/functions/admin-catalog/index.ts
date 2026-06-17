@@ -27,6 +27,16 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
+// Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
+// write/upload can never land under a typo'd or malformed tenant prefix.
+async function assertClient(sb: any, clientId: string) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("invalid client id");
+  const { data, error } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error("unknown client");
+  return clientId;
+}
+
 // Shared CSV pricing + inclusion importer (also used by portal-settings).
 // rows: [{ style, size, price, inclusions: { item_key: yes/no } }]. Resolves
 // style by label OR key and size by label (case-insensitive). Blank price =>
@@ -197,32 +207,43 @@ Deno.serve(async (req: Request) => {
       // their own "garage"/"studio" with their own image + prices), so this
       // creates a style straight on the client, deriving a unique per-client key.
       case "create_style": {
-        const clientId = reqStr(p.clientId, "clientId");
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const label    = reqStr(p.label, "label");
-        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "style";
+        const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
+        // Reserve master catalog keys: a created style must not share a key with
+        // a master style, else a later assign_style upsert would overwrite it.
+        const masterKeys = new Set<string>();
+        const mk = await sb.from("building_style_catalog").select("key");
+        if (mk.error) throw mk.error;
+        for (const m of mk.data ?? []) masterKeys.add(String(m.key));
+        // INSERT (not upsert) so a concurrent same-key create surfaces as a 23505
+        // we retry — never a silent overwrite of an existing style.
         let key = base, n = 1;
-        // ensure the key is free for this client (unique on client_id,key)
-        while (true) {
-          const ex = await sb.from("building_styles").select("key").eq("client_id", clientId).eq("key", key).maybeSingle();
-          if (ex.error) throw ex.error;
-          if (!ex.data) break;
+        for (let attempt = 0; attempt < 50; attempt++) {
+          if (masterKeys.has(key)) { key = `${base}-${++n}`; continue; }
+          const ins = await sb.from("building_styles").insert(
+            { client_id: clientId, key, label, image_url: p.imageUrl ?? null,
+              sort_order: Number.isFinite(p.sortOrder) ? p.sortOrder : 0, active: true })
+            .select("id, key").maybeSingle();
+          if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
+          if (ins.error.code !== "23505") throw ins.error;
           key = `${base}-${++n}`;
         }
-        const up = await sb.from("building_styles").upsert(
-          { client_id: clientId, key, label, image_url: p.imageUrl ?? null,
-            sort_order: Number.isFinite(p.sortOrder) ? p.sortOrder : 0, active: true },
-          { onConflict: "client_id,key" }).select("id, key").maybeSingle();
-        if (up.error) throw up.error;
-        return json({ ok: true, styleId: up.data!.id, key: up.data!.key });
+        throw new Error("could not allocate a unique style key");
       }
       // Upload a building-style image (base64) to the public 'branding' bucket
       // and return its public URL; the caller stores it via create_style/save_style.
       case "upload_image": {
-        const clientId = reqStr(p.clientId, "clientId");
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         if (typeof p.imageBase64 !== "string" || !p.imageBase64.trim()) throw new Error("No image data.");
-        const rawB64 = p.imageBase64.replace(/^data:[^;]+;base64,/, "");
+        // Raster allowlist only — reject SVG (script-bearing stored-XSS vector on
+        // the public branding bucket) and any other caller-asserted type.
         const ct = String(p.contentType || "image/jpeg");
-        const ext = (ct.split("/")[1] || "jpg").split("+")[0].replace(/[^a-z0-9]/gi, "") || "jpg";
+        const EXT_BY_CT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+        const ext = EXT_BY_CT[ct];
+        if (!ext) throw new Error("Unsupported image type (use JPG, PNG, WEBP or GIF).");
+        const rawB64 = p.imageBase64.replace(/^data:[^;]+;base64,/, "");
+        if (rawB64.length > 4_200_000) throw new Error("Image too large (max 3MB)."); // guard before the full atob decode
         let bytes: Uint8Array;
         try { bytes = Uint8Array.from(atob(rawB64), (c) => c.charCodeAt(0)); } catch { throw new Error("Invalid image data."); }
         if (bytes.length > 3_000_000) throw new Error("Image too large (max 3MB).");

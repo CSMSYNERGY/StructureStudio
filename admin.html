@@ -88,6 +88,7 @@ function AdminApp() {
   const [newStyleImg, setNewStyleImg] = useState(null); // { base64, contentType }
   const [csvBusy, setCsvBusy] = useState(false);
   const [csvResult, setCsvResult] = useState(null); // { imported, skipped[] }
+  const [fileKey, setFileKey] = useState(0); // bump to remount the (uncontrolled) file input
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -101,7 +102,9 @@ function AdminApp() {
     setBusy(false);
   };
   const loadClient = async (cid) => {
-    setSel(cid); setCat(null); if (!cid) return;
+    setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
+    setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
+    if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
     catch (e) { flash({ err: e.message }); }
@@ -117,9 +120,13 @@ function AdminApp() {
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
   const onPickStyleImg = (file) => {
     if (!file) { setNewStyleImg(null); return; }
+    if (!ALLOWED_IMG.includes(file.type)) { flash({ err: "Use a JPG, PNG, WEBP or GIF image." }); setFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { flash({ err: "Image too large (max 3MB)." }); setFileKey((k) => k + 1); return; }
     const r = new FileReader();
+    r.onerror = () => flash({ err: "Could not read that image." });
     r.onload = () => setNewStyleImg({ base64: r.result, contentType: file.type || "image/jpeg" });
     r.readAsDataURL(file);
   };
@@ -133,7 +140,7 @@ function AdminApp() {
         imageUrl = up.url;
       }
       await api("create_style", pwd, { clientId: sel, label: newStyleName.trim(), imageUrl });
-      setNewStyleName(""); setNewStyleImg(null);
+      setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1);
       setCat(await api("get_client_catalog", pwd, { clientId: sel }));
       flash({ ok: "Style created" });
     } catch (e) { flash({ err: e.message }); }
@@ -319,7 +326,7 @@ function AdminApp() {
               <span style={S.lbl}>Create a new style for this client</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
                 <input value={newStyleName} onChange={(e) => setNewStyleName(e.target.value)} placeholder="Style name (e.g. Garage)" style={{ ...S.input, minWidth: 200 }} />
-                <input type="file" accept="image/*" onChange={(e) => onPickStyleImg(e.target.files && e.target.files[0])} style={{ fontSize: 12 }} />
+                <input key={fileKey} type="file" accept="image/*" onChange={(e) => onPickStyleImg(e.target.files && e.target.files[0])} style={{ fontSize: 12 }} />
                 {newStyleImg && <img src={newStyleImg.base64} alt="" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />}
                 <button onClick={createStyle} disabled={busy || !newStyleName.trim()} style={S.btn(busy || !newStyleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create style</button>
               </div>
@@ -330,7 +337,8 @@ function AdminApp() {
             <div style={{ marginTop: 16 }}>
               <span style={S.lbl}>Or assign from the master catalog</span>
               {master.buildingStyleCatalog.map((st) => {
-                const on = styleAssigned(st.key);
+                // presence (regardless of active) so re-clicking "Assign" can't overwrite a hidden custom row's label/image
+                const on = (cat.buildingStyles || []).some((s) => s.key === st.key);
                 return (
                   <div key={st.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" }}>
                     <div style={S.pill(on)} onClick={() => !busy && act(on ? "unassign_style" : "assign_style", { clientId: sel, styleKey: st.key }, on ? "Unassigned" : "Assigned")}>
