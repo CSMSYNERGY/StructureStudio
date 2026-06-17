@@ -167,12 +167,11 @@ Deno.serve(async (req: Request) => {
       case "save_style": {
         const clientId = reqStr(p.clientId, "clientId");
         const styleKey = reqStr(p.styleKey, "styleKey");
-        const patch: any = { updated_at: undefined };
+        const patch: any = {};
         if ("label" in p)     patch.label = p.label;
         if ("imageUrl" in p)  patch.image_url = p.imageUrl;
         if ("sortOrder" in p) patch.sort_order = p.sortOrder;
         if ("active" in p)    patch.active = !!p.active;
-        delete patch.updated_at;
         const { error } = await sb.from("building_styles").update(patch).eq("client_id", clientId).eq("key", styleKey);
         if (error) throw error;
         return json({ ok: true });
