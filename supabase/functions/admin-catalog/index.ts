@@ -27,6 +27,50 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
+// Shared CSV pricing + inclusion importer (also used by portal-settings).
+// rows: [{ style, size, price, inclusions: { item_key: yes/no } }]. Resolves
+// style by label OR key and size by label (case-insensitive). Blank price =>
+// null => size inactive (NULL-base-price contract). Inclusions upsert/delete
+// building_size_inclusions. Never creates styles/sizes (they must exist first).
+async function importPricingRows(sb: any, clientId: string, rows: any[]) {
+  const st = await sb.from("building_styles").select("id, key, label").eq("client_id", clientId);
+  if (st.error) throw st.error;
+  const sz = await sb.from("building_sizes").select("id, style_id, label").eq("client_id", clientId);
+  if (sz.error) throw sz.error;
+  const styleByName = new Map<string, any>();
+  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const sizeByKey = new Map<string, any>();
+  for (const z of sz.data ?? []) sizeByKey.set(`${z.style_id}|${String(z.label).toLowerCase()}`, z);
+  const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  let imported = 0; const skipped: string[] = [];
+  for (const row of rows) {
+    const styleName = String(row?.style ?? "").trim();
+    const sizeLabel = String(row?.size ?? "").trim();
+    if (!styleName && !sizeLabel) continue;
+    const style = styleByName.get(styleName.toLowerCase());
+    if (!style) { skipped.push(`${styleName} / ${sizeLabel}: unknown style`); continue; }
+    const size = sizeByKey.get(`${style.id}|${sizeLabel.toLowerCase()}`);
+    if (!size) { skipped.push(`${styleName} / ${sizeLabel}: unknown size`); continue; }
+    const priceRaw = row.price;
+    const blank = priceRaw === "" || priceRaw == null;
+    const price = blank ? null : Number(String(priceRaw).replace(/[$,\s]/g, ""));
+    if (!blank && !Number.isFinite(price)) { skipped.push(`${styleName} / ${sizeLabel}: invalid price "${priceRaw}"`); continue; }
+    const up = await sb.from("building_sizes").update({ base_price: price, active: price != null }).eq("id", size.id);
+    if (up.error) { skipped.push(`${styleName} / ${sizeLabel}: ${up.error.message}`); continue; }
+    const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
+    for (const [itemKey, val] of Object.entries(inc)) {
+      if (!itemKey) continue;
+      if (truthy(val)) {
+        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: size.id, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
+      } else {
+        await sb.from("building_size_inclusions").delete().eq("size_id", size.id).eq("item_key", itemKey);
+      }
+    }
+    imported++;
+  }
+  return { imported, skipped };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -62,13 +106,14 @@ Deno.serve(async (req: Request) => {
       }
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
-        const [styles, sizes, items] = await Promise.all([
+        const [styles, sizes, items, incl] = await Promise.all([
           sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("building_sizes").select("id, style_id, label, width_ft, depth_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
+          sb.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
         ]);
-        if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error;
-        return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data });
+        if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
+        return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
       }
 
       // ── layout-item assignment ──────────────────────────────────────────
@@ -220,6 +265,18 @@ Deno.serve(async (req: Request) => {
           }
         }
         return json({ ok: true });
+      }
+
+      // ── CSV pricing + inclusion import ──────────────────────────────────
+      // body.rows: [{ style, size, price, inclusions: { item_key: yes/no } }]
+      // Resolves style by label OR key and size by label (case-insensitive),
+      // sets building_sizes.base_price (blank => null => size inactive, per the
+      // NULL-base-price contract), and upserts/deletes building_size_inclusions.
+      case "import_pricing_csv": {
+        const clientId = reqStr(p.clientId, "clientId");
+        if (!Array.isArray(p.rows)) throw new Error("rows[] required");
+        const r = await importPricingRows(sb, clientId, p.rows);
+        return json({ ok: true, ...r });
       }
 
       default:

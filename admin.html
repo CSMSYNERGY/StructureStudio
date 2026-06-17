@@ -48,6 +48,32 @@ function api(action, password, body) {
     });
 }
 
+// ── CSV helpers (RFC-4180-ish) ──────────────────────────────────────────────
+function csvEscape(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCSV(headers, rows) { return [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\r\n"); }
+function parseCSV(text) {
+  const rows = []; let row = [], field = "", inQ = false;
+  text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ""));
+}
+function downloadFile(name, text) {
+  const b = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const u = URL.createObjectURL(b); const a = document.createElement("a");
+  a.href = u; a.download = name; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(u);
+}
+
 function AdminApp() {
   const [pwd, setPwd] = useState("");
   const [authed, setAuthed] = useState(false);
@@ -60,6 +86,8 @@ function AdminApp() {
   const [msg, setMsg] = useState(null);
   const [newStyleName, setNewStyleName] = useState("");
   const [newStyleImg, setNewStyleImg] = useState(null); // { base64, contentType }
+  const [csvBusy, setCsvBusy] = useState(false);
+  const [csvResult, setCsvResult] = useState(null); // { imported, skipped[] }
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -112,6 +140,49 @@ function AdminApp() {
     setBusy(false);
   };
 
+  // CSV pricing/inclusion: active items for this client with display labels.
+  const csvItems = () => {
+    const labelByKey = {}; (master && master.layoutItemTypes || []).forEach((it) => { labelByKey[it.item_key] = it.label; });
+    return ((cat && cat.clientLayoutItems) || []).filter((i) => i.active)
+      .map((i) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
+  };
+  const downloadTemplate = () => {
+    const items = csvItems();
+    const headers = ["style", "size", "price", ...items.map((it) => it.label)];
+    const incBySize = {}; ((cat && cat.inclusions) || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    const rows = [];
+    ((cat && cat.buildingStyles) || []).filter((s) => s.active).forEach((s) => {
+      ((cat && cat.buildingSizes) || []).filter((z) => z.style_id === s.id).forEach((z) => {
+        const inc = incBySize[z.id] || {};
+        rows.push([s.label, z.label, z.base_price == null ? "" : z.base_price, ...items.map((it) => inc[it.key] ? "yes" : "no")]);
+      });
+    });
+    downloadFile(`${sel}-pricing-template.csv`, toCSV(headers, rows));
+  };
+  const onUploadCsv = async (file) => {
+    if (!file || !sel) return;
+    setCsvBusy(true); setMsg(null); setCsvResult(null);
+    try {
+      const matrix = parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      const header = matrix[0].map((h) => String(h).trim());
+      const lc = header.map((h) => h.toLowerCase());
+      const iStyle = lc.indexOf("style"), iSize = lc.indexOf("size"), iPrice = lc.indexOf("price");
+      if (iStyle < 0 || iSize < 0 || iPrice < 0) throw new Error('CSV needs "style", "size" and "price" columns.');
+      const labelToKey = {}; csvItems().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
+      const colKey = header.map((h, idx) => (idx === iStyle || idx === iSize || idx === iPrice) ? null : (labelToKey[h.toLowerCase()] || null));
+      const rows = matrix.slice(1).map((cols) => {
+        const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
+        return { style: cols[iStyle], size: cols[iSize], price: cols[iPrice], inclusions };
+      });
+      const res = await api("import_pricing_csv", pwd, { clientId: sel, rows });
+      setCsvResult(res);
+      setCat(await api("get_client_catalog", pwd, { clientId: sel }));
+      flash({ ok: `Imported ${res.imported} row(s)` + (res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : "") });
+    } catch (e) { flash({ err: e.message }); }
+    setCsvBusy(false);
+  };
+
   if (!authed) {
     return (
       <div>
@@ -149,6 +220,7 @@ function AdminApp() {
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
+            <div style={S.tab(tab === "csv")} onClick={() => setTab("csv")}>CSV / Pricing</div>
             <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Catalog</div>
           </div>
         </div>
@@ -269,6 +341,39 @@ function AdminApp() {
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {tab === "csv" && sel && cat && (
+          <div style={S.card}>
+            <div style={S.h2}>CSV pricing &amp; inclusions for <span style={{ color: ACCENT }}>{sel}</span></div>
+            <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
+              Download the template (one row per style × size, pre-filled with current prices &amp; inclusions),
+              fill in the <b>price</b> and a <b>yes/no</b> for each option, then upload it back.
+              Styles &amp; sizes must already exist (use the Building Styles tab first).
+              A blank price hides that size from the designer.
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
+              <label style={{ ...S.btn(csvBusy ? "#9CA3AF" : ACCENT, "#FFF"), cursor: csvBusy ? "default" : "pointer", display: "inline-block" }}>
+                {csvBusy ? "Importing…" : "⬆ Upload filled CSV"}
+                <input type="file" accept=".csv,text/csv" disabled={csvBusy} style={{ display: "none" }}
+                  onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; onUploadCsv(f); }} />
+              </label>
+            </div>
+            {csvResult && (
+              <div style={{ marginTop: 14, fontSize: 13 }}>
+                <div style={{ color: "#15803D", fontWeight: 700 }}>✓ Imported {csvResult.imported} row(s).</div>
+                {csvResult.skipped && csvResult.skipped.length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ color: "#B91C1C", fontWeight: 700 }}>{csvResult.skipped.length} row(s) skipped:</div>
+                    <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+                      {csvResult.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
