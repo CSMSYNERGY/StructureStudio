@@ -450,6 +450,116 @@ function SettingsView() {
   );
 }
 
+// ─── CSV helpers (RFC-4180-ish) ───
+function csvEscape(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCSV(headers, rows) { return [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\r\n"); }
+function parseCSV(text) {
+  const rows = []; let row = [], field = "", inQ = false;
+  text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) { if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; } else field += c; }
+    else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ""));
+}
+function downloadFile(name, text) {
+  const b = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const u = URL.createObjectURL(b); const a = document.createElement("a");
+  a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
+}
+
+// ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
+function PricingCsv() {
+  const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [result, setResult] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+  };
+  useEffect(() => { load(); }, []);
+
+  const items = () => (cat && cat.items) || [];
+  const downloadTemplate = () => {
+    if (!cat) return;
+    const its = items();
+    const headers = ["style", "size", "price", ...its.map((it) => it.label)];
+    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    const rows = [];
+    (cat.styles || []).filter((s) => s.active).forEach((s) => {
+      (cat.sizes || []).filter((z) => z.style_id === s.id).forEach((z) => {
+        const inc = incBySize[z.id] || {};
+        rows.push([s.label, z.label, z.base_price == null ? "" : z.base_price, ...its.map((it) => inc[it.key] ? "yes" : "no")]);
+      });
+    });
+    downloadFile(`${cat.clientId || "pricing"}-template.csv`, toCSV(headers, rows));
+  };
+  const onUpload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null); setResult(null);
+    try {
+      const matrix = parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      const header = matrix[0].map((h) => String(h).trim());
+      const lc = header.map((h) => h.toLowerCase());
+      const iStyle = lc.indexOf("style"), iSize = lc.indexOf("size"), iPrice = lc.indexOf("price");
+      if (iStyle < 0 || iSize < 0 || iPrice < 0) throw new Error('CSV needs "style", "size" and "price" columns.');
+      const labelToKey = {}; items().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
+      const colKey = header.map((h, idx) => (idx === iStyle || idx === iSize || idx === iPrice) ? null : (labelToKey[h.toLowerCase()] || null));
+      const rows = matrix.slice(1).map((cols) => {
+        const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
+        return { style: cols[iStyle], size: cols[iSize], price: cols[iPrice], inclusions };
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setResult(data); await load();
+      setMsg({ ok: `Imported ${data.imported} row(s)` + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : "") });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false); setFileKey((k) => k + 1);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Pricing &amp; included options (CSV)</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+        Download the template (one row per building style &amp; size), fill in the <b>price</b> and a <b>yes/no</b> for each
+        option that's included free, then upload it back. A blank price hides that size from your designer.
+      </p>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
+          <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+            {busy ? "Importing…" : "⬆ Upload filled CSV"}
+            <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
+              onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+          </label>
+        </div>
+      )}
+      {result && result.skipped && result.skipped.length > 0 && (
+        <div style={{ marginTop: 12, fontSize: 13 }}>
+          <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
+          <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+            {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Dashboard shell ───
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
@@ -507,11 +617,13 @@ function Dashboard({ session }) {
         </div>
         <div style={{ display: "flex", gap: 4 }}>
           {tabBtn("designs", "Designs & Leads")}
+          {tabBtn("pricing", "Pricing")}
           {tabBtn("settings", "Settings")}
         </div>
       </div>
       <div style={{ padding: "20px 24px" }}>
         {tab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
+        {tab === "pricing" && <PricingCsv />}
         {tab === "settings" && <SettingsView />}
       </div>
     </div>

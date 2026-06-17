@@ -34,6 +34,49 @@ function maskId(v: string | null): string | null {
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
 }
 
+// Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
+// [{ style, size, price, inclusions: { item_key: yes/no } }]. clientId is the
+// JWT-resolved tenant — never trusted from the request body. Blank price =>
+// null => size inactive (NULL-base-price contract). Never creates styles/sizes.
+async function importPricingRows(sb: any, clientId: string, rows: any[]) {
+  const st = await sb.from("building_styles").select("id, key, label").eq("client_id", clientId);
+  if (st.error) throw st.error;
+  const sz = await sb.from("building_sizes").select("id, style_id, label").eq("client_id", clientId);
+  if (sz.error) throw sz.error;
+  const styleByName = new Map<string, any>();
+  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const sizeByKey = new Map<string, any>();
+  for (const z of sz.data ?? []) sizeByKey.set(`${z.style_id}|${String(z.label).toLowerCase()}`, z);
+  const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  let imported = 0; const skipped: string[] = [];
+  for (const row of rows) {
+    const styleName = String(row?.style ?? "").trim();
+    const sizeLabel = String(row?.size ?? "").trim();
+    if (!styleName && !sizeLabel) continue;
+    const style = styleByName.get(styleName.toLowerCase());
+    if (!style) { skipped.push(`${styleName} / ${sizeLabel}: unknown style`); continue; }
+    const size = sizeByKey.get(`${style.id}|${sizeLabel.toLowerCase()}`);
+    if (!size) { skipped.push(`${styleName} / ${sizeLabel}: unknown size`); continue; }
+    const priceRaw = row.price;
+    const blank = priceRaw === "" || priceRaw == null;
+    const price = blank ? null : Number(String(priceRaw).replace(/[$,\s]/g, ""));
+    if (!blank && !Number.isFinite(price)) { skipped.push(`${styleName} / ${sizeLabel}: invalid price "${priceRaw}"`); continue; }
+    const up = await sb.from("building_sizes").update({ base_price: price, active: price != null }).eq("id", size.id);
+    if (up.error) { skipped.push(`${styleName} / ${sizeLabel}: ${up.error.message}`); continue; }
+    const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
+    for (const [itemKey, val] of Object.entries(inc)) {
+      if (!itemKey) continue;
+      if (truthy(val)) {
+        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: size.id, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
+      } else {
+        await sb.from("building_size_inclusions").delete().eq("size_id", size.id).eq("item_key", itemKey);
+      }
+    }
+    imported++;
+  }
+  return { imported, skipped };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -198,6 +241,34 @@ Deno.serve(async (req: Request) => {
     if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
+  }
+
+  // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
+  // the downloadable template (styles × sizes + active items + current inclusions).
+  if (action === "catalog") {
+    const [styles, sizes, items, types, incl] = await Promise.all([
+      admin.from("building_styles").select("id, key, label, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_sizes").select("id, style_id, label, base_price, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("layout_item_types").select("item_key, label"),
+      admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
+    ]);
+    for (const r of [styles, sizes, items, types, incl]) if (r.error) return json({ error: r.error.message }, 500);
+    const labelByKey: Record<string, string> = {};
+    (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
+    const itemList = (items.data ?? []).filter((i: any) => i.active)
+      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data });
+  }
+
+  // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
+  // never from the body, so an owner can only ever import into their own tenant.
+  if (action === "import_pricing_csv") {
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    try {
+      const r = await importPricingRows(admin, clientId, payload.rows);
+      return json({ ok: true, ...r });
+    } catch (e) { return json({ error: (e as Error).message || String(e) }, 500); }
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
