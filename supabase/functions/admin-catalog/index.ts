@@ -63,7 +63,7 @@ Deno.serve(async (req: Request) => {
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
         const [styles, sizes, items] = await Promise.all([
-          sb.from("building_styles").select("id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+          sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("building_sizes").select("id, style_id, label, width_ft, depth_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
         ]);
@@ -146,6 +146,47 @@ Deno.serve(async (req: Request) => {
           }, { onConflict: "style_id,label" });
         }
         return json({ ok: true });
+      }
+
+      // ── per-client style creation (no master dependency) ───────────────
+      // Building styles are never shared across companies (every client has
+      // their own "garage"/"studio" with their own image + prices), so this
+      // creates a style straight on the client, deriving a unique per-client key.
+      case "create_style": {
+        const clientId = reqStr(p.clientId, "clientId");
+        const label    = reqStr(p.label, "label");
+        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "style";
+        let key = base, n = 1;
+        // ensure the key is free for this client (unique on client_id,key)
+        while (true) {
+          const ex = await sb.from("building_styles").select("key").eq("client_id", clientId).eq("key", key).maybeSingle();
+          if (ex.error) throw ex.error;
+          if (!ex.data) break;
+          key = `${base}-${++n}`;
+        }
+        const up = await sb.from("building_styles").upsert(
+          { client_id: clientId, key, label, image_url: p.imageUrl ?? null,
+            sort_order: Number.isFinite(p.sortOrder) ? p.sortOrder : 0, active: true },
+          { onConflict: "client_id,key" }).select("id, key").maybeSingle();
+        if (up.error) throw up.error;
+        return json({ ok: true, styleId: up.data!.id, key: up.data!.key });
+      }
+      // Upload a building-style image (base64) to the public 'branding' bucket
+      // and return its public URL; the caller stores it via create_style/save_style.
+      case "upload_image": {
+        const clientId = reqStr(p.clientId, "clientId");
+        if (typeof p.imageBase64 !== "string" || !p.imageBase64.trim()) throw new Error("No image data.");
+        const rawB64 = p.imageBase64.replace(/^data:[^;]+;base64,/, "");
+        const ct = String(p.contentType || "image/jpeg");
+        const ext = (ct.split("/")[1] || "jpg").split("+")[0].replace(/[^a-z0-9]/gi, "") || "jpg";
+        let bytes: Uint8Array;
+        try { bytes = Uint8Array.from(atob(rawB64), (c) => c.charCodeAt(0)); } catch { throw new Error("Invalid image data."); }
+        if (bytes.length > 3_000_000) throw new Error("Image too large (max 3MB).");
+        const path = `${clientId}/style-${Date.now()}.${ext}`;
+        const upl = await sb.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+        if (upl.error) throw new Error(`Image upload failed: ${upl.error.message}`);
+        const { data: pub } = sb.storage.from("branding").getPublicUrl(path);
+        return json({ ok: true, url: pub.publicUrl });
       }
 
       // ── master catalog CRUD ─────────────────────────────────────────────

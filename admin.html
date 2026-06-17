@@ -58,6 +58,8 @@ function AdminApp() {
   const [tab, setTab] = useState("items");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [newStyleName, setNewStyleName] = useState("");
+  const [newStyleImg, setNewStyleImg] = useState(null); // { base64, contentType }
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -84,6 +86,28 @@ function AdminApp() {
       if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));
       const m = await api("get_master", pwd); setMaster(m);
       flash({ ok: ok || "Saved" });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  const onPickStyleImg = (file) => {
+    if (!file) { setNewStyleImg(null); return; }
+    const r = new FileReader();
+    r.onload = () => setNewStyleImg({ base64: r.result, contentType: file.type || "image/jpeg" });
+    r.readAsDataURL(file);
+  };
+  const createStyle = async () => {
+    if (!sel || !newStyleName.trim()) return;
+    setBusy(true); setMsg(null);
+    try {
+      let imageUrl = null;
+      if (newStyleImg) {
+        const up = await api("upload_image", pwd, { clientId: sel, imageBase64: newStyleImg.base64, contentType: newStyleImg.contentType });
+        imageUrl = up.url;
+      }
+      await api("create_style", pwd, { clientId: sel, label: newStyleName.trim(), imageUrl });
+      setNewStyleName(""); setNewStyleImg(null);
+      setCat(await api("get_client_catalog", pwd, { clientId: sel }));
+      flash({ ok: "Style created" });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -179,20 +203,31 @@ function AdminApp() {
         {tab === "styles" && sel && cat && master && (
           <div style={S.card}>
             <div style={S.h2}>Building styles for <span style={{ color: ACCENT }}>{sel}</span></div>
-            {master.buildingStyleCatalog.map((st) => {
-              const on = styleAssigned(st.key);
-              const row = (cat.buildingStyles || []).find((s) => s.key === st.key);
-              const sizes = row ? (cat.buildingSizes || []).filter((z) => z.style_id === row.id) : [];
+
+            {/* This client's own styles (created here or assigned from master) */}
+            <span style={S.lbl}>This client's styles</span>
+            {(cat.buildingStyles || []).length === 0 &&
+              <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below or assign from the master catalog.</div>}
+            {(cat.buildingStyles || []).map((row) => {
+              const sizes = (cat.buildingSizes || []).filter((z) => z.style_id === row.id);
               return (
-                <div key={st.key} style={{ borderBottom: "1px solid #F1F5F9", padding: "10px 0" }}>
+                <div key={row.id} style={{ borderBottom: "1px solid #F1F5F9", padding: "10px 0" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={S.pill(on)} onClick={() => !busy && act(on ? "unassign_style" : "assign_style", { clientId: sel, styleKey: st.key }, on ? "Unassigned" : "Assigned")}>
-                      {on ? "✓ Assigned" : "Assign"}
+                    {row.image_url
+                      ? <img src={row.image_url} alt={row.label} style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} />
+                      : <div style={{ width: 40, height: 40, borderRadius: 6, background: "#F1F5F9", flexShrink: 0 }} />}
+                    <div style={{ display: "flex", flexDirection: "column" }}>
+                      <b>{row.label}</b>
+                      <span style={{ fontSize: 11, color: "#94A3B8" }}>{row.key} · {row.client_id}</span>
                     </div>
-                    <b style={{ minWidth: 110 }}>{st.key}</b><span style={{ color: "#64748B" }}>{st.label}</span>
+                    <div style={{ marginLeft: "auto" }}>
+                      <div style={S.pill(row.active)} onClick={() => !busy && act("save_style", { clientId: sel, styleKey: row.key, active: !row.active }, row.active ? "Hidden" : "Shown")}>
+                        {row.active ? "✓ Active" : "Hidden"}
+                      </div>
+                    </div>
                   </div>
-                  {on && sizes.length > 0 && (
-                    <div style={{ marginTop: 8, paddingLeft: 10 }}>
+                  {sizes.length > 0 && (
+                    <div style={{ marginTop: 8, paddingLeft: 50 }}>
                       <span style={S.lbl}>Sizes &amp; base prices</span>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
                         {sizes.map((z) => (
@@ -206,6 +241,34 @@ function AdminApp() {
                 </div>
               );
             })}
+
+            {/* Create a new per-client style (name + image) */}
+            <div style={{ marginTop: 16, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+              <span style={S.lbl}>Create a new style for this client</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
+                <input value={newStyleName} onChange={(e) => setNewStyleName(e.target.value)} placeholder="Style name (e.g. Garage)" style={{ ...S.input, minWidth: 200 }} />
+                <input type="file" accept="image/*" onChange={(e) => onPickStyleImg(e.target.files && e.target.files[0])} style={{ fontSize: 12 }} />
+                {newStyleImg && <img src={newStyleImg.base64} alt="" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />}
+                <button onClick={createStyle} disabled={busy || !newStyleName.trim()} style={S.btn(busy || !newStyleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create style</button>
+              </div>
+              <div style={{ fontSize: 11, color: "#92400E", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
+            </div>
+
+            {/* Assign from the shared master catalog */}
+            <div style={{ marginTop: 16 }}>
+              <span style={S.lbl}>Or assign from the master catalog</span>
+              {master.buildingStyleCatalog.map((st) => {
+                const on = styleAssigned(st.key);
+                return (
+                  <div key={st.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" }}>
+                    <div style={S.pill(on)} onClick={() => !busy && act(on ? "unassign_style" : "assign_style", { clientId: sel, styleKey: st.key }, on ? "Unassigned" : "Assigned")}>
+                      {on ? "✓ Assigned" : "Assign"}
+                    </div>
+                    <b style={{ minWidth: 110 }}>{st.key}</b><span style={{ color: "#64748B" }}>{st.label}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
