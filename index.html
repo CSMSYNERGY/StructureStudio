@@ -378,6 +378,12 @@ function StructureStudioInner({ config }) {
       pa.style.fontSize = "13px";
       pa.style.fontWeight = "600";
       pa.style.color = "#000";
+      // Force a light theme so the search box matches the white sibling address
+      // fields — the gmp element otherwise defaults to a dark background, which
+      // looked like the brand color "bleeding" into the search box. color-scheme
+      // crosses the closed shadow boundary; backgroundColor covers the host.
+      pa.style.colorScheme = "light";
+      pa.style.backgroundColor = "#FFF";
       container.replaceChildren(pa);
 
       let sizeTries = 0;
