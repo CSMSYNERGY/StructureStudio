@@ -271,6 +271,15 @@ function StructureStudioInner({ config }) {
     });
   }, [sel.style, C.options]);
 
+  // Phase 4a: which placeable items are INCLUDED (free) with the selected
+  // style+size — from get_config's per-style sizeInclusions map. Everything else
+  // is an "additional" (chargeable) option. Empty until a style+size is chosen.
+  const includedItemKeys = useMemo(() => {
+    if (!sel.style || !sel.size) return [];
+    const st = C.buildingStyles.find((s) => s.value === sel.style);
+    return st && st.sizeInclusions && Array.isArray(st.sizeInclusions[sel.size]) ? st.sizeInclusions[sel.size] : [];
+  }, [sel.style, sel.size, C.buildingStyles]);
+
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
   const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
   const [customOptions, setCustomOptions] = useState([]);
@@ -1453,7 +1462,20 @@ function StructureStudioInner({ config }) {
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
         body: { ...payload, betaMode },
       });
-      if (fnErr) throw new Error(fnErr.message || "Submit failed");
+      // supabase-js flattens a non-2xx Edge Function response to the generic
+      // "Edge Function returned a non-2xx status code". The function's real reason
+      // (e.g. a GHL validation message like an invalid zip-for-state) lives in the
+      // JSON body on fnErr.context — surface it so failures aren't a mystery.
+      if (fnErr) {
+        let detail = fnErr.message || "Submit failed";
+        try {
+          if (fnErr.context && typeof fnErr.context.json === "function") {
+            const errBody = await fnErr.context.json();
+            if (errBody && errBody.error) detail = errBody.error;
+          }
+        } catch (_) { /* body unreadable — keep the generic message */ }
+        throw new Error(detail);
+      }
       if (!result?.ok) throw new Error(result?.error || "Submit failed");
 
       // Persist the returned GHL IDs so subsequent edits update the same estimate.
@@ -1795,8 +1817,8 @@ function StructureStudioInner({ config }) {
 
       {/* Tool Palette */}
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
-        {Object.entries(ITEMS).map(([key, cfg]) => (
+        {(() => {
+          const btn = ([key, cfg]) => (
             <button key={key} onClick={() => { setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
@@ -1807,7 +1829,23 @@ function StructureStudioInner({ config }) {
               <span style={{ fontSize: 14 }}>{cfg.icon}</span>{cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
-        ))}
+          );
+          const entries = Object.entries(ITEMS);
+          const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
+          const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
+          if (incl.length === 0) {
+            return (<>
+              <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
+              {addl.map(btn)}
+            </>);
+          }
+          return (<>
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place these:</span>
+            {incl.map(btn)}
+            <span style={{ ...S.lbl, marginLeft: 10, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            {addl.map(btn)}
+          </>);
+        })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           {selectedId && (
