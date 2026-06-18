@@ -93,6 +93,8 @@ function AdminApp() {
   const [ncId, setNcId] = useState("");
   const [ncCompany, setNcCompany] = useState("");
   const [ncTemplate, setNcTemplate] = useState("");
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [ownerEmail, setOwnerEmail] = useState("");
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -124,6 +126,16 @@ function AdminApp() {
       setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("");
       await loadClient(id);
       flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  const linkOwner = async () => {
+    if (!sel || !ownerEmail.trim()) return;
+    setBusy(true); setMsg(null);
+    try {
+      await api("link_owner", pwd, { clientId: sel, email: ownerEmail.trim() });
+      setLinkOpen(false); setOwnerEmail("");
+      flash({ ok: `Owner "${ownerEmail.trim()}" linked to "${sel}" — they can now sign into the portal.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -243,6 +255,7 @@ function AdminApp() {
             {clients.map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id} ({c.client_id})</option>)}
           </select>
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
+          <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -268,6 +281,25 @@ function AdminApp() {
               </select>
               <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>
             </div>
+          </div>
+        )}
+
+        {linkOpen && (
+          <div style={{ ...S.card, background: "#EFF6FF", border: "1px solid #BFDBFE" }}>
+            <div style={S.h2}>Link an owner login</div>
+            {!sel ? (
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
+                  First create the login in <b>Supabase → Authentication → Add user</b>, then enter that email here to map it to <b>{sel}</b> so they can sign into the portal.
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <input value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
+                  <button onClick={linkOwner} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link owner to {sel}</button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

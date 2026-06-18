@@ -329,6 +329,28 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, clientId });
       }
 
+      // ── link an owner login to a client ────────────────────────────────
+      // Finds the Supabase auth user by email (admin API) and maps it to the
+      // client in client_users (role=owner). The login itself must already exist
+      // (Authentication → Add user) — account creation stays out of scope here.
+      case "link_owner": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const email = reqStr(p.email, "email").toLowerCase();
+        let user: any = null;
+        for (let page = 1; page <= 20 && !user; page++) {
+          const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
+          if (list.error) throw list.error;
+          const users = list.data?.users || [];
+          user = users.find((u: any) => String(u.email || "").toLowerCase() === email) || null;
+          if (users.length < 1000) break;
+        }
+        if (!user) throw new Error(`No Supabase user with email "${email}". Create the login first in Authentication → Add user.`);
+        const up = await sb.from("client_users").upsert(
+          { user_id: user.id, client_id: clientId, role: "owner" }, { onConflict: "user_id" });
+        if (up.error) throw up.error;
+        return json({ ok: true, userId: user.id, email });
+      }
+
       default:
         return json({ error: `Unknown action: ${action}` }, 400);
     }
