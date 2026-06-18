@@ -74,6 +74,8 @@ function downloadFile(name, text) {
   a.remove(); URL.revokeObjectURL(u);
 }
 
+function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
+
 function AdminApp() {
   const [pwd, setPwd] = useState("");
   const [authed, setAuthed] = useState(false);
@@ -93,6 +95,7 @@ function AdminApp() {
   const [ncId, setNcId] = useState("");
   const [ncCompany, setNcCompany] = useState("");
   const [ncTemplate, setNcTemplate] = useState("");
+  const [ncIdTouched, setNcIdTouched] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
 
@@ -123,7 +126,7 @@ function AdminApp() {
     try {
       await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate || undefined });
       const c = await api("list_clients", pwd); setClients(c.clients || []);
-      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("");
+      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate(""); setNcIdTouched(false);
       await loadClient(id);
       flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
     } catch (e) { flash({ err: e.message }); }
@@ -273,8 +276,8 @@ function AdminApp() {
               login in Supabase Auth and map <code>client_users</code>.
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              <input value={ncId} onChange={(e) => setNcId(e.target.value.toLowerCase())} placeholder="client-id (e.g. acme-barns)" style={{ ...S.input, minWidth: 210 }} />
-              <input value={ncCompany} onChange={(e) => setNcCompany(e.target.value)} placeholder="Company name (e.g. Acme Barns)" style={{ ...S.input, minWidth: 200 }} />
+              <input value={ncCompany} onChange={(e) => { const v = e.target.value; setNcCompany(v); if (!ncIdTouched) setNcId(slugify(v)); }} placeholder="Company name (e.g. Acme Barns)" style={{ ...S.input, minWidth: 220 }} />
+              <input value={ncId} onChange={(e) => { setNcId(e.target.value.toLowerCase()); setNcIdTouched(true); }} placeholder="client-id (auto from name)" title="Auto-generated from the company name; edit to override" style={{ ...S.input, minWidth: 200 }} />
               <select value={ncTemplate} onChange={(e) => setNcTemplate(e.target.value)} style={{ ...S.input }}>
                 <option value="">Clone template: junior-barns (default)</option>
                 {clients.map((c) => <option key={c.client_id} value={c.client_id}>Clone: {c.client_id}</option>)}
