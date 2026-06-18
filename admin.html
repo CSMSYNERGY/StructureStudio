@@ -98,6 +98,7 @@ function AdminApp() {
   const [ncIdTouched, setNcIdTouched] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
+  const [linkRole, setLinkRole] = useState("owner");
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -136,9 +137,10 @@ function AdminApp() {
     if (!sel || !ownerEmail.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("link_owner", pwd, { clientId: sel, email: ownerEmail.trim() });
+      const r = await api("link_owner", pwd, { clientId: sel, email: ownerEmail.trim(), role: linkRole });
       setLinkOpen(false); setOwnerEmail("");
-      flash({ ok: `Owner "${ownerEmail.trim()}" linked to "${sel}" — they can now sign into the portal.` });
+      const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
+      flash({ ok: `"${ownerEmail.trim()}" linked to "${sel}" as ${roleLabel} — they can now sign into the portal.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -187,16 +189,22 @@ function AdminApp() {
   };
   const downloadTemplate = () => {
     const items = csvItems();
-    const headers = ["style", "size", "price", ...items.map((it) => it.label)];
+    const headers = ["style", "width", "length", "price", ...items.map((it) => it.label), "active"];
     const incBySize = {}; ((cat && cat.inclusions) || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
     const rows = [];
     ((cat && cat.buildingStyles) || []).filter((s) => s.active).forEach((s) => {
-      ((cat && cat.buildingSizes) || []).filter((z) => z.style_id === s.id).forEach((z) => {
-        const inc = incBySize[z.id] || {};
-        rows.push([s.label, z.label, z.base_price == null ? "" : z.base_price, ...items.map((it) => inc[it.key] ? "yes" : "no")]);
-      });
+      const sizes = ((cat && cat.buildingSizes) || []).filter((z) => z.style_id === s.id);
+      if (sizes.length === 0) {
+        rows.push([s.label, "", "", "", ...items.map(() => "no"), "yes"]);
+      } else {
+        sizes.forEach((z) => {
+          const inc = incBySize[z.id] || {};
+          rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
+            ...items.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+        });
+      }
     });
-    downloadFile(`${sel}-pricing-template.csv`, toCSV(headers, rows));
+    downloadFile(`${sel}-pricing.csv`, toCSV(headers, rows));
   };
   const onUploadCsv = async (file) => {
     if (!file || !sel) return;
@@ -207,18 +215,20 @@ function AdminApp() {
       if (matrix.length < 2) throw new Error("CSV has no data rows.");
       const header = matrix[0].map((h) => String(h).trim());
       const lc = header.map((h) => h.toLowerCase());
-      const iStyle = lc.indexOf("style"), iSize = lc.indexOf("size"), iPrice = lc.indexOf("price");
-      if (iStyle < 0 || iSize < 0 || iPrice < 0) throw new Error('CSV needs "style", "size" and "price" columns.');
+      const iStyle = lc.indexOf("style"), iWidth = lc.indexOf("width"), iLength = lc.indexOf("length"), iPrice = lc.indexOf("price"), iActive = lc.indexOf("active");
+      if (iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0) throw new Error('CSV needs "style", "width", "length" and "price" columns.');
+      const reserved = new Set([iStyle, iWidth, iLength, iPrice, iActive]);
       const labelToKey = {}; csvItems().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
-      const colKey = header.map((h, idx) => (idx === iStyle || idx === iSize || idx === iPrice) ? null : (labelToKey[h.toLowerCase()] || null));
+      const colKey = header.map((h, idx) => reserved.has(idx) ? null : (labelToKey[h.toLowerCase()] || null));
       const rows = matrix.slice(1).map((cols) => {
         const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
-        return { style: cols[iStyle], size: cols[iSize], price: cols[iPrice], inclusions };
+        return { style: cols[iStyle], width: cols[iWidth], length: cols[iLength], price: cols[iPrice], active: iActive >= 0 ? cols[iActive] : "", inclusions };
       });
       const res = await api("import_pricing_csv", pwd, { clientId: sel, rows });
       setCsvResult(res);
       setCat(await api("get_client_catalog", pwd, { clientId: sel }));
-      flash({ ok: `Imported ${res.imported} row(s)` + (res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : "") });
+      const parts = []; if (res.created) parts.push(`${res.created} added`); if (res.updated) parts.push(`${res.updated} updated`);
+      flash({ ok: `Imported ${res.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : "") });
     } catch (e) { flash({ err: e.message }); }
     setCsvBusy(false);
   };
@@ -299,8 +309,13 @@ function AdminApp() {
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
-                  <button onClick={linkOwner} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link owner to {sel}</button>
+                  <select value={linkRole} onChange={(e) => setLinkRole(e.target.value)} style={{ ...S.input, width: 230 }}>
+                    <option value="owner">Admin (full access)</option>
+                    <option value="user">Team member (Designs &amp; Leads only)</option>
+                  </select>
+                  <button onClick={linkOwner} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
                 </div>
+                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Admins see Pricing &amp; Settings; team members only see Designs &amp; Leads.</div>
               </div>
             )}
           </div>
@@ -430,10 +445,10 @@ function AdminApp() {
           <div style={S.card}>
             <div style={S.h2}>CSV pricing &amp; inclusions for <span style={{ color: ACCENT }}>{sel}</span></div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
-              Download the template (one row per style × size, pre-filled with current prices &amp; inclusions),
-              fill in the <b>price</b> and a <b>yes/no</b> for each option, then upload it back.
-              Styles &amp; sizes must already exist (use the Building Styles tab first).
-              A blank price hides that size from the designer.
+              Download the template (one row per style, pre-filled with any existing sizes), then add a row for every
+              size: type <b>width</b> and <b>length</b> (feet) and the <b>price</b>. The yes/no columns mean “is this option
+              <b> included in the price?</b>”. Sizes are created/updated on upload, matched by style + width + length (no duplicates).
+              <b> Styles must exist first</b> (Building Styles tab). A blank price — or <b>active = no</b> — hides that size.
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>

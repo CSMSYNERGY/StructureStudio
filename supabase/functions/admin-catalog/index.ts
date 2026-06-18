@@ -38,47 +38,75 @@ async function assertClient(sb: any, clientId: string) {
 }
 
 // Shared CSV pricing + inclusion importer (also used by portal-settings).
-// rows: [{ style, size, price, inclusions: { item_key: yes/no } }]. Resolves
-// style by label OR key and size by label (case-insensitive). Blank price =>
-// null => size inactive (NULL-base-price contract). Inclusions upsert/delete
-// building_size_inclusions. Never creates styles/sizes (they must exist first).
+// rows: [{ style, width, length, price, active, inclusions: { item_key: yes/no } }].
+// Resolves the style by label OR key (case-insensitive). CREATES the size if a
+// (style, width, length) combo doesn't exist yet, otherwise UPDATES it — keyed on
+// dimensions, so re-uploading the same sheet updates prices without ever creating
+// duplicates. A size is offered only when it's active AND priced: a blank price (or
+// active=no) hides it (NULL-base-price contract). Never creates styles — those must
+// exist first (built via the styles tab), which is what the IDs are matched against.
 async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   const st = await sb.from("building_styles").select("id, key, label").eq("client_id", clientId);
   if (st.error) throw st.error;
-  const sz = await sb.from("building_sizes").select("id, style_id, label").eq("client_id", clientId);
+  const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
   if (sz.error) throw sz.error;
   const styleByName = new Map<string, any>();
   for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
-  const sizeByKey = new Map<string, any>();
-  for (const z of sz.data ?? []) sizeByKey.set(`${z.style_id}|${String(z.label).toLowerCase()}`, z);
+  const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
+  const maxSort = new Map<string, number>();   // style_id -> highest sort_order
+  for (const z of sz.data ?? []) {
+    const zw = Number(z.width_ft), zl = Number(z.length_ft);
+    sizeByDims.set(`${z.style_id}|${zw}|${zl}`, { id: z.id });
+    const cur = maxSort.get(z.style_id) ?? -1;
+    if ((z.sort_order ?? 0) > cur) maxSort.set(z.style_id, z.sort_order ?? 0);
+  }
   const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
-  let imported = 0; const skipped: string[] = [];
+  const inactiveWord = (v: unknown) => ["no", "n", "0", "false", "inactive"].includes(String(v ?? "").trim().toLowerCase());
+  const num = (v: unknown) => { const blank = v === "" || v == null; if (blank) return { blank: true, n: NaN }; return { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) }; };
+  const fmt = (n: number) => String(n);
+  let created = 0, updated = 0; const skipped: string[] = [];
   for (const row of rows) {
     const styleName = String(row?.style ?? "").trim();
-    const sizeLabel = String(row?.size ?? "").trim();
-    if (!styleName && !sizeLabel) continue;
+    const wv = num(row?.width), lv = num(row?.length);
+    if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
     const style = styleByName.get(styleName.toLowerCase());
-    if (!style) { skipped.push(`${styleName} / ${sizeLabel}: unknown style`); continue; }
-    const size = sizeByKey.get(`${style.id}|${sizeLabel.toLowerCase()}`);
-    if (!size) { skipped.push(`${styleName} / ${sizeLabel}: unknown size`); continue; }
-    const priceRaw = row.price;
-    const blank = priceRaw === "" || priceRaw == null;
-    const price = blank ? null : Number(String(priceRaw).replace(/[$,\s]/g, ""));
-    if (!blank && !Number.isFinite(price)) { skipped.push(`${styleName} / ${sizeLabel}: invalid price "${priceRaw}"`); continue; }
-    const up = await sb.from("building_sizes").update({ base_price: price, active: price != null }).eq("id", size.id);
-    if (up.error) { skipped.push(`${styleName} / ${sizeLabel}: ${up.error.message}`); continue; }
+    if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
+    if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
+    if (!Number.isFinite(wv.n) || !Number.isFinite(lv.n) || wv.n <= 0 || lv.n <= 0) {
+      skipped.push(`${styleName} ${row?.width}x${row?.length}: invalid width/length`); continue;
+    }
+    const w = wv.n, l = lv.n;
+    const pr = num(row?.price);
+    if (!pr.blank && !Number.isFinite(pr.n)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
+    const price = pr.blank ? null : pr.n;
+    const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
+    const label = `${fmt(w)}x${fmt(l)}`;
+    const dimKey = `${style.id}|${w}|${l}`;
+    let sizeId: string;
+    const existing = sizeByDims.get(dimKey);
+    if (existing) {
+      const up = await sb.from("building_sizes").update({ label, base_price: price, active }).eq("id", existing.id);
+      if (up.error) { skipped.push(`${styleName} ${label}: ${up.error.message}`); continue; }
+      sizeId = existing.id; updated++;
+    } else {
+      const nextSort = (maxSort.get(style.id) ?? -1) + 1; maxSort.set(style.id, nextSort);
+      const insv = await sb.from("building_sizes").insert(
+        { client_id: clientId, style_id: style.id, label, width_ft: w, length_ft: l,
+          base_price: price, active, sort_order: nextSort }).select("id").maybeSingle();
+      if (insv.error) { skipped.push(`${styleName} ${label}: ${insv.error.message}`); continue; }
+      sizeId = insv.data!.id; sizeByDims.set(dimKey, { id: sizeId }); created++;
+    }
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
       if (truthy(val)) {
-        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: size.id, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
+        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
       } else {
-        await sb.from("building_size_inclusions").delete().eq("size_id", size.id).eq("item_key", itemKey);
+        await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
       }
     }
-    imported++;
   }
-  return { imported, skipped };
+  return { imported: created + updated, created, updated, skipped };
 }
 
 Deno.serve(async (req: Request) => {
@@ -118,7 +146,7 @@ Deno.serve(async (req: Request) => {
         const clientId = reqStr(p.clientId, "clientId");
         const [styles, sizes, items, incl] = await Promise.all([
           sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
-          sb.from("building_sizes").select("id, style_id, label, width_ft, depth_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
+          sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
           sb.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
         ]);
@@ -158,11 +186,11 @@ Deno.serve(async (req: Request) => {
         if (up.error) throw up.error;
         const styleId = up.data!.id;
         // clone master default sizes (only where missing), base_price null
-        const ms = await sb.from("building_style_catalog_sizes").select("label, width_ft, depth_ft, sort_order").eq("style_key", styleKey);
+        const ms = await sb.from("building_style_catalog_sizes").select("label, width_ft, length_ft, sort_order").eq("style_key", styleKey);
         if (ms.error) throw ms.error;
         for (const s of ms.data ?? []) {
           await sb.from("building_sizes").upsert(
-            { client_id: clientId, style_id: styleId, label: s.label, width_ft: s.width_ft, depth_ft: s.depth_ft,
+            { client_id: clientId, style_id: styleId, label: s.label, width_ft: s.width_ft, length_ft: s.length_ft,
               sort_order: s.sort_order, active: true }, { onConflict: "style_id,label" });
         }
         return json({ ok: true, styleId });
@@ -187,14 +215,14 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true });
       }
       case "save_sizes": {
-        // body.sizes: [{ label, widthFt, depthFt, basePrice, sortOrder, active }]
+        // body.sizes: [{ label, widthFt, lengthFt, basePrice, sortOrder, active }]
         const clientId = reqStr(p.clientId, "clientId");
         const styleId  = reqStr(p.styleId, "styleId");
         if (!Array.isArray(p.sizes)) throw new Error("sizes[] required");
         for (const s of p.sizes) {
           await sb.from("building_sizes").upsert({
             client_id: clientId, style_id: styleId, label: reqStr(s.label, "size.label"),
-            width_ft: s.widthFt, depth_ft: s.depthFt,
+            width_ft: s.widthFt, length_ft: s.lengthFt,
             base_price: (s.basePrice === "" || s.basePrice == null) ? null : Number(s.basePrice),
             sort_order: s.sortOrder ?? 0, active: s.active !== false,
           }, { onConflict: "style_id,label" });
@@ -280,7 +308,7 @@ Deno.serve(async (req: Request) => {
           for (const s of p.sizes) {
             await sb.from("building_style_catalog_sizes").upsert({
               style_key: key, label: reqStr(s.label, "size.label"),
-              width_ft: s.widthFt, depth_ft: s.depthFt, sort_order: s.sortOrder ?? 0,
+              width_ft: s.widthFt, length_ft: s.lengthFt, sort_order: s.sortOrder ?? 0,
             }, { onConflict: "style_key,label" });
           }
         }
@@ -288,10 +316,8 @@ Deno.serve(async (req: Request) => {
       }
 
       // ── CSV pricing + inclusion import ──────────────────────────────────
-      // body.rows: [{ style, size, price, inclusions: { item_key: yes/no } }]
-      // Resolves style by label OR key and size by label (case-insensitive),
-      // sets building_sizes.base_price (blank => null => size inactive, per the
-      // NULL-base-price contract), and upserts/deletes building_size_inclusions.
+      // body.rows: [{ style, width, length, price, active, inclusions: {item_key: yes/no} }]
+      // Creates-or-updates building_sizes by (style, width, length) — see importPricingRows.
       case "import_pricing_csv": {
         const clientId = reqStr(p.clientId, "clientId");
         if (!Array.isArray(p.rows)) throw new Error("rows[] required");
@@ -329,13 +355,16 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, clientId });
       }
 
-      // ── link an owner login to a client ────────────────────────────────
+      // ── link a user login to a client (with a role) ────────────────────
       // Finds the Supabase auth user by email (admin API) and maps it to the
-      // client in client_users (role=owner). The login itself must already exist
-      // (Authentication → Add user) — account creation stays out of scope here.
+      // client in client_users. role: "owner"/"admin" (full access incl. Pricing +
+      // Settings) or "user" (Designs & Leads only). The login itself must already
+      // exist (Authentication → Add user) — account creation stays out of scope.
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const email = reqStr(p.email, "email").toLowerCase();
+        const role = ["owner", "admin", "user"].includes(String(p.role || "").toLowerCase())
+          ? String(p.role).toLowerCase() : "owner";
         let user: any = null;
         for (let page = 1; page <= 20 && !user; page++) {
           const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
@@ -346,9 +375,9 @@ Deno.serve(async (req: Request) => {
         }
         if (!user) throw new Error(`No Supabase user with email "${email}". Create the login first in Authentication → Add user.`);
         const up = await sb.from("client_users").upsert(
-          { user_id: user.id, client_id: clientId, role: "owner" }, { onConflict: "user_id" });
+          { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
         if (up.error) throw up.error;
-        return json({ ok: true, userId: user.id, email });
+        return json({ ok: true, userId: user.id, email, role });
       }
 
       default:
