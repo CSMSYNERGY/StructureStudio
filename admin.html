@@ -89,6 +89,10 @@ function AdminApp() {
   const [csvBusy, setCsvBusy] = useState(false);
   const [csvResult, setCsvResult] = useState(null); // { imported, skipped[] }
   const [fileKey, setFileKey] = useState(0); // bump to remount the (uncontrolled) file input
+  const [newOpen, setNewOpen] = useState(false);
+  const [ncId, setNcId] = useState("");
+  const [ncCompany, setNcCompany] = useState("");
+  const [ncTemplate, setNcTemplate] = useState("");
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -108,6 +112,19 @@ function AdminApp() {
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
     catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  const createNewClient = async () => {
+    const id = ncId.trim().toLowerCase();
+    if (!id || !ncCompany.trim()) return;
+    setBusy(true); setMsg(null);
+    try {
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate || undefined });
+      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("");
+      await loadClient(id);
+      flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
+    } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
   const act = async (action, body, ok) => {
@@ -225,6 +242,7 @@ function AdminApp() {
             <option value="">— select a client —</option>
             {clients.map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id} ({c.client_id})</option>)}
           </select>
+          <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -232,6 +250,26 @@ function AdminApp() {
             <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Catalog</div>
           </div>
         </div>
+
+        {newOpen && (
+          <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
+            <div style={S.h2}>Create a new client</div>
+            <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
+              Creates the tenant config (cloned from a template's contact fields, sizes &amp; options + your branding).
+              After this: add their building styles, layout items &amp; pricing in the tabs, then create the owner
+              login in Supabase Auth and map <code>client_users</code>.
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={ncId} onChange={(e) => setNcId(e.target.value.toLowerCase())} placeholder="client-id (e.g. acme-barns)" style={{ ...S.input, minWidth: 210 }} />
+              <input value={ncCompany} onChange={(e) => setNcCompany(e.target.value)} placeholder="Company name (e.g. Acme Barns)" style={{ ...S.input, minWidth: 200 }} />
+              <select value={ncTemplate} onChange={(e) => setNcTemplate(e.target.value)} style={{ ...S.input }}>
+                <option value="">Clone template: junior-barns (default)</option>
+                {clients.map((c) => <option key={c.client_id} value={c.client_id}>Clone: {c.client_id}</option>)}
+              </select>
+              <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>
+            </div>
+          </div>
+        )}
 
         {tab === "master" && master && (
           <div style={S.card}>

@@ -299,6 +299,36 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, ...r });
       }
 
+      // ── create a new tenant (config row only) ──────────────────────────
+      // Makes a COMPLETE client_configs row by cloning a template's
+      // contact_fields/default_sizes/options + the supplied branding, so
+      // get_config returns a valid (empty-catalog) config the moment it exists.
+      // The owner LOGIN is created separately in Supabase Auth (account creation
+      // is out of scope here); building styles/items/pricing are added via the tabs.
+      case "create_client": {
+        const clientId = reqStr(p.clientId, "clientId").toLowerCase();
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Client id must be lowercase letters, numbers and hyphens (DNS-safe).");
+        const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal"];
+        if (reserved.includes(clientId)) throw new Error(`"${clientId}" is a reserved id.`);
+        const companyName = reqStr(p.companyName, "companyName");
+        const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
+        if (exists.error) throw exists.error;
+        if (exists.data) throw new Error(`A client "${clientId}" already exists.`);
+        const tmplId = (typeof p.templateClientId === "string" && p.templateClientId.trim()) ? p.templateClientId.trim() : "junior-barns";
+        const tmpl = await sb.from("client_configs").select("contact_fields, default_sizes, options").eq("client_id", tmplId).maybeSingle();
+        if (tmpl.error) throw tmpl.error;
+        if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
+        const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
+        const ins = await sb.from("client_configs").insert({
+          client_id: clientId, company_name: companyName,
+          tagline: opt(p.tagline), accent_color: opt(p.accentColor), header_bg: opt(p.headerBg), logo_url: opt(p.logoUrl),
+          contact_fields: tmpl.data.contact_fields, default_sizes: tmpl.data.default_sizes, options: tmpl.data.options,
+          updated_at: new Date().toISOString(),
+        });
+        if (ins.error) throw ins.error;
+        return json({ ok: true, clientId });
+      }
+
       default:
         return json({ error: `Unknown action: ${action}` }, 400);
     }
