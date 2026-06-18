@@ -170,6 +170,7 @@ function AdminApp() {
     if (!file || !sel) return;
     setCsvBusy(true); setMsg(null); setCsvResult(null);
     try {
+      if (file.size > 5_000_000) throw new Error("CSV too large (max 5MB).");
       const matrix = parseCSV(await file.text());
       if (matrix.length < 2) throw new Error("CSV has no data rows.");
       const header = matrix[0].map((h) => String(h).trim());

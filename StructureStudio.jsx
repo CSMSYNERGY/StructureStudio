@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── Supabase project ───
@@ -488,7 +488,7 @@ function StructureStudioInner({ config }) {
 
   // Get sizes for selected style
   const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
-  const sizeOpts = selectedStyle ? selectedStyle.sizes : (C.defaultSizes || []);
+  const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
   const frontWall = getFrontWall(items);
   // Detect unattached lofts for warning banner
   const lofts = items.filter((i) => i.type === "loft");
@@ -2270,7 +2270,7 @@ function StructureStudioInner({ config }) {
                   style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
               </div>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>Image PNG:</span>
+                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>Floor plan PDF:</span>
                 <input readOnly value={savedDesign.imageUrl}
                   style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
                   onClick={(e) => e.target.select()} />
@@ -2366,6 +2366,27 @@ function StructureStudioInner({ config }) {
 // so fail loud on the error screen instead. Every row must be authored complete —
 // see the onboarding runbook in CLAUDE.md.
 const REQUIRED_CONFIG_KEYS = ["branding", "contactFields", "buildingStyles", "defaultSizes", "options", "layoutItems"];
+
+// Catches render-time throws inside the designer (e.g. a malformed-but-complete
+// config row that passes REQUIRED_CONFIG_KEYS but has a bad nested shape) so the
+// user gets a recoverable message instead of a blank white screen.
+class DesignerErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); }
+  render() {
+    if (this.state.err) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>This designer couldn't be displayed</div>
+          <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480, marginBottom: 4 }}>There's a problem with this builder's configuration. Please contact support.</div>
+          <button onClick={() => window.location.reload()} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Reload</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Cutover marker: lets us verify from the deployed site which data path this
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
@@ -2466,5 +2487,5 @@ export default function StructureStudio({ config: configProp = null }) {
       </div>
     );
   }
-  return <StructureStudioInner config={state.config} />;
+  return <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>;
 }
