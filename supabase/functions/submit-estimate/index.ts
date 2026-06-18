@@ -168,14 +168,14 @@ Deno.serve(async (req: Request) => {
   }));
 
   const dynamicLocationId = (products[0]?.locationId) || locationId;
-  let dynamicUserId = (products[0]?.createdBy) || "";
 
-  // 5b. userId fallback. GHL's estimate API rejects an empty userId ("userId should not
-  // be empty"). We normally borrow one from the first product's `createdBy`, but a fresh
-  // GHL location with no products yet leaves it blank. When that happens, fetch a real
-  // user from the location and use the first. Non-fatal: if this fails, dynamicUserId
-  // stays "" and the create returns the same 422 — no regression on the product-backed
-  // path (when createdBy is present this block never runs).
+  // 5b. Resolve the GHL userId the estimate is assigned to. GHL's estimate API rejects an
+  // empty userId ("userId should not be empty"). Resolution order:
+  //   1. products[0].createdBy   — borrow from an existing product (how prod/Junior Barns works)
+  //   2. GET /users/?locationId= — first user in the location
+  // If both come up empty (e.g. a brand-new GHL location with no products and no assigned
+  // users), we fail early with an actionable message instead of GHL's cryptic 422.
+  let dynamicUserId = (products[0]?.createdBy) || "";
   if (!dynamicUserId) {
     try {
       const r = await fetch(
@@ -192,6 +192,13 @@ Deno.serve(async (req: Request) => {
     } catch (e) {
       console.warn("userId fallback (users fetch) error:", (e as Error).message);
     }
+  }
+  if (!dynamicUserId) {
+    return json({
+      error: `Can't create the estimate: the GHL location for "${clientId}" (${locationId}) has no user to assign it to. ` +
+        `GHL requires a userId. Assign at least one user to that GHL sub-account (and ideally add a product for pricing), ` +
+        `or set an explicit GHL user id in the client's settings, then resubmit.`,
+    }, 400);
   }
 
   // 6. Product matching helper — ported from n8n verbatim
