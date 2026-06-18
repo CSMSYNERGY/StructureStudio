@@ -271,5 +271,74 @@ Deno.serve(async (req: Request) => {
     } catch (e) { return json({ error: (e as Error).message || String(e) }, 500); }
   }
 
+  // Verify the GHL Location ID + API key against GoHighLevel, then save ONLY if they
+  // are valid. Location/key fall back to the stored values when the field is left blank
+  // (so an owner can re-verify without re-typing the secret). Also reports whether the
+  // location has users (required for estimates) and products (needed for pricing).
+  if (action === "verify_save_ghl") {
+    const trim = (v: unknown) => String(v ?? "").trim();
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings")
+      .select("ghl_location_id, ghl_api_key")
+      .eq("client_id", clientId)
+      .maybeSingle();
+    if (curErr) return json({ error: curErr.message }, 500);
+
+    const locationId = trim(payload.ghlLocationId) || (cur?.ghl_location_id ?? "");
+    const apiKey = trim(payload.ghlApiKey) || (cur?.ghl_api_key ?? "");
+    if (!locationId || !apiKey) {
+      return json({ error: "Enter both a GHL Location ID and an API key to verify the connection." }, 400);
+    }
+    // Guard against browser autofill dropping the login email into the Location ID field.
+    if (locationId.includes("@") || /\s/.test(locationId)) {
+      return json({ error: `That GHL Location ID looks wrong ("${locationId}") — it should be the sub-account location id like sp58arigVfqozsJSPe1z, not an email. This is usually browser autofill: clear the field and paste the real Location ID.` }, 400);
+    }
+
+    const ghlHeaders = {
+      "Version": "2021-07-28",
+      "Authorization": `Bearer ${apiKey}`,
+      "Accept": "application/json",
+    };
+    // Location-scoped read: 200 ⇒ the key is valid for this location; 401/403 ⇒ wrong key/location.
+    let prodStatus = 0, prodOk = false, prodBody = "";
+    try {
+      const r = await fetch(`https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
+      prodStatus = r.status; prodOk = r.ok; prodBody = (await r.text()).slice(0, 600);
+    } catch (e) {
+      return json({ error: `Couldn't reach GoHighLevel to verify: ${(e as Error).message}` }, 502);
+    }
+    if (!prodOk) {
+      const hint = prodStatus === 401 || prodStatus === 403
+        ? "The API key is wrong, expired, or not authorized for this Location ID."
+        : `GoHighLevel responded: ${prodBody}`;
+      return json({ error: `Verification failed (HTTP ${prodStatus}). ${hint}` }, 400);
+    }
+
+    // Estimate-readiness signals (non-blocking).
+    let hasProducts = false, hasUsers = false;
+    try { const pj = JSON.parse(prodBody || "{}"); hasProducts = Array.isArray(pj?.products) && pj.products.length > 0; } catch { /* ignore */ }
+    try {
+      const ur = await fetch(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
+      if (ur.ok) { const uj = await ur.json(); hasUsers = Array.isArray(uj?.users) && uj.users.length > 0; }
+    } catch { /* non-fatal */ }
+
+    // Verified → save.
+    const updates: Record<string, unknown> = {
+      client_id: clientId,
+      ghl_location_id: locationId,
+      ghl_api_key: apiKey,
+      updated_at: new Date().toISOString(),
+    };
+    if ("ghlPipelineId" in payload) updates.ghl_pipeline_id = trim(payload.ghlPipelineId) || null;
+    if ("ghlStageSendQuoteId" in payload) updates.ghl_stage_send_quote_id = trim(payload.ghlStageSendQuoteId) || null;
+    const { error: upErr } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
+    if (upErr) return json({ error: `Verified, but the save failed: ${upErr.message}` }, 500);
+
+    const warning = !hasUsers
+      ? "But this GHL location has no users yet — estimates will be rejected until you assign at least one user to the sub-account."
+      : (!hasProducts ? "Note: this location has no products, so estimate line items won't be priced yet." : "");
+    return json({ ok: true, verified: true, ghlLocationIdMasked: maskId(locationId), hasUsers, hasProducts, warning });
+  }
+
   return json({ error: `Unknown action "${action}".` }, 400);
 });

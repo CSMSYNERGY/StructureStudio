@@ -238,6 +238,8 @@ function SettingsView() {
   // blank = keep current value.
   const [ghlLocationId, setGhlLocationId] = useState("");
   const [ghlApiKey, setGhlApiKey] = useState("");
+  const [ghlBusy, setGhlBusy] = useState(false);
+  const [ghlMsg, setGhlMsg] = useState(null);   // { ok } | { err }
   const [form, setForm] = useState({
     ghlPipelineId: "", ghlStageSendQuoteId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
@@ -324,8 +326,6 @@ function SettingsView() {
     const hasAddr = form.addr1 || form.addrCity || form.addrState || form.addrZip;
     const body = {
       action: "save",
-      ghlPipelineId: form.ghlPipelineId,
-      ghlStageSendQuoteId: form.ghlStageSendQuoteId,
       businessName: form.businessName,
       businessPhone: form.businessPhone,
       businessWebsite: form.businessWebsite,
@@ -335,14 +335,33 @@ function SettingsView() {
       betaMode: form.betaMode,
       betaEmail: form.betaEmail,
     };
-    if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
-    if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
     if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
     setSaved(true);
-    setGhlApiKey(""); setGhlLocationId("");
     // refresh masked status
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // GHL connection: verify the location id + API key against GoHighLevel and save
+  // only if they're valid. Location/key fall back to the stored values when left
+  // blank. Also surfaces a warning when the location has no users (estimates would
+  // fail) or no products (line items unpriced).
+  const saveGhl = async () => {
+    setGhlMsg(null); setGhlBusy(true);
+    const body = {
+      action: "verify_save_ghl",
+      ghlPipelineId: form.ghlPipelineId,
+      ghlStageSendQuoteId: form.ghlStageSendQuoteId,
+    };
+    if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
+    if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    setGhlBusy(false);
+    if (err || (data && data.error)) { setGhlMsg({ err: (data && data.error) || (err && err.message) || "Verification failed." }); return; }
+    setGhlMsg({ ok: data.warning ? `Verified & saved. ${data.warning}` : "Verified & saved — the connection works.", warn: Boolean(data.warning) });
+    setGhlApiKey(""); setGhlLocationId("");
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -350,7 +369,7 @@ function SettingsView() {
   if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
 
   return (
-    <form onSubmit={save}>
+    <form onSubmit={save} autoComplete="off">
       {error && <div style={S.err}>{error}</div>}
       {saved && <div style={S.okMsg}>Settings saved.</div>}
 
@@ -361,16 +380,20 @@ function SettingsView() {
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
             : <>Not connected yet. Estimates can't be sent until a GHL Location ID and API key are saved.</>}
         </p>
+        {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
+        {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#FFFBEB", color: "#92400E", border: "1px solid #FDE68A" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
           <div><span style={S.lbl}>GHL Location ID</span>
-            <input style={S.input} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
+            <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
           <div><span style={S.lbl}>GHL API Key</span>
-            <input style={S.input} type="password" autoComplete="off" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
+            <input style={S.input} type="password" name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
           <div><span style={S.lbl}>Pipeline ID (optional)</span>
-            <input style={S.input} value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
+            <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
           <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
-            <input style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
+            <input style={S.input} name="ss-ghl-stage-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
         </div>
+        <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against GoHighLevel and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
       </div>
 
       <div style={S.card}>
