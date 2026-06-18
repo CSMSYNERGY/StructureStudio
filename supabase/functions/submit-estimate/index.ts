@@ -168,7 +168,31 @@ Deno.serve(async (req: Request) => {
   }));
 
   const dynamicLocationId = (products[0]?.locationId) || locationId;
-  const dynamicUserId = (products[0]?.createdBy) || "";
+  let dynamicUserId = (products[0]?.createdBy) || "";
+
+  // 5b. userId fallback. GHL's estimate API rejects an empty userId ("userId should not
+  // be empty"). We normally borrow one from the first product's `createdBy`, but a fresh
+  // GHL location with no products yet leaves it blank. When that happens, fetch a real
+  // user from the location and use the first. Non-fatal: if this fails, dynamicUserId
+  // stays "" and the create returns the same 422 — no regression on the product-backed
+  // path (when createdBy is present this block never runs).
+  if (!dynamicUserId) {
+    try {
+      const r = await fetch(
+        `https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`,
+        { headers: ghlHeaders }
+      );
+      if (r.ok) {
+        const d = await r.json();
+        const users: any[] = Array.isArray(d?.users) ? d.users : [];
+        dynamicUserId = users[0]?.id || users[0]?._id || "";
+      } else {
+        console.warn("userId fallback (users fetch) failed:", r.status, (await r.text()).slice(0, 500));
+      }
+    } catch (e) {
+      console.warn("userId fallback (users fetch) error:", (e as Error).message);
+    }
+  }
 
   // 6. Product matching helper — ported from n8n verbatim
   function getProductDetails(searchString: string, userSelection = "") {
