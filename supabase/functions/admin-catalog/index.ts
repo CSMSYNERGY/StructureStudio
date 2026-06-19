@@ -99,11 +99,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
-      if (truthy(val)) {
-        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
-      } else {
-        await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
-      }
+      const incRes = truthy(val)
+        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" })
+        : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
+      if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
     }
   }
   return { imported: created + updated, created, updated, skipped };
@@ -415,7 +414,14 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // 3. map (or re-map) the user to this client with the chosen role
+        // 3. map the user to this client with the chosen role. Refuse to SILENTLY re-home a
+        //    login already linked to a different client (operator typo / isolation footgun);
+        //    require an explicit reassign:true to move them.
+        const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
+        if (existingLink.error) throw existingLink.error;
+        if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
+          throw new Error(`"${email}" is already linked to client "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
+        }
         const up = await sb.from("client_users").upsert(
           { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
         if (up.error) throw up.error;

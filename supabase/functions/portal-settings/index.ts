@@ -95,11 +95,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
-      if (truthy(val)) {
-        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
-      } else {
-        await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
-      }
+      const incRes = truthy(val)
+        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" })
+        : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
+      if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
     }
   }
   return { imported: created + updated, created, updated, skipped };
@@ -231,7 +230,9 @@ Deno.serve(async (req: Request) => {
     if (typeof payload.logoBase64 === "string" && payload.logoBase64.trim()) {
       const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
       const ct = String(payload.logoContentType || "image/png");
-      const ext = (ct.split("/")[1] || "png").split("+")[0].replace(/[^a-z0-9]/gi, "") || "png";
+      const EXT_BY_CT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+      const ext = EXT_BY_CT[ct];
+      if (!ext) return json({ error: "Unsupported image type (use PNG, JPG, WEBP or GIF)." }, 400);
       let bytes: Uint8Array;
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
       catch { return json({ error: "Invalid logo data." }, 400); }
@@ -258,7 +259,9 @@ Deno.serve(async (req: Request) => {
     if (typeof payload.logoBase64 !== "string" || !payload.logoBase64.trim()) return json({ error: "No logo data." }, 400);
     const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
     const ct = String(payload.logoContentType || "image/png");
-    const ext = (ct.split("/")[1] || "png").split("+")[0].replace(/[^a-z0-9]/gi, "") || "png";
+    const EXT_BY_CT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT_BY_CT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use PNG, JPG, WEBP or GIF)." }, 400);
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
     catch { return json({ error: "Invalid logo data." }, 400); }
