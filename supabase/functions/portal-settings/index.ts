@@ -275,7 +275,7 @@ Deno.serve(async (req: Request) => {
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
     const [styles, sizes, items, types, incl] = await Promise.all([
-      admin.from("building_styles").select("id, key, label, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, image_url, active").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -366,6 +366,59 @@ Deno.serve(async (req: Request) => {
       ? "But this GHL location has no users yet — estimates will be rejected until you assign at least one user to the sub-account."
       : (!hasProducts ? "Note: this location has no products, so estimate line items won't be priced yet." : "");
     return json({ ok: true, verified: true, ghlLocationIdMasked: maskId(locationId), hasUsers, hasProducts, warning });
+  }
+
+  // Create a building style for THIS tenant (clientId is JWT-resolved, never from the
+  // body) so owners can self-serve styles before pricing. An optional base64 image is
+  // uploaded to the public 'branding' bucket. Key allocation mirrors admin-catalog's
+  // create_style: derive a slug, never collide with a master-catalog key, retry on
+  // unique-violation so a concurrent create never silently overwrites a style.
+  if (action === "create_style") {
+    const label = String(payload.label ?? "").trim();
+    if (!label) return json({ error: "Building style name is required." }, 400);
+    let imageUrl: string | null = null;
+    if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
+      const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+      const ct = String(payload.imageContentType || "image/jpeg");
+      const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+      const ext = EXT[ct];
+      if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+      let bytes: Uint8Array;
+      try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+      if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+      imageUrl = pub.publicUrl;
+    }
+    const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
+    const mk = await admin.from("building_style_catalog").select("key");
+    if (mk.error) return json({ error: mk.error.message }, 500);
+    const masterKeys = new Set<string>((mk.data ?? []).map((m: any) => String(m.key)));
+    let key = base, n = 1;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (masterKeys.has(key)) { key = `${base}-${++n}`; continue; }
+      const ins = await admin.from("building_styles").insert(
+        { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
+        .select("id, key").maybeSingle();
+      if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
+      if (ins.error.code !== "23505") return json({ error: ins.error.message }, 500);
+      key = `${base}-${++n}`;
+    }
+    return json({ error: "Could not allocate a unique style key." }, 500);
+  }
+
+  // Show/hide one of this tenant's styles (a hidden style drops out of the designer and
+  // the pricing template). Scoped to clientId so an owner can only touch their own styles.
+  if (action === "set_style_active") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error } = await admin.from("building_styles")
+      .update({ active: payload.active !== false })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    return json({ ok: true });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
