@@ -111,6 +111,7 @@ function AdminApp() {
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
+  const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink }
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
 
@@ -147,12 +148,18 @@ function AdminApp() {
   };
   const linkOwner = async () => {
     if (!sel || !ownerEmail.trim()) return;
-    setBusy(true); setMsg(null);
+    setBusy(true); setMsg(null); setLinkResult(null);
     try {
-      const r = await api("link_owner", pwd, { clientId: sel, email: ownerEmail.trim(), role: linkRole });
-      setLinkOpen(false); setOwnerEmail("");
+      const email = ownerEmail.trim();
+      const r = await api("link_owner", pwd, {
+        clientId: sel, email, role: linkRole,
+        portalUrl: location.origin + "/portal.html",
+      });
       const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
-      flash({ ok: `"${ownerEmail.trim()}" linked to "${sel}" as ${roleLabel} — they can now sign into the portal.` });
+      // keep the panel open so the operator can copy the setup link
+      setLinkResult({ email, client: sel, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null });
+      setOwnerEmail("");
+      flash({ ok: `"${email}" linked to "${sel}" as ${roleLabel}.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -319,7 +326,7 @@ function AdminApp() {
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
-                  First create the login in <b>Supabase → Authentication → Add user</b>, then enter that email here to map it to <b>{sel}</b> so they can sign into the portal.
+                  Enter the owner's email — we'll create their portal login automatically (no manual Supabase step), map it to <b>{sel}</b>, and give you a one-time set-password link to send them (also emailed automatically if SMTP is configured).
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
@@ -330,6 +337,27 @@ function AdminApp() {
                   <button onClick={linkOwner} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
                 </div>
                 <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Admins see Pricing &amp; Settings; team members only see Designs &amp; Leads.</div>
+                {linkResult && (
+                  <div style={{ marginTop: 12, padding: 12, background: "#FFF", border: "1px solid #BFDBFE", borderRadius: 8 }}>
+                    <div style={{ fontSize: 13, color: "#15803D", fontWeight: 600, marginBottom: 6 }}>
+                      ✓ {linkResult.email} linked to {linkResult.client} as {linkResult.roleLabel}.
+                      {linkResult.created ? (linkResult.emailSent ? " Login created and invite email sent." : " Login created.") : " (login already existed)"}
+                    </div>
+                    {linkResult.setupLink ? (
+                      <div>
+                        <div style={{ fontSize: 12, color: "#475569", marginBottom: 6 }}>
+                          Send them this one-time set-password link{linkResult.emailSent ? " (in case the email doesn't arrive)" : ""}:
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <input readOnly value={linkResult.setupLink} onFocus={(e) => e.target.select()} style={{ ...S.input, flex: 1, minWidth: 260, fontSize: 12 }} />
+                          <button onClick={() => { (navigator.clipboard && navigator.clipboard.writeText(linkResult.setupLink)); flash({ ok: "Setup link copied." }); }} style={S.btn(ACCENT, "#FFF")}>Copy link</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: "#B45309" }}>Couldn't generate a setup link — have them use the portal's “Forgot password” to set one.</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
