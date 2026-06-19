@@ -41,7 +41,7 @@ do $do$ begin
 end $do$;
 
 -- (c) ---------------------------------------------------------------------------------------
-create or replace function public.enforce_size_pricing() returns trigger language plpgsql as $ef$
+create or replace function public.enforce_size_pricing() returns trigger language plpgsql set search_path = '' as $ef$
 begin
   if new.base_price is null then new.active := false; end if;  -- unpriced sizes are never offered
   return new;
