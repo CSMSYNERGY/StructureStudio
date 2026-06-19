@@ -368,15 +368,23 @@ Deno.serve(async (req: Request) => {
       }
 
       // ── link a user login to a client (with a role) ────────────────────
-      // Finds the Supabase auth user by email (admin API) and maps it to the
-      // client in client_users. role: "owner"/"admin" (full access incl. Pricing +
-      // Settings) or "user" (Designs & Leads only). The login itself must already
-      // exist (Authentication → Add user) — account creation stays out of scope.
+      // Finds-or-CREATES the Supabase auth user for the email, then maps it to the
+      // client in client_users. No manual "Authentication → Add user" step: if the
+      // login doesn't exist we create it and try to email an invite (best-effort,
+      // needs SMTP), and either way we return a one-time set-password link the
+      // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
+      // Settings) or "user" (Designs & Leads only).
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const email = reqStr(p.email, "email").toLowerCase();
         const role = ["owner", "admin", "user"].includes(String(p.role || "").toLowerCase())
           ? String(p.role).toLowerCase() : "owner";
+        // Where the set-password link lands (the portal). The panel passes
+        // location.origin + "/portal.html"; fall back to production.
+        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
+          ? p.portalUrl : "https://structurestudio.app/portal.html";
+
+        // 1. find an existing auth user by email (admin API, paginated)
         let user: any = null;
         for (let page = 1; page <= 20 && !user; page++) {
           const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
@@ -385,11 +393,41 @@ Deno.serve(async (req: Request) => {
           user = users.find((u: any) => String(u.email || "").toLowerCase() === email) || null;
           if (users.length < 1000) break;
         }
-        if (!user) throw new Error(`No Supabase user with email "${email}". Create the login first in Authentication → Add user.`);
+
+        // 2. create the login if missing. inviteUserByEmail creates + emails the
+        // invite when SMTP is set up; if that fails (e.g. no SMTP) we still want the
+        // account, so fall back to a plain confirmed createUser.
+        let created = false, emailSent = false;
+        if (!user) {
+          const inv = await sb.auth.admin.inviteUserByEmail(email, { redirectTo: portalUrl });
+          if (!inv.error && inv.data?.user) {
+            user = inv.data.user; created = true; emailSent = true;
+          } else {
+            const cu = await sb.auth.admin.createUser({ email, email_confirm: true });
+            if (cu.error && !/already|registered|exist/i.test(cu.error.message || "")) throw cu.error;
+            user = cu.data?.user || null;
+            if (!user) {
+              const relist = await sb.auth.admin.listUsers({ page: 1, perPage: 1000 });
+              user = (relist.data?.users || []).find((u: any) => String(u.email || "").toLowerCase() === email) || null;
+            }
+            if (!user) throw new Error(`Could not create a login for "${email}".`);
+            created = !cu.error; emailSent = false;
+          }
+        }
+
+        // 3. map (or re-map) the user to this client with the chosen role
         const up = await sb.from("client_users").upsert(
           { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
         if (up.error) throw up.error;
-        return json({ ok: true, userId: user.id, email, role });
+
+        // 4. always hand back a one-time set-password link (works without SMTP)
+        let setupLink: string | null = null;
+        try {
+          const gl = await sb.auth.admin.generateLink({ type: "recovery", email, options: { redirectTo: portalUrl } });
+          if (!gl.error) setupLink = gl.data?.properties?.action_link || null;
+        } catch (_) { /* link is best-effort */ }
+
+        return json({ ok: true, userId: user.id, email, role, created, emailSent, setupLink });
       }
 
       default:

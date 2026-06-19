@@ -683,10 +683,12 @@ function PortalApp() {
   const [recovery, setRecovery] = useState(false);
 
   useEffect(() => {
-    // A recovery-email link lands here with #…type=recovery. supabase-js
-    // exchanges the token automatically (detectSessionInUrl); we just route
-    // to the set-password view.
-    if (window.location.hash.includes("type=recovery")) setRecovery(true);
+    // A recovery- or invite-email link lands here with #…type=recovery or
+    // #…type=invite. supabase-js exchanges the token automatically
+    // (detectSessionInUrl); we route both to the set-password view so a freshly
+    // invited owner sets a password instead of dropping into the dashboard with none.
+    const h = window.location.hash;
+    if (h.includes("type=recovery") || h.includes("type=invite")) setRecovery(true);
     sb.auth.getSession().then(({ data }) => setSession(data.session || null));
     const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
       setSession(sess || null);
