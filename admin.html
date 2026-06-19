@@ -94,7 +94,7 @@ function AdminApp() {
   const [newOpen, setNewOpen] = useState(false);
   const [ncId, setNcId] = useState("");
   const [ncCompany, setNcCompany] = useState("");
-  const [ncTemplate, setNcTemplate] = useState("");
+  const [ncTemplate, setNcTemplate] = useState("__none__");
   const [ncIdTouched, setNcIdTouched] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
@@ -125,9 +125,9 @@ function AdminApp() {
     if (!id || !ncCompany.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate || undefined });
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate });
       const c = await api("list_clients", pwd); setClients(c.clients || []);
-      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate(""); setNcIdTouched(false);
+      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false);
       await loadClient(id);
       flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
     } catch (e) { flash({ err: e.message }); }
@@ -281,15 +281,17 @@ function AdminApp() {
           <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
             <div style={S.h2}>Create a new client</div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
-              Creates the tenant config (cloned from a template's contact fields, sizes &amp; options + your branding).
-              After this: add their building styles, layout items &amp; pricing in the tabs, then create the owner
-              login in Supabase Auth and map <code>client_users</code>.
+              Creates the tenant config. <b>No template</b> starts blank (standard contact form, no sizes/options — you
+              add everything in the tabs). Or clone a template to copy its contact fields, default sizes &amp; options.
+              After this: add building styles, layout items &amp; pricing in the tabs, then create the owner login in
+              Supabase Auth and map <code>client_users</code>.
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input value={ncCompany} onChange={(e) => { const v = e.target.value; setNcCompany(v); if (!ncIdTouched) setNcId(slugify(v)); }} placeholder="Company name (e.g. Acme Barns)" style={{ ...S.input, minWidth: 220 }} />
               <input value={ncId} onChange={(e) => { setNcId(e.target.value.toLowerCase()); setNcIdTouched(true); }} placeholder="client-id (auto from name)" title="Auto-generated from the company name; edit to override" style={{ ...S.input, minWidth: 200 }} />
               <select value={ncTemplate} onChange={(e) => setNcTemplate(e.target.value)} style={{ ...S.input }}>
-                <option value="">Clone template: junior-barns (default)</option>
+                <option value="__none__">No template — blank (recommended)</option>
+                <option value="">Clone template: junior-barns</option>
                 {clients.map((c) => <option key={c.client_id} value={c.client_id}>Clone: {c.client_id}</option>)}
               </select>
               <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>

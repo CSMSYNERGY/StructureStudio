@@ -340,19 +340,31 @@ Deno.serve(async (req: Request) => {
         const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
         if (exists.error) throw exists.error;
         if (exists.data) throw new Error(`A client "${clientId}" already exists.`);
-        const tmplId = (typeof p.templateClientId === "string" && p.templateClientId.trim()) ? p.templateClientId.trim() : "junior-barns";
-        const tmpl = await sb.from("client_configs").select("contact_fields, default_sizes, options").eq("client_id", tmplId).maybeSingle();
-        if (tmpl.error) throw tmpl.error;
-        if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
+        // templateClientId === "__none__" => start blank (no clone): a standard contact
+        // form so the designer works, and empty sizes/options the operator fills in via
+        // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
+        const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__";
+        let contactFields: unknown, defaultSizes: unknown, options: unknown;
+        if (blank) {
+          contactFields = ["name", "email", "phone", "street", "city", "state", "zip"];
+          defaultSizes = [];
+          options = [];
+        } else {
+          const tmplId = (typeof p.templateClientId === "string" && p.templateClientId.trim()) ? p.templateClientId.trim() : "junior-barns";
+          const tmpl = await sb.from("client_configs").select("contact_fields, default_sizes, options").eq("client_id", tmplId).maybeSingle();
+          if (tmpl.error) throw tmpl.error;
+          if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
+          contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
+        }
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
           client_id: clientId, company_name: companyName,
           tagline: opt(p.tagline), accent_color: opt(p.accentColor), header_bg: opt(p.headerBg), logo_url: opt(p.logoUrl),
-          contact_fields: tmpl.data.contact_fields, default_sizes: tmpl.data.default_sizes, options: tmpl.data.options,
+          contact_fields: contactFields, default_sizes: defaultSizes, options,
           updated_at: new Date().toISOString(),
         });
         if (ins.error) throw ins.error;
-        return json({ ok: true, clientId });
+        return json({ ok: true, clientId, blank });
       }
 
       // ── link a user login to a client (with a role) ────────────────────
