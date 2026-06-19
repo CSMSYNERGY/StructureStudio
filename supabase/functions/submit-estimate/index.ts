@@ -83,11 +83,17 @@ Deno.serve(async (req: Request) => {
   //    browser right before calling us, so it must exist here.
   const { data: existingDesign, error: designErr } = await supabase
     .from("designs")
-    .select("ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id")
+    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
     return json({ error: `Design ${designId} not found in Supabase` }, 404);
+  }
+  // Cross-tenant guard: the design must belong to the clientId in the request. Without this,
+  // an anon caller could pass another tenant's clientId + a known design code and drive
+  // estimates (and customer emails) through the victim tenant's GHL account.
+  if (existingDesign.client_id && existingDesign.client_id !== clientId) {
+    return json({ error: "This design does not belong to the specified client." }, 403);
   }
   const existingEstimateId: string | null = existingDesign.ghl_estimate_id || null;
 
@@ -257,9 +263,12 @@ Deno.serve(async (req: Request) => {
   // (building_sizes.base_price, matched by style label + size label). Add-on options below
   // are still GHL-priced when products exist and $0 when they don't (getProductDetails
   // returns null with an empty price list) — so no-product tenants get "options free for now".
+  // Building price: prefer a matching GHL product. Only fall back to the CSV catalog when the
+  // tenant has NO GHL product catalog at all (products.length === 0) — never on a single
+  // fuzzy-match miss for a GHL-priced tenant, which would silently swap pricing models.
   const shed = getProductDetails(`${style} ${size} ${paintStatus}`);
-  let csvBuildingPrice = 0;
-  if (!shed) {
+  let csvBuildingPrice = 0, csvPriced = false;
+  if (!shed && products.length === 0) {
     try {
       // The designer submits the style's KEY (e.g. "test"), not its label ("Test"), and
       // sizes can render with a × vs x. Normalize both sides (lowercase, ×→x, strip spaces)
@@ -270,9 +279,13 @@ Deno.serve(async (req: Request) => {
       if (styleRow) {
         const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
         const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
-        if (sizeRow && sizeRow.base_price != null) csvBuildingPrice = Number(sizeRow.base_price) || 0;
+        if (sizeRow && sizeRow.base_price != null) { csvBuildingPrice = Number(sizeRow.base_price) || 0; csvPriced = true; }
       }
-    } catch { /* leave at 0 if the lookup fails */ }
+    } catch { /* leave unpriced; handled below */ }
+    // Fail loudly instead of emailing a $0 quote when the size has no price set.
+    if (!csvPriced) {
+      return json({ error: `No price is set for "${style} ${size}". Add it in the portal Pricing tab (or set up GHL products), then resubmit.` }, 400);
+    }
   }
   targetItems.push({
     name: shed ? shed.name : `${style} (${size} - ${paintStatus})`,
@@ -458,8 +471,11 @@ Deno.serve(async (req: Request) => {
 
   // The browser uploads a single-page letter PDF of the floor plan to Storage and passes
   // its public URL here as `imageUrl` (the column is still named image_url for legacy reasons).
+  // Only attach a URL that points at THIS tenant's floor-plans prefix — never a caller-supplied
+  // external URL — so an attacker can't graft arbitrary links onto a tenant's branded estimate.
+  const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
   const estimateAttachments: any[] = [];
-  if (imageUrl && !String(imageUrl).startsWith("data:")) {
+  if (imageUrl && String(imageUrl).startsWith(expectedPdfPrefix)) {
     estimateAttachments.push({
       id: designId,
       name: `${designId}.pdf`,
@@ -485,7 +501,7 @@ Deno.serve(async (req: Request) => {
     title: "ESTIMATE",
     invoiceNumberPrefix: "EST-",
     estimateNumberPrefix: "EST-",
-    invoiceNumber: uniqueSequence.toString(),
+    invoiceNumber: (existingEstimateId && existingDesign.ghl_estimate_number) ? String(existingDesign.ghl_estimate_number) : uniqueSequence.toString(),
     currency: "USD",
     issueDate: today,
     expiryDate: expiryFormatted,
