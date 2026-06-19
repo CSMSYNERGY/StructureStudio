@@ -39,13 +39,25 @@ const S = {
   row: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" },
 };
 
-function api(action, password, body) {
-  return sb.functions.invoke("admin-catalog", { body: { action, adminPassword: password, ...(body || {}) } })
-    .then(({ data, error }) => {
-      if (error) throw new Error(error.message || "request failed");
-      if (data && data.error) throw new Error(data.error);
-      return data;
-    });
+async function api(action, password, body) {
+  const { data, error } = await sb.functions.invoke("admin-catalog", { body: { action, adminPassword: password, ...(body || {}) } });
+  if (error) {
+    // supabase-js wraps any non-2xx response in a FunctionsHttpError whose .message is the
+    // opaque "Edge Function returned a non-2xx status code". The real { error } body the
+    // function sent is on error.context (the raw Response) — read it so the operator sees
+    // the actual reason (e.g. "No Supabase user with email …. Create the login first").
+    let msg = error.message || "request failed";
+    try {
+      const ctx = error.context;
+      if (ctx && typeof ctx.json === "function") {
+        const b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+        if (b && b.error) msg = b.error;
+      }
+    } catch (_) { /* fall back to the generic message */ }
+    throw new Error(msg);
+  }
+  if (data && data.error) throw new Error(data.error);
+  return data;
 }
 
 // ── CSV helpers (RFC-4180-ish) ──────────────────────────────────────────────
