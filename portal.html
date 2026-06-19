@@ -503,6 +503,11 @@ function PricingCsv() {
   const [msg, setMsg] = useState(null);
   const [result, setResult] = useState(null);
   const [fileKey, setFileKey] = useState(0);
+  // building-style manager state
+  const [styleName, setStyleName] = useState("");
+  const [styleImg, setStyleImg] = useState(null);     // { base64, contentType, name }
+  const [styleBusy, setStyleBusy] = useState(false);
+  const [styleFileKey, setStyleFileKey] = useState(0);
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -512,7 +517,43 @@ function PricingCsv() {
   useEffect(() => { load(); }, []);
 
   const items = () => (cat && cat.items) || [];
-  const activeStyles = () => ((cat && cat.styles) || []).filter((s) => s.active);
+  const allStyles = () => (cat && cat.styles) || [];
+  const activeStyles = () => allStyles().filter((s) => s.active);
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onStyleImg = (file) => {
+    if (!file) { setStyleImg(null); return; }
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setStyleFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setStyleFileKey((k) => k + 1); return; }
+    const r = new FileReader();
+    r.onerror = () => setMsg({ err: "Could not read that image." });
+    r.onload = () => setStyleImg({ base64: r.result, contentType: file.type || "image/jpeg", name: file.name });
+    r.readAsDataURL(file);
+  };
+  const addStyle = async () => {
+    if (!styleName.trim()) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const body = { action: "create_style", label: styleName.trim() };
+      if (styleImg) { body.imageBase64 = styleImg.base64; body.imageContentType = styleImg.contentType; }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const added = styleName.trim();
+      setStyleName(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
+      await load();
+      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the CSV below.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  const toggleStyle = async (s) => {
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_active", styleId: s.id, active: !s.active } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
   const downloadTemplate = () => {
     if (!cat) return;
     const its = items();
@@ -563,41 +604,78 @@ function PricingCsv() {
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0 };
   return (
-    <div style={S.card}>
-      <div style={S.h2}>Pricing &amp; included options (CSV)</div>
-      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-        Download the template (one row per building style), then add a row for every size you offer: type the
-        <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The yes/no columns mean “is this option
-        <b> included in the price?</b>” — leave them <b>no</b> to charge for it. Re-upload anytime to update prices
-        (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
-      </p>
+    <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
-        <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", color: "#92400E", fontSize: 13, lineHeight: 1.5 }}>
-          <b>Add your building styles first.</b> The pricing template is built from your styles — once you’ve created at
-          least one (Settings → building styles, or ask your admin), come back here to download it and set sizes &amp; prices.
-        </div>
-      ) : (
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
-          <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
-            {busy ? "Importing…" : "⬆ Upload filled CSV"}
-            <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
-              onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
-          </label>
-        </div>
-      )}
-      {result && result.skipped && result.skipped.length > 0 && (
-        <div style={{ marginTop: 12, fontSize: 13 }}>
-          <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
-          <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
-            {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
-          </ul>
-        </div>
-      )}
-    </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Building styles</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
+          style using the CSV below. Hidden styles don’t appear in your designer or the pricing template.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+          <div>
+            {allStyles().length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                {allStyles().map((s) => (
+                  <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: "1px solid #E2E8F0", borderRadius: 8, opacity: s.active ? 1 : 0.55 }}>
+                    {s.image_url
+                      ? <img src={s.image_url} alt="" style={thumb} />
+                      : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <button onClick={() => toggleStyle(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>{s.active ? "Hide" : "Show"}</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={styleName} onChange={(e) => setStyleName(e.target.value)} placeholder="Building style name (e.g. Lofted Barn)" style={{ ...S.input, minWidth: 220 }} />
+              <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer", display: "inline-block" }}>
+                {styleImg ? "Image selected ✓" : "Choose image"}
+                <input key={styleFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onStyleImg(e.target.files && e.target.files[0])} />
+              </label>
+              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={S.btn(styleBusy || !styleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>{styleBusy ? "Adding…" : "Add style"}</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Pricing &amp; included options (CSV)</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Download the template (one row per building style), then add a row for every size you offer: type the
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The yes/no columns mean “is this option
+          <b> included in the price?</b>” — leave them <b>no</b> to charge for it. Re-upload anytime to update prices
+          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
+          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", color: "#92400E", fontSize: 13, lineHeight: 1.5 }}>
+            <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
+            (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
+            <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+              {busy ? "Importing…" : "⬆ Upload filled CSV"}
+              <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
+                onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+            </label>
+          </div>
+        )}
+        {result && result.skipped && result.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
