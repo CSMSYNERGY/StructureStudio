@@ -431,12 +431,17 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // 8. Estimate payload — America/Los_Angeles to match the business address
-  const tzString = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
-  const localNow = new Date(tzString);
-  const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const today = fmt(localNow);
-  const exp = new Date(localNow); exp.setDate(exp.getDate() + 30);
+  // 8. Estimate payload — issue/expiry dates.
+  // GHL validates issueDate against the LOCATION's clock and rejects anything "in the
+  // future" (code estimate_date_invalid). A date-only value is read at 00:00 in the
+  // location's timezone, so for locations west of UTC an early-UTC submission could push
+  // "today" into the future. Anchor the issue date 12h behind UTC now: that's <= the
+  // current local date in every real timezone (UTC-12..UTC+14), so it's never in the
+  // future, while still reading as "today" during normal business hours.
+  const fmt = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  const issueAnchor = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  const today = fmt(issueAnchor);
+  const exp = new Date(issueAnchor.getTime() + 30 * 24 * 60 * 60 * 1000);
   const expiryFormatted = fmt(exp);
 
   let formattedPhone = "";
