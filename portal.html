@@ -25,6 +25,45 @@ const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
+// never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
+// rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
+const SS_ERR_SOURCE = "portal";
+function ssLogError(source, message, code, context) {
+  try {
+    const params = new URLSearchParams(location.search);
+    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
+      body: JSON.stringify({
+        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
+        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
+        p_code: code == null ? null : String(code).slice(0, 100),
+        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: context || null,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* logging must never break the app */ }
+}
+window.ssLogError = ssLogError;
+window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
+  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
+// Capture every portal-settings edge-function error in one place by wrapping invoke.
+const __ssInvoke = sb.functions.invoke.bind(sb.functions);
+sb.functions.invoke = async (name, opts) => {
+  const res = await __ssInvoke(name, opts);
+  try {
+    if (res && (res.error || (res.data && res.data.error))) {
+      ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
+        (res.error && res.error.name) || null, { fn: name, action: opts && opts.body && opts.body.action });
+    }
+  } catch (_) {}
+  return res;
+};
+
 const ACCENT = "#D97706";
 const S = {
   page: { minHeight: "100vh", display: "flex", flexDirection: "column" },

@@ -1494,6 +1494,7 @@ function StructureStudioInner({ config }) {
     } catch (err) {
       setSubmitError(err.message || "Something went wrong submitting your quote. Please try again.");
       console.error("Submit error:", err);
+      if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "submit failed", null, { phase: "submitQuote", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null });
     } finally {
       setSubmitting(false);
     }
@@ -2373,7 +2374,7 @@ const REQUIRED_CONFIG_KEYS = ["branding", "contactFields", "buildingStyles", "de
 class DesignerErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { err: null }; }
   static getDerivedStateFromError(err) { return { err }; }
-  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); }
+  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "render error", err && err.name, { phase: "render", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null }); }
   render() {
     if (this.state.err) {
       return (

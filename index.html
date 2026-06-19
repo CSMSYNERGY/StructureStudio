@@ -1503,6 +1503,7 @@ function StructureStudioInner({ config }) {
     } catch (err) {
       setSubmitError(err.message || "Something went wrong submitting your quote. Please try again.");
       console.error("Submit error:", err);
+      if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "submit failed", null, { phase: "submitQuote", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null });
     } finally {
       setSubmitting(false);
     }
@@ -2382,7 +2383,7 @@ const REQUIRED_CONFIG_KEYS = ["branding", "contactFields", "buildingStyles", "de
 class DesignerErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { err: null }; }
   static getDerivedStateFromError(err) { return { err }; }
-  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); }
+  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "render error", err && err.name, { phase: "render", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null }); }
   render() {
     if (this.state.err) {
       return (
@@ -2498,6 +2499,33 @@ function StructureStudio({ config: configProp = null }) {
   }
   return <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>;
 }
+
+// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
+// never throws, never blocks the app. Auto-captures uncaught errors + unhandled promise
+// rejections; the component also reports submit/render failures via window.ssLogError. ──
+const SS_ERR_SOURCE = "designer";
+function ssLogError(source, message, code, context) {
+  try {
+    const params = new URLSearchParams(location.search);
+    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
+      body: JSON.stringify({
+        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
+        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
+        p_code: code == null ? null : String(code).slice(0, 100),
+        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: context || null,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* logging must never break the app */ }
+}
+window.ssLogError = ssLogError;
+window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
+  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
 
 window.addEventListener("message",(e)=>{if(e.data&&e.data.type==="structureConfig"){const root=ReactDOM.createRoot(document.getElementById("root"));root.render(<StructureStudio config={e.data.config}/>);}});
 const root=ReactDOM.createRoot(document.getElementById("root"));

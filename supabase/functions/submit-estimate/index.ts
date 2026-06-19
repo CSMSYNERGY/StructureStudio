@@ -250,11 +250,34 @@ Deno.serve(async (req: Request) => {
   const style = selections.buildingStyle || "";
   const size = selections.buildingSize || "";
   const paintStatus = (selections.paint && String(selections.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint";
+
+  // Building price: prefer a matching GHL product (unchanged for tenants like junior-barns
+  // that price via GHL); when there's no GHL match (e.g. a tenant with no product catalog
+  // who prices via the CSV), fall back to this tenant's CSV catalog price
+  // (building_sizes.base_price, matched by style label + size label). Add-on options below
+  // are still GHL-priced when products exist and $0 when they don't (getProductDetails
+  // returns null with an empty price list) — so no-product tenants get "options free for now".
   const shed = getProductDetails(`${style} ${size} ${paintStatus}`);
+  let csvBuildingPrice = 0;
+  if (!shed) {
+    try {
+      // The designer submits the style's KEY (e.g. "test"), not its label ("Test"), and
+      // sizes can render with a × vs x. Normalize both sides (lowercase, ×→x, strip spaces)
+      // and match the style by key OR label so the CSV price reliably resolves.
+      const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
+      const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
+      const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
+      if (styleRow) {
+        const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
+        const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
+        if (sizeRow && sizeRow.base_price != null) csvBuildingPrice = Number(sizeRow.base_price) || 0;
+      }
+    } catch { /* leave at 0 if the lookup fails */ }
+  }
   targetItems.push({
-    name: shed ? shed.name : `${style} ${businessName} (${size} - ${paintStatus})`,
+    name: shed ? shed.name : `${style} (${size} - ${paintStatus})`,
     qty: 1,
-    amount: shed ? shed.amount : 0,
+    amount: shed ? shed.amount : csvBuildingPrice,
     priceId: shed?.priceId || "",
     productId: shed?.productId || "",
     attachments: shed?.imageUrl ? [shed.imageUrl] : [],
@@ -413,12 +436,17 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // 8. Estimate payload — America/Los_Angeles to match the business address
-  const tzString = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
-  const localNow = new Date(tzString);
-  const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const today = fmt(localNow);
-  const exp = new Date(localNow); exp.setDate(exp.getDate() + 30);
+  // 8. Estimate payload — issue/expiry dates.
+  // GHL validates issueDate against the LOCATION's clock and rejects anything "in the
+  // future" (code estimate_date_invalid). A date-only value is read at 00:00 in the
+  // location's timezone, so for locations west of UTC an early-UTC submission could push
+  // "today" into the future. Anchor the issue date 12h behind UTC now: that's <= the
+  // current local date in every real timezone (UTC-12..UTC+14), so it's never in the
+  // future, while still reading as "today" during normal business hours.
+  const fmt = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  const issueAnchor = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  const today = fmt(issueAnchor);
+  const exp = new Date(issueAnchor.getTime() + 30 * 24 * 60 * 60 * 1000);
   const expiryFormatted = fmt(exp);
 
   let formattedPhone = "";
