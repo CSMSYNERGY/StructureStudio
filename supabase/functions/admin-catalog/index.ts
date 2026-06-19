@@ -454,8 +454,11 @@ Deno.serve(async (req: Request) => {
           if (error) throw new Error(`${table}: ${error.message}`);
           deleted[table] = count ?? 0;
         };
-        // Catalog/design rows first (FKs: inclusions→sizes→styles), config last.
+        // Catalog/design rows first, config last. Order respects FKs
+        // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");
+        await wipe("layout_item_pricing");      // FK style_id → building_styles
+        await wipe("colors");                   // standalone per-tenant palette
         await wipe("building_size_inclusions");
         await wipe("building_sizes");
         await wipe("building_styles");
