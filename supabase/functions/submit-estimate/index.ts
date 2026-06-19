@@ -250,11 +250,29 @@ Deno.serve(async (req: Request) => {
   const style = selections.buildingStyle || "";
   const size = selections.buildingSize || "";
   const paintStatus = (selections.paint && String(selections.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint";
+
+  // Building price: prefer a matching GHL product (unchanged for tenants like junior-barns
+  // that price via GHL); when there's no GHL match (e.g. a tenant with no product catalog
+  // who prices via the CSV), fall back to this tenant's CSV catalog price
+  // (building_sizes.base_price, matched by style label + size label). Add-on options below
+  // are still GHL-priced when products exist and $0 when they don't (getProductDetails
+  // returns null with an empty price list) — so no-product tenants get "options free for now".
   const shed = getProductDetails(`${style} ${size} ${paintStatus}`);
+  let csvBuildingPrice = 0;
+  if (!shed) {
+    try {
+      const stRes = await supabase.from("building_styles").select("id").eq("client_id", clientId).eq("label", style).limit(1);
+      const styleId = stRes.data?.[0]?.id;
+      if (styleId) {
+        const szRes = await supabase.from("building_sizes").select("base_price").eq("client_id", clientId).eq("style_id", styleId).eq("label", size).limit(1);
+        csvBuildingPrice = Number(szRes.data?.[0]?.base_price ?? 0) || 0;
+      }
+    } catch { /* leave at 0 if the lookup fails */ }
+  }
   targetItems.push({
-    name: shed ? shed.name : `${style} ${businessName} (${size} - ${paintStatus})`,
+    name: shed ? shed.name : `${style} (${size} - ${paintStatus})`,
     qty: 1,
-    amount: shed ? shed.amount : 0,
+    amount: shed ? shed.amount : csvBuildingPrice,
     priceId: shed?.priceId || "",
     productId: shed?.productId || "",
     attachments: shed?.imageUrl ? [shed.imageUrl] : [],

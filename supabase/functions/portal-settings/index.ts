@@ -362,9 +362,12 @@ Deno.serve(async (req: Request) => {
     const { error: upErr } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
     if (upErr) return json({ error: `Verified, but the save failed: ${upErr.message}` }, 500);
 
+    // Pricing comes from the per-tenant CSV catalog (building_sizes), not GHL products, so a
+    // missing product catalog is no longer worth warning about. A missing USER still blocks
+    // estimates (GHL requires a userId on the estimate), so keep that one.
     const warning = !hasUsers
       ? "But this GHL location has no users yet — estimates will be rejected until you assign at least one user to the sub-account."
-      : (!hasProducts ? "Note: this location has no products, so estimate line items won't be priced yet." : "");
+      : "";
     return json({ ok: true, verified: true, ghlLocationIdMasked: maskId(locationId), hasUsers, hasProducts, warning });
   }
 
