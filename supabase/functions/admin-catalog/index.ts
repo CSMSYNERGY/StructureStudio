@@ -436,6 +436,64 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, userId: user.id, email, role, created, emailSent, setupLink });
       }
 
+      // ── delete a tenant and ALL of its data (operator hard delete) ──────
+      // Removes the client's designs, catalog (styles/sizes/inclusions/layout
+      // items), settings, error logs, user mappings + their now-orphaned auth
+      // logins, and uploaded storage objects (floor-plans + branding), then the
+      // client_configs row itself. Requires the typed client id to match
+      // (confirmClientId) so a stray/mistaken call can't nuke a tenant.
+      // Irreversible. GHL-side contacts/estimates are external and untouched.
+      case "delete_client": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
+          throw new Error("Confirmation text does not match the client id.");
+        }
+        const deleted: Record<string, number> = {};
+        const wipe = async (table: string) => {
+          const { error, count } = await sb.from(table).delete({ count: "exact" }).eq("client_id", clientId);
+          if (error) throw new Error(`${table}: ${error.message}`);
+          deleted[table] = count ?? 0;
+        };
+        // Catalog/design rows first (FKs: inclusions→sizes→styles), config last.
+        await wipe("designs");
+        await wipe("building_size_inclusions");
+        await wipe("building_sizes");
+        await wipe("building_styles");
+        await wipe("client_layout_items");
+        await wipe("client_settings");
+        try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
+
+        // Capture the logins mapped to this client, unmap them, then delete any
+        // that aren't also attached to another client.
+        const cu = await sb.from("client_users").select("user_id").eq("client_id", clientId);
+        if (cu.error) throw cu.error;
+        const userIds = [...new Set((cu.data ?? []).map((r: any) => r.user_id).filter(Boolean))];
+        await wipe("client_users");
+        let deletedUsers = 0;
+        for (const uid of userIds) {
+          const still = await sb.from("client_users").select("user_id").eq("user_id", uid).maybeSingle();
+          if (!still.error && !still.data) { const d = await sb.auth.admin.deleteUser(uid); if (!d.error) deletedUsers++; }
+        }
+        deleted["auth_logins"] = deletedUsers;
+
+        // Storage: remove everything under <clientId>/ in both buckets.
+        let files = 0;
+        for (const bucket of ["floor-plans", "branding"]) {
+          try {
+            const { data: list } = await sb.storage.from(bucket).list(clientId, { limit: 1000 });
+            const paths = (list ?? []).map((o: any) => `${clientId}/${o.name}`);
+            if (paths.length) { const rm = await sb.storage.from(bucket).remove(paths); if (!rm.error) files += paths.length; }
+          } catch (_) { /* storage cleanup is best-effort */ }
+        }
+        deleted["storage_files"] = files;
+
+        const cc = await sb.from("client_configs").delete({ count: "exact" }).eq("client_id", clientId);
+        if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
+        deleted["client_configs"] = cc.count ?? 0;
+
+        return json({ ok: true, clientId, deleted });
+      }
+
       default:
         return json({ error: `Unknown action: ${action}` }, 400);
     }

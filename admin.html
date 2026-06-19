@@ -140,6 +140,8 @@ function AdminApp() {
   const [linkRole, setLinkRole] = useState("owner");
   const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink }
   const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
+  const [delOpen, setDelOpen] = useState(false);
+  const [delConfirm, setDelConfirm] = useState("");
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
@@ -155,6 +157,7 @@ function AdminApp() {
   const loadClient = async (cid) => {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
+    setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -188,6 +191,21 @@ function AdminApp() {
       setLinkResult({ email, client: sel, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null });
       setOwnerEmail("");
       flash({ ok: `"${email}" linked to "${sel}" as ${roleLabel}.` });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  // Operator hard-delete: server wipes the tenant + all its data (catalog,
+  // designs, settings, logins, storage). Guarded by typing the client id.
+  const deleteClient = async () => {
+    const id = sel;
+    if (!id || delConfirm.trim() !== id) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
+      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
+      const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+      flash({ ok: `Client "${id}" deleted${parts ? ` (${parts})` : ""}.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -349,6 +367,7 @@ function AdminApp() {
           </select>
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -419,6 +438,30 @@ function AdminApp() {
                     )}
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {delOpen && (
+          <div style={{ ...S.card, background: "#FEF2F2", border: "1px solid #FECACA" }}>
+            <div style={S.h2}>⚠️ Delete client</div>
+            {!sel ? (
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
+                  This permanently deletes <b>{sel}</b> and <b>all of its data</b> — designs/leads, building styles &amp; sizes,
+                  pricing &amp; inclusions, layout items, settings (incl. GHL credentials), error logs, owner/team logins, and
+                  uploaded floor-plan &amp; branding files. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates live in
+                  GHL and are not affected.)
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}
+                    onKeyDown={(e) => e.key === "Enter" && delConfirm.trim() === sel && deleteClient()} style={{ ...S.input, minWidth: 260 }} />
+                  <button onClick={deleteClient} disabled={busy || delConfirm.trim() !== sel}
+                    style={S.btn(busy || delConfirm.trim() !== sel ? "#9CA3AF" : "#DC2626", "#FFF")}>{busy ? "Deleting…" : "Delete permanently"}</button>
+                </div>
               </div>
             )}
           </div>
