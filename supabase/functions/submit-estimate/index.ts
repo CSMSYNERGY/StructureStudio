@@ -261,11 +261,16 @@ Deno.serve(async (req: Request) => {
   let csvBuildingPrice = 0;
   if (!shed) {
     try {
-      const stRes = await supabase.from("building_styles").select("id").eq("client_id", clientId).eq("label", style).limit(1);
-      const styleId = stRes.data?.[0]?.id;
-      if (styleId) {
-        const szRes = await supabase.from("building_sizes").select("base_price").eq("client_id", clientId).eq("style_id", styleId).eq("label", size).limit(1);
-        csvBuildingPrice = Number(szRes.data?.[0]?.base_price ?? 0) || 0;
+      // The designer submits the style's KEY (e.g. "test"), not its label ("Test"), and
+      // sizes can render with a × vs x. Normalize both sides (lowercase, ×→x, strip spaces)
+      // and match the style by key OR label so the CSV price reliably resolves.
+      const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
+      const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
+      const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
+      if (styleRow) {
+        const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
+        const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
+        if (sizeRow && sizeRow.base_price != null) csvBuildingPrice = Number(sizeRow.base_price) || 0;
       }
     } catch { /* leave at 0 if the lookup fails */ }
   }
