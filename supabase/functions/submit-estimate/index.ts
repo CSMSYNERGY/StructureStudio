@@ -267,6 +267,7 @@ Deno.serve(async (req: Request) => {
   // tenant has NO GHL product catalog at all (products.length === 0) — never on a single
   // fuzzy-match miss for a GHL-priced tenant, which would silently swap pricing models.
   const shed = getProductDetails(`${style} ${size} ${paintStatus}`);
+  let styleRowId: string | null = null;   // selected style's catalog row id — reused for layout_item_pricing style overrides
   let csvBuildingPrice = 0, csvPriced = false;
   if (!shed && products.length === 0) {
     try {
@@ -277,6 +278,7 @@ Deno.serve(async (req: Request) => {
       const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
       const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
       if (styleRow) {
+        styleRowId = styleRow.id;
         const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
         const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
         if (sizeRow && sizeRow.base_price != null) { csvBuildingPrice = Number(sizeRow.base_price) || 0; csvPriced = true; }
@@ -299,16 +301,39 @@ Deno.serve(async (req: Request) => {
     description: `Size: ${size}` + (selections.paint ? ` | Paint: ${selections.paint}` : ""),
   });
 
+  // Add-on pricing fallback. When the tenant has NO GHL product catalog, GHL matching
+  // returns nothing and every add-on would otherwise land at $0. Instead price add-ons
+  // from this tenant's layout_item_pricing table (keyed by item_key). A style-specific
+  // override (style_id = the selected style) wins over the style_id IS NULL default.
+  const layoutRates = new Map<string, { method: string; rate: number }>();
+  if (products.length === 0) {
+    try {
+      const lpRes = await supabase
+        .from("layout_item_pricing")
+        .select("item_key, style_id, pricing_method, rate")
+        .eq("client_id", clientId);
+      for (const r of (lpRes.data || []) as any[]) {
+        if (r.style_id && r.style_id !== styleRowId) continue;   // a different style's override — ignore
+        const existing = layoutRates.get(r.item_key);
+        if (!existing || r.style_id) {                            // override (style_id set) wins over the default
+          layoutRates.set(r.item_key, { method: String(r.pricing_method), rate: Number(r.rate) || 0 });
+        }
+      }
+    } catch { /* no layout pricing → add-ons stay $0, same as before */ }
+  }
+
   // GHL renders `description` as a subtitle under the line-item name. Pass "" when the
   // description would just repeat the name, otherwise it shows up redundantly on the PDF.
-  const pushItem = (qty: number, search: string | string[], description: string) => {
+  const pushItem = (qty: number, search: string | string[], description: string, itemKey?: string) => {
     const searches = Array.isArray(search) ? search : [search];
     let pd: any = null;
     for (const s of searches) { pd = pd || getProductDetails(s); }
+    // No GHL match + no product catalog → fall back to the tenant's layout_item_pricing rate.
+    const lp = (!pd && products.length === 0 && itemKey) ? layoutRates.get(itemKey) : null;
     targetItems.push({
       name: pd?.name || searches[0],
       qty,
-      amount: pd?.amount || 0,
+      amount: pd?.amount ?? (lp ? lp.rate : 0),
       priceId: pd?.priceId || "",
       productId: pd?.productId || "",
       attachments: pd?.imageUrl ? [pd.imageUrl] : [],
@@ -318,9 +343,9 @@ Deno.serve(async (req: Request) => {
     });
   };
 
-  if (summary.doubleDoors > 0) pushItem(summary.doubleDoors, "Double Door", "");
-  if (summary.singleDoors > 0) pushItem(summary.singleDoors, "Single Door", "");
-  if (summary.windows > 0) pushItem(summary.windows, "Window", "");
+  if (summary.doubleDoors > 0) pushItem(summary.doubleDoors, "Double Door", "", "doubleDoor");
+  if (summary.singleDoors > 0) pushItem(summary.singleDoors, "Single Door", "", "singleDoor");
+  if (summary.windows > 0) pushItem(summary.windows, "Window", "", "window");
 
   if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) {
     summary.workbenches.forEach((wb: any) => {
@@ -329,11 +354,18 @@ Deno.serve(async (req: Request) => {
       const descParts: string[] = [];
       if (wall) descParts.push(`${wall} wall`);
       descParts.push(`${lengthFt}ft (priced per foot)`);
-      pushItem(lengthFt, ["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], descParts.join(" - "));
+      pushItem(lengthFt, ["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], descParts.join(" - "), "workbench");
     });
   }
-  if (summary.lofts > 0) pushItem(summary.lofts, ["Loft", "Loft Kit", "Loft Storage"], "");
-  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem(1, "Ramp", "");
+  if (summary.lofts > 0) {
+    // Loft can be priced per-unit (each) or by area (sqft_option). For the CSV fallback,
+    // match the quantity to the method so amount=rate yields the right total; with a GHL
+    // catalog this stays the loft count (unchanged behavior).
+    const loftLp = (products.length === 0) ? layoutRates.get("loft") : null;
+    const loftQty = (loftLp && loftLp.method === "sqft_option") ? (Number(summary.loftSqft) || 0) : summary.lofts;
+    pushItem(loftQty, ["Loft", "Loft Kit", "Loft Storage"], "", "loft");
+  }
+  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem(1, "Ramp", "", "ramp");
 
   // Rough openings — webhook supplies name/dims/qty/amount directly, not from GHL products
   if (Array.isArray(roughOpenings)) {

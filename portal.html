@@ -720,6 +720,146 @@ function PricingCsv() {
   );
 }
 
+// ─── Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp) ───
+// Edits the DEFAULT (all-styles) price for each enabled layout item. Per-style overrides
+// stay DB-managed. These rates feed estimates for tenants that don't price via GHL products.
+const LP_METHODS = [
+  { value: "each", label: "Per item" },
+  { value: "lineal_ft", label: "Per linear foot" },
+  { value: "sqft_option", label: "Per square foot" },
+];
+function LayoutPricing() {
+  const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
+  const [rows, setRows] = useState([]);      // [{ item_key, label, pricing_method, rate }]
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+
+  const buildRows = (data) => {
+    const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
+    return (data.items || []).map((it) => {
+      const p = byKey[it.key] || {};
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0" };
+    });
+  };
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data); setRows(buildRows(data));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (key, field, val) => setRows((rs) => rs.map((r) => r.item_key === key ? { ...r, [field]: val } : r));
+
+  const save = async (rowsToSave) => {
+    setBusy(true); setMsg(null);
+    try {
+      const payloadRows = (rowsToSave || rows).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: Number(r.rate) || 0 }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} item price(s)` + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const downloadCsv = () => {
+    const headers = ["item", "method", "rate"];
+    downloadFile(`${(cat && cat.clientId) || "layout"}-layout-pricing.csv`, toCSV(headers, rows.map((r) => [r.item_key, r.pricing_method, r.rate])));
+  };
+
+  const onUpload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null);
+    try {
+      if (file.size > 2_000_000) throw new Error("CSV too large (max 2MB).");
+      const matrix = parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      const header = matrix[0].map((h) => String(h).trim().toLowerCase());
+      const iItem = header.indexOf("item"), iMethod = header.indexOf("method"), iRate = header.indexOf("rate");
+      if (iItem < 0 || iMethod < 0 || iRate < 0) throw new Error('CSV needs "item", "method" and "rate" columns.');
+      // Accept the item by key or label, and the method as its enum value or friendly label.
+      const keyByAny = {}; rows.forEach((r) => { keyByAny[r.item_key.toLowerCase()] = r.item_key; keyByAny[r.label.toLowerCase()] = r.item_key; });
+      const methodByAny = {}; LP_METHODS.forEach((m) => { methodByAny[m.value.toLowerCase()] = m.value; methodByAny[m.label.toLowerCase()] = m.value; });
+      const next = rows.map((r) => ({ ...r }));
+      const byKey = {}; next.forEach((r) => { byKey[r.item_key] = r; });
+      matrix.slice(1).forEach((cols) => {
+        const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
+        if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
+        const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
+        if (method) byKey[itemKey].pricing_method = method;
+        const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
+        if (rate !== "") byKey[itemKey].rate = rate;
+      });
+      setRows(next);
+      await save(next);
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false); setFileKey((k) => k + 1);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Layout item pricing</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Set the price for each item customers can place on the floor plan. <b>Per item</b> charges the rate for each
+          one (doors, windows, ramp); <b>per linear foot</b> multiplies by length (workbench); <b>per square foot</b>
+          multiplies by area (loft). These rates are used on estimates when you don’t price through GoHighLevel products.
+          Building sizes are priced on the <b>Pricing</b> tab.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
+        ) : (
+          <>
+            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+              <thead><tr>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.item_key}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}</td>
+                    <td style={S.td}>
+                      <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
+                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}>
+                      <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={() => save()} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save prices"}</button>
+              <button onClick={downloadCsv} disabled={busy || !cat} style={S.btn("#F1F5F9", "#334155")}>⬇ Download CSV</button>
+              <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+                {busy ? "Working…" : "⬆ Upload CSV"}
+                <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }} onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+          </>
+        )}
+        {msg && msg.skipped && msg.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} item(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ─── Dashboard shell ───
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
@@ -784,12 +924,14 @@ function Dashboard({ session }) {
         <div style={{ display: "flex", gap: 4 }}>
           {tabBtn("designs", "Designs & Leads")}
           {isAdmin && tabBtn("pricing", "Pricing")}
+          {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
           {isAdmin && tabBtn("settings", "Settings")}
         </div>
       </div>
       <div style={{ padding: "20px 24px" }}>
         {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
         {activeTab === "pricing" && isAdmin && <PricingCsv />}
+        {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
         {activeTab === "settings" && isAdmin && <SettingsView />}
       </div>
     </div>

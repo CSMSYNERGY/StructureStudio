@@ -1434,6 +1434,7 @@ function StructureStudioInner({ config }) {
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
           }),
           lofts: items.filter((i) => i.type === "loft").length,
+          loftSqft: Math.round(items.filter((i) => i.type === "loft").reduce((s, i) => s + (i.widthFt || 0) * (i.heightFt || 0), 0)),
           ramp: items.filter((i) => i.type === "ramp").length > 0 ? "yes" : "no",
           lines: items.filter((i) => i.type === "line").length,
           notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
