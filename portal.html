@@ -212,6 +212,7 @@ function DesignsTable({ clientId }) {
     const { data, error: err } = await sb
       .from("designs")
       .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+      .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
     setRows(data || []);
@@ -339,6 +340,7 @@ function SettingsView() {
     (async () => {
       const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
       if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+      if (!data) { setError("Couldn't load settings (empty response). Please refresh."); return; }
       setStatus(data);
       const a = data.businessAddress || {};
       const b = data.branding || {};
@@ -462,7 +464,7 @@ function SettingsView() {
                 ? <img src={logoDataUrl || currentLogo} alt="logo" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
                 : <span style={{ color: "#94A3B8", fontSize: 11 }}>no logo</span>}
             </div>
-            <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
+            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
           </div>
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / SVG / WebP, under 2MB. Preview shows it on your header color.</div>
         </div>
@@ -480,7 +482,7 @@ function SettingsView() {
             <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8 }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: ACCENT, cursor: bizLogoBusy ? "wait" : "pointer" }}>
                 {bizLogoBusy ? "Uploading…" : "⬆ Upload image"}
-                <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={onBizLogoFile} disabled={bizLogoBusy} style={{ display: "none" }} />
+                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onBizLogoFile} disabled={bizLogoBusy} style={{ display: "none" }} />
               </label>
               <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste a URL above</span>
               {form.businessLogoUrl && <img src={form.businessLogoUrl} alt="" style={{ height: 24, maxWidth: 90, objectFit: "contain", borderRadius: 4, border: "1px solid #E2E8F0" }} />}

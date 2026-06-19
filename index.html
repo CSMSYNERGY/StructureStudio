@@ -454,13 +454,17 @@ function StructureStudioInner({ config }) {
       ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
       setHasExistingEstimate(!!data.ghl_estimate_id);
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
-      setSel(data.selections || {});
+      setSel((prev) => ({ ...prev, ...(data.selections || {}) }));
       setPaintColors(data.paint_colors || { body: "", trim: "" });
       setCustomOptions(data.custom_options || []);
       setRoDimensions(data.ro_dimensions || {});
       // Items must be set after sel.size has propagated; the prevSizeRef guard
       // above keeps the size effect from wiping them.
-      setItems(Array.isArray(data.items) ? data.items : []);
+      const loadedItems = Array.isArray(data.items) ? data.items : [];
+      setItems(loadedItems);
+      // Keep the global id counter ahead of any restored ids so the next placement can't
+      // reuse an existing id (which collided in select/drag/delete/resize).
+      idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1012,7 +1016,7 @@ function StructureStudioInner({ config }) {
     }
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
-  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId)); setSelectedId(null); } };
+  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); } };
   const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
   const clearAll = () => { setItems([]); setSelectedId(null); };
 

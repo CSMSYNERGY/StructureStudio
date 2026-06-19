@@ -193,11 +193,13 @@ function AdminApp() {
   const act = async (action, body, ok) => {
     setBusy(true); setMsg(null);
     try {
-      await api(action, pwd, body);
-      if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));
-      const m = await api("get_master", pwd); setMaster(m);
-      flash({ ok: ok || "Saved" });
-    } catch (e) { flash({ err: e.message }); }
+      await api(action, pwd, body);                 // the actual write
+    } catch (e) { flash({ err: e.message }); setBusy(false); return; }
+    flash({ ok: ok || "Saved" });                   // write succeeded — report it BEFORE refreshing
+    try {                                            // refresh reads are best-effort; a failure here must not
+      if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));  // mask the successful write or
+      const m = await api("get_master", pwd); setMaster(m);                       // corrupt the on-screen pill state
+    } catch (_) { /* UI catches up on the next action */ }
     setBusy(false);
   };
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
