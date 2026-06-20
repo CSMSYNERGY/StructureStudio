@@ -145,33 +145,21 @@ Deno.serve(async (req: Request) => {
     return json({ error: `Contact upsert error: ${(e as Error).message}` }, 502);
   }
 
-  // 4. Fetch GHL products
+  // 4. Fetch GHL products — pricing NEVER comes from GHL (every line item is priced from this
+  //    tenant's StructureStudio catalog below). We still read the product list solely to borrow
+  //    a userId for the estimate (products[0].createdBy). It's best-effort: a products-API hiccup
+  //    must not block an estimate, and userId falls back to the users API.
   let products: any[] = [];
   try {
     const r = await fetch(
       `https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`,
       { headers: ghlHeaders }
     );
-    if (!r.ok) return json({ error: `Failed to fetch products: ${r.status} ${await r.text()}` }, 502);
-    const d = await r.json();
-    products = d?.products || [];
+    if (r.ok) { const d = await r.json(); products = d?.products || []; }
+    else console.warn("Products fetch (userId only) failed:", r.status, (await r.text()).slice(0, 300));
   } catch (e) {
-    return json({ error: `Products fetch error: ${(e as Error).message}` }, 502);
+    console.warn("Products fetch (userId only) error:", (e as Error).message);
   }
-
-  // 5. Fetch all prices, parallel
-  const allPrices: any[] = [];
-  await Promise.all(products.map(async (p: any) => {
-    try {
-      const r = await fetch(
-        `https://services.leadconnectorhq.com/products/${p._id}/price?locationId=${encodeURIComponent(locationId)}`,
-        { headers: ghlHeaders }
-      );
-      if (!r.ok) return;
-      const d = await r.json();
-      if (Array.isArray(d?.prices)) allPrices.push(...d.prices);
-    } catch { /* ignore single-product failure */ }
-  }));
 
   const dynamicLocationId = (products[0]?.locationId) || locationId;
 
@@ -207,49 +195,9 @@ Deno.serve(async (req: Request) => {
     }, 400);
   }
 
-  // 6. Product matching helper — ported from n8n verbatim
-  function getProductDetails(searchString: string, userSelection = "") {
-    if (!searchString || allPrices.length === 0) return null;
-    const isNoVariant = (name: string) => name.split("@")[0].trim().toLowerCase().startsWith("no ");
-
-    let matchedPrice = allPrices.find((p) => {
-      if (!p.name) return false;
-      if (isNoVariant(p.name)) return false;
-      const cleanName = p.name.split("@")[0].trim().toLowerCase();
-      return cleanName === searchString.toLowerCase();
-    });
-
-    if (!matchedPrice) {
-      const searchTerms = searchString.toLowerCase().split(/\s+/);
-      matchedPrice = allPrices.find((p) => {
-        if (!p.name) return false;
-        if (isNoVariant(p.name)) return false;
-        const pName = p.name.toLowerCase();
-        const isMatch = searchTerms.every((t) => pName.includes(t));
-        if (isMatch) {
-          if (/\bno\b/i.test(userSelection) && /\bno\b/i.test(pName)) return false;
-          if (searchTerms.includes("paint") && !searchTerms.includes("unpaint") && pName.includes("unpaint")) return false;
-        }
-        return isMatch;
-      });
-    }
-
-    if (matchedPrice) {
-      const cleanName = matchedPrice.name.split(" @")[0].trim();
-      const parentProduct = products.find((prod: any) => prod._id === matchedPrice.product);
-      const itemImage = parentProduct ? (parentProduct.image || parentProduct.imageUrl || "") : "";
-      return {
-        name: cleanName,
-        amount: matchedPrice.amount,
-        priceId: matchedPrice._id,
-        productId: matchedPrice.product,
-        imageUrl: itemImage,
-      };
-    }
-    return null;
-  }
-
-  // 7. Build line items
+  // 7. Build line items — every amount comes from this tenant's StructureStudio catalog
+  //    (building_sizes for the building, layout_item_pricing for add-ons). GHL products are
+  //    never consulted for pricing.
   const summary = itemSummary || {};
   const targetItems: any[] = [];
 
@@ -257,86 +205,74 @@ Deno.serve(async (req: Request) => {
   const size = selections.buildingSize || "";
   const paintStatus = (selections.paint && String(selections.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint";
 
-  // Building price: prefer a matching GHL product (unchanged for tenants like junior-barns
-  // that price via GHL); when there's no GHL match (e.g. a tenant with no product catalog
-  // who prices via the CSV), fall back to this tenant's CSV catalog price
-  // (building_sizes.base_price, matched by style label + size label). Add-on options below
-  // are still GHL-priced when products exist and $0 when they don't (getProductDetails
-  // returns null with an empty price list) — so no-product tenants get "options free for now".
-  // Building price: prefer a matching GHL product. Only fall back to the CSV catalog when the
-  // tenant has NO GHL product catalog at all (products.length === 0) — never on a single
-  // fuzzy-match miss for a GHL-priced tenant, which would silently swap pricing models.
-  const shed = getProductDetails(`${style} ${size} ${paintStatus}`);
-  let styleRowId: string | null = null;   // selected style's catalog row id — reused for layout_item_pricing style overrides
-  let csvBuildingPrice = 0, csvPriced = false;
-  if (!shed && products.length === 0) {
-    try {
-      // The designer submits the style's KEY (e.g. "test"), not its label ("Test"), and
-      // sizes can render with a × vs x. Normalize both sides (lowercase, ×→x, strip spaces)
-      // and match the style by key OR label so the CSV price reliably resolves.
-      const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
-      const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
-      const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
-      if (styleRow) {
-        styleRowId = styleRow.id;
-        const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
-        const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
-        if (sizeRow && sizeRow.base_price != null) { csvBuildingPrice = Number(sizeRow.base_price) || 0; csvPriced = true; }
-      }
-    } catch { /* leave unpriced; handled below */ }
-    // Fail loudly instead of emailing a $0 quote when the size has no price set.
-    if (!csvPriced) {
-      return json({ error: `No price is set for "${style} ${size}". Add it in the portal Pricing tab (or set up GHL products), then resubmit.` }, 400);
+  // Building price — always from this tenant's StructureStudio catalog (building_sizes.base_price).
+  // The designer submits the style's KEY (e.g. "test"), not its label ("Test"), and sizes can
+  // render with × vs x. Normalize both sides (lowercase, ×→x, strip spaces) and match the style
+  // by key OR label so the price reliably resolves. styleRowId is reused below for any
+  // style-specific layout_item_pricing overrides.
+  const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
+  let styleRowId: string | null = null;
+  let styleLabel = style;            // display-name fallback if the style row isn't found
+  let buildingPrice = 0, priced = false;
+  try {
+    const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
+    const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
+    if (styleRow) {
+      styleRowId = styleRow.id;
+      styleLabel = styleRow.label || style;
+      const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
+      const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
+      if (sizeRow && sizeRow.base_price != null) { buildingPrice = Number(sizeRow.base_price) || 0; priced = true; }
     }
+  } catch { /* leave unpriced; handled below */ }
+  // Fail loudly instead of emailing a $0 quote when the size has no price set.
+  if (!priced) {
+    return json({ error: `No price is set for "${style} ${size}". Add it in the portal Pricing tab, then resubmit.` }, 400);
   }
   targetItems.push({
-    name: shed ? shed.name : `${style} (${size} - ${paintStatus})`,
+    name: `${styleLabel} (${size} - ${paintStatus})`,
     qty: 1,
-    amount: shed ? shed.amount : csvBuildingPrice,
-    priceId: shed?.priceId || "",
-    productId: shed?.productId || "",
-    attachments: shed?.imageUrl ? [shed.imageUrl] : [],
+    amount: buildingPrice,
+    priceId: "",
+    productId: "",
+    attachments: [],
     currency: "USD",
     type: "one_time",
     description: `Size: ${size}` + (selections.paint ? ` | Paint: ${selections.paint}` : ""),
   });
 
-  // Add-on pricing fallback. When the tenant has NO GHL product catalog, GHL matching
-  // returns nothing and every add-on would otherwise land at $0. Instead price add-ons
-  // from this tenant's layout_item_pricing table (keyed by item_key). A style-specific
-  // override (style_id = the selected style) wins over the style_id IS NULL default.
+  // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
+  // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
+  // default. Items without a configured row price at $0.
   const layoutRates = new Map<string, { method: string; rate: number }>();
-  if (products.length === 0) {
-    try {
-      const lpRes = await supabase
-        .from("layout_item_pricing")
-        .select("item_key, style_id, pricing_method, rate")
-        .eq("client_id", clientId);
-      for (const r of (lpRes.data || []) as any[]) {
-        if (r.style_id && r.style_id !== styleRowId) continue;   // a different style's override — ignore
-        const existing = layoutRates.get(r.item_key);
-        if (!existing || r.style_id) {                            // override (style_id set) wins over the default
-          layoutRates.set(r.item_key, { method: String(r.pricing_method), rate: Number(r.rate) || 0 });
-        }
+  try {
+    const lpRes = await supabase
+      .from("layout_item_pricing")
+      .select("item_key, style_id, pricing_method, rate")
+      .eq("client_id", clientId);
+    for (const r of (lpRes.data || []) as any[]) {
+      if (r.style_id && r.style_id !== styleRowId) continue;   // a different style's override — ignore
+      const existing = layoutRates.get(r.item_key);
+      if (!existing || r.style_id) {                            // override (style_id set) wins over the default
+        layoutRates.set(r.item_key, { method: String(r.pricing_method), rate: Number(r.rate) || 0 });
       }
-    } catch { /* no layout pricing → add-ons stay $0, same as before */ }
-  }
+    }
+  } catch { /* no layout pricing → add-ons stay $0 */ }
 
   // GHL renders `description` as a subtitle under the line-item name. Pass "" when the
   // description would just repeat the name, otherwise it shows up redundantly on the PDF.
   const pushItem = (qty: number, search: string | string[], description: string, itemKey?: string) => {
     const searches = Array.isArray(search) ? search : [search];
-    let pd: any = null;
-    for (const s of searches) { pd = pd || getProductDetails(s); }
-    // No GHL match + no product catalog → fall back to the tenant's layout_item_pricing rate.
-    const lp = (!pd && products.length === 0 && itemKey) ? layoutRates.get(itemKey) : null;
+    // Price from this tenant's layout_item_pricing rate (GHL products are never consulted);
+    // an item with no configured rate lands at $0.
+    const lp = itemKey ? layoutRates.get(itemKey) : null;
     targetItems.push({
-      name: pd?.name || searches[0],
+      name: searches[0],
       qty,
-      amount: pd?.amount ?? (lp ? lp.rate : 0),
-      priceId: pd?.priceId || "",
-      productId: pd?.productId || "",
-      attachments: pd?.imageUrl ? [pd.imageUrl] : [],
+      amount: lp ? lp.rate : 0,
+      priceId: "",
+      productId: "",
+      attachments: [],
       currency: "USD",
       type: "one_time",
       description,
@@ -358,10 +294,9 @@ Deno.serve(async (req: Request) => {
     });
   }
   if (summary.lofts > 0) {
-    // Loft can be priced per-unit (each) or by area (sqft_option). For the CSV fallback,
-    // match the quantity to the method so amount=rate yields the right total; with a GHL
-    // catalog this stays the loft count (unchanged behavior).
-    const loftLp = (products.length === 0) ? layoutRates.get("loft") : null;
+    // Loft can be priced per-unit (each) or by area (sqft_option). Match the quantity to the
+    // method so amount × qty yields the right total (per-sqft → qty = total sqft).
+    const loftLp = layoutRates.get("loft");
     const loftQty = (loftLp && loftLp.method === "sqft_option") ? (Number(summary.loftSqft) || 0) : summary.lofts;
     pushItem(loftQty, ["Loft", "Loft Kit", "Loft Storage"], "", "loft");
   }
