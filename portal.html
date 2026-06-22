@@ -727,6 +727,10 @@ const LP_METHODS = [
   { value: "each", label: "Per item" },
   { value: "lineal_ft", label: "Per linear foot" },
   { value: "sqft_option", label: "Per square foot" },
+  { value: "sqft_building", label: "Per building sq ft" },
+  { value: "perimeter_building", label: "Per building perimeter ft" },
+  { value: "pct_building_price", label: "% of building price" },
+  { value: "pct_estimate_total", label: "% of estimate total" },
 ];
 function LayoutPricing() {
   const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
@@ -808,9 +812,11 @@ function LayoutPricing() {
       <div style={S.card}>
         <div style={S.h2}>Layout item pricing</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          Set the price for each item customers can place on the floor plan. <b>Per item</b> charges the rate for each
+          Set how each item customers can place on the floor plan is priced. <b>Per item</b> charges the rate for each
           one (doors, windows, ramp); <b>per linear foot</b> multiplies by length (workbench); <b>per square foot</b>
-          multiplies by area (loft). These rates are used on estimates when you don’t price through GoHighLevel products.
+          multiplies by area (loft). You can also price relative to the building: <b>per building sq ft</b> (rate × width × depth),
+          <b>per building perimeter ft</b> (rate × 2 × (width + depth)), <b>% of building price</b>, or <b>% of estimate total</b>
+          (applied after all other lines). These rates are used on estimates when you don’t price through GoHighLevel products.
           Building sizes are priced on the <b>Pricing</b> tab.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
