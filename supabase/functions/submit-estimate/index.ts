@@ -214,15 +214,20 @@ Deno.serve(async (req: Request) => {
   let styleRowId: string | null = null;
   let styleLabel = style;            // display-name fallback if the style row isn't found
   let buildingPrice = 0, priced = false;
+  let buildingWidthFt = 0, buildingDepthFt = 0;   // drive sqft_building / perimeter_building add-ons
   try {
     const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
     const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
-      const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
+      const szRes = await supabase.from("building_sizes").select("base_price, label, width_ft, depth_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
       const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
-      if (sizeRow && sizeRow.base_price != null) { buildingPrice = Number(sizeRow.base_price) || 0; priced = true; }
+      if (sizeRow && sizeRow.base_price != null) {
+        buildingPrice = Number(sizeRow.base_price) || 0; priced = true;
+        buildingWidthFt = Number(sizeRow.width_ft) || 0;
+        buildingDepthFt = Number(sizeRow.depth_ft) || 0;
+      }
     }
   } catch { /* leave unpriced; handled below */ }
   // Fail loudly instead of emailing a $0 quote when the size has no price set.
@@ -259,29 +264,65 @@ Deno.serve(async (req: Request) => {
     }
   } catch { /* no layout pricing → add-ons stay $0 */ }
 
-  // GHL renders `description` as a subtitle under the line-item name. Pass "" when the
-  // description would just repeat the name, otherwise it shows up redundantly on the PDF.
-  const pushItem = (qty: number, search: string | string[], description: string, itemKey?: string) => {
+  // Building geometry available to area/perimeter pricing methods.
+  const buildingArea = buildingWidthFt * buildingDepthFt;             // sqft_building
+  const buildingPerimeter = 2 * (buildingWidthFt + buildingDepthFt);  // perimeter_building
+
+  // Resolve a layout add-on to a GHL line item using its configured pricing_method. `amount`
+  // is always PER-UNIT; GHL multiplies it by qty. `count` is how many of the item were placed;
+  // lengthFt / optionSqft carry the per-measure quantity for the two measured methods:
+  //   each               -> qty=count,     amount=rate
+  //   lineal_ft          -> qty=totalFeet, amount=rate
+  //   sqft_option        -> qty=totalSqft, amount=rate
+  //   sqft_building      -> qty=count,     amount=rate × (width×depth)
+  //   perimeter_building -> qty=count,     amount=rate × 2(width+depth)
+  //   pct_building_price -> qty=count,     amount=(rate/100) × base building price
+  //   pct_estimate_total -> qty=count,     amount resolved LAST against the running subtotal
+  // An item with no configured pricing row (or rate) lands at $0. GHL products are never consulted.
+  const deferredPctLines: { item: any; rate: number }[] = [];
+  const pushItem = (
+    search: string | string[],
+    itemKey: string | undefined,
+    description: string,
+    measures: { count?: number; lengthFt?: number; optionSqft?: number } = {},
+  ) => {
     const searches = Array.isArray(search) ? search : [search];
-    // Price from this tenant's layout_item_pricing rate (GHL products are never consulted);
-    // an item with no configured rate lands at $0.
     const lp = itemKey ? layoutRates.get(itemKey) : null;
-    targetItems.push({
+    const method = lp?.method || "each";
+    const rate = lp?.rate || 0;
+    const count = measures.count ?? 1;
+
+    let qty = count;
+    let amount = rate;
+    switch (method) {
+      case "lineal_ft":          qty = measures.lengthFt ?? count;   amount = rate; break;
+      case "sqft_option":        qty = measures.optionSqft ?? count; amount = rate; break;
+      case "sqft_building":      qty = count; amount = rate * buildingArea; break;
+      case "perimeter_building": qty = count; amount = rate * buildingPerimeter; break;
+      case "pct_building_price": qty = count; amount = (rate / 100) * buildingPrice; break;
+      case "pct_estimate_total": qty = count; amount = 0; break; // resolved after every other line
+      case "each":
+      default:                   qty = count; amount = rate; break;
+    }
+
+    const item = {
       name: searches[0],
       qty,
-      amount: lp ? lp.rate : 0,
+      amount,
       priceId: "",
       productId: "",
       attachments: [],
       currency: "USD",
       type: "one_time",
       description,
-    });
+    };
+    targetItems.push(item);
+    if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
 
-  if (summary.doubleDoors > 0) pushItem(summary.doubleDoors, "Double Door", "", "doubleDoor");
-  if (summary.singleDoors > 0) pushItem(summary.singleDoors, "Single Door", "", "singleDoor");
-  if (summary.windows > 0) pushItem(summary.windows, "Window", "", "window");
+  if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
+  if (summary.singleDoors > 0) pushItem("Single Door", "singleDoor", "", { count: summary.singleDoors });
+  if (summary.windows > 0) pushItem("Window", "window", "", { count: summary.windows });
 
   if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) {
     summary.workbenches.forEach((wb: any) => {
@@ -290,17 +331,15 @@ Deno.serve(async (req: Request) => {
       const descParts: string[] = [];
       if (wall) descParts.push(`${wall} wall`);
       descParts.push(`${lengthFt}ft (priced per foot)`);
-      pushItem(lengthFt, ["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], descParts.join(" - "), "workbench");
+      pushItem(["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], "workbench", descParts.join(" - "), { count: 1, lengthFt });
     });
   }
   if (summary.lofts > 0) {
-    // Loft can be priced per-unit (each) or by area (sqft_option). Match the quantity to the
-    // method so amount × qty yields the right total (per-sqft → qty = total sqft).
-    const loftLp = layoutRates.get("loft");
-    const loftQty = (loftLp && loftLp.method === "sqft_option") ? (Number(summary.loftSqft) || 0) : summary.lofts;
-    pushItem(loftQty, ["Loft", "Loft Kit", "Loft Storage"], "", "loft");
+    // qty/amount are derived from the loft's configured method inside pushItem: per-unit (each)
+    // uses the loft count, per-area (sqft_option) uses total loft sqft.
+    pushItem(["Loft", "Loft Kit", "Loft Storage"], "loft", "", { count: summary.lofts, optionSqft: Number(summary.loftSqft) || 0 });
   }
-  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem(1, "Ramp", "", "ramp");
+  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem("Ramp", "ramp", "", { count: 1 });
 
   // Rough openings — webhook supplies name/dims/qty/amount directly, not from GHL products
   if (Array.isArray(roughOpenings)) {
@@ -335,6 +374,18 @@ Deno.serve(async (req: Request) => {
         description: "",
       });
     });
+  }
+
+  // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
+  // line (building + non-percentage add-ons + custom options + rough openings + any
+  // pct_building_price lines, which resolve earlier). Computed off a fixed base so multiple
+  // such add-ons don't compound on each other.
+  if (deferredPctLines.length > 0) {
+    const baseSubtotal = targetItems.reduce(
+      (s, it) => s + (deferredPctLines.some((d) => d.item === it) ? 0 : (Number(it.qty) || 0) * (Number(it.amount) || 0)),
+      0,
+    );
+    for (const d of deferredPctLines) d.item.amount = (d.rate / 100) * baseSubtotal;
   }
 
   // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
