@@ -139,6 +139,9 @@ function AdminApp() {
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
   const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink }
+  const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
+  const [delOpen, setDelOpen] = useState(false);
+  const [delConfirm, setDelConfirm] = useState("");
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
@@ -154,6 +157,7 @@ function AdminApp() {
   const loadClient = async (cid) => {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
+    setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -190,6 +194,21 @@ function AdminApp() {
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
+  // Operator hard-delete: server wipes the tenant + all its data (catalog,
+  // designs, settings, logins, storage). Guarded by typing the client id.
+  const deleteClient = async () => {
+    const id = sel;
+    if (!id || delConfirm.trim() !== id) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
+      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
+      const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+      flash({ ok: `Client "${id}" deleted${parts ? ` (${parts})` : ""}.` });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
   const act = async (action, body, ok) => {
     setBusy(true); setMsg(null);
     try {
@@ -200,6 +219,38 @@ function AdminApp() {
       if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));  // mask the successful write or
       const m = await api("get_master", pwd); setMaster(m);                       // corrupt the on-screen pill state
     } catch (_) { /* UI catches up on the next action */ }
+    setBusy(false);
+  };
+
+  // Layout-item editing is staged: the pills toggle a local selection and nothing is
+  // written until "Save". Re-sync the staged set whenever the loaded client/catalog
+  // changes (client switch or a post-save refresh). cat only changes on an explicit
+  // load/refresh, so an operator's in-progress ticks are never clobbered mid-edit.
+  useEffect(() => {
+    setItemSel(new Set((((cat && cat.clientLayoutItems) || []).filter((i) => i.active)).map((i) => i.item_key)));
+  }, [sel, cat]);
+  const toggleItemSel = (key) => setItemSel((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const selectAllItems = () => setItemSel(new Set(((master && master.layoutItemTypes) || []).map((i) => i.item_key)));
+  const clearAllItems = () => setItemSel(new Set());
+  // Diff the staged set against what's actually assigned, then apply only the changes
+  // (enable newly-ticked, disable newly-unticked) and refresh once at the end — so the
+  // operator ticks everything and clicks Save once instead of one request per pill.
+  const saveItems = async () => {
+    if (!sel || !cat || !master) return;
+    const saved = new Set(((cat.clientLayoutItems) || []).filter((i) => i.active).map((i) => i.item_key));
+    const keys = (master.layoutItemTypes || []).map((i) => i.item_key);
+    const toEnable  = keys.filter((k) => itemSel.has(k) && !saved.has(k));
+    const toDisable = keys.filter((k) => !itemSel.has(k) && saved.has(k));
+    const total = toEnable.length + toDisable.length;
+    if (total === 0) { flash({ ok: "No changes to save." }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      for (const k of toEnable)  await api("toggle_item", pwd, { clientId: sel, itemKey: k, active: true });
+      for (const k of toDisable) await api("toggle_item", pwd, { clientId: sel, itemKey: k, active: false });
+    } catch (e) { flash({ err: e.message }); setBusy(false); return; }
+    flash({ ok: `Saved ${total} change${total === 1 ? "" : "s"}.` });
+    try { setCat(await api("get_client_catalog", pwd, { clientId: sel })); setMaster(await api("get_master", pwd)); }
+    catch (_) { /* UI catches up on the next action */ }
     setBusy(false);
   };
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -299,7 +350,6 @@ function AdminApp() {
   }
 
   const styleAssigned = (key) => (cat?.buildingStyles || []).some((s) => s.key === key && s.active);
-  const itemAssigned  = (key) => (cat?.clientLayoutItems || []).some((i) => i.item_key === key && i.active);
 
   return (
     <div>
@@ -317,6 +367,7 @@ function AdminApp() {
           </select>
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -392,6 +443,30 @@ function AdminApp() {
           </div>
         )}
 
+        {delOpen && (
+          <div style={{ ...S.card, background: "#FEF2F2", border: "1px solid #FECACA" }}>
+            <div style={S.h2}>⚠️ Delete client</div>
+            {!sel ? (
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
+                  This permanently deletes <b>{sel}</b> and <b>all of its data</b> — designs/leads, building styles &amp; sizes,
+                  pricing &amp; inclusions, layout items, settings (incl. GHL credentials), error logs, owner/team logins, and
+                  uploaded floor-plan &amp; branding files. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates live in
+                  GHL and are not affected.)
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}
+                    onKeyDown={(e) => e.key === "Enter" && delConfirm.trim() === sel && deleteClient()} style={{ ...S.input, minWidth: 260 }} />
+                  <button onClick={deleteClient} disabled={busy || delConfirm.trim() !== sel}
+                    style={S.btn(busy || delConfirm.trim() !== sel ? "#9CA3AF" : "#DC2626", "#FFF")}>{busy ? "Deleting…" : "Delete permanently"}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === "master" && master && (
           <div style={S.card}>
             <div style={S.h2}>🧱 Master layout items</div>
@@ -421,23 +496,37 @@ function AdminApp() {
 
         {tab !== "master" && !sel && <div style={S.card}>Select a client above to manage their styles and items.</div>}
 
-        {tab === "items" && sel && cat && master && (
+        {tab === "items" && sel && cat && master && (() => {
+          const saved = new Set((cat.clientLayoutItems || []).filter((i) => i.active).map((i) => i.item_key));
+          const pending = (master.layoutItemTypes || []).reduce((acc, it) => acc + ((itemSel.has(it.item_key) !== saved.has(it.item_key)) ? 1 : 0), 0);
+          return (
           <div style={S.card}>
-            <div style={S.h2}>Layout items for <span style={{ color: ACCENT }}>{sel}</span></div>
-            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Tick the placeable items this client gets.</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ ...S.h2, marginBottom: 0 }}>Layout items for <span style={{ color: ACCENT }}>{sel}</span></div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={selectAllItems} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Select all</button>
+                <button onClick={clearAllItems} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Clear</button>
+                <button onClick={saveItems} disabled={busy || pending === 0} style={S.btn(busy || pending === 0 ? "#9CA3AF" : ACCENT, "#FFF")}>
+                  {busy ? "Saving…" : (pending > 0 ? `Save (${pending})` : "Saved")}
+                </button>
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "#64748B", margin: "8px 0 10px" }}>Tick the placeable items this client gets, then click <b>Save</b> to apply them all at once.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {master.layoutItemTypes.map((it) => {
-                const on = itemAssigned(it.item_key);
+                const on = itemSel.has(it.item_key);
                 return (
                   <div key={it.item_key} style={S.pill(on)}
-                    onClick={() => !busy && act("toggle_item", { clientId: sel, itemKey: it.item_key, active: !on }, on ? "Removed" : "Added")}>
+                    onClick={() => !busy && toggleItemSel(it.item_key)}>
                     <span style={{ marginRight: 6 }}>{it.icon}</span>{it.label} {on ? "✓" : ""}
                   </div>
                 );
               })}
             </div>
+            {pending > 0 && <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, marginTop: 10 }}>{pending} unsaved change{pending === 1 ? "" : "s"} — click Save to apply.</div>}
           </div>
-        )}
+          );
+        })()}
 
         {tab === "styles" && sel && cat && master && (
           <div style={S.card}>

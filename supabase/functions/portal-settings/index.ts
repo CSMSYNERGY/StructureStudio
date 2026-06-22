@@ -277,19 +277,21 @@ Deno.serve(async (req: Request) => {
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows] = await Promise.all([
       admin.from("building_styles").select("id, key, label, image_url, active").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
       admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
+      // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
+      admin.from("layout_item_pricing").select("item_key, pricing_method, rate").eq("client_id", clientId).is("style_id", null),
     ]);
-    for (const r of [styles, sizes, items, types, incl]) if (r.error) return json({ error: r.error.message }, 500);
+    for (const r of [styles, sizes, items, types, incl, lpRows]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active)
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [] });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -300,6 +302,40 @@ Deno.serve(async (req: Request) => {
       const r = await importPricingRows(admin, clientId, payload.rows);
       return json({ ok: true, ...r });
     } catch (e) { return json({ error: (e as Error).message || String(e) }, 500); }
+  }
+
+  // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
+  // only DEFAULT rows (style_id IS NULL); per-style overrides stay DB-managed and are
+  // still honored at estimate time. Manual upsert (not PostgREST onConflict) because the
+  // unique index is partial — (client_id, item_key) WHERE style_id IS NULL — and can't be
+  // inferred by the upsert API. clientId is JWT-resolved, never trusted from the body.
+  if (action === "save_layout_pricing") {
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option"]);
+    const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
+    if (itemsRes.error) return json({ error: itemsRes.error.message }, 500);
+    const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
+    const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const idByKey = new Map<string, string>();
+    for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
+    let saved = 0; const skipped: string[] = [];
+    for (const row of payload.rows) {
+      const itemKey = String(row?.item_key ?? "").trim();
+      const method = String(row?.pricing_method ?? "").trim();
+      const rate = Number(row?.rate);
+      if (!itemKey) continue;
+      if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
+      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
+      if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
+      const existingId = idByKey.get(itemKey);
+      const res = existingId
+        ? await admin.from("layout_item_pricing").update({ pricing_method: method, rate }).eq("id", existingId)
+        : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: itemKey, style_id: null, pricing_method: method, rate });
+      if (res.error) { skipped.push(`${itemKey}: ${res.error.message}`); continue; }
+      saved++;
+    }
+    return json({ ok: true, saved, skipped });
   }
 
   // Verify the GHL Location ID + API key against GoHighLevel, then save ONLY if they
