@@ -311,7 +311,7 @@ Deno.serve(async (req: Request) => {
   // inferred by the upsert API. clientId is JWT-resolved, never trusted from the body.
   if (action === "save_layout_pricing") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
-    const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option"]);
+    const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
     if (itemsRes.error) return json({ error: itemsRes.error.message }, 500);
     const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
