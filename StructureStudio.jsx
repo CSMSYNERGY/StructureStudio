@@ -225,6 +225,8 @@ function StructureStudioInner({ config }) {
   const C = config;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
   const accent = C.branding.accentColor || "#D97706";
+  // White-label initials for the logo placeholder shown when no logo is set.
+  const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
   // Admin gate: ?admin=1 surfaces the GHL credentials panel. The credentials never
   // round-trip through the browser — admin types them in, the Edge Function stores
   // them in Supabase, and customers' browsers never see them.
@@ -1674,10 +1676,10 @@ function StructureStudioInner({ config }) {
       <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
         {C.branding.logo
           ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
-          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>SS</div>}
+          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>StructureStudio</div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.companyName} — {C.branding.tagline || "Design & Quote"}</div>
+          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
         </div>
         <button onClick={() => setConfigOpen(!configOpen)} style={{ ...S.btn(configOpen ? "#FFF" : "rgba(255,255,255,0.15)", configOpen ? "#1E293B" : "#FFF"), border: "1px solid rgba(255,255,255,0.25)" }}>
           {configOpen ? "▴ Hide" : "▾ Show"} Options
@@ -2328,7 +2330,7 @@ function StructureStudioInner({ config }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
           <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>StructureStudio Export</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} Export</h3>
               <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
             </div>
             {exportUrl && (
@@ -2403,6 +2405,13 @@ export default function StructureStudio({ config: configProp = null }) {
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
   ));
+
+  // White-label the browser tab: show the tenant's business name once config loads.
+  useEffect(() => {
+    if (state.status === "ready" && typeof document !== "undefined") {
+      document.title = (state.config.branding && state.config.branding.companyName) || "Design Studio";
+    }
+  }, [state]);
 
   useEffect(() => {
     if (state.status !== "loading") return;
