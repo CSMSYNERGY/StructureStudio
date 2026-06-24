@@ -142,6 +142,12 @@ function AdminApp() {
   const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
   const [delOpen, setDelOpen] = useState(false);
   const [delConfirm, setDelConfirm] = useState("");
+  // Operator-global email sender (Supabase Auth custom SMTP → a Google account).
+  const [emailSender, setEmailSender] = useState(null); // null=unloaded · {connected,senderEmail} · {error}
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [emailAddr, setEmailAddr] = useState("carolyn@csmsynergy.com");
+  const [emailPwd, setEmailPwd] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
@@ -151,8 +157,37 @@ function AdminApp() {
       const c = await api("list_clients", pwd);
       const m = await api("get_master", pwd);
       setClients(c.clients || []); setMaster(m); setAuthed(true);
+      loadEmailSender();   // best-effort; never blocks login
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
+  };
+  // Read the current Auth email-sender status (best-effort: a missing
+  // SUPABASE_MGMT_TOKEN or API hiccup must never break the admin page).
+  const loadEmailSender = async () => {
+    try { setEmailSender(await api("get_email_sender", pwd)); }
+    catch (e) { setEmailSender({ error: e.message }); }
+  };
+  const connectEmail = async () => {
+    const addr = emailAddr.trim();
+    const pass = emailPwd.replace(/\s+/g, "");   // Google shows it as 4 spaced groups
+    if (!addr || !pass) return;
+    setEmailBusy(true); setMsg(null);
+    try {
+      const r = await api("connect_email", pwd, { email: addr, appPassword: pass });
+      setEmailSender({ connected: true, senderEmail: r.senderEmail || addr });
+      setEmailPwd(""); setEmailOpen(false);
+      flash({ ok: `Connected — login & invite emails now send from ${r.senderEmail || addr}.` });
+    } catch (e) { flash({ err: e.message }); }
+    setEmailBusy(false);
+  };
+  const disconnectEmail = async () => {
+    setEmailBusy(true); setMsg(null);
+    try {
+      await api("disconnect_email", pwd);
+      setEmailSender({ connected: false, senderEmail: null });
+      flash({ ok: "Disconnected — emails will use the Supabase default sender." });
+    } catch (e) { flash({ err: e.message }); }
+    setEmailBusy(false);
   };
   const loadClient = async (cid) => {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
@@ -633,6 +668,43 @@ function AdminApp() {
             )}
           </div>
         )}
+
+        {/* Email sender (operator-global): connect a Google account so the portal's
+            login / invite / password-reset emails send from it instead of Supabase. */}
+        <div style={{ ...S.card, marginTop: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ ...S.h2, marginBottom: 0 }}>📧 Email Sender</div>
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+              {emailSender && emailSender.connected &&
+                <button onClick={disconnectEmail} disabled={emailBusy} style={S.btn("#FEE2E2", "#B91C1C")}>{emailBusy ? "…" : "Disconnect"}</button>}
+              <button onClick={() => setEmailOpen((o) => !o)} style={S.btn(emailOpen ? "#F1F5F9" : ACCENT, emailOpen ? "#334155" : "#FFF")}>
+                {emailOpen ? "Cancel" : (emailSender && emailSender.connected ? "Reconnect Google account" : "Connect Google account")}
+              </button>
+            </div>
+          </div>
+          <div style={{ fontSize: 13, color: "#475569", marginTop: 8, lineHeight: 1.5 }}>
+            {emailSender && emailSender.error
+              ? <span style={{ color: "#B45309" }}>⚠ Couldn't read email status: {emailSender.error}</span>
+              : emailSender && emailSender.connected
+                ? <span>Portal login &amp; invite emails send from <b style={{ color: ACCENT }}>{emailSender.senderEmail}</b>.</span>
+                : <span>Not connected — login &amp; invite emails use the <b>Supabase default sender</b>. Connect a Google account to send them from your own address.</span>}
+          </div>
+          {emailOpen && (
+            <div style={{ marginTop: 12, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#475569", marginBottom: 8, lineHeight: 1.5 }}>
+                Enter the Google account and its <b>app password</b> (Google Account → Security → 2-Step Verification → App passwords).
+                2-step verification must be on. The password is stored securely server-side and never shown again.
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <input value={emailAddr} onChange={(e) => setEmailAddr(e.target.value)} placeholder="name@yourdomain.com" autoComplete="off" style={{ ...S.input, minWidth: 240 }} />
+                <input type="password" value={emailPwd} onChange={(e) => setEmailPwd(e.target.value)} placeholder="paste the 16-char app password" autoComplete="new-password"
+                  onKeyDown={(e) => e.key === "Enter" && emailAddr.trim() && emailPwd.trim() && connectEmail()} style={{ ...S.input, minWidth: 240 }} />
+                <button onClick={connectEmail} disabled={emailBusy || !emailAddr.trim() || !emailPwd.trim()}
+                  style={S.btn(emailBusy || !emailAddr.trim() || !emailPwd.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>{emailBusy ? "Connecting…" : "Connect & save"}</button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
