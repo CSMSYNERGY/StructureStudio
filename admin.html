@@ -148,6 +148,8 @@ function AdminApp() {
   const [emailAddr, setEmailAddr] = useState("carolyn@csmsynergy.com");
   const [emailPwd, setEmailPwd] = useState("");
   const [emailBusy, setEmailBusy] = useState(false);
+  const [emailTestTo, setEmailTestTo] = useState(""); // recipient for the "Send test email" button (must be an existing login)
+  const [emailTestBusy, setEmailTestBusy] = useState(false);
 
   const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
@@ -188,6 +190,18 @@ function AdminApp() {
       flash({ ok: "Disconnected — emails will use the Supabase default sender." });
     } catch (e) { flash({ err: e.message }); }
     setEmailBusy(false);
+  };
+  // Send a real auth email (a password reset) through the connected sender to
+  // confirm delivery + the From address. Recipient must be an existing login.
+  const sendTestEmail = async () => {
+    const to = emailTestTo.trim();
+    if (!to) return;
+    setEmailTestBusy(true); setMsg(null);
+    try {
+      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal.html" });
+      flash({ ok: `Test sent to ${r.sentTo}${r.senderEmail ? ` from ${r.senderEmail}` : ""} — check the inbox. It's a password-reset email; nothing changes unless you click the link.` });
+    } catch (e) { flash({ err: e.message }); }
+    setEmailTestBusy(false);
   };
   const loadClient = async (cid) => {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
@@ -689,6 +703,16 @@ function AdminApp() {
                 ? <span>Portal login &amp; invite emails send from <b style={{ color: ACCENT }}>{emailSender.senderEmail}</b>.</span>
                 : <span>Not connected — login &amp; invite emails use the <b>Supabase default sender</b>. Connect a Google account to send them from your own address.</span>}
           </div>
+          {emailSender && emailSender.connected && !emailOpen && (
+            <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={emailTestTo} onChange={(e) => setEmailTestTo(e.target.value)} placeholder="send a test to an owner/operator login email"
+                autoComplete="off" onKeyDown={(e) => e.key === "Enter" && emailTestTo.trim() && sendTestEmail()} style={{ ...S.input, minWidth: 300 }} />
+              <button onClick={sendTestEmail} disabled={emailTestBusy || !emailTestTo.trim()}
+                style={S.btn(emailTestBusy || !emailTestTo.trim() ? "#9CA3AF" : "#F1F5F9", emailTestBusy || !emailTestTo.trim() ? "#FFF" : "#334155")}>
+                {emailTestBusy ? "Sending…" : "Send test email"}
+              </button>
+            </div>
+          )}
           {emailOpen && (
             <div style={{ marginTop: 12, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
               <div style={{ fontSize: 12, color: "#475569", marginBottom: 8, lineHeight: 1.5 }}>

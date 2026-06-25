@@ -501,6 +501,41 @@ Deno.serve(async (req: Request) => {
         await mgmtAuthConfig("PATCH", { smtp_host: "", smtp_user: "", smtp_pass: "", smtp_admin_email: "", smtp_sender_name: "" });
         return json({ ok: true, connected: false, senderEmail: null });
       }
+      // ── send a test email through the connected sender ──────────────────
+      // Proves the configured SMTP actually delivers by pushing a REAL auth email
+      // through it — a password-recovery email, which is one of the flows this
+      // feature powers and has no side effects: nothing is created, and nothing
+      // changes unless the recipient clicks the link (which only lets them set a
+      // password they already own). The recipient must be an existing login: GoTrue
+      // recover returns 200 even when it skips a non-user, so we verify first rather
+      // than report a misleading "sent".
+      case "test_email": {
+        const email = reqStr(p.email, "email").toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Enter a valid email address to send the test to.");
+
+        // Refuse to "test" when there's no custom sender — the email would quietly
+        // go out via Supabase's default sender and prove nothing about the connection.
+        const cfg = await mgmtAuthConfig("GET");
+        if (!(cfg && cfg.smtp_host)) throw new Error("Connect a Google account first — there's no custom sender to test yet.");
+
+        // Confirm the recipient is a real login (recovery only emails existing users).
+        let exists = false;
+        for (let page = 1; page <= 20 && !exists; page++) {
+          const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
+          if (list.error) throw list.error;
+          const users = list.data?.users || [];
+          exists = users.some((u: any) => String(u.email || "").toLowerCase() === email);
+          if (users.length < 1000) break;
+        }
+        if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
+
+        // Where the reset link lands; the panel passes location.origin + "/portal.html".
+        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
+          ? p.portalUrl : "https://structurestudio.app/portal.html";
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: portalUrl });
+        if (error) throw error;
+        return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });
+      }
 
       // ── delete a tenant and ALL of its data (operator hard delete) ──────
       // Removes the client's designs, catalog (styles/sizes/inclusions/layout
