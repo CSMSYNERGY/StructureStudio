@@ -32,16 +32,17 @@ const reqStr = (v: unknown, name: string) => {
 // a Google account (Gmail host + app password) makes ALL auth emails — owner
 // invites, password resets, email changes — send from that address instead of
 // Supabase's default sender, with no per-flow code. Requires a Supabase personal
-// access token in the SUPABASE_MGMT_TOKEN secret. The app password is write-only:
-// it lives only inside this Auth config and is never returned by the GET.
+// access token in the MGMT_TOKEN secret — NOT "SUPABASE_MGMT_TOKEN": Supabase
+// reserves the SUPABASE_ prefix and rejects any edge secret named with it. The app
+// password is write-only: it lives only inside this Auth config, never returned by GET.
 const PROJECT_REF = "jzeamjbhdrsbygdnphbm";
 async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
-  const token = Deno.env.get("SUPABASE_MGMT_TOKEN");
+  const token = Deno.env.get("MGMT_TOKEN");
   if (!token) {
     throw new Error(
-      "Email sending isn't set up on the server yet: the SUPABASE_MGMT_TOKEN secret is missing. " +
+      "Email sending isn't set up on the server yet: the MGMT_TOKEN secret is missing. " +
       "Create a Supabase personal access token at https://supabase.com/dashboard/account/tokens and add " +
-      "it as an Edge Function secret named SUPABASE_MGMT_TOKEN.");
+      "it as an Edge Function secret named MGMT_TOKEN.");
   }
   const r = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth`, {
     method,

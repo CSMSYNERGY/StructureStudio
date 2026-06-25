@@ -164,7 +164,7 @@ function AdminApp() {
     setBusy(false);
   };
   // Read the current Auth email-sender status (best-effort: a missing
-  // SUPABASE_MGMT_TOKEN or API hiccup must never break the admin page).
+  // MGMT_TOKEN or API hiccup must never break the admin page).
   const loadEmailSender = async () => {
     try { setEmailSender(await api("get_email_sender", pwd)); }
     catch (e) { setEmailSender({ error: e.message }); }
