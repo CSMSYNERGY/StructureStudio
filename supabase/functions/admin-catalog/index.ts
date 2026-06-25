@@ -32,16 +32,17 @@ const reqStr = (v: unknown, name: string) => {
 // a Google account (Gmail host + app password) makes ALL auth emails — owner
 // invites, password resets, email changes — send from that address instead of
 // Supabase's default sender, with no per-flow code. Requires a Supabase personal
-// access token in the SUPABASE_MGMT_TOKEN secret. The app password is write-only:
-// it lives only inside this Auth config and is never returned by the GET.
+// access token in the MGMT_TOKEN secret — NOT "SUPABASE_MGMT_TOKEN": Supabase
+// reserves the SUPABASE_ prefix and rejects any edge secret named with it. The app
+// password is write-only: it lives only inside this Auth config, never returned by GET.
 const PROJECT_REF = "jzeamjbhdrsbygdnphbm";
 async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
-  const token = Deno.env.get("SUPABASE_MGMT_TOKEN");
+  const token = Deno.env.get("MGMT_TOKEN");
   if (!token) {
     throw new Error(
-      "Email sending isn't set up on the server yet: the SUPABASE_MGMT_TOKEN secret is missing. " +
+      "Email sending isn't set up on the server yet: the MGMT_TOKEN secret is missing. " +
       "Create a Supabase personal access token at https://supabase.com/dashboard/account/tokens and add " +
-      "it as an Edge Function secret named SUPABASE_MGMT_TOKEN.");
+      "it as an Edge Function secret named MGMT_TOKEN.");
   }
   const r = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth`, {
     method,
@@ -500,6 +501,41 @@ Deno.serve(async (req: Request) => {
         // Leave external_email_enabled untouched so email logins keep working.
         await mgmtAuthConfig("PATCH", { smtp_host: "", smtp_user: "", smtp_pass: "", smtp_admin_email: "", smtp_sender_name: "" });
         return json({ ok: true, connected: false, senderEmail: null });
+      }
+      // ── send a test email through the connected sender ──────────────────
+      // Proves the configured SMTP actually delivers by pushing a REAL auth email
+      // through it — a password-recovery email, which is one of the flows this
+      // feature powers and has no side effects: nothing is created, and nothing
+      // changes unless the recipient clicks the link (which only lets them set a
+      // password they already own). The recipient must be an existing login: GoTrue
+      // recover returns 200 even when it skips a non-user, so we verify first rather
+      // than report a misleading "sent".
+      case "test_email": {
+        const email = reqStr(p.email, "email").toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Enter a valid email address to send the test to.");
+
+        // Refuse to "test" when there's no custom sender — the email would quietly
+        // go out via Supabase's default sender and prove nothing about the connection.
+        const cfg = await mgmtAuthConfig("GET");
+        if (!(cfg && cfg.smtp_host)) throw new Error("Connect a Google account first — there's no custom sender to test yet.");
+
+        // Confirm the recipient is a real login (recovery only emails existing users).
+        let exists = false;
+        for (let page = 1; page <= 20 && !exists; page++) {
+          const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
+          if (list.error) throw list.error;
+          const users = list.data?.users || [];
+          exists = users.some((u: any) => String(u.email || "").toLowerCase() === email);
+          if (users.length < 1000) break;
+        }
+        if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
+
+        // Where the reset link lands; the panel passes location.origin + "/portal.html".
+        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
+          ? p.portalUrl : "https://structurestudio.app/portal.html";
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: portalUrl });
+        if (error) throw error;
+        return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });
       }
 
       // ── delete a tenant and ALL of its data (operator hard delete) ──────
