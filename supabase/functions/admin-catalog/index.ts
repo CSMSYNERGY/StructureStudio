@@ -27,6 +27,37 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
+// ── Supabase Auth custom-SMTP config via the Management API ──────────────────
+// Powers the admin.html "Email Sender" card. Pointing the project's Auth SMTP at
+// a Google account (Gmail host + app password) makes ALL auth emails — owner
+// invites, password resets, email changes — send from that address instead of
+// Supabase's default sender, with no per-flow code. Requires a Supabase personal
+// access token in the SUPABASE_MGMT_TOKEN secret. The app password is write-only:
+// it lives only inside this Auth config and is never returned by the GET.
+const PROJECT_REF = "jzeamjbhdrsbygdnphbm";
+async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
+  const token = Deno.env.get("SUPABASE_MGMT_TOKEN");
+  if (!token) {
+    throw new Error(
+      "Email sending isn't set up on the server yet: the SUPABASE_MGMT_TOKEN secret is missing. " +
+      "Create a Supabase personal access token at https://supabase.com/dashboard/account/tokens and add " +
+      "it as an Edge Function secret named SUPABASE_MGMT_TOKEN.");
+  }
+  const r = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth`, {
+    method,
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
+  if (!r.ok) {
+    const msg = (data && (data.message || data.error || data.msg)) || text || `request failed (${r.status})`;
+    throw new Error(`Supabase Management API: ${String(msg).slice(0, 500)}`);
+  }
+  return data;
+}
+
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
 // write/upload can never land under a typo'd or malformed tenant prefix.
 async function assertClient(sb: any, clientId: string) {
@@ -434,6 +465,41 @@ Deno.serve(async (req: Request) => {
         } catch (_) { /* link is best-effort */ }
 
         return json({ ok: true, userId: user.id, email, role, created, emailSent, setupLink });
+      }
+
+      // ── email sender: connect a Google account so auth emails send from it ──
+      // (Supabase Auth custom SMTP via the Management API — see mgmtAuthConfig.)
+      case "get_email_sender": {
+        const cfg = await mgmtAuthConfig("GET");
+        const host = (cfg && cfg.smtp_host) || "";
+        return json({ ok: true, connected: !!host, senderEmail: (cfg && cfg.smtp_admin_email) || null, host: host || null });
+      }
+      case "connect_email": {
+        const email = reqStr(p.email, "email").toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Enter a valid Google email address.");
+        // Google shows app passwords as 4 space-separated groups; strip whitespace
+        // to the raw 16 chars. Required on every connect (it's tied to the account),
+        // so we never PATCH an empty smtp_pass — the stored secret can't be blanked
+        // by an empty save; clearing is the explicit disconnect_email action.
+        const appPassword = String(p.appPassword ?? "").replace(/\s+/g, "");
+        if (!appPassword) throw new Error("Paste the 16-character Google app password.");
+        if (appPassword.length < 16) throw new Error("That app password looks too short — paste the full 16-character code from Google.");
+        await mgmtAuthConfig("PATCH", {
+          external_email_enabled: true,
+          smtp_host: "smtp.gmail.com",
+          smtp_port: 465,
+          smtp_user: email,
+          smtp_pass: appPassword,
+          smtp_admin_email: email,
+          smtp_sender_name: (typeof p.senderName === "string" && p.senderName.trim()) ? p.senderName.trim().slice(0, 100) : "Structure Studio",
+        });
+        return json({ ok: true, connected: true, senderEmail: email });
+      }
+      case "disconnect_email": {
+        // Revert to Supabase's built-in sender by clearing the custom SMTP fields.
+        // Leave external_email_enabled untouched so email logins keep working.
+        await mgmtAuthConfig("PATCH", { smtp_host: "", smtp_user: "", smtp_pass: "", smtp_admin_email: "", smtp_sender_name: "" });
+        return json({ ok: true, connected: false, senderEmail: null });
       }
 
       // ── delete a tenant and ALL of its data (operator hard delete) ──────
