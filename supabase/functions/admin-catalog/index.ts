@@ -488,7 +488,9 @@ Deno.serve(async (req: Request) => {
         await mgmtAuthConfig("PATCH", {
           external_email_enabled: true,
           smtp_host: "smtp.gmail.com",
-          smtp_port: 465,
+          // String, not number: the Management API's auth-config schema types
+          // smtp_port as a string and rejects a number ("Expected string, received number").
+          smtp_port: "465",
           smtp_user: email,
           smtp_pass: appPassword,
           smtp_admin_email: email,
