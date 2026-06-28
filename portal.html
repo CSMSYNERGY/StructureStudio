@@ -549,6 +549,7 @@ function PricingCsv() {
   const [styleImg, setStyleImg] = useState(null);     // { base64, contentType, name }
   const [styleBusy, setStyleBusy] = useState(false);
   const [styleFileKey, setStyleFileKey] = useState(0);
+  const [pendingDelete, setPendingDelete] = useState(null);  // style pending permanent delete (confirm modal)
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -595,15 +596,9 @@ function PricingCsv() {
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
   };
-  const deleteStyle = async (s) => {
-    const ok = window.confirm(
-      `Permanently delete the building style “${s.label}”?\n\n` +
-      `This also deletes ALL of its sizes and prices. Past designs that used this style keep ` +
-      `their saved plan, but their estimate can no longer be regenerated.\n\n` +
-      `To simply stop offering it to customers, click Cancel and use “Hide” instead.\n\n` +
-      `This cannot be undone.`
-    );
-    if (!ok) return;
+  const confirmDelete = async () => {
+    const s = pendingDelete;
+    if (!s) return;
     setStyleBusy(true); setMsg(null);
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "delete_style", styleId: s.id } });
@@ -612,6 +607,7 @@ function PricingCsv() {
       setMsg({ ok: `Building style “${s.label}” and its sizes/prices were deleted.` });
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
+    setPendingDelete(null);
   };
   const downloadTemplate = () => {
     if (!cat) return;
@@ -669,6 +665,26 @@ function PricingCsv() {
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
 
+      {pendingDelete && (
+        <div onClick={() => !styleBusy && setPendingDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 10 }}>Delete “{pendingDelete.label}”?</div>
+            <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 18 }}>
+              This permanently deletes the style and <b>all of its sizes and prices</b>. Past designs that used it keep
+              their saved plan, but their estimate can no longer be regenerated. <b>This cannot be undone.</b> To just
+              stop offering it, use <b>Hide</b> instead.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setPendingDelete(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              <button onClick={confirmDelete} disabled={styleBusy} style={S.btn(styleBusy ? "#9CA3AF" : "#DC2626", "#FFF")}>
+                {styleBusy ? "Deleting…" : "OK – proceed and delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={S.card}>
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
@@ -688,7 +704,7 @@ function PricingCsv() {
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
                     <button onClick={() => toggleStyle(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>{s.active ? "Hide" : "Show"}</button>
-                    <button onClick={() => deleteStyle(s)} disabled={styleBusy} style={S.btn("#FEF2F2", "#DC2626")}>Delete</button>
+                    <button onClick={() => setPendingDelete(s)} disabled={styleBusy} style={S.btn("#FEF2F2", "#DC2626")}>Delete</button>
                   </div>
                 ))}
               </div>
