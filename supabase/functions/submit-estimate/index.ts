@@ -221,12 +221,12 @@ Deno.serve(async (req: Request) => {
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
-      const szRes = await supabase.from("building_sizes").select("base_price, label, width_ft, depth_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
+      const szRes = await supabase.from("building_sizes").select("base_price, label, width_ft, length_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
       const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
       if (sizeRow && sizeRow.base_price != null) {
         buildingPrice = Number(sizeRow.base_price) || 0; priced = true;
         buildingWidthFt = Number(sizeRow.width_ft) || 0;
-        buildingDepthFt = Number(sizeRow.depth_ft) || 0;
+        buildingDepthFt = Number(sizeRow.length_ft) || 0;   // building "depth" is stored as length_ft
       }
     }
   } catch { /* leave unpriced; handled below */ }
