@@ -7,12 +7,10 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// Beta routing: either the request body sets `betaMode: true` (staging deploys) or the
-// client's settings row has beta_mode = true (per-tenant test switch). When active, the
-// estimate-send step redirects the outbound email to the client's beta_email (or this
-// QA inbox as a last resort) instead of the customer. Everything else (contact upsert,
-// estimate create, opportunity link) still runs full-fidelity against the real GHL location.
-const BETA_TEST_EMAIL = "beta@csmsynergy.com";
+// The estimate email always goes to the customer — in every environment, beta included.
+// `betaMode` (request flag or the client's beta_mode setting) is still surfaced for
+// telemetry, but it no longer redirects the recipient: a previous QA-inbox redirect sent
+// beta estimates to a non-deliverable address and they silently failed to send.
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -573,12 +571,10 @@ Deno.serve(async (req: Request) => {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
   }
 
-  // 10. Send (re-emails on update, per requirements). In beta mode (request flag OR the
-  //     client's beta_mode setting) the outbound email is redirected to the client's
-  //     beta_email (falling back to the QA inbox) so test runs don't reach real customers.
-  //     We capture the GHL response (status + body) and return it as `sendDebug` so
-  //     failures don't hide behind a generic 200 — the React app or curl caller can
-  //     inspect what GHL rejected.
+  // 10. Send (re-emails on update, per requirements). The estimate email always goes to the
+  //     customer's own email — beta deploys included. We capture the GHL response
+  //     (status + body) and return it as `sendDebug` so failures don't hide behind a generic
+  //     200 — the React app or curl caller can inspect what GHL rejected.
   let sendDebug: { status: number | null; ok: boolean; body: string; sentTo: string[] } = {
     status: null,
     ok: false,
@@ -587,9 +583,7 @@ Deno.serve(async (req: Request) => {
   };
   try {
     if (estimateId) {
-      const recipients = effectiveBetaMode
-        ? [settings.beta_email || BETA_TEST_EMAIL]
-        : [contact?.email].filter(Boolean);
+      const recipients = [contact?.email].filter(Boolean);
       sendDebug.sentTo = recipients;
       const sendBody = {
         altId: dynamicLocationId,
