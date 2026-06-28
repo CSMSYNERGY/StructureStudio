@@ -509,6 +509,15 @@ Deno.serve(async (req: Request) => {
   // the birthday bound collided after only a few hundred estimates.
   const uniqueSequence = (Date.now() % 100_000_000) * 100 + Math.floor(Math.random() * 100);
 
+  // GHL renders termsNotes as HTML, which collapses the plain-text line breaks the owner
+  // typed in their quote_terms into a single paragraph. Escape HTML, then convert newlines
+  // to <br> so the terms display with the same line/paragraph structure as saved in the portal.
+  const termsNotesHtml = quoteTerms
+    ? quoteTerms.replace(/\r\n/g, "\n")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/\n/g, "<br>")
+    : "";
+
   const finalPayload: any = {
     altId: dynamicLocationId,
     userId: dynamicUserId,
@@ -524,7 +533,7 @@ Deno.serve(async (req: Request) => {
     // Terms & Conditions: always populate the estimate's Terms & Notes from the tenant's
     // quote_terms (client_settings). GHL's field is `termsNotes` — the old `terms` key was
     // silently ignored, so quote terms never appeared on the estimate.
-    termsNotes: quoteTerms,
+    termsNotes: termsNotesHtml,
     businessDetails: {
       name: businessName,
       ...(businessPhone ? { phoneNo: businessPhone } : {}),
