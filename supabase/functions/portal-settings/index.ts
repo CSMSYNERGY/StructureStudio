@@ -481,5 +481,42 @@ Deno.serve(async (req: Request) => {
     return json({ ok: true });
   }
 
+  // Update one of this tenant's styles: rename and/or replace its image. Scoped to clientId.
+  // Only fields present in the body are written; an absent image leaves the current one intact.
+  // Does not touch sizes/prices (CSV) or active state (set_style_active).
+  if (action === "update_style") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const updates: Record<string, unknown> = {};
+    if ("label" in payload) {
+      const label = String(payload.label ?? "").trim();
+      if (!label) return json({ error: "Building style name can't be empty." }, 400);
+      updates.label = label;
+    }
+    if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
+      const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+      const ct = String(payload.imageContentType || "image/jpeg");
+      const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+      const ext = EXT[ct];
+      if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+      let bytes: Uint8Array;
+      try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+      if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+      updates.image_url = pub.publicUrl;
+    }
+    if (Object.keys(updates).length === 0) return json({ error: "Nothing to update." }, 400);
+    updates.updated_at = new Date().toISOString();
+    const { error, count } = await admin.from("building_styles")
+      .update(updates, { count: "exact" })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, imageUrl: updates.image_url ?? null });
+  }
+
   return json({ error: `Unknown action "${action}".` }, 400);
 });
