@@ -463,5 +463,23 @@ Deno.serve(async (req: Request) => {
     return json({ ok: true });
   }
 
+  // Permanently delete one of this tenant's styles. The FK cascade removes the style's
+  // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
+  // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
+  // Irreversible — prefer set_style_active(false) to merely hide a style. Scoped to clientId
+  // so an owner can only delete their own styles. Past designs that used this style keep their
+  // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
+  // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
+  if (action === "delete_style") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error, count } = await admin.from("building_styles")
+      .delete({ count: "exact" })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true });
+  }
+
   return json({ error: `Unknown action "${action}".` }, 400);
 });
