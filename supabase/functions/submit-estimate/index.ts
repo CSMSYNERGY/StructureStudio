@@ -521,7 +521,10 @@ Deno.serve(async (req: Request) => {
     currency: "USD",
     issueDate: today,
     expiryDate: expiryFormatted,
-    terms: quoteTerms,
+    // Terms & Conditions: always populate the estimate's Terms & Notes from the tenant's
+    // quote_terms (client_settings). GHL's field is `termsNotes` — the old `terms` key was
+    // silently ignored, so quote terms never appeared on the estimate.
+    termsNotes: quoteTerms,
     businessDetails: {
       name: businessName,
       ...(businessPhone ? { phoneNo: businessPhone } : {}),
