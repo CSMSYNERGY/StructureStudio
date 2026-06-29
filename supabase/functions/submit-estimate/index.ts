@@ -201,6 +201,20 @@ Deno.serve(async (req: Request) => {
   const summary = itemSummary || {};
   const targetItems: any[] = [];
 
+  // Per-line product image (the "image inside the app" the owner uploaded → shown on the
+  // estimate line). Images live in this tenant's public 'branding' bucket; only attach a URL
+  // under that tenant prefix so a tampered catalog row can't graft an arbitrary link onto the
+  // branded estimate. GHL renders a line item's attachments as the product photo.
+  const brandingPrefix = `${supabaseUrl}/storage/v1/object/public/branding/${clientId}/`;
+  const MIME_BY_EXT: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" };
+  const imgAttachments = (url: unknown): any[] => {
+    const u = String(url || "");
+    if (!u || !u.startsWith(brandingPrefix)) return [];
+    const ext = (u.split("?")[0].split("#")[0].split(".").pop() || "").toLowerCase();
+    const base = u.split("/").pop() || "image";
+    return [{ id: base, name: base, url: u, type: MIME_BY_EXT[ext] || "image/jpeg", size: 50000 }];
+  };
+
   const style = selections.buildingStyle || "";
   const size = selections.buildingSize || "";
   const paintStatus = (selections.paint && String(selections.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint";
@@ -213,13 +227,15 @@ Deno.serve(async (req: Request) => {
   const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
   let styleRowId: string | null = null;
   let styleLabel = style;            // display-name fallback if the style row isn't found
+  let styleImageUrl: string | null = null;   // building-style photo, attached to the building line
   let buildingPrice = 0, priced = false;
   try {
-    const stRes = await supabase.from("building_styles").select("id, key, label").eq("client_id", clientId);
+    const stRes = await supabase.from("building_styles").select("id, key, label, image_url").eq("client_id", clientId);
     const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
+      styleImageUrl = styleRow.image_url || null;
       const szRes = await supabase.from("building_sizes").select("base_price, label").eq("client_id", clientId).eq("style_id", styleRow.id);
       const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
       if (sizeRow && sizeRow.base_price != null) { buildingPrice = Number(sizeRow.base_price) || 0; priced = true; }
@@ -235,7 +251,7 @@ Deno.serve(async (req: Request) => {
     amount: buildingPrice,
     priceId: "",
     productId: "",
-    attachments: [],
+    attachments: imgAttachments(styleImageUrl),
     currency: "USD",
     type: "one_time",
     description: `Size: ${size}` + (selections.paint ? ` | Paint: ${selections.paint}` : ""),
@@ -244,17 +260,25 @@ Deno.serve(async (req: Request) => {
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
   // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
   // default. Items without a configured row price at $0.
-  const layoutRates = new Map<string, { method: string; rate: number }>();
+  const layoutRates = new Map<string, { method: string; rate: number; imageUrl: string | null }>();
   try {
     const lpRes = await supabase
       .from("layout_item_pricing")
-      .select("item_key, style_id, pricing_method, rate")
+      .select("item_key, style_id, pricing_method, rate, image_url")
       .eq("client_id", clientId);
     for (const r of (lpRes.data || []) as any[]) {
       if (r.style_id && r.style_id !== styleRowId) continue;   // a different style's override — ignore
       const existing = layoutRates.get(r.item_key);
       if (!existing || r.style_id) {                            // override (style_id set) wins over the default
-        layoutRates.set(r.item_key, { method: String(r.pricing_method), rate: Number(r.rate) || 0 });
+        layoutRates.set(r.item_key, {
+          method: String(r.pricing_method),
+          rate: Number(r.rate) || 0,
+          // the product image lives on the DEFAULT (style_id NULL) row; don't let an
+          // imageless style-override clear it.
+          imageUrl: r.image_url || existing?.imageUrl || null,
+        });
+      } else if (!existing.imageUrl && r.image_url) {
+        existing.imageUrl = r.image_url;
       }
     }
   } catch { /* no layout pricing → add-ons stay $0 */ }
@@ -272,7 +296,7 @@ Deno.serve(async (req: Request) => {
       amount: lp ? lp.rate : 0,
       priceId: "",
       productId: "",
-      attachments: [],
+      attachments: lp ? imgAttachments(lp.imageUrl) : [],
       currency: "USD",
       type: "one_time",
       description,
@@ -506,12 +530,22 @@ Deno.serve(async (req: Request) => {
   // 9. Create or update
   let estimateId: string | null = existingEstimateId;
   let estimateNumber: string | null = null;
+  const hadLineImages = targetItems.some((it) => Array.isArray(it.attachments) && it.attachments.length > 0);
+  let lineImagesStripped = false;
   try {
     const url = existingEstimateId
       ? `https://services.leadconnectorhq.com/invoices/estimate/${existingEstimateId}`
       : `https://services.leadconnectorhq.com/invoices/estimate`;
     const method = existingEstimateId ? "PUT" : "POST";
-    const r = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(finalPayload) });
+    let r = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(finalPayload) });
+    // Resilience: the optional per-line product images must never break an estimate. If GHL
+    // rejects the payload and we attached line-item images, retry once WITHOUT them so the
+    // estimate (and the customer email) still goes out — imageless in the worst case.
+    if (!r.ok && hadLineImages) {
+      const stripped = { ...finalPayload, items: targetItems.map((it) => ({ ...it, attachments: [] })) };
+      const r2 = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(stripped) });
+      if (r2.ok) { r = r2; lineImagesStripped = true; console.warn("Estimate retried without line-item images (GHL rejected attachments)."); }
+    }
     if (!r.ok) {
       return json({ error: `Failed to ${existingEstimateId ? "update" : "create"} estimate: ${r.status} ${await r.text()}` }, 502);
     }
@@ -585,6 +619,7 @@ Deno.serve(async (req: Request) => {
     opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
     updated: Boolean(existingEstimateId),
     betaMode: effectiveBetaMode,
+    lineImagesStripped,
     sendDebug,
   });
 });

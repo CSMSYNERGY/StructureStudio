@@ -376,6 +376,7 @@ Deno.serve(async (req: Request) => {
         // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
         const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__";
         let contactFields: unknown, defaultSizes: unknown, options: unknown;
+        let templateId: string | null = null;
         if (blank) {
           contactFields = ["name", "email", "phone", "street", "city", "state", "zip"];
           defaultSizes = [];
@@ -386,6 +387,7 @@ Deno.serve(async (req: Request) => {
           if (tmpl.error) throw tmpl.error;
           if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
           contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
+          templateId = tmplId;
         }
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
@@ -395,7 +397,93 @@ Deno.serve(async (req: Request) => {
           updated_at: new Date().toISOString(),
         });
         if (ins.error) throw ins.error;
-        return json({ ok: true, clientId, blank });
+
+        // Clone the template's FULL catalog so the new client is usable immediately — the
+        // config row alone has no styles/sizes/prices/items/colors (the old bug: a cloned
+        // client "didn't bring it all over"). New rows get fresh ids; foreign keys are
+        // remapped old→new. client_settings is intentionally NOT copied (GHL credentials +
+        // business identity are per-client). Inserts only — nothing is dropped or removed.
+        let clonedCounts: Record<string, number> | null = null;
+        if (templateId) {
+          const T = templateId, Cc = clientId;
+          const counts: Record<string, number> = {};
+
+          // 1. building_styles → old id → new id (matched by stable per-client key)
+          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active").eq("client_id", T);
+          if (stSrc.error) throw new Error(`clone styles read: ${stSrc.error.message}`);
+          if ((stSrc.data ?? []).length) {
+            const r = await sb.from("building_styles").insert((stSrc.data ?? []).map((s: any) => ({
+              client_id: Cc, key: s.key, label: s.label, image_url: s.image_url, sort_order: s.sort_order, active: s.active,
+            })));
+            if (r.error) throw new Error(`clone styles: ${r.error.message}`);
+          }
+          const [oldStyles, newStyles] = await Promise.all([
+            sb.from("building_styles").select("id, key").eq("client_id", T),
+            sb.from("building_styles").select("id, key").eq("client_id", Cc),
+          ]);
+          if (oldStyles.error) throw oldStyles.error; if (newStyles.error) throw newStyles.error;
+          const newStyleIdByKey = new Map<string, string>();
+          for (const s of newStyles.data ?? []) newStyleIdByKey.set(String(s.key), s.id);
+          const styleIdMap = new Map<string, string>();   // old style id → new style id
+          for (const s of oldStyles.data ?? []) { const nid = newStyleIdByKey.get(String(s.key)); if (nid) styleIdMap.set(s.id, nid); }
+          counts.building_styles = styleIdMap.size;
+
+          // 2. building_sizes → remap style_id; old size id → new size id (by new style_id|label)
+          const szSrc = await sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", T);
+          if (szSrc.error) throw new Error(`clone sizes read: ${szSrc.error.message}`);
+          const szRows = (szSrc.data ?? []).filter((z: any) => styleIdMap.has(z.style_id)).map((z: any) => ({
+            client_id: Cc, style_id: styleIdMap.get(z.style_id), label: z.label, width_ft: z.width_ft,
+            length_ft: z.length_ft, base_price: z.base_price, sort_order: z.sort_order, active: z.active,
+          }));
+          if (szRows.length) { const r = await sb.from("building_sizes").insert(szRows); if (r.error) throw new Error(`clone sizes: ${r.error.message}`); }
+          const newSizes = await sb.from("building_sizes").select("id, style_id, label").eq("client_id", Cc);
+          if (newSizes.error) throw newSizes.error;
+          const newSizeIdByKey = new Map<string, string>();
+          for (const z of newSizes.data ?? []) newSizeIdByKey.set(`${z.style_id}|${z.label}`, z.id);
+          const sizeIdMap = new Map<string, string>();   // old size id → new size id
+          for (const z of szSrc.data ?? []) { const ns = styleIdMap.get(z.style_id); if (!ns) continue; const nid = newSizeIdByKey.get(`${ns}|${z.label}`); if (nid) sizeIdMap.set(z.id, nid); }
+          counts.building_sizes = sizeIdMap.size;
+
+          // 3. building_size_inclusions → remap size_id
+          const incSrc = await sb.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", T);
+          if (incSrc.error) throw new Error(`clone inclusions read: ${incSrc.error.message}`);
+          const incRows = (incSrc.data ?? []).filter((x: any) => sizeIdMap.has(x.size_id)).map((x: any) => ({
+            client_id: Cc, size_id: sizeIdMap.get(x.size_id), item_key: x.item_key, included: x.included,
+          }));
+          if (incRows.length) { const r = await sb.from("building_size_inclusions").insert(incRows); if (r.error) throw new Error(`clone inclusions: ${r.error.message}`); }
+          counts.building_size_inclusions = incRows.length;
+
+          // 4. client_layout_items (no style FK)
+          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override").eq("client_id", T);
+          if (liSrc.error) throw new Error(`clone items read: ${liSrc.error.message}`);
+          if ((liSrc.data ?? []).length) {
+            const r = await sb.from("client_layout_items").insert((liSrc.data ?? []).map((i: any) => ({ client_id: Cc, ...i })));
+            if (r.error) throw new Error(`clone items: ${r.error.message}`);
+          }
+          counts.client_layout_items = (liSrc.data ?? []).length;
+
+          // 5. layout_item_pricing → remap style_id (NULL default stays NULL)
+          const lpSrc = await sb.from("layout_item_pricing").select("item_key, style_id, pricing_method, rate, image_url").eq("client_id", T);
+          if (lpSrc.error) throw new Error(`clone pricing read: ${lpSrc.error.message}`);
+          const lpRows = (lpSrc.data ?? []).filter((q: any) => !q.style_id || styleIdMap.has(q.style_id)).map((q: any) => ({
+            client_id: Cc, item_key: q.item_key, style_id: q.style_id ? styleIdMap.get(q.style_id) : null,
+            pricing_method: q.pricing_method, rate: q.rate, image_url: q.image_url,
+          }));
+          if (lpRows.length) { const r = await sb.from("layout_item_pricing").insert(lpRows); if (r.error) throw new Error(`clone pricing: ${r.error.message}`); }
+          counts.layout_item_pricing = lpRows.length;
+
+          // 6. colors (no FK) — copy every column except identity/timestamps
+          const colSrc = await sb.from("colors").select("*").eq("client_id", T);
+          if (colSrc.error) throw new Error(`clone colors read: ${colSrc.error.message}`);
+          if ((colSrc.data ?? []).length) {
+            const colRows = (colSrc.data ?? []).map((c0: any) => { const { id, client_id, created_at, updated_at, ...rest } = c0; return { client_id: Cc, ...rest }; });
+            const r = await sb.from("colors").insert(colRows); if (r.error) throw new Error(`clone colors: ${r.error.message}`);
+          }
+          counts.colors = (colSrc.data ?? []).length;
+
+          clonedCounts = counts;
+        }
+        return json({ ok: true, clientId, blank, cloned: clonedCounts });
       }
 
       // ── link a user login to a client (with a role) ────────────────────
