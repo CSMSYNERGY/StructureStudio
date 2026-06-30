@@ -206,13 +206,13 @@ Deno.serve(async (req: Request) => {
   // under that tenant prefix so a tampered catalog row can't graft an arbitrary link onto the
   // branded estimate. GHL renders a line item's attachments as the product photo.
   const brandingPrefix = `${supabaseUrl}/storage/v1/object/public/branding/${clientId}/`;
-  const MIME_BY_EXT: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" };
-  const imgAttachments = (url: unknown): any[] => {
+  // GHL line-item attachments are an array of plain image-URL STRINGS (proven by the working
+  // n8n payload: `attachments: [imageUrl]`). An array of objects is rejected. Only attach a
+  // URL under this tenant's branding prefix so a tampered catalog row can't inject a link.
+  const imgAttachments = (url: unknown): string[] => {
     const u = String(url || "");
     if (!u || !u.startsWith(brandingPrefix)) return [];
-    const ext = (u.split("?")[0].split("#")[0].split(".").pop() || "").toLowerCase();
-    const base = u.split("/").pop() || "image";
-    return [{ id: base, name: base, url: u, type: MIME_BY_EXT[ext] || "image/jpeg", size: 50000 }];
+    return [u];
   };
 
   const style = selections.buildingStyle || "";
