@@ -832,12 +832,14 @@ function LayoutPricing() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [fileKey, setFileKey] = useState(0);
+  const [imgBusyKey, setImgBusyKey] = useState(null);   // item_key currently uploading an image
+  const [imgFileKey, setImgFileKey] = useState(0);      // resets the hidden file inputs after a pick
 
   const buildRows = (data) => {
     const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
     return (data.items || []).map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0" };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null };
     });
   };
 
@@ -850,10 +852,35 @@ function LayoutPricing() {
 
   const setRow = (key, field, val) => setRows((rs) => rs.map((r) => r.item_key === key ? { ...r, [field]: val } : r));
 
+  // Optional per-item product image. Uploads immediately to get a public URL (branding
+  // bucket, via portal-settings), stores it on the row, and persists on "Save prices" →
+  // layout_item_pricing.image_url, which submit-estimate attaches to that item's estimate line.
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onRowImg = async (itemKey, file) => {
+    if (!file) return;
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    setImgBusyKey(itemKey); setMsg(null);
+    try {
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onerror = () => rej(new Error("Could not read that image."));
+        r.onload = () => res(r.result);
+        r.readAsDataURL(file);
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_layout_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRow(itemKey, "image_url", data.url);
+      setMsg({ ok: "Image added — click “Save prices” to apply it to estimates." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyKey(null); setImgFileKey((k) => k + 1);
+  };
+  const removeRowImg = (itemKey) => { setRow(itemKey, "image_url", null); setMsg({ ok: "Image removed — click “Save prices” to apply." }); };
+
   const save = async (rowsToSave) => {
     setBusy(true); setMsg(null);
     try {
-      const payloadRows = (rowsToSave || rows).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: Number(r.rate) || 0 }));
+      const payloadRows = (rowsToSave || rows).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: Number(r.rate) || 0, imageUrl: r.image_url ?? null }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
@@ -899,6 +926,7 @@ function LayoutPricing() {
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
   return (
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
@@ -911,6 +939,7 @@ function LayoutPricing() {
           <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
           <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
           These rates are used on estimates when you don’t price through GoHighLevel products. Building sizes are priced on the <b>Pricing</b> tab.
+          <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
@@ -918,7 +947,7 @@ function LayoutPricing() {
           <>
             <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => (
@@ -931,6 +960,19 @@ function LayoutPricing() {
                     </td>
                     <td style={S.td}>
                       <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    <td style={S.td}>
+                      {r.image_url ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <img src={r.image_url} alt="" style={thumb} />
+                          <button onClick={() => removeRowImg(r.item_key)} disabled={busy || imgBusyKey === r.item_key} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
+                        </div>
+                      ) : (
+                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyKey === r.item_key ? "default" : "pointer", display: "inline-block" }}>
+                          {imgBusyKey === r.item_key ? "Uploading…" : "Add image"}
+                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyKey === r.item_key} style={{ display: "none" }} onChange={(e) => onRowImg(r.item_key, e.target.files && e.target.files[0])} />
+                        </label>
+                      )}
                     </td>
                   </tr>
                 ))}

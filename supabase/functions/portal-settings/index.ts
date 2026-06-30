@@ -284,7 +284,7 @@ Deno.serve(async (req: Request) => {
       admin.from("layout_item_types").select("item_key, label"),
       admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
-      admin.from("layout_item_pricing").select("item_key, pricing_method, rate").eq("client_id", clientId).is("style_id", null),
+      admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
@@ -328,10 +328,17 @@ Deno.serve(async (req: Request) => {
       if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
+      // Optional per-item image (shown on the estimate line for this product). Only written
+      // when the row carries an imageUrl field, so a save from an older client never blanks
+      // it; an explicit empty string clears it.
+      const hasImg = Object.prototype.hasOwnProperty.call(row, "imageUrl");
+      const imageUrl = hasImg ? (String(row.imageUrl ?? "").trim() || null) : undefined;
       const existingId = idByKey.get(itemKey);
+      const patch: Record<string, unknown> = { pricing_method: method, rate };
+      if (hasImg) patch.image_url = imageUrl;
       const res = existingId
-        ? await admin.from("layout_item_pricing").update({ pricing_method: method, rate }).eq("id", existingId)
-        : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: itemKey, style_id: null, pricing_method: method, rate });
+        ? await admin.from("layout_item_pricing").update(patch).eq("id", existingId)
+        : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: itemKey, style_id: null, ...patch });
       if (res.error) { skipped.push(`${itemKey}: ${res.error.message}`); continue; }
       saved++;
     }
@@ -461,6 +468,27 @@ Deno.serve(async (req: Request) => {
       .eq("client_id", clientId).eq("id", styleId);
     if (error) return json({ error: error.message }, 500);
     return json({ ok: true });
+  }
+
+  // Upload-only: store a layout-item image in the 'branding' bucket and return its public
+  // URL (no DB write). The portal places the URL on the row and persists it via
+  // save_layout_pricing → layout_item_pricing.image_url, which submit-estimate then attaches
+  // to that item's estimate line. clientId is JWT-resolved (own tenant only).
+  if (action === "upload_layout_image") {
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+    const path = `${clientId}/layout-${Date.now()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
   }
 
   // Permanently delete one of this tenant's styles. The FK cascade removes the style's
