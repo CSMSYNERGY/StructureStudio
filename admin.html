@@ -138,7 +138,8 @@ function AdminApp() {
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
-  const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink }
+  const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink, movedFrom }
+  const [reassignFrom, setReassignFrom] = useState(null); // email already linked elsewhere: { email, role, fromClient } — drives the one-click Reassign prompt
   const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
   const [delOpen, setDelOpen] = useState(false);
   const [delConfirm, setDelConfirm] = useState("");
@@ -204,7 +205,7 @@ function AdminApp() {
     setEmailTestBusy(false);
   };
   const loadClient = async (cid) => {
-    setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
+    setSel(cid); setCat(null); setMsg(null); setCsvResult(null); setReassignFrom(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
     setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
     if (!cid) return;
@@ -226,7 +227,9 @@ function AdminApp() {
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
-  const linkOwner = async () => {
+  // reassign=false → normal link; reassign=true → move a login already mapped to another
+  // client (the backend refuses to silently re-home one without this explicit flag).
+  const linkOwner = async (reassign = false) => {
     if (!sel || !ownerEmail.trim()) return;
     setBusy(true); setMsg(null); setLinkResult(null);
     try {
@@ -234,13 +237,27 @@ function AdminApp() {
       const r = await api("link_owner", pwd, {
         clientId: sel, email, role: linkRole,
         portalUrl: location.origin + "/portal.html",
+        ...(reassign ? { reassign: true } : {}),
       });
       const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
+      const movedFrom = (reassign && reassignFrom) ? reassignFrom.fromClient : null;
       // keep the panel open so the operator can copy the setup link
-      setLinkResult({ email, client: sel, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null });
-      setOwnerEmail("");
-      flash({ ok: `"${email}" linked to "${sel}" as ${roleLabel}.` });
-    } catch (e) { flash({ err: e.message }); }
+      setLinkResult({ email, client: sel, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null, movedFrom });
+      setOwnerEmail(""); setReassignFrom(null);
+      flash({ ok: `"${email}" ${movedFrom ? `reassigned from "${movedFrom}" to` : "linked to"} "${sel}" as ${roleLabel}.` });
+    } catch (e) {
+      // Email already belongs to another tenant: rather than dead-end on the error, offer a
+      // one-click Reassign. We key off the backend's stable "reassign:true" instruction and
+      // pull the current client out of its message so the prompt can name it.
+      const errMsg = (e && e.message) || String(e);
+      if (/reassign\s*:\s*true/i.test(errMsg)) {
+        const m = /already linked to client "([^"]+)"/.exec(errMsg);
+        setReassignFrom({ email: ownerEmail.trim(), role: linkRole, fromClient: m ? m[1] : null });
+      } else {
+        setReassignFrom(null);
+      }
+      flash({ err: errMsg });
+    }
     setBusy(false);
   };
   // Operator hard-delete: server wipes the tenant + all its data (catalog,
@@ -458,19 +475,30 @@ function AdminApp() {
                   Enter the owner's email — we'll create their portal login automatically (no manual Supabase step), map it to <b>{sel}</b>, and give you a one-time set-password link to send them (also emailed automatically if SMTP is configured).
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <input value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
+                  <input value={ownerEmail} onChange={(e) => { setOwnerEmail(e.target.value); setReassignFrom(null); }} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
                   <select value={linkRole} onChange={(e) => setLinkRole(e.target.value)} style={{ ...S.input, width: 230 }}>
                     <option value="owner">Admin (full access)</option>
                     <option value="user">Team member (Designs &amp; Leads only)</option>
                   </select>
-                  <button onClick={linkOwner} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
+                  <button onClick={() => linkOwner(false)} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
                 </div>
                 <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Admins see Pricing &amp; Settings; team members only see Designs &amp; Leads.</div>
+                {reassignFrom && (
+                  <div style={{ marginTop: 12, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+                    <div style={{ fontSize: 13, color: "#92400E", marginBottom: 8, lineHeight: 1.5 }}>
+                      <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another client"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other client"}'s designs &amp; leads.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <button onClick={() => linkOwner(true)} disabled={busy} style={S.btn(busy ? "#9CA3AF" : "#B45309", "#FFF")}>{busy ? "Reassigning…" : `Reassign to ${sel}`}</button>
+                      <button onClick={() => setReassignFrom(null)} disabled={busy} style={S.btn("#E2E8F0", "#0F172A")}>Cancel</button>
+                    </div>
+                  </div>
+                )}
                 {linkResult && (
                   <div style={{ marginTop: 12, padding: 12, background: "#FFF", border: "1px solid #BFDBFE", borderRadius: 8 }}>
                     <div style={{ fontSize: 13, color: "#15803D", fontWeight: 600, marginBottom: 6 }}>
-                      ✓ {linkResult.email} linked to {linkResult.client} as {linkResult.roleLabel}.
-                      {linkResult.created ? (linkResult.emailSent ? " Login created and invite email sent." : " Login created.") : " (login already existed)"}
+                      ✓ {linkResult.email} {linkResult.movedFrom ? `reassigned from ${linkResult.movedFrom} to` : "linked to"} {linkResult.client} as {linkResult.roleLabel}.
+                      {linkResult.movedFrom ? "" : (linkResult.created ? (linkResult.emailSent ? " Login created and invite email sent." : " Login created.") : " (login already existed)")}
                     </div>
                     {linkResult.setupLink ? (
                       <div>
