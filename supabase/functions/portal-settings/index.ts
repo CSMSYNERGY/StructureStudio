@@ -420,8 +420,8 @@ Deno.serve(async (req: Request) => {
   // Create a building style for THIS tenant (clientId is JWT-resolved, never from the
   // body) so owners can self-serve styles before pricing. An optional base64 image is
   // uploaded to the public 'branding' bucket. Key allocation mirrors admin-catalog's
-  // create_style: derive a slug, never collide with a master-catalog key, retry on
-  // unique-violation so a concurrent create never silently overwrites a style.
+  // create_style: derive a slug and retry on unique-violation so a concurrent create
+  // never silently overwrites a style.
   if (action === "create_style") {
     const label = String(payload.label ?? "").trim();
     if (!label) return json({ error: "Building style name is required." }, 400);
@@ -442,12 +442,10 @@ Deno.serve(async (req: Request) => {
       imageUrl = pub.publicUrl;
     }
     const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
-    const mk = await admin.from("building_style_catalog").select("key");
-    if (mk.error) return json({ error: mk.error.message }, 500);
-    const masterKeys = new Set<string>((mk.data ?? []).map((m: any) => String(m.key)));
+    // INSERT then retry on a unique-violation (23505) for a per-client key collision. The
+    // global building_style_catalog key-reservation was removed with that table in 030.
     let key = base, n = 1;
     for (let attempt = 0; attempt < 50; attempt++) {
-      if (masterKeys.has(key)) { key = `${base}-${++n}`; continue; }
       const ins = await admin.from("building_styles").insert(
         { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
         .select("id, key").maybeSingle();
