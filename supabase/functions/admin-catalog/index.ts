@@ -3,9 +3,9 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
-// admin-save-settings). Manages the GLOBAL master catalog (layout_item_types,
-// building_style_catalog + sizes) and per-client assignments (client_layout_items,
-// building_styles/building_sizes). All writes use the service role (bypass RLS).
+// admin-save-settings). Manages the GLOBAL master layout-item palette (layout_item_types)
+// and per-client catalog (client_layout_items, building_styles/building_sizes). All writes
+// use the service role (bypass RLS).
 // Kept separate from admin-save-settings so GHL-credential logic stays isolated.
 
 const cors = {
@@ -165,13 +165,12 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, clients: data });
       }
       case "get_master": {
-        const [items, styles, sizes] = await Promise.all([
-          sb.from("layout_item_types").select("*").order("sort_order").order("item_key"),
-          sb.from("building_style_catalog").select("*").order("sort_order").order("key"),
-          sb.from("building_style_catalog_sizes").select("*").order("style_key").order("sort_order"),
-        ]);
-        if (items.error) throw items.error; if (styles.error) throw styles.error; if (sizes.error) throw sizes.error;
-        return json({ ok: true, layoutItemTypes: items.data, buildingStyleCatalog: styles.data, catalogSizes: sizes.data });
+        // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
+        // (migration 030) — tenants get styles via the Clone feature or per-client
+        // create_style, not by assigning from a global master template.
+        const items = await sb.from("layout_item_types").select("*").order("sort_order").order("item_key");
+        if (items.error) throw items.error;
+        return json({ ok: true, layoutItemTypes: items.data });
       }
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
@@ -204,28 +203,7 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true });
       }
 
-      // ── building-style assignment ───────────────────────────────────────
-      case "assign_style": {
-        const clientId = reqStr(p.clientId, "clientId");
-        const styleKey = reqStr(p.styleKey, "styleKey");
-        const cat = await sb.from("building_style_catalog").select("label, default_image_url").eq("key", styleKey).maybeSingle();
-        if (cat.error) throw cat.error;
-        if (!cat.data) throw new Error("unknown style key");
-        const up = await sb.from("building_styles").upsert(
-          { client_id: clientId, key: styleKey, label: cat.data.label, image_url: cat.data.default_image_url, active: true },
-          { onConflict: "client_id,key" }).select("id").maybeSingle();
-        if (up.error) throw up.error;
-        const styleId = up.data!.id;
-        // clone master default sizes (only where missing), base_price null
-        const ms = await sb.from("building_style_catalog_sizes").select("label, width_ft, length_ft, sort_order").eq("style_key", styleKey);
-        if (ms.error) throw ms.error;
-        for (const s of ms.data ?? []) {
-          await sb.from("building_sizes").upsert(
-            { client_id: clientId, style_id: styleId, label: s.label, width_ft: s.width_ft, length_ft: s.length_ft,
-              sort_order: s.sort_order, active: true }, { onConflict: "style_id,label" });
-        }
-        return json({ ok: true, styleId });
-      }
+      // ── building-style management (per-client; the global master was retired in 030) ──
       case "unassign_style": {
         const clientId = reqStr(p.clientId, "clientId");
         const styleKey = reqStr(p.styleKey, "styleKey");
@@ -269,17 +247,11 @@ Deno.serve(async (req: Request) => {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const label    = reqStr(p.label, "label");
         const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
-        // Reserve master catalog keys: a created style must not share a key with
-        // a master style, else a later assign_style upsert would overwrite it.
-        const masterKeys = new Set<string>();
-        const mk = await sb.from("building_style_catalog").select("key");
-        if (mk.error) throw mk.error;
-        for (const m of mk.data ?? []) masterKeys.add(String(m.key));
-        // INSERT (not upsert) so a concurrent same-key create surfaces as a 23505
-        // we retry — never a silent overwrite of an existing style.
+        // INSERT (not upsert) so a concurrent same-key create surfaces as a 23505 we
+        // retry — never a silent overwrite of an existing style. (The global master
+        // key-reservation was removed with the building_style_catalog table in 030.)
         let key = base, n = 1;
         for (let attempt = 0; attempt < 50; attempt++) {
-          if (masterKeys.has(key)) { key = `${base}-${++n}`; continue; }
           const ins = await sb.from("building_styles").insert(
             { client_id: clientId, key, label, image_url: p.imageUrl ?? null,
               sort_order: Number.isFinite(p.sortOrder) ? p.sortOrder : 0, active: true })
@@ -326,23 +298,6 @@ Deno.serve(async (req: Request) => {
         };
         const { error } = await sb.from("layout_item_types").upsert(row, { onConflict: "item_key" });
         if (error) throw error;
-        return json({ ok: true });
-      }
-      case "save_master_style": {
-        const key = reqStr(p.key, "key");
-        const { error } = await sb.from("building_style_catalog").upsert({
-          key, label: reqStr(p.label, "label"), default_image_url: p.defaultImageUrl ?? null,
-          sort_order: p.sortOrder ?? 0, active: p.active !== false, updated_at: new Date().toISOString(),
-        }, { onConflict: "key" });
-        if (error) throw error;
-        if (Array.isArray(p.sizes)) {
-          for (const s of p.sizes) {
-            await sb.from("building_style_catalog_sizes").upsert({
-              style_key: key, label: reqStr(s.label, "size.label"),
-              width_ft: s.widthFt, length_ft: s.lengthFt, sort_order: s.sortOrder ?? 0,
-            }, { onConflict: "style_key,label" });
-          }
-        }
         return json({ ok: true });
       }
 

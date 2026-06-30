@@ -456,7 +456,7 @@ function AdminApp() {
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
             <div style={S.tab(tab === "csv")} onClick={() => setTab("csv")}>CSV / Pricing</div>
-            <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Catalog</div>
+            <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Items</div>
           </div>
         </div>
 
@@ -575,17 +575,7 @@ function AdminApp() {
                 </span>
               </div>
             ))}
-            <div style={{ ...S.h2, marginTop: 18 }}>🏠 Master building styles</div>
-            {master.buildingStyleCatalog.map((st) => (
-              <div key={st.key} style={S.row}>
-                <b style={{ minWidth: 120 }}>{st.key}</b>
-                <span style={{ color: "#64748B" }}>{st.label}</span>
-                <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>
-                  {master.catalogSizes.filter((z) => z.style_key === st.key).length} default sizes{st.active ? "" : " · INACTIVE"}
-                </span>
-              </div>
-            ))}
-            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Editing master defs affects every client via inheritance. (Add/edit forms can be wired to <code>save_master_item</code> / <code>save_master_style</code>.)</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Global layout-item defaults. Per-client building styles &amp; sizes live under the <b>Building Styles</b> and <b>CSV / Pricing</b> tabs; new clients are seeded with the <b>Clone</b> feature.</div>
           </div>
         )}
 
@@ -677,22 +667,6 @@ function AdminApp() {
               <div style={{ fontSize: 11, color: "#92400E", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
             </div>
 
-            {/* Assign from the shared master catalog */}
-            <div style={{ marginTop: 16 }}>
-              <span style={S.lbl}>Or assign from the master catalog</span>
-              {master.buildingStyleCatalog.map((st) => {
-                // presence (regardless of active) so re-clicking "Assign" can't overwrite a hidden custom row's label/image
-                const on = (cat.buildingStyles || []).some((s) => s.key === st.key);
-                return (
-                  <div key={st.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" }}>
-                    <div style={S.pill(on)} onClick={() => !busy && act(on ? "unassign_style" : "assign_style", { clientId: sel, styleKey: st.key }, on ? "Unassigned" : "Assigned")}>
-                      {on ? "✓ Assigned" : "Assign"}
-                    </div>
-                    <b style={{ minWidth: 110 }}>{st.key}</b><span style={{ color: "#64748B" }}>{st.label}</span>
-                  </div>
-                );
-              })}
-            </div>
           </div>
         )}
 
