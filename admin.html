@@ -620,7 +620,7 @@ function AdminApp() {
             {/* This client's own styles (created here or assigned from master) */}
             <span style={S.lbl}>This client's styles</span>
             {(cat.buildingStyles || []).length === 0 &&
-              <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below or assign from the master catalog.</div>}
+              <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below.</div>}
             {(cat.buildingStyles || []).map((row) => {
               const sizes = (cat.buildingSizes || []).filter((z) => z.style_id === row.id);
               return (
