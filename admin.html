@@ -22,6 +22,10 @@ const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Hide the operator "Email Sender" card for now. Flip to true to restore it — all
+// the wiring (connect/disconnect/test + the admin-catalog actions) stays in place.
+const SHOW_EMAIL_SENDER = false;
+
 // ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
 // never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
 // rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
@@ -703,8 +707,10 @@ function AdminApp() {
           </div>
         )}
 
-        {/* Email sender (operator-global): connect a Google account so the portal's
-            login / invite / password-reset emails send from it instead of Supabase. */}
+        {/* Email Sender card (operator-global) — HIDDEN FOR NOW via SHOW_EMAIL_SENDER
+            (flip the flag near the top to true to restore). Connects a Google account so
+            the portal's login / invite / password-reset emails send from it, not Supabase. */}
+        {SHOW_EMAIL_SENDER && (
         <div style={{ ...S.card, marginTop: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <div style={{ ...S.h2, marginBottom: 0 }}>📧 Email Sender</div>
@@ -749,6 +755,7 @@ function AdminApp() {
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );
