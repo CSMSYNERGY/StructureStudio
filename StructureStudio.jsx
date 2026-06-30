@@ -29,6 +29,43 @@ const BUILT_IN_TOOLS = {
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
 
+// Board-and-batten door glyph for the palette buttons (single + double), modeled on the
+// real shed doors: cream frame, vertical planks, a mid cross-rail, black T-hinges, and a
+// latch. Replaces the generic door emoji so the button reads as the actual product.
+function DoorIcon({ double = false }) {
+  const FRAME = "#ECE4D3", PANEL = "#B99A82", PLANK = "#8B7058", IRON = "#2C2A28";
+  const leaf = (x, w, hingeLeft) => {
+    const planks = [];
+    for (let i = 1; i <= 3; i++) { const px = x + (w * i) / 4; planks.push(<line key={i} x1={px} y1={2.6} x2={px} y2={15.4} stroke={PLANK} strokeWidth={0.4} />); }
+    const hx = hingeLeft ? x + 0.5 : x + w - 1.8;
+    return (
+      <g key={x}>
+        <rect x={x} y={1} width={w} height={16} rx={0.5} fill={FRAME} stroke="#B5A98E" strokeWidth={0.7} />
+        <rect x={x + 1.1} y={2.2} width={w - 2.2} height={13.6} fill={PANEL} />
+        {planks}
+        <rect x={x + 1.1} y={8.1} width={w - 2.2} height={1.2} fill={FRAME} />
+        <rect x={hx} y={3.4} width={1.3} height={0.9} fill={IRON} />
+        <rect x={hx} y={12.8} width={1.3} height={0.9} fill={IRON} />
+      </g>
+    );
+  };
+  if (double) {
+    return (
+      <svg width={18} height={16} viewBox="0 0 20 18" style={{ display: "block" }} aria-hidden="true">
+        {leaf(0.5, 9, true)}
+        {leaf(10.5, 9, false)}
+        <rect x={9.2} y={8.3} width={1.6} height={0.9} fill={IRON} />
+      </svg>
+    );
+  }
+  return (
+    <svg width={11} height={16} viewBox="0 0 12 18" style={{ display: "block" }} aria-hidden="true">
+      {leaf(0.5, 11, true)}
+      <rect x={9.4} y={8.2} width={1.4} height={0.9} fill={IRON} />
+    </svg>
+  );
+}
+
 // Closest point distance from (px,py) to the segment (x1,y1)-(x2,y2)
 function _distToSeg(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
@@ -1834,7 +1871,7 @@ function StructureStudioInner({ config }) {
                 color: activeTool === key ? "#FFF" : "#334155",
                 border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
               }}>
-              <span style={{ fontSize: 14 }}>{cfg.icon}</span>{cfg.label}
+              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
