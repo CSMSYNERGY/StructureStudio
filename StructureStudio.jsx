@@ -2328,7 +2328,7 @@ function StructureStudioInner({ config }) {
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
             <button
               onClick={() => { setSubmitted(false); }}
-              style={{ ...S.btn("#FFF", "#166534"), border: "2px solid #166534", padding: "10px 24px", fontSize: 14 }}
+              style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "10px 24px", fontSize: 14 }}
             >
               Resubmit for an Updated Estimate
             </button>
@@ -2349,7 +2349,7 @@ function StructureStudioInner({ config }) {
                 setHasExistingEstimate(false);
                 window.history.replaceState({}, "", window.location.pathname);
               }}
-              style={{ ...S.btn("#166534", "#FFF"), padding: "10px 24px", fontSize: 14 }}
+              style={{ ...S.btn(accent, "#FFF"), padding: "10px 24px", fontSize: 14 }}
             >
               Start New Quote
             </button>
