@@ -357,6 +357,8 @@ function StructureStudioInner({ config }) {
   const [estimateVersions, setEstimateVersions] = useState([]);
   // Which version is currently loaded in the editor (null = the latest). Marks "Viewing".
   const [viewingVersion, setViewingVersion] = useState(null);
+  // Whether the "all designs on this estimate" dropdown is expanded (collapsed by default).
+  const [versionsOpen, setVersionsOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -2363,33 +2365,44 @@ function StructureStudioInner({ config }) {
               {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
             </button>
           </div>
-          {estimateVersions.length > 0 && (
-            <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-                All designs on this estimate ({estimateVersions.length})
-              </div>
-              {estimateVersions.map((v, i) => {
-                const vsel = v.selections || {};
-                const viewing = viewingVersion == null ? i === 0 : v.version === viewingVersion;
-                let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                return (
-                  <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0", borderTop: i === 0 ? "none" : "1px solid #F1F5F9" }}>
-                    <div style={{ minWidth: 0 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}</span>
-                      <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{v.version}{viewing ? " (viewing)" : ""}</span>
-                      {dstr && <div style={{ fontSize: 11, color: "#94A3B8" }}>{dstr}</div>}
-                    </div>
-                    <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                      {viewing
-                        ? <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
-                        : <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>}
-                      {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                    </div>
+          {estimateVersions.length > 0 && (() => {
+            const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
+            const others = estimateVersions.filter((v) => v.version !== cur.version);
+            const csel = cur.selections || {};
+            return (
+              <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
+                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (viewing)</span>
+                    {others.length > 0 && (
+                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
+                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
+                      </button>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          )}
+                  <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                    <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
+                    {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                  </div>
+                </div>
+                {versionsOpen && others.map((v) => {
+                  const vsel = v.selections || {};
+                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                  return (
+                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
+                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
+                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                        <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
+                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2419,30 +2432,41 @@ function StructureStudioInner({ config }) {
               )}
             </div>
           )}
-          {estimateVersions.length > 0 && (
-            <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-                All designs on this estimate ({estimateVersions.length})
-              </div>
-              {estimateVersions.map((v, i) => {
-                const vsel = v.selections || {};
-                let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                return (
-                  <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0", borderTop: i === 0 ? "none" : "1px solid #F1F5F9" }}>
-                    <div style={{ minWidth: 0 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}</span>
-                      <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{v.version}{i === 0 ? " (current)" : ""}</span>
-                      {dstr && <div style={{ fontSize: 11, color: "#94A3B8" }}>{dstr}</div>}
-                    </div>
-                    <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                      <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                      {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                    </div>
+          {estimateVersions.length > 0 && (() => {
+            const cur = estimateVersions[0];
+            const others = estimateVersions.slice(1);
+            const csel = cur.selections || {};
+            return (
+              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
+                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (current)</span>
+                    {others.length > 0 && (
+                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
+                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
+                      </button>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          )}
+                  {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
+                </div>
+                {versionsOpen && others.map((v) => {
+                  const vsel = v.selections || {};
+                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                  return (
+                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
+                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
+                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                        <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
+                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
             <button
               onClick={() => { setSubmitted(false); }}
