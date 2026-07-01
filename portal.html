@@ -731,7 +731,7 @@ function PricingCsv() {
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button onClick={() => setEditStyle(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
-              <button onClick={saveEdit} disabled={styleBusy || !editName.trim()} style={S.btn(styleBusy || !editName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>
+              <button onClick={saveEdit} disabled={styleBusy || !editName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim()) ? 0.55 : 1 }}>
                 {styleBusy ? "Saving…" : "Save changes"}
               </button>
             </div>
