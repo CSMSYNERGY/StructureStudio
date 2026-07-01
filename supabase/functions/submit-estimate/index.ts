@@ -415,7 +415,7 @@ Deno.serve(async (req: Request) => {
   // (won deals are closed shed sales — a fresh quote is a new pursuit). If it's lost we
   // update it back to status "open". Failures here are non-fatal — the estimate still
   // goes out.
-  const oppName = `${style} ${size}`.trim();
+  const oppName = `${styleLabel} ${size}`.trim();
   const oppValue = targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0);
   let opportunityId: string | null = existingDesign.ghl_opportunity_id || null;
   if (contactId) {
@@ -526,7 +526,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
-  const estimateName = `${firstName} - ${style} ${size}`.trim();
+  const estimateName = `${firstName} - ${styleLabel} ${size}`.trim();
   // Collision-resistant invoice sequence: low 8 digits of the epoch-ms clock
   // (unique within any ~28h window) + 2 random digits to cover two submissions
   // landing in the same millisecond. Replaces a plain 5-digit random, which by
