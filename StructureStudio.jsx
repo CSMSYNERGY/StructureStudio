@@ -500,14 +500,27 @@ function StructureStudioInner({ config }) {
       ghlEstimateIdRef.current = data.ghl_estimate_id || null;
       ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
       setHasExistingEstimate(!!data.ghl_estimate_id);
+
+      // Optionally open a specific saved version (?v=N) for review/resubmit. The design
+      // DATA comes from that version's snapshot; the GHL refs above stay from the current
+      // row so a resubmit updates the same one estimate rather than creating a new one.
+      let design = data;
+      const vParam = parseInt(params.get("v") || "", 10);
+      if (Number.isFinite(vParam) && vParam > 0) {
+        const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
+        const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+        if (!cancelled && vrow) design = vrow;
+      }
+      if (cancelled) return;
+
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
-      setSel((prev) => ({ ...prev, ...(data.selections || {}) }));
-      setPaintColors(data.paint_colors || { body: "", trim: "" });
-      setCustomOptions(data.custom_options || []);
-      setRoDimensions(data.ro_dimensions || {});
+      setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
+      setPaintColors(design.paint_colors || { body: "", trim: "" });
+      setCustomOptions(design.custom_options || []);
+      setRoDimensions(design.ro_dimensions || {});
       // Items must be set after sel.size has propagated; the prevSizeRef guard
       // above keeps the size effect from wiping them.
-      const loadedItems = Array.isArray(data.items) ? data.items : [];
+      const loadedItems = Array.isArray(design.items) ? design.items : [];
       setItems(loadedItems);
       // Keep the global id counter ahead of any restored ids so the next placement can't
       // reuse an existing id (which collided in select/drag/delete/resize).
@@ -1389,9 +1402,10 @@ function StructureStudioInner({ config }) {
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
       const shortCode = currentDesignIdRef.current || genShortCode();
-      // Store the PDF under a per-tenant prefix ({client_id}/<code>.pdf) so every
-      // file is tagged to its tenant; the cutover storage policy enforces this shape.
-      const filePath = `${C.clientId}/${shortCode}.pdf`;
+      // Store the PDF under a per-tenant prefix ({client_id}/<code>-<ts>.pdf). The
+      // timestamp suffix keeps each submitted version's PDF instead of overwriting the
+      // previous one (design_versions history); the storage policy allows the -<digits>.
+      const filePath = `${C.clientId}/${shortCode}-${Date.now()}.pdf`;
 
       // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.

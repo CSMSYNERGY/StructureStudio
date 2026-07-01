@@ -229,6 +229,8 @@ function ShareLinkCard({ clientId }) {
 function DesignsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
+  const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
+  const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
 
   const load = useCallback(async () => {
     setError(null);
@@ -239,6 +241,15 @@ function DesignsTable({ clientId }) {
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
     setRows(data || []);
+    // Version history (newest first), grouped by design. Owner-scoped by RLS.
+    const { data: vdata } = await sb
+      .from("design_versions")
+      .select("short_code, version, created_at, selections, image_url")
+      .eq("client_id", clientId)
+      .order("version", { ascending: false });
+    const map = {};
+    (vdata || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+    setVmap(map);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -265,21 +276,51 @@ function DesignsTable({ clientId }) {
               {rows.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
+                const vs = vmap[r.short_code] || [];       // newest first
+                const older = vs.slice(1);                  // everything below the latest
+                const isOpen = !!expanded[r.short_code];
+                const verUrl = (v) => `${openUrl}&v=${v}`;
                 return (
-                  <tr key={r.short_code}>
+                  <React.Fragment key={r.short_code}>
+                  <tr>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.created_at)}</td>
                     <td style={{ ...S.td, fontWeight: 700 }}>{c.name || "—"}</td>
                     <td style={S.td}>
                       <div>{c.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
                     </td>
-                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{[titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      {[titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—"}
+                      {older.length > 0 && (
+                        <button onClick={() => setExpanded((p) => ({ ...p, [r.short_code]: !p[r.short_code] }))}
+                          style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontSize: 12, fontWeight: 700 }}>
+                          {isOpen ? "▴ hide" : `▾ ${vs.length} versions`}
+                        </button>
+                      )}
+                    </td>
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
                       {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
                     </td>
                   </tr>
+                  {isOpen && older.map((v) => {
+                    const vsel = v.selections || {};
+                    return (
+                      <tr key={r.short_code + "-v" + v.version} style={{ background: "#F8FAFC" }}>
+                        <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>{fmtDate(v.created_at)}</td>
+                        <td style={S.td}></td>
+                        <td style={S.td}></td>
+                        <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>↳ v{v.version} · {[titleCase(vsel.style), vsel.size].filter(Boolean).join(" ") || "—"}</td>
+                        <td style={S.td}></td>
+                        <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                          <a href={verUrl(v.version)} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                          {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  </React.Fragment>
                 );
               })}
             </tbody>
