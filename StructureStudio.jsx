@@ -341,7 +341,6 @@ function StructureStudioInner({ config }) {
   const [resizing, setResizing] = useState(null);
   const [showExport, setShowExport] = useState(false);
   const [exportUrl, setExportUrl] = useState(null);
-  const [configOpen, setConfigOpen] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState(null);
@@ -1737,9 +1736,6 @@ function StructureStudioInner({ config }) {
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
-          <button onClick={() => setConfigOpen(!configOpen)} style={{ ...S.btn(configOpen ? "#FFF" : "rgba(255,255,255,0.15)", configOpen ? "#1E293B" : "#FFF"), border: "1px solid rgba(255,255,255,0.25)" }}>
-            {configOpen ? "▴ Hide" : "▾ Show"} Options
-          </button>
           <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
         </div>
       </div>
@@ -1785,7 +1781,7 @@ function StructureStudioInner({ config }) {
       )}
 
       {/* Configuration Panel */}
-      {configOpen && (
+      {(
         <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
           {/* Building Styles */}
           <div style={{ marginBottom: 14 }}>
