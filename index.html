@@ -2332,45 +2332,37 @@ function StructureStudioInner({ config }) {
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>EST-{savedDesign.estimateNumber}</span>
                 </div>
               )}
-              <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>View / edit:</span>
-                <input readOnly value={savedDesign.viewUrl}
-                  style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
-                  onClick={(e) => e.target.select()} />
-                <button onClick={() => { navigator.clipboard.writeText(savedDesign.viewUrl).catch(() => {}); }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
-              </div>
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>Floor plan PDF:</span>
-                <input readOnly value={savedDesign.imageUrl}
-                  style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
-                  onClick={(e) => e.target.select()} />
-                <button onClick={() => { navigator.clipboard.writeText(savedDesign.imageUrl).catch(() => {}); }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
-              </div>
             </div>
           )}
-          <button
-            onClick={() => {
-              setSubmitted(false);
-              setSavedDesign(null);
-              setItems([]);
-              setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-              setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
-              setPaintColors({ body: "", trim: "" });
-              setCustomOptions([]);
-              setRoDimensions({});
-              currentDesignIdRef.current = null;
-              ghlContactIdRef.current = null;
-              ghlEstimateIdRef.current = null;
-              ghlEstimateNumberRef.current = null;
-              setHasExistingEstimate(false);
-              window.history.replaceState({}, "", window.location.pathname);
-            }}
-            style={{ ...S.btn("#166534", "#FFF"), marginTop: 20, padding: "10px 24px", fontSize: 14 }}
-          >
-            Start New Quote
-          </button>
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
+            <button
+              onClick={() => { setSubmitted(false); }}
+              style={{ ...S.btn("#FFF", "#166534"), border: "2px solid #166534", padding: "10px 24px", fontSize: 14 }}
+            >
+              Resubmit for an Updated Estimate
+            </button>
+            <button
+              onClick={() => {
+                setSubmitted(false);
+                setSavedDesign(null);
+                setItems([]);
+                setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
+                setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+                setPaintColors({ body: "", trim: "" });
+                setCustomOptions([]);
+                setRoDimensions({});
+                currentDesignIdRef.current = null;
+                ghlContactIdRef.current = null;
+                ghlEstimateIdRef.current = null;
+                ghlEstimateNumberRef.current = null;
+                setHasExistingEstimate(false);
+                window.history.replaceState({}, "", window.location.pathname);
+              }}
+              style={{ ...S.btn("#166534", "#FFF"), padding: "10px 24px", fontSize: 14 }}
+            >
+              Start New Quote
+            </button>
+          </div>
         </div>
       )}
       {toast && (
