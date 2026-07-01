@@ -790,7 +790,7 @@ function PricingCsv() {
                 {styleImg ? "Image selected ✓" : "Choose image"}
                 <input key={styleFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onStyleImg(e.target.files && e.target.files[0])} />
               </label>
-              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={S.btn(styleBusy || !styleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>{styleBusy ? "Adding…" : "Add style"}</button>
+              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
             </div>
           </div>
         )}
