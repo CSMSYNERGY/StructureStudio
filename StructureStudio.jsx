@@ -355,6 +355,8 @@ function StructureStudioInner({ config }) {
   const [designCode, setDesignCode] = useState(null);
   // All versions of the current design (this estimate), newest first.
   const [estimateVersions, setEstimateVersions] = useState([]);
+  // Which version is currently loaded in the editor (null = the latest). Marks "Viewing".
+  const [viewingVersion, setViewingVersion] = useState(null);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -522,6 +524,7 @@ function StructureStudioInner({ config }) {
         if (!cancelled && vrow) design = vrow;
       }
       if (cancelled) return;
+      setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
 
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
       setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
@@ -552,6 +555,31 @@ function StructureStudioInner({ config }) {
     })();
     return () => { cancelled = true; };
   }, [supabase, designCode, submitted]);
+
+  // Switch to another saved version in place (no page reload). Loads that version's design
+  // data and keeps the current GHL refs (same estimate), marking it as the one being viewed.
+  const openVersion = useCallback(async (version) => {
+    if (!supabase || !designCode) return;
+    const { data: vrows, error } = await supabase.rpc("load_design_version", { p_code: designCode, p_version: version });
+    const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+    if (error || !vrow) return;
+    const vsel = vrow.selections || {};
+    // Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
+    // user size-change and wipe the items we're loading (same guard the initial load uses).
+    prevSizeRef.current = vsel.size || prevSizeRef.current;
+    setSel((prev) => ({ ...prev, ...vsel }));
+    setPaintColors(vrow.paint_colors || { body: "", trim: "" });
+    setCustomOptions(vrow.custom_options || []);
+    setRoDimensions(vrow.ro_dimensions || {});
+    const loadedItems = Array.isArray(vrow.items) ? vrow.items : [];
+    setItems(loadedItems);
+    setSelectedId(null);
+    idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
+    setViewingVersion(version);
+    const p = new URLSearchParams(window.location.search);
+    p.set("v", String(version));
+    window.history.replaceState({}, "", `?${p.toString()}`);
+  }, [supabase, designCode]);
 
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
   // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
@@ -1474,6 +1502,7 @@ function StructureStudioInner({ config }) {
       window.history.replaceState({}, "", `?${shareParams.toString()}`);
       currentDesignIdRef.current = shortCode;
       setDesignCode(shortCode);
+      setViewingVersion(null);
 
       const payload = {
         // New fields — n8n can use these for GHL linking + image embed
@@ -2334,37 +2363,33 @@ function StructureStudioInner({ config }) {
               {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
             </button>
           </div>
-          {estimateVersions.length > 0 && (() => {
-            const curV = (() => { const p = parseInt(new URLSearchParams(window.location.search).get("v") || "", 10); return Number.isFinite(p) && p > 0 ? p : null; })();
-            return (
-              <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-                  All designs on this estimate ({estimateVersions.length})
-                </div>
-                {estimateVersions.map((v, i) => {
-                  const vsel = v.selections || {};
-                  const viewing = curV == null ? i === 0 : v.version === curV;
-                  const vOpenUrl = `${window.location.origin}${window.location.pathname}?client=${encodeURIComponent(C.clientId)}&id=${encodeURIComponent(designCode)}&v=${v.version}`;
-                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                  return (
-                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0", borderTop: i === 0 ? "none" : "1px solid #F1F5F9" }}>
-                      <div style={{ minWidth: 0 }}>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}</span>
-                        <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{v.version}{viewing ? " (viewing)" : ""}</span>
-                        {dstr && <div style={{ fontSize: 11, color: "#94A3B8" }}>{dstr}</div>}
-                      </div>
-                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                        {viewing
-                          ? <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
-                          : <a href={vOpenUrl} style={{ color: accent, fontWeight: 700, textDecoration: "none", marginRight: 12, fontSize: 13 }}>Open</a>}
-                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                      </div>
-                    </div>
-                  );
-                })}
+          {estimateVersions.length > 0 && (
+            <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                All designs on this estimate ({estimateVersions.length})
               </div>
-            );
-          })()}
+              {estimateVersions.map((v, i) => {
+                const vsel = v.selections || {};
+                const viewing = viewingVersion == null ? i === 0 : v.version === viewingVersion;
+                let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                return (
+                  <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0", borderTop: i === 0 ? "none" : "1px solid #F1F5F9" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}</span>
+                      <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{v.version}{viewing ? " (viewing)" : ""}</span>
+                      {dstr && <div style={{ fontSize: 11, color: "#94A3B8" }}>{dstr}</div>}
+                    </div>
+                    <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                      {viewing
+                        ? <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
+                        : <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>}
+                      {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -2401,7 +2426,6 @@ function StructureStudioInner({ config }) {
               </div>
               {estimateVersions.map((v, i) => {
                 const vsel = v.selections || {};
-                const vOpenUrl = `${window.location.origin}${window.location.pathname}?client=${encodeURIComponent(C.clientId)}&id=${encodeURIComponent(savedDesign.code)}&v=${v.version}`;
                 let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
                 return (
                   <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0", borderTop: i === 0 ? "none" : "1px solid #F1F5F9" }}>
@@ -2411,7 +2435,7 @@ function StructureStudioInner({ config }) {
                       {dstr && <div style={{ fontSize: 11, color: "#94A3B8" }}>{dstr}</div>}
                     </div>
                     <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                      <a href={vOpenUrl} style={{ color: accent, fontWeight: 700, textDecoration: "none", marginRight: 12, fontSize: 13 }}>Open</a>
+                      <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
                       {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                     </div>
                   </div>
@@ -2443,6 +2467,7 @@ function StructureStudioInner({ config }) {
                 setHasExistingEstimate(false);
                 setDesignCode(null);
                 setEstimateVersions([]);
+                setViewingVersion(null);
                 window.history.replaceState({}, "", window.location.pathname);
               }}
               style={{ ...S.btn(accent, "#FFF"), padding: "10px 24px", fontSize: 14 }}
