@@ -53,9 +53,9 @@ window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.messag
 window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
   { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
 
-const ACCENT = "#92400E";
+const ACCENT = "#3D3672";  // brand purple
 const S = {
-  header: { background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  header: { background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
   badge: { background: ACCENT, borderRadius: 8, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 15 },
   wrap: { padding: 20 },
   card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 18, marginBottom: 14 },
@@ -64,7 +64,7 @@ const S = {
   input: { border: "1px solid #CBD5E1", borderRadius: 6, padding: "7px 9px", fontSize: 13, fontWeight: 600, background: "#FFF", boxSizing: "border-box" },
   btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
   tab: (on) => ({ padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155" }),
-  pill: (on) => ({ padding: "6px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? "#FFFBEB" : "#FFF", color: on ? ACCENT : "#64748B" }),
+  pill: (on) => ({ padding: "6px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? "#DBEAFF" : "#FFF", color: on ? ACCENT : "#64748B" }),
   err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   ok:  { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   row: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" },
@@ -465,7 +465,7 @@ function AdminApp() {
         </div>
 
         {newOpen && (
-          <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
+          <div style={{ ...S.card, background: "#DBEAFF", border: "1px solid #75E6DA" }}>
             <div style={S.h2}>Create a new client</div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
               Creates the tenant config. <b>No template</b> starts blank (standard contact form, no sizes/options — you
@@ -506,8 +506,8 @@ function AdminApp() {
                 </div>
                 <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Admins see Pricing &amp; Settings; team members only see Designs &amp; Leads.</div>
                 {reassignFrom && (
-                  <div style={{ marginTop: 12, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
-                    <div style={{ fontSize: 13, color: "#92400E", marginBottom: 8, lineHeight: 1.5 }}>
+                  <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
+                    <div style={{ fontSize: 13, color: "#1B7895", marginBottom: 8, lineHeight: 1.5 }}>
                       <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another client"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other client"}'s designs &amp; leads.
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -660,7 +660,7 @@ function AdminApp() {
             })}
 
             {/* Create a new per-client style (name + image) */}
-            <div style={{ marginTop: 16, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+            <div style={{ marginTop: 16, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
               <span style={S.lbl}>Create a new style for this client</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
                 <input value={newStyleName} onChange={(e) => setNewStyleName(e.target.value)} placeholder="Style name (e.g. Garage)" style={{ ...S.input, minWidth: 200 }} />
@@ -668,7 +668,7 @@ function AdminApp() {
                 {newStyleImg && <img src={newStyleImg.base64} alt="" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />}
                 <button onClick={createStyle} disabled={busy || !newStyleName.trim()} style={S.btn(busy || !newStyleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create style</button>
               </div>
-              <div style={{ fontSize: 11, color: "#92400E", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
+              <div style={{ fontSize: 11, color: "#1B7895", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
             </div>
 
           </div>
@@ -740,7 +740,7 @@ function AdminApp() {
             </div>
           )}
           {emailOpen && (
-            <div style={{ marginTop: 12, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+            <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
               <div style={{ fontSize: 12, color: "#475569", marginBottom: 8, lineHeight: 1.5 }}>
                 Enter the Google account and its <b>app password</b> (Google Account → Security → 2-Step Verification → App passwords).
                 2-step verification must be on. The password is stored securely server-side and never shown again.

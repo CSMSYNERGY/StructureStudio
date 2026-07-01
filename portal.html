@@ -64,10 +64,10 @@ sb.functions.invoke = async (name, opts) => {
   return res;
 };
 
-const ACCENT = "#D97706";
+const ACCENT = "#3D3672";  // brand purple
 const S = {
   page: { minHeight: "100vh", display: "flex", flexDirection: "column" },
-  header: { background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  header: { background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
   badge: { background: ACCENT, borderRadius: 8, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16, flexShrink: 0 },
   card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
   h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
@@ -440,7 +440,7 @@ function SettingsView() {
             : <>Not connected yet. Estimates can't be sent until a GHL Location ID and API key are saved.</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
-        {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#FFFBEB", color: "#92400E", border: "1px solid #FDE68A" } : S.okMsg}>{ghlMsg.ok}</div>}
+        {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
           <div><span style={S.lbl}>GHL Location ID</span>
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
@@ -805,7 +805,7 @@ function PricingCsv() {
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
-          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", color: "#92400E", fontSize: 13, lineHeight: 1.5 }}>
+          <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
             <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
             (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
           </div>
