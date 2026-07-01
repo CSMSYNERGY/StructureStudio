@@ -85,6 +85,11 @@ function fmtDate(iso) {
   try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
   catch { return iso; }
 }
+// Capitalize each word of a building-style name for display. Designs store the style as
+// either its label ("Farmland") or its lowercase key ("cabin"), so normalize to Title Case.
+function titleCase(s) {
+  return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 // Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
 // carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
@@ -268,7 +273,7 @@ function DesignsTable({ clientId }) {
                       <div>{c.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
                     </td>
-                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{[sel.style, sel.size].filter(Boolean).join(" ") || "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{[titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—"}</td>
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
