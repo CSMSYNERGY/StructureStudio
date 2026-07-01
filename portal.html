@@ -1064,14 +1064,14 @@ function Dashboard({ session }) {
 
   const tabBtn = (id, label) => (
     <button onClick={() => setTab(id)} style={{
-      ...S.btn(activeTab === id ? "#FFF" : "transparent", activeTab === id ? "#1E293B" : "#CBD5E1"),
+      ...S.btn(activeTab === id ? "#FFF" : "transparent", activeTab === id ? ACCENT : "#CBD5E1"),
       borderRadius: "8px 8px 0 0", padding: "10px 18px",
     }}>{label}</button>
   );
 
   return (
     <div>
-      <div style={{ background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", padding: "0 24px" }}>
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "0 24px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 0 12px" }}>
           <div style={S.badge}>SS</div>
           <div style={{ flex: 1 }}>
