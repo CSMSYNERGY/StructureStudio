@@ -544,5 +544,23 @@ Deno.serve(async (req: Request) => {
     return json({ ok: true, imageUrl: updates.image_url ?? null });
   }
 
+  // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
+  // each style's sort_order is set to its index, which is what get_config / the designer sort
+  // by (so the first id becomes the first style shown on the design page). Scoped to clientId.
+  if (action === "reorder_styles") {
+    if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    let i = 0;
+    for (const styleId of payload.orderedIds) {
+      const sid = String(styleId ?? "").trim();
+      if (!sid) continue;
+      const { error } = await admin.from("building_styles")
+        .update({ sort_order: i })
+        .eq("client_id", clientId).eq("id", sid);
+      if (error) return json({ error: error.message }, 500);
+      i++;
+    }
+    return json({ ok: true });
+  }
+
   return json({ error: `Unknown action "${action}".` }, 400);
 });

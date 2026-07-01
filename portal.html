@@ -618,6 +618,7 @@ function PricingCsv() {
   const [editName, setEditName] = useState("");
   const [editImg, setEditImg] = useState(null);              // { base64, contentType } | null
   const [editFileKey, setEditFileKey] = useState(0);
+  const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -662,6 +663,22 @@ function PricingCsv() {
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  // Drag a style to a new position; persists the new order (sort_order = index), which is what
+  // the design page sorts styles by. Optimistic UI, reloads on failure to resync.
+  const moveStyle = async (from, to) => {
+    const arr = [...allStyles()];
+    if (from == null || to == null || from === to || from < 0 || to < 0 || from >= arr.length || to >= arr.length) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(to, 0, moved);
+    setCat((c) => ({ ...c, styles: arr }));
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "reorder_styles", orderedIds: arr.map((s) => s.id) } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setMsg({ ok: "Display order saved — this is the order customers see on the design page." });
+    } catch (e) { setMsg({ err: e.message }); await load(); }
     setStyleBusy(false);
   };
   const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
@@ -809,16 +826,24 @@ function PricingCsv() {
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
-          style using the CSV below. <b>Hide</b> stops offering a style to customers but keeps its sizes &amp; prices
-          (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices — use it only when
-          you’re sure you won’t need that style again.
+          style using the CSV below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
+          sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
+          use it only when you’re sure you won’t need that style again.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
           <div>
             {allStyles().length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-                {allStyles().map((s) => (
-                  <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: "1px solid #E2E8F0", borderRadius: 8, opacity: s.active ? 1 : 0.55 }}>
+                {allStyles().map((s, i) => (
+                  <div key={s.id}
+                    draggable={!styleBusy}
+                    onDragStart={(e) => { setDragIdx(i); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => { e.preventDefault(); moveStyle(dragIdx, i); setDragIdx(null); }}
+                    onDragEnd={() => setDragIdx(null)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: `1px solid ${dragIdx === i ? ACCENT : "#E2E8F0"}`, borderRadius: 8, opacity: dragIdx === i ? 0.4 : (s.active ? 1 : 0.55), background: "#FFF", cursor: styleBusy ? "default" : "grab" }}>
+                    <span title="Drag to reorder" style={{ color: "#CBD5E1", fontSize: 16, userSelect: "none", flexShrink: 0 }}>⠿</span>
                     {s.image_url
                       ? <img src={s.image_url} alt="" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
