@@ -47,6 +47,10 @@ const BUILT_IN_TOOLS = {
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
 
+// Title-case a building-style name for display (designs store either the label
+// "Farmland" or the lowercase key "cabin").
+function capWords(s) { return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase()); }
+
 // Board-and-batten door glyph for the palette buttons (single + double), modeled on the
 // real shed doors: cream frame, vertical planks, a mid cross-rail, black T-hinges, and a
 // latch. Replaces the generic door emoji so the button reads as the actual product.
@@ -346,6 +350,8 @@ function StructureStudioInner({ config }) {
   const [submitError, setSubmitError] = useState(null);
   // After a successful save, holds { code, viewUrl, imageUrl } for the success screen
   const [savedDesign, setSavedDesign] = useState(null);
+  // All versions of the just-submitted design (this estimate), newest first.
+  const [estimateVersions, setEstimateVersions] = useState([]);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -529,6 +535,19 @@ function StructureStudioInner({ config }) {
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
+
+  // On the submit-success screen, load every version of this design (this estimate) so the
+  // customer/rep can see and reopen all designs on the estimate. Capability read by code.
+  useEffect(() => {
+    if (!supabase || !submitted || !savedDesign || !savedDesign.code) { setEstimateVersions([]); return; }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.rpc("list_design_versions", { p_code: savedDesign.code });
+      if (cancelled || error) return;
+      setEstimateVersions(Array.isArray(data) ? data : []);
+    })();
+    return () => { cancelled = true; };
+  }, [supabase, submitted, savedDesign]);
 
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
   // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
@@ -2337,6 +2356,31 @@ function StructureStudioInner({ config }) {
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>EST-{savedDesign.estimateNumber}</span>
                 </div>
               )}
+            </div>
+          )}
+          {estimateVersions.length > 0 && (
+            <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                All designs on this estimate ({estimateVersions.length})
+              </div>
+              {estimateVersions.map((v, i) => {
+                const vsel = v.selections || {};
+                const vOpenUrl = `${window.location.origin}${window.location.pathname}?client=${encodeURIComponent(C.clientId)}&id=${encodeURIComponent(savedDesign.code)}&v=${v.version}`;
+                let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                return (
+                  <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0", borderTop: i === 0 ? "none" : "1px solid #F1F5F9" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}</span>
+                      <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{v.version}{i === 0 ? " (current)" : ""}</span>
+                      {dstr && <div style={{ fontSize: 11, color: "#94A3B8" }}>{dstr}</div>}
+                    </div>
+                    <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                      <a href={vOpenUrl} style={{ color: accent, fontWeight: 700, textDecoration: "none", marginRight: 12, fontSize: 13 }}>Open</a>
+                      {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
