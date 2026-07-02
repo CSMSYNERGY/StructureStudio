@@ -1119,8 +1119,6 @@ function ColorsView() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [libOpen, setLibOpen] = useState(false);
-  const [imgBusyIdx, setImgBusyIdx] = useState(null);
-  const [imgFileKey, setImgFileKey] = useState(0);
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -1129,7 +1127,7 @@ function ColorsView() {
     setRows((data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
-      image_url: c.image_url || null,
+      hex: c.hex || null,
     })));
   };
   useEffect(() => { load(); }, []);
@@ -1137,7 +1135,7 @@ function ColorsView() {
   const setRow = (idx, field, val) => setRows((rs) => rs.map((r, i) => i === idx ? { ...r, [field]: val } : r));
   const addRow = (preset) => setRows((rs) => [...rs, {
     id: null, label: preset ? preset.name : "", siding: true, trim: true,
-    allow_custom: false, is_default: false, active: true, image_url: null,
+    allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
   }]);
   const removeRow = (idx) => setRows((rs) => rs.filter((_, i) => i !== idx));
   const move = (idx, dir) => setRows((rs) => {
@@ -1145,34 +1143,13 @@ function ColorsView() {
     const next = rs.slice(); [next[idx], next[j]] = [next[j], next[idx]]; return next;
   });
 
-  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const onSwatch = async (idx, file) => {
-    if (!file) return;
-    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
-    setImgBusyIdx(idx); setMsg(null);
-    try {
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onerror = () => rej(new Error("Could not read that image."));
-        r.onload = () => res(r.result);
-        r.readAsDataURL(file);
-      });
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_layout_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
-      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      setRow(idx, "image_url", data.url);
-      setMsg({ ok: "Swatch added — click “Save colors” to apply." });
-    } catch (e) { setMsg({ err: e.message }); }
-    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
-  };
-
   const save = async () => {
     setBusy(true); setMsg(null);
     try {
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label, siding: !!r.siding, trim: !!r.trim,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
-        sortOrder: i, imageUrl: r.image_url ?? null,
+        sortOrder: i, hex: r.hex || null,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -1222,12 +1199,11 @@ function ColorsView() {
                           <button onClick={() => move(idx, 1)} disabled={idx === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
                         </td>
                         <td style={ctr}>
-                          {r.image_url
-                            ? <img src={r.image_url} alt="" style={swatchBox} />
-                            : <label title="Add a swatch image" style={{ ...swatchBox, background: "#F1F5F9", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: imgBusyIdx === idx ? "default" : "pointer", color: "#94A3B8", fontSize: 16 }}>
-                                {imgBusyIdx === idx ? "…" : "+"}
-                                <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyIdx === idx} style={{ display: "none" }} onChange={(e) => onSwatch(idx, e.target.files && e.target.files[0])} />
-                              </label>}
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ ...swatchBox, background: r.hex || "#F1F5F9", display: "inline-block" }} title={r.hex || "No color set"} />
+                            <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(idx, "hex", e.target.value)} title="Pick this color"
+                              style={{ width: 26, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                          </span>
                         </td>
                         <td style={S.td}>
                           <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 140 }} />

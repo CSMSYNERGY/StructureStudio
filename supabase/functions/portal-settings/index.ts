@@ -286,7 +286,7 @@ Deno.serve(async (req: Request) => {
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Paint palette for the Colors tab.
-      admin.from("colors").select("id, label, siding, trim, allow_custom, is_default, rate, pricing_method, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("id, label, siding, trim, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
@@ -594,6 +594,8 @@ Deno.serve(async (req: Request) => {
         active: row?.active !== false,       // default true
         rate: Number.isFinite(rate) && rate >= 0 ? rate : 0,
         pricing_method: method,
+        // Optional swatch color as a hex string (#RGB / #RRGGBB). Anything else → null.
+        hex: (typeof row?.hex === "string" && /^#[0-9a-fA-F]{3,8}$/.test(row.hex.trim())) ? row.hex.trim() : null,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };

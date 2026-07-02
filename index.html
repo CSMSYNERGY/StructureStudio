@@ -289,6 +289,42 @@ function isOptionApplicable(opt, styleValue) {
 }
 
 // ─── MAIN COMPONENT ───
+// Custom color dropdown: a native <select> can't render a color swatch per option, so this
+// shows a color chip + name in the closed button and in each list row (matching the palette).
+function ColorSelect({ value, colors, onPick }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    document.addEventListener("touchstart", h);
+    return () => { document.removeEventListener("mousedown", h); document.removeEventListener("touchstart", h); };
+  }, [open]);
+  const sel = colors.find((c) => c.label === value);
+  const chip = (hex) => <span style={{ width: 14, height: 14, borderRadius: 3, background: hex || "transparent", border: "1px solid rgba(0,0,0,0.25)", flexShrink: 0, display: "inline-block" }} />;
+  return (
+    <div ref={ref} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        style={{ width: "100%", display: "flex", alignItems: "center", gap: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, background: "#FFF", cursor: "pointer", color: sel ? "#334155" : "#94A3B8" }}>
+        {sel && chip(sel.hex)}
+        <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel ? sel.label : "Select…"}</span>
+        <span style={{ fontSize: 10, color: "#94A3B8" }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 30, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,0.15)", maxHeight: 220, overflowY: "auto" }}>
+          {colors.map((c) => (
+            <div key={c.id || c.label} onClick={() => { onPick(c.label); setOpen(false); }}
+              style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12, background: c.label === value ? "#F1F5F9" : "#FFF", color: "#334155" }}>
+              {chip(c.hex)}<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StructureStudioInner({ config }) {
   const C = config;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
@@ -1798,10 +1834,7 @@ function StructureStudioInner({ config }) {
         return (
           <div style={{ ...PAINT_LBL, gap: 4 }}>
             <span>{labelTxt}</span>
-            <select value={selectVal} onChange={(e) => onSel(e.target.value)} style={{ ...PAINT_INPUT, background: "#FFF", cursor: "pointer" }}>
-              <option value="">Select…</option>
-              {colors.map((c) => <option key={c.id} value={c.label}>{c.label}</option>)}
-            </select>
+            <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
             {isCustom && (
               <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
             )}
