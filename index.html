@@ -1563,6 +1563,7 @@ function StructureStudioInner({ config }) {
         viewUrl,
         source: "StructureStudio",
         clientId: C.clientId,
+        deliveryFee: Number(sel.deliveryFee) || 0,
         contact: {
           name: contact.name,
           email: contact.email,
@@ -2427,6 +2428,17 @@ function StructureStudioInner({ config }) {
               {submitError}
             </div>
           )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <span style={{ ...S.lbl, fontSize: 11 }}>Delivery fee (optional)</span>
+            <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+              <span style={{ position: "absolute", left: 8, color: "#94A3B8", fontSize: 13, pointerEvents: "none" }}>$</span>
+              <input type="text" inputMode="decimal" value={sel.deliveryFee || ""}
+                onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                placeholder="0.00"
+                style={{ width: 110, border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 8px 8px 18px", fontSize: 13, fontWeight: 600, color: "#1E293B", boxSizing: "border-box" }} />
+            </div>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
+          </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
               {hasExistingEstimate

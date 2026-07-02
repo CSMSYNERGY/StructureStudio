@@ -27,7 +27,7 @@ Deno.serve(async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -408,6 +408,26 @@ Deno.serve(async (req: Request) => {
       0,
     );
     for (const d of deferredPctLines) d.item.amount = (d.rate / 100) * baseSubtotal;
+  }
+
+  // 7a-ii. Delivery fee — added LAST (after the pct_estimate_total base is computed, so a
+  // percentage add-on never applies to delivery) and marked NON-TAXABLE via an explicit empty
+  // taxes array, which overrides the estimate's automatic tax for this one line. Amount comes
+  // from the designer's optional delivery-fee field; omitted entirely when 0/blank.
+  const deliveryAmt = Number(deliveryFee) || 0;
+  if (deliveryAmt > 0) {
+    targetItems.push({
+      name: "Delivery",
+      qty: 1,
+      amount: deliveryAmt,
+      priceId: "",
+      productId: "",
+      attachments: [],
+      currency: "USD",
+      type: "one_time",
+      description: "Delivery fee (non-taxable)",
+      taxes: [],
+    });
   }
 
   // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
