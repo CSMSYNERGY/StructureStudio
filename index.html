@@ -229,6 +229,497 @@ function isOptionApplicable(opt, styleValue) {
   return !!styleValue && opt.buildingStyles.includes(styleValue);
 }
 
+// ─── 3D VIEW ENGINE ───
+// Parametric 3D: every mesh below is computed from the same layout/catalog state
+// the 2D plan renders from (bldgW/bldgH in feet, items in page coordinates, style
+// + paint selections). No model assets, no 3D SaaS — Three.js (MIT) is lazy-loaded
+// as a browser-native ES module only when the customer opens the 3D view, so the
+// initial page load pays nothing. See STRUCTURESTUDIO_3D_PLAN.md.
+const THREE_VERSION = "0.167.0";
+// Browser-native dynamic import via Function indirection. The import() KEYWORD
+// can't appear in this shared component body: Babel-standalone (index.html)
+// rewrites it to an async require() wrapper that explodes at call time, and
+// bundlers try to resolve the URL at build time. Constructing the import inside
+// a Function keeps it invisible to both — the browser runs the real thing.
+// (index.html already needs eval for Babel itself, so no new CSP constraint.)
+function nativeImport(u) {
+  return new Function("u", "return import(u)")(u);
+}
+let _threeLoadPromise = null;
+function loadThree() {
+  if (_threeLoadPromise) return _threeLoadPromise;
+  const base = `https://esm.sh/three@${THREE_VERSION}`;
+  _threeLoadPromise = Promise.all([
+    nativeImport(`${base}`),
+    nativeImport(`${base}/examples/jsm/controls/OrbitControls.js`),
+  ]).then(([THREE, oc]) => ({ THREE, OrbitControls: oc.OrbitControls }))
+    .catch((err) => { _threeLoadPromise = null; throw err; });
+  return _threeLoadPromise;
+}
+
+// Vertical dimensions the layout data model doesn't store yet (plan §6). Until
+// wall_height_ft lives in building_sizes and opening heights live on items,
+// every style renders with these defaults (feet):
+const D3 = {
+  WALL_H: 8,          // wall plate height
+  DOOR_H: 6.5,        // door opening height
+  RO_H: 6.5,          // rough-opening height
+  WINDOW_H: 3,        // window opening height
+  WINDOW_SILL: 3.5,   // window sill elevation
+  LOFT_ELEV: 5.5,     // loft platform top elevation
+  LOFT_T: 0.35,       // loft platform thickness
+  BENCH_H: 3,         // workbench top height
+  WALL_T: 0.3,        // wall thickness
+  FLOOR_T: 0.35,      // floor slab thickness (slab top = y 0)
+  ROOF_T: 0.2,        // roof panel thickness
+  OVERHANG: 0.6,      // roof overhang past the walls
+};
+
+// Roof profile per building style, keyed by lowercased style value (plan §4.2).
+// pitch = rise/run; gambrel knee/ridge values are fractions of the half-span.
+// Styles not listed here get the default gable.
+const D3_ROOFS = {
+  econo:     { type: "shed",    pitch: 0.25 },
+  urban:     { type: "gable",   pitch: 0.33 },
+  northwood: { type: "gable",   pitch: 0.55 },
+  farmland:  { type: "gambrel", kneeU: 0.55, kneeRise: 0.55, ridgeRise: 0.8 },
+};
+const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
+
+// Natural-material fallbacks for "No Paint" designs (and for palette values the
+// browser can't parse — the paint palette stores display names, not hex).
+const D3_COLORS = {
+  body: "#CDBA92", trim: "#8F7B55", roof: "#565C66",
+  floor: "#B7AC99", ground: "#DCE2D8", door: "#77664C",
+  glass: "#B9D8EA", loft: "#C2A67D", bench: "#8B7355", ramp: "#9AA0A6",
+};
+
+// Resolve a palette value ("Red", "Dark Gray", "#AA3322", …) to a CSS color the
+// renderer can use. Tries the raw value, then a squashed lowercase form
+// ("Dark Gray" → "darkgray"); falls back when neither parses.
+function d3CssColor(v, fallback) {
+  if (!v || typeof v !== "string" || typeof document === "undefined") return fallback;
+  const probe = new Option().style;
+  probe.color = v.trim();
+  if (probe.color) return v.trim();
+  probe.color = v.trim().toLowerCase().replace(/\s+/g, "");
+  return probe.color || fallback;
+}
+
+// Build the whole parametric building as one Group. World units are FEET; the
+// footprint is centered on the origin with the floor top at y=0; +x = east and
+// +z = south, matching the 2D plan (page-down = south). Returns { root, wallMat,
+// roofGroup } so the viewer can ghost the shell for the "look inside" mode and
+// dispose everything on close.
+function buildShed3DModel(THREE, p) {
+  const { bldgW, bldgH, items, itemTypes, styleValue, bodyColor, trimColor, frontWall, scale, mgX, mgY } = p;
+  const H = D3.WALL_H, T = D3.WALL_T;
+  const root = new THREE.Group();
+  const mat = (color, extra) => new THREE.MeshLambertMaterial({ color, ...(extra || {}) });
+  const wallMat = mat(bodyColor);
+  const trimMat = mat(trimColor);
+  const roofMat = mat(D3_COLORS.roof);
+  const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+
+  // Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
+  const ftX = (px) => (px - mgX) / scale - bldgW / 2;
+  const ftZ = (py) => (py - mgY) / scale - bldgH / 2;
+
+  // Ground + floor slab
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(Math.max(bldgW, bldgH) * 2.4, 48), mat(D3_COLORS.ground));
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -D3.FLOOR_T;
+  root.add(ground);
+  const floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
+  floor.position.y = -D3.FLOOR_T / 2;
+  root.add(floor);
+
+  // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
+  // wall, N = exterior normal. `along` runs west→east on N/S walls and
+  // north→south on E/W walls — exactly how the 2D snap logic measures items.
+  const WALLS = {
+    north: { len: bldgW, O: [-bldgW / 2, -bldgH / 2], U: [1, 0], N: [0, -1] },
+    south: { len: bldgW, O: [-bldgW / 2, bldgH / 2],  U: [1, 0], N: [0, 1] },
+    west:  { len: bldgH, O: [-bldgW / 2, -bldgH / 2], U: [0, 1], N: [-1, 0] },
+    east:  { len: bldgH, O: [bldgW / 2, -bldgH / 2],  U: [0, 1], N: [1, 0] },
+  };
+  const wallsGroup = new THREE.Group();     // ghosted in "look inside" mode
+  const openingsGroup = new THREE.Group();  // frames + door/window fills (stay solid)
+
+  // Place a box on wall `wf` spanning [a0,a1] along it and [y0,y1] vertically,
+  // `out` ft toward the exterior, `depth` ft thick (defaults to wall thickness).
+  const wallBox = (m, wf, a0, a1, y0, y1, out, depth) => {
+    const b = box(m, a1 - a0, y1 - y0, depth || T);
+    const ac = (a0 + a1) / 2;
+    b.position.set(
+      wf.O[0] + wf.U[0] * ac + wf.N[0] * (out || 0),
+      (y0 + y1) / 2,
+      wf.O[1] + wf.U[1] * ac + wf.N[1] * (out || 0)
+    );
+    if (wf.U[0] === 0) b.rotation.y = Math.PI / 2;
+    return b;
+  };
+
+  // Opening vertical extent by item type (plan §4.4 defaults).
+  const openingSpan = (it) => {
+    if (it.type === "window") return [D3.WINDOW_SILL, D3.WINDOW_SILL + D3.WINDOW_H];
+    if (it.type === "roughOpening") return [0, D3.RO_H];
+    return [0, D3.DOOR_H]; // singleDoor / doubleDoor
+  };
+
+  Object.keys(WALLS).forEach((wname) => {
+    const wf = WALLS[wname];
+    const ops = items
+      .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname; })
+      .map((it) => {
+        const c = itemTypes[it.type];
+        const w = it.widthFt || c.width;
+        const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+        const a = Math.max(w / 2, Math.min(along, wf.len - w / 2));
+        const span = openingSpan(it);
+        return { it, a, a0: a - w / 2, a1: a + w / 2, y0: span[0], y1: span[1] };
+      })
+      .sort((q, r) => q.a0 - r.a0);
+
+    // Union overlapping opening ranges (e.g. a window over a door — the 2D
+    // collision check only guards door-vs-door) so wall segments never
+    // intersect a hole.
+    const ranges = [];
+    ops.forEach((o) => {
+      const last = ranges[ranges.length - 1];
+      if (last && o.a0 < last.a1 - 0.01) {
+        last.a1 = Math.max(last.a1, o.a1);
+        last.y0 = Math.min(last.y0, o.y0);
+        last.y1 = Math.max(last.y1, o.y1);
+      } else ranges.push({ a0: o.a0, a1: o.a1, y0: o.y0, y1: o.y1 });
+    });
+
+    // Panel-split walls (plan §4.4 fallback strategy, chosen over CSG for the
+    // no-build stack): full-height segments between openings, plus sill/header
+    // strips below/above each opening range.
+    let cursor = 0;
+    ranges.forEach((rg) => {
+      if (rg.a0 > cursor + 0.01) wallsGroup.add(wallBox(wallMat, wf, cursor, rg.a0, 0, H));
+      if (rg.y0 > 0.01) wallsGroup.add(wallBox(wallMat, wf, rg.a0, rg.a1, 0, rg.y0));
+      if (rg.y1 < H - 0.01) wallsGroup.add(wallBox(wallMat, wf, rg.a0, rg.a1, rg.y1, H));
+      cursor = rg.a1;
+    });
+    if (cursor < wf.len - 0.01) wallsGroup.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
+
+    // Frames + fills per opening (trim-colored casing; doors get panels,
+    // windows get glass + muntins, rough openings stay empty).
+    ops.forEach((o) => {
+      const f = 0.17;
+      openingsGroup.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
+      openingsGroup.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
+      openingsGroup.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
+      if (o.it.type === "window") {
+        openingsGroup.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
+        openingsGroup.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+        const midY = (o.y0 + o.y1) / 2;
+        openingsGroup.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
+        openingsGroup.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
+      } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor") {
+        const doorMat = mat(D3_COLORS.door);
+        if (o.it.type === "doubleDoor") {
+          openingsGroup.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
+          openingsGroup.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+        } else {
+          openingsGroup.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+        }
+      }
+    });
+  });
+
+  // ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
+  // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
+  // top. Ridge runs front↔back so the gable end faces the customer's FRONT
+  // (derived from door placement, same rule the 2D labels use); the econo shed
+  // slope descends front→back. No doors yet → longer axis.
+  const roofGroup = new THREE.Group();
+  const styleKey = String(styleValue || "").trim().toLowerCase();
+  const roofCfg = D3_ROOFS[styleKey] || D3_DEFAULT_ROOF;
+  const fw = frontWall || (bldgH >= bldgW ? "north" : "west");
+  const frontNS = fw === "north" || fw === "south";
+  // Profile u-axis: the axis the roof profile spans across. For gable/gambrel
+  // the ridge is perpendicular to the front; for the shed the SLOPE runs
+  // front→back, so the axes swap.
+  const uAxisIsX = roofCfg.type === "shed" ? !frontNS : frontNS;
+  const S = uAxisIsX ? bldgW : bldgH;   // profile span
+  const L = uAxisIsX ? bldgH : bldgW;   // extrusion length
+  const prof = [];    // profile polygon points [u, y], eave→ridge→eave
+  const slopes = [];  // top edges [[A,B], …] that get roof slabs
+  if (roofCfg.type === "shed") {
+    const rise = S * (roofCfg.pitch || 0.25);
+    const tallNeg = fw === "north" || fw === "west";
+    const A = tallNeg ? [-S / 2, H + rise] : [-S / 2, H];
+    const B = tallNeg ? [S / 2, H] : [S / 2, H + rise];
+    prof.push([-S / 2, H], A, B, [S / 2, H]);
+    slopes.push([A, B]);
+  } else if (roofCfg.type === "gambrel") {
+    const s2 = S / 2;
+    const kU = s2 * (roofCfg.kneeU || 0.55);
+    const kY = H + s2 * (roofCfg.kneeRise || 0.55);
+    const rY = H + s2 * (roofCfg.ridgeRise || 0.8);
+    prof.push([-s2, H], [-kU, kY], [0, rY], [kU, kY], [s2, H]);
+    slopes.push([[-s2, H], [-kU, kY]], [[-kU, kY], [0, rY]], [[0, rY], [kU, kY]], [[kU, kY], [s2, H]]);
+  } else {
+    const rise = (S / 2) * (roofCfg.pitch || 0.4);
+    prof.push([-S / 2, H], [0, H + rise], [S / 2, H]);
+    slopes.push([[-S / 2, H], [0, H + rise]], [[0, H + rise], [S / 2, H]]);
+  }
+  // Drop consecutive duplicate points (the shed profile produces one) before
+  // building the shape; the open edge auto-closes along the wall-plate line.
+  const dedup = prof.filter((pt, i) => i === 0 || Math.abs(pt[0] - prof[i - 1][0]) > 1e-6 || Math.abs(pt[1] - prof[i - 1][1]) > 1e-6);
+  const shape = new THREE.Shape();
+  dedup.forEach((pt, i) => (i === 0 ? shape.moveTo(pt[0], pt[1]) : shape.lineTo(pt[0], pt[1])));
+  const rg = new THREE.Group(); // local space: x = profile u, y = up, z = 0..L along the ridge
+  rg.add(new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false }), wallMat));
+  slopes.forEach((sl) => {
+    const A = sl[0], B = sl[1];
+    const du = B[0] - A[0], dy = B[1] - A[1];
+    const slen = Math.sqrt(du * du + dy * dy);
+    const slab = box(roofMat, slen + D3.OVERHANG * 2, D3.ROOF_T, L + D3.OVERHANG * 2);
+    slab.rotation.z = Math.atan2(dy, du);
+    const nx = -dy / slen, ny = du / slen; // 2D normal of the slope, pointing up-outward
+    slab.position.set(
+      (A[0] + B[0]) / 2 + nx * (D3.ROOF_T / 2 + 0.02),
+      (A[1] + B[1]) / 2 + ny * (D3.ROOF_T / 2 + 0.02),
+      L / 2
+    );
+    rg.add(slab);
+  });
+  if (uAxisIsX) { rg.position.z = -L / 2; }
+  else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
+  roofGroup.add(rg);
+  // Corner trim boards live in roofGroup so "look inside" hides them with the roof.
+  [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
+    const post = box(trimMat, T + 0.14, H, T + 0.14);
+    post.position.set(c[0], H / 2, c[1]);
+    roofGroup.add(post);
+  });
+
+  // ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
+  const interiorGroup = new THREE.Group();
+  items.forEach((it) => {
+    const c = itemTypes[it.type];
+    if (!c) return;
+    if (it.type === "loft") {
+      const w = it.widthFt || c.width, d = it.heightFt || c.height;
+      const cx = ftX(it.x), cz = ftZ(it.y);
+      const plat = box(mat(D3_COLORS.loft), w, D3.LOFT_T, d);
+      plat.position.set(cx, D3.LOFT_ELEV - D3.LOFT_T / 2, cz);
+      interiorGroup.add(plat);
+      const ph = D3.LOFT_ELEV - D3.LOFT_T;
+      [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach((sgn) => {
+        const post = box(mat(D3_COLORS.bench), 0.28, ph, 0.28);
+        post.position.set(cx + sgn[0] * (w / 2 - 0.25), ph / 2, cz + sgn[1] * (d / 2 - 0.25));
+        interiorGroup.add(post);
+      });
+    } else if (it.type === "workbench") {
+      const w = it.widthFt || c.width, d = it.heightFt || c.height;
+      const g = new THREE.Group();
+      const benchMat = mat(D3_COLORS.bench);
+      const top = box(benchMat, w, 0.22, d);
+      top.position.y = D3.BENCH_H - 0.11;
+      g.add(top);
+      [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach((sgn) => {
+        const leg = box(benchMat, 0.18, D3.BENCH_H - 0.22, 0.18);
+        leg.position.set(sgn[0] * (w / 2 - 0.15), (D3.BENCH_H - 0.22) / 2, sgn[1] * (d / 2 - 0.15));
+        g.add(leg);
+      });
+      if (it.rotation === 90) g.rotation.y = Math.PI / 2;
+      g.position.set(ftX(it.x), 0, ftZ(it.y));
+      interiorGroup.add(g);
+    } else if (it.type === "ramp") {
+      const wf = WALLS[it.wall];
+      if (!wf) return;
+      const w = it.widthFt || 3;
+      const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+      const run = 3, drop = D3.FLOOR_T;
+      const g = new THREE.Group();
+      const deck = box(mat(D3_COLORS.ramp), w, 0.12, Math.sqrt(run * run + drop * drop));
+      deck.rotation.x = Math.atan2(drop, run); // far end drops to grade
+      deck.position.set(0, -drop / 2 + 0.06, run / 2);
+      g.add(deck);
+      g.rotation.y = Math.atan2(wf.N[0], wf.N[1]); // local +z → exterior normal
+      g.position.set(
+        wf.O[0] + wf.U[0] * along + wf.N[0] * (T / 2),
+        0,
+        wf.O[1] + wf.U[1] * along + wf.N[1] * (T / 2)
+      );
+      interiorGroup.add(g);
+    }
+    // textNote / line: 2D annotations with no 3D representation (plan §4.7).
+  });
+
+  root.add(wallsGroup);
+  root.add(openingsGroup);
+  root.add(roofGroup);
+  root.add(interiorGroup);
+  return { root, wallMat, roofGroup };
+}
+
+// Full-screen orbitable 3D view of the current design. Mounted only while open:
+// builds the scene on mount, disposes every geometry/material on unmount (Three
+// doesn't GC WebGL resources). Renders on demand — no animation loop, so an idle
+// scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
+// captures a view — and automatically on close if they never did — so the
+// submit flow can add the 3D page to the quote PDF.
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, onSnapshot, onClose }) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const engineRef = useRef(null);
+  const capturedRef = useRef(false);
+  const [phase, setPhase] = useState("loading"); // loading | ready | error
+  const [interior, setInterior] = useState(false);
+  const [shotTaken, setShotTaken] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+    loadThree().then((bundle) => {
+      const THREE = bundle.THREE, OrbitControls = bundle.OrbitControls;
+      if (disposed || !canvasRef.current) return;
+      const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#E7EEF5");
+      const bodyColor = painted ? d3CssColor(paintBody, D3_COLORS.body) : D3_COLORS.body;
+      const trimColor = painted ? d3CssColor(paintTrim, D3_COLORS.trim) : D3_COLORS.trim;
+      const model = buildShed3DModel(THREE, { bldgW, bldgH, items, itemTypes, styleValue, bodyColor, trimColor, frontWall, scale, mgX, mgY });
+      scene.add(model.root);
+      scene.add(new THREE.HemisphereLight(0xFFFFFF, 0x8D8573, 1.8));
+      // Start the camera on the FRONT side (same wall the 2D labels call FRONT),
+      // nudged sideways for a three-quarter view; the sun follows the camera side.
+      const fw = frontWall || "south";
+      const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
+      const R = Math.max(bldgW, bldgH) * 0.5 + D3.WALL_H;
+      const dist = R * 2.7;
+      const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
+      const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+      const sun = new THREE.DirectionalLight(0xFFFFFF, 2.2);
+      sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
+      scene.add(sun);
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, dist * 8);
+      camera.position.set(camX, dist * 0.5, camZ);
+      const controls = new OrbitControls(camera, canvasRef.current);
+      controls.target.set(0, D3.WALL_H * 0.45, 0);
+      controls.maxPolarAngle = Math.PI * 0.495; // never below the ground plane
+      controls.minDistance = R * 1.1;
+      controls.maxDistance = dist * 2.5;
+      controls.update();
+      const render = () => renderer.render(scene, camera);
+      controls.addEventListener("change", render);
+      const resize = () => {
+        const el = wrapRef.current;
+        if (!el) return;
+        renderer.setSize(el.clientWidth, el.clientHeight, false);
+        camera.aspect = el.clientWidth / Math.max(1, el.clientHeight);
+        camera.updateProjectionMatrix();
+        render();
+      };
+      const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
+      if (ro && wrapRef.current) ro.observe(wrapRef.current);
+      window.addEventListener("resize", resize);
+      engineRef.current = { renderer, scene, camera, controls, model, render, resize, ro };
+      resize();
+      setPhase("ready");
+    }).catch((err) => {
+      console.error("3D view failed to load:", err);
+      if (!disposed) setPhase("error");
+    });
+    return () => {
+      disposed = true;
+      const e = engineRef.current;
+      if (!e) return;
+      engineRef.current = null;
+      window.removeEventListener("resize", e.resize);
+      if (e.ro) e.ro.disconnect();
+      e.controls.dispose();
+      const mats = new Set();
+      e.model.root.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
+      });
+      mats.forEach((m) => m.dispose());
+      e.renderer.dispose();
+    };
+  // The modal mounts fresh on every open and the 2D designer can't change
+  // underneath it, so the scene builds exactly once per mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // "Look inside": hide the roof, ghost the walls; door/window frames, floor
+  // and interior items stay solid so lofts/workbenches read clearly.
+  useEffect(() => {
+    const e = engineRef.current;
+    if (!e) return;
+    e.model.roofGroup.visible = !interior;
+    e.model.wallMat.transparent = interior;
+    e.model.wallMat.opacity = interior ? 0.14 : 1;
+    e.model.wallMat.depthWrite = !interior;
+    e.model.wallMat.needsUpdate = true;
+    e.render();
+  }, [interior, phase]);
+
+  const capture = () => {
+    const e = engineRef.current;
+    if (!e) return null;
+    e.render(); // fresh buffer right before reading it back
+    try {
+      const c = e.renderer.domElement;
+      return { url: c.toDataURL("image/jpeg", 0.9), w: c.width, h: c.height };
+    } catch (_) { return null; }
+  };
+  const takeSnapshot = () => {
+    const shot = capture();
+    if (!shot) return;
+    capturedRef.current = true;
+    onSnapshot(shot);
+    setShotTaken(true);
+  };
+  const handleClose = () => {
+    // Never-captured close still contributes the last viewed angle — opening
+    // the 3D view at all means the customer gets the 3D page in their quote.
+    if (!capturedRef.current && phase === "ready") {
+      const shot = capture();
+      if (shot) onSnapshot(shot);
+    }
+    onClose();
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.9)", zIndex: 1100, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", background: "#0F172A" }}>
+        <div style={{ color: "#F8FAFC", fontWeight: 800, fontSize: 15 }}>
+          3D Preview
+          <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12, marginLeft: 10 }}>{bldgW}×{bldgH} ft — drag to orbit, scroll or pinch to zoom</span>
+        </div>
+        <button onClick={handleClose} style={{ background: "none", border: "none", color: "#CBD5E1", fontSize: 22, cursor: "pointer", lineHeight: 1 }}>✕</button>
+      </div>
+      <div ref={wrapRef} style={{ flex: 1, position: "relative", minHeight: 0 }}>
+        <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }} />
+        {phase === "loading" && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#E2E8F0", fontWeight: 700 }}>Building your 3D model…</div>
+        )}
+        {phase === "error" && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#FCA5A5", fontWeight: 700, textAlign: "center", padding: 20 }}>
+            Couldn't load the 3D viewer — check your connection, then close and try again.
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center", padding: "12px 16px", background: "#0F172A", flexWrap: "wrap" }}>
+        <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+          {interior ? "🏠 Show exterior" : "👁 Look inside"}
+        </button>
+        <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+          {shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN COMPONENT ───
 function StructureStudioInner({ config }) {
   const C = config;
@@ -300,6 +791,13 @@ function StructureStudioInner({ config }) {
   // After a successful save, holds { code, viewUrl, imageUrl } for the success screen
   const [savedDesign, setSavedDesign] = useState(null);
   const [toast, setToast] = useState(null);
+  // ─── 3D view state ───
+  const [show3D, setShow3D] = useState(false);
+  // Latest captured 3D snapshot ({ url, w, h } — a JPEG data-URL) — becomes
+  // page 2 of the quote PDF on submit/download. Kept in a ref (it's large and
+  // never rendered); has3DSnapshot mirrors it for button labels.
+  const render3DSnapshotRef = useRef(null);
+  const [has3DSnapshot, setHas3DSnapshot] = useState(false);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
   // would otherwise re-run the hit test and deselect the item if the cursor
@@ -511,6 +1009,14 @@ function StructureStudioInner({ config }) {
     });
     return !checkLoftAttached(cx - w, cx + w, cy - h, cy + h, bldgW, bldgH, others);
   });
+
+  // A 3D snapshot must always show the layout it ships with: drop it whenever
+  // anything that feeds the 3D scene changes (also fires on design load, which
+  // is correct — the customer re-captures from the reopened design).
+  useEffect(() => {
+    render3DSnapshotRef.current = null;
+    setHas3DSnapshot(false);
+  }, [items, sel.style, sel.size, sel.paint, paintColors, bldgW, bldgH]);
 
   // ─── INTERACTION HANDLERS ───
   const getSvgPt = useCallback((e) => {
@@ -1332,8 +1838,10 @@ function StructureStudioInner({ config }) {
     setSubmitError(null);
 
     try {
-      // 1. Render the export canvas — wrapped in a single-page letter PDF and uploaded to
-      //    Storage. The submit-estimate Edge Function attaches that PDF to the GHL estimate.
+      // 1. Render the export canvas — page 1 of the quote PDF. If the customer
+      //    opened the 3D view, the captured snapshot rides along as page 2 of the
+      //    SAME PDF (same storage path, so the {client_id}/SS-….pdf storage policy
+      //    and the Edge Function's attachment handling are untouched).
       const canvas = renderExportCanvas();
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
@@ -1344,11 +1852,10 @@ function StructureStudioInner({ config }) {
 
       // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
-      const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
-      const jpegBin = atob(jpegDataUrl.split(",")[1]);
-      const jpegBytes = new Uint8Array(jpegBin.length);
-      for (let i = 0; i < jpegBin.length; i++) jpegBytes[i] = jpegBin.charCodeAt(i);
-      const blob = buildPdfFromJpegBytes(jpegBytes, canvas.width, canvas.height);
+      const pdfPages = [{ bytes: dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.92)), w: canvas.width, h: canvas.height }];
+      const shot3d = render3DSnapshotRef.current;
+      if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
+      const blob = buildPdfFromJpegPages(pdfPages);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
         .upload(filePath, blob, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
@@ -1510,15 +2017,21 @@ function StructureStudioInner({ config }) {
 
   const downloadPNG = () => { if (!exportUrl) return; const a = document.createElement("a"); a.href = exportUrl; const nameSlug = contact.name.trim().replace(/\s+/g, "-").toLowerCase() || "customer"; a.download = `structurestudio-${nameSlug}-${bldgW}x${bldgH}.png`; a.click(); };
 
-  // Build a single-page US-Letter PDF that embeds a JPEG of the canvas.
-  // Self-contained (no external library): the canvas is letter-shaped already, so
-  // the JPEG is stretched to fill the 612×792 pt page (8.5"×11" at 72 DPI).
-  const buildPdfFromJpegBytes = (jpegBytes, jpegW, jpegH) => {
+  const dataUrlToBytes = (dataUrl) => {
+    const bin = atob(dataUrl.split(",")[1]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  };
+
+  // Build a US-Letter PDF embedding one JPEG per page ({ bytes, w, h } each),
+  // aspect-fit. Page 1 (the floor-plan canvas) is letter-shaped already so it
+  // fills the page edge-to-edge exactly as before; other aspect ratios (the 3D
+  // snapshot) get a small margin and center on the page. Self-contained — no
+  // external PDF library.
+  const buildPdfFromJpegPages = (pages) => {
     const PT_W = 612, PT_H = 792;
     const enc = new TextEncoder();
-    const contentStream = `q ${PT_W} 0 0 ${PT_H} 0 0 cm /Im0 Do Q\n`;
-    const contentBytes = enc.encode(contentStream);
-
     const chunks = [];
     let totalLen = 0;
     const offsets = [];
@@ -1532,26 +2045,38 @@ function StructureStudioInner({ config }) {
     pushStr("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
 
     offsets[2] = totalLen;
-    pushStr("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    const kids = pages.map((_, i) => `${3 + i * 3} 0 R`).join(" ");
+    pushStr(`2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${pages.length} >>\nendobj\n`);
 
-    offsets[3] = totalLen;
-    pushStr(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PT_W} ${PT_H}] /Resources << /XObject << /Im0 4 0 R >> /ProcSet [/PDF /ImageC] >> /Contents 5 0 R >>\nendobj\n`);
+    pages.forEach((pg, i) => {
+      const pageObj = 3 + i * 3, imgObj = pageObj + 1, contObj = pageObj + 2;
+      // Letter-ratio images (the 2D canvas) fill the page; others get a margin.
+      const margin = Math.abs(pg.w / pg.h - PT_W / PT_H) < 0.01 ? 0 : 18;
+      const s = Math.min((PT_W - margin * 2) / pg.w, (PT_H - margin * 2) / pg.h);
+      const dw = pg.w * s, dh = pg.h * s;
+      const dx = (PT_W - dw) / 2, dy = (PT_H - dh) / 2;
+      const contentBytes = enc.encode(`q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${dx.toFixed(2)} ${dy.toFixed(2)} cm /Im0 Do Q\n`);
 
-    offsets[4] = totalLen;
-    pushStr(`4 0 obj\n<< /Type /XObject /Subtype /Image /Width ${jpegW} /Height ${jpegH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
-    pushBytes(jpegBytes);
-    pushStr("\nendstream\nendobj\n");
+      offsets[pageObj] = totalLen;
+      pushStr(`${pageObj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PT_W} ${PT_H}] /Resources << /XObject << /Im0 ${imgObj} 0 R >> /ProcSet [/PDF /ImageC] >> /Contents ${contObj} 0 R >>\nendobj\n`);
 
-    offsets[5] = totalLen;
-    pushStr(`5 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`);
-    pushBytes(contentBytes);
-    pushStr("endstream\nendobj\n");
+      offsets[imgObj] = totalLen;
+      pushStr(`${imgObj} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${pg.w} /Height ${pg.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${pg.bytes.length} >>\nstream\n`);
+      pushBytes(pg.bytes);
+      pushStr("\nendstream\nendobj\n");
 
+      offsets[contObj] = totalLen;
+      pushStr(`${contObj} 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`);
+      pushBytes(contentBytes);
+      pushStr("endstream\nendobj\n");
+    });
+
+    const maxObj = 2 + pages.length * 3;
     const xrefOffset = totalLen;
-    let xref = "xref\n0 6\n0000000000 65535 f \n";
-    for (let i = 1; i <= 5; i++) xref += String(offsets[i]).padStart(10, "0") + " 00000 n \n";
+    let xref = `xref\n0 ${maxObj + 1}\n0000000000 65535 f \n`;
+    for (let i = 1; i <= maxObj; i++) xref += String(offsets[i]).padStart(10, "0") + " 00000 n \n";
     pushStr(xref);
-    pushStr(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+    pushStr(`trailer\n<< /Size ${maxObj + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
 
     const out = new Uint8Array(totalLen);
     let off = 0;
@@ -1561,11 +2086,10 @@ function StructureStudioInner({ config }) {
 
   const downloadPDF = () => {
     const canvas = renderExportCanvas();
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-    const bin = atob(dataUrl.split(",")[1]);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const blob = buildPdfFromJpegBytes(bytes, canvas.width, canvas.height);
+    const pages = [{ bytes: dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.92)), w: canvas.width, h: canvas.height }];
+    const shot3d = render3DSnapshotRef.current;
+    if (shot3d) pages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
+    const blob = buildPdfFromJpegPages(pages);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1861,6 +2385,7 @@ function StructureStudioInner({ config }) {
             </>
           )}
           <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>
+          <button onClick={() => setShow3D(true)} style={S.btn("#7C3AED", "#FFF")}>{has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View"}</button>
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
         </div>
       </div>
@@ -2325,6 +2850,17 @@ function StructureStudioInner({ config }) {
             <button onClick={() => setToast(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#92400E", flexShrink: 0, padding: 0 }}>✕</button>
           </div>
         </div>
+      )}
+
+      {show3D && (
+        <Structure3DViewer
+          bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+          styleValue={sel.style} frontWall={frontWall}
+          painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
+          scale={scale} mgX={mgX} mgY={mgY} accent={accent}
+          onSnapshot={(shot) => { render3DSnapshotRef.current = shot; setHas3DSnapshot(true); }}
+          onClose={() => setShow3D(false)}
+        />
       )}
 
       {showExport && (
