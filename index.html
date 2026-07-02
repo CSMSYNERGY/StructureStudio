@@ -309,8 +309,10 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // Resolve a style's 3D appearance: tenant config override (the style entry's
 // `d3` object) over the built-in per-style defaults, over the generic gable.
 // sidingOverride (from d3SidingOverride) wins over everything — it's the
-// customer's selected siding upgrade.
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride) {
+// customer's selected siding upgrade. customerWallHeightFt is the customer's
+// wall-height pick from the 3D view (sel.wallHeight) and beats the style's
+// default height, like IdeaRoom's wall-raise feature.
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
@@ -318,7 +320,7 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     roof: { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) },
     siding: sidingOverride || (o.siding !== undefined ? o.siding : (base.siding || null)),
     colors: { ...(base.colors || {}), ...(o.colors || {}) },
-    wallHeightFt: o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
+    wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
 }
 
@@ -714,7 +716,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, paintEnabled, onPaintChange, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -734,6 +736,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   // Paint picker selection; labels flow into paintColors (same free-text
   // semantics as the 2D paint inputs).
   const [paintSel, setPaintSel] = useState({ body: painted ? (paintBody || "") : "", trim: painted ? (paintTrim || "") : "" });
+  // Customer wall-height pick (IdeaRoom's wall-raise, per Carolyn 2026-07-02).
+  // Rebuilds the model live and commits to sel.wallHeight via onWallHeight.
+  const [wallHSel, setWallHSel] = useState((style3d && style3d.wallHeightFt) || D3.WALL_H);
+  const pickWallHeight = (h) => {
+    setWallHSel(h);
+    const e = engineRef.current;
+    if (e && e.setWallHeight) e.setWallHeight(h);
+    if (onWallHeight) onWallHeight(h);
+    capturedRef.current = false; // height change makes any earlier shot stale
+    setShotTaken(false);
+  };
   const pickColor = (kind, label) => {
     const next = kind === "none" ? { body: "", trim: "" } : { ...paintSel, [kind]: label };
     setPaintSel(next);
@@ -906,6 +919,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           applyShellMode(e);
           render();
         });
+      };
+      // Wall-height picks mutate the working spec and rebuild — walls, openings
+      // and roof all recompute from the new plate height.
+      const setWallHeight = (h) => {
+        spec.wallHeightFt = h || 0;
+        queueRebuild();
       };
       // Swatch picks recolor the live materials in place — no rebuild needed.
       // Clearing paint returns to the style's natural material colors.
@@ -1147,7 +1166,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
       if (ro && wrapRef.current) ro.observe(wrapRef.current);
       window.addEventListener("resize", resize);
-      engineRef.current = { renderer, scene, camera, controls, model, render, resize, ro, applyShellMode, disposeInteraction, setLiveColors, interior: false };
+      engineRef.current = { renderer, scene, camera, controls, model, render, resize, ro, applyShellMode, disposeInteraction, setLiveColors, setWallHeight, interior: false };
       resize();
       setPhase("ready");
     }).catch((err) => {
@@ -1238,6 +1257,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             </button>
           ))}
           {tool3 && <span style={{ color: accent, fontSize: 12, fontWeight: 700 }}>← click a wall to place</span>}
+        </div>
+        {/* Wall height — rebuilds live; the pick rides into the saved design + estimate */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+          <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Wall height</span>
+          {[6, 7, 8, 9, 10].map((h) => (
+            <button key={h} onClick={() => pickWallHeight(h)} disabled={phase !== "ready"}
+              style={{ background: wallHSel === h ? accent : "#1E293B", color: wallHSel === h ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              {h} ft
+            </button>
+          ))}
         </div>
         {/* Paint colors: labels land in paintColors (and the estimate); swatch hex drives the 3D */}
         {paintEnabled && (
@@ -1389,6 +1418,12 @@ function StructureStudioInner({ config }) {
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminStatus, setAdminStatus] = useState(null); // {configured, ghlLocationIdMasked, updatedAt} | null
   const [adminMsg, setAdminMsg] = useState(null);       // {ok, msg} | null
+  // 3D style calibration (operator): tune a style's d3 spec against its
+  // four-side reference photos, preview live, save to the config row.
+  const [adminCal, setAdminCal] = useState(null);        // { styleValue, spec, photos: [url×4] } | null
+  const [adminCalMsg, setAdminCalMsg] = useState(null);  // {ok, msg} | null
+  const [adminCalBusy, setAdminCalBusy] = useState(false);
+  const [adminCalPreview, setAdminCalPreview] = useState(false);
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
@@ -2358,6 +2393,73 @@ function StructureStudioInner({ config }) {
     } finally { setAdminBusy(false); }
   };
 
+  // ─── ADMIN: 3D style calibration handlers ───
+  // The four-side photos are the calibration REFERENCE (the IdeaRoom onboarding
+  // workflow): a human — or the calibrate-style function — reads the roof/
+  // siding/color parameters off them into the style's d3 spec; the parametric
+  // engine renders from the spec, never from the photos.
+  const openCalEditor = (s) => {
+    setAdminCalMsg(null);
+    setAdminCalPreview(false);
+    setAdminCal({
+      styleValue: s.value,
+      spec: d3ResolveStyleSpec(s, s.value, C.wallHeightFt),
+      photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
+    });
+  };
+  const calSet = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, ...patch } }));
+  const calSetRoof = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, roof: { ...p.spec.roof, ...patch } } }));
+  const calSetColor = (k, v) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, colors: { ...p.spec.colors, [k]: v } } }));
+  const calSetPhoto = (i, v) => setAdminCal((p) => { const ph = p.photos.slice(); ph[i] = v; return { ...p, photos: ph }; });
+  const copyCalJson = () => {
+    const out = JSON.stringify({ d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) }, null, 2);
+    try {
+      navigator.clipboard.writeText(out);
+      setAdminCalMsg({ ok: true, msg: "d3 JSON copied — paste into this style's entry in client_configs.config.buildingStyles." });
+    } catch (_) {
+      setAdminCalMsg({ ok: false, msg: "Clipboard blocked — JSON: " + out });
+    }
+  };
+  const saveCalSpec = async () => {
+    if (!adminPwd) { setAdminCalMsg({ ok: false, msg: "Enter the admin password first (top row)." }); return; }
+    setAdminCalBusy(true); setAdminCalMsg(null);
+    try {
+      const { data, error } = await supabase.functions.invoke("admin-save-settings", {
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) },
+      });
+      if (error) throw new Error(error.message || "Save failed");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
+      setAdminCalMsg({ ok: true, msg: "Saved to the config row — reload the page to see it live." });
+    } catch (e) {
+      setAdminCalMsg({ ok: false, msg: e.message + " (If the deployed function predates save_style_d3, redeploy admin-save-settings — or use Copy JSON meanwhile.)" });
+    } finally { setAdminCalBusy(false); }
+  };
+  const calibrateFromPhotos = async () => {
+    const photos = adminCal.photos.filter(Boolean);
+    if (!adminPwd) { setAdminCalMsg({ ok: false, msg: "Enter the admin password first (top row)." }); return; }
+    if (photos.length === 0) { setAdminCalMsg({ ok: false, msg: "Add at least one photo URL first." }); return; }
+    setAdminCalBusy(true); setAdminCalMsg(null);
+    try {
+      const { data, error } = await supabase.functions.invoke("calibrate-style", {
+        body: { adminPassword: adminPwd, photoUrls: photos, styleLabel: adminCal.styleValue },
+      });
+      if (error) throw new Error(error.message || "Calibration failed");
+      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Calibration failed");
+      setAdminCal((p) => ({
+        ...p,
+        spec: {
+          roof: { ...p.spec.roof, ...(data.d3.roof || {}) },
+          siding: data.d3.siding !== undefined ? data.d3.siding : p.spec.siding,
+          colors: { ...p.spec.colors, ...(data.d3.colors || {}) },
+          wallHeightFt: data.d3.wallHeightFt || p.spec.wallHeightFt,
+        },
+      }));
+      setAdminCalMsg({ ok: true, msg: "Draft spec read from the photos — preview it, tweak, then save." });
+    } catch (e) {
+      setAdminCalMsg({ ok: false, msg: e.message + " (calibrate-style must be deployed with ANTHROPIC_API_KEY set.)" });
+    } finally { setAdminCalBusy(false); }
+  };
+
   // ─── SUBMIT QUOTE ───
   const submitQuote = async () => {
     // Validate every contact field that's enabled in the config. Address fields
@@ -2468,6 +2570,9 @@ function StructureStudioInner({ config }) {
           buildingSize: sel.size,
           paint: sel.paint || "No Paint",
           ...(sel.paint === "Painted" ? { paintBodyColor: paintColors.body || "TBD", paintTrimColor: paintColors.trim || "TBD" } : {}),
+          // Customer's 3D wall-height pick (feet). Additive — absent when the
+          // customer never touched it; pricing hookup is a catalog follow-up.
+          ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
@@ -2801,6 +2906,102 @@ function StructureStudioInner({ config }) {
               {adminMsg.msg}
             </div>
           )}
+
+          {/* ── 3D Style Calibration (operator onboarding tool) ── */}
+          <div style={{ marginTop: 14, borderTop: "1px dashed #F59E0B", paddingTop: 10 }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
+            <span style={{ fontSize: 11, color: "#92400E", marginLeft: 8 }}>
+              Pick a style, paste its four-side photo URLs, tune the spec against the live preview, then Save (or Copy JSON into the config row).
+            </span>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
+              {C.buildingStyles.map((s) => (
+                <button key={s.value} onClick={() => openCalEditor(s)}
+                  style={{ ...S.btn(adminCal && adminCal.styleValue === s.value ? "#92400E" : "#FFF", adminCal && adminCal.styleValue === s.value ? "#FFF" : "#92400E"), border: "1px solid #FCD34D" }}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            {adminCal && (
+              <div>
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
+                    <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="gable">gable</option>
+                      <option value="shed">shed</option>
+                      <option value="gambrel">gambrel</option>
+                    </select>
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
+                    <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (standard look)
+                    <select value={adminCal.spec.siding || ""} onChange={(e) => calSet({ siding: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="">plain</option>
+                      <option value="batten">batten (vertical)</option>
+                      <option value="lap">lap (horizontal)</option>
+                    </select>
+                  </label>
+                </div>
+                {adminCal.spec.roof.type === "gambrel" && (
+                  <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                    <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
+                      <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    </label>
+                    <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Knee rise (× half-span)
+                      <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    </label>
+                    <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge rise (× half-span)
+                      <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    </label>
+                  </div>
+                )}
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                  {["body", "trim", "roof"].map((k) => (
+                    <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
+                  {["Front", "Back", "Left", "Right"].map((side, i) => (
+                    <label key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{side} photo URL
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="text" placeholder="https://…" value={adminCal.photos[i] || ""} onChange={(e) => calSetPhoto(i, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        {adminCal.photos[i] ? <img src={adminCal.photos[i]} alt={side} style={{ width: 44, height: 32, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", flexShrink: 0 }} /> : null}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <button onClick={() => setAdminCalPreview(true)} style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>🧊 Preview in 3D</button>
+                  <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>
+                  <button onClick={calibrateFromPhotos} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                    {adminCalBusy ? "Working…" : "✨ Draft from photos (AI)"}
+                  </button>
+                  <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                    {adminCalBusy ? "Saving…" : "Save to config"}
+                  </button>
+                </div>
+                {adminCalMsg && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: adminCalMsg.ok ? "#166534" : "#DC2626", fontWeight: 600, wordBreak: "break-all" }}>
+                    {adminCalMsg.msg}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -3405,18 +3606,34 @@ function StructureStudioInner({ config }) {
         </div>
       )}
 
+      {/* Operator calibration preview: the current layout rendered with the
+          DRAFT spec being edited — tune numbers against the reference photos. */}
+      {isAdmin && adminCal && adminCalPreview && (
+        <Structure3DViewer
+          bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+          styleValue={adminCal.styleValue} frontWall={frontWall}
+          painted={false} paintBody="" paintTrim=""
+          scale={scale} mgX={mgX} mgY={mgY} accent={accent}
+          style3d={adminCal.spec}
+          paintEnabled={false}
+          onSnapshot={() => {}}
+          onClose={() => setAdminCalPreview(false)}
+        />
+      )}
+
       {show3D && (
         <Structure3DViewer
           bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
             setSel((p) => ({ ...p, paint: (pc.body || pc.trim) ? "Painted" : "No Paint" }));
           }}
+          onWallHeight={(h) => setSel((p) => ({ ...p, wallHeight: h }))}
           onItemAdd={(ni) => setItems((p) => [...p, ni])}
           onItemSelect={(id) => setSelectedId(id)}
           onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}

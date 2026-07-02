@@ -71,6 +71,51 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // "save_style_d3" — writes a building style's 3D appearance spec (and its
+  // four-side reference photo URLs) into the tenant's config blob:
+  // config.buildingStyles[value == styleValue].d3 / .d3Photos. Used by the
+  // designer's ?admin=1 calibration editor. Additive: touches only the one
+  // style entry; everything else in the config row is preserved.
+  if (action === "save_style_d3") {
+    const { styleValue, d3, d3Photos } = payload || {};
+    if (!styleValue || typeof styleValue !== "string") {
+      return json({ error: "styleValue is required." }, 400);
+    }
+    if (!d3 || typeof d3 !== "object" || !d3.roof || typeof d3.roof !== "object") {
+      return json({ error: "d3 spec with a roof object is required." }, 400);
+    }
+    const roofType = String(d3.roof.type || "");
+    if (!["shed", "gable", "gambrel"].includes(roofType)) {
+      return json({ error: `Unknown roof type "${roofType}" — expected shed|gable|gambrel.` }, 400);
+    }
+    const photos = Array.isArray(d3Photos)
+      ? d3Photos.filter((u: unknown) => typeof u === "string" && /^https?:\/\//.test(u)).slice(0, 4)
+      : [];
+
+    const { data: row, error: cfgErr } = await supabase
+      .from("client_configs")
+      .select("config")
+      .eq("client_id", clientId.trim())
+      .single();
+    if (cfgErr || !row) return json({ error: `No config row for client "${clientId}".` }, 404);
+
+    const config = row.config || {};
+    const styles = Array.isArray(config.buildingStyles) ? config.buildingStyles : [];
+    const idx = styles.findIndex((s: any) => s && s.value === styleValue);
+    if (idx === -1) {
+      return json({ error: `Style "${styleValue}" not found in this client's buildingStyles.` }, 404);
+    }
+    styles[idx] = { ...styles[idx], d3, d3Photos: photos };
+    config.buildingStyles = styles;
+
+    const { error: upErr } = await supabase
+      .from("client_configs")
+      .update({ config })
+      .eq("client_id", clientId.trim());
+    if (upErr) return json({ error: `Config save failed: ${upErr.message}` }, 500);
+    return json({ ok: true });
+  }
+
   // "save" path — upserts the credentials.
   if (!ghlLocationId || typeof ghlLocationId !== "string" || !ghlLocationId.trim()) {
     return json({ error: "ghlLocationId is required." }, 400);
