@@ -1,6 +1,6 @@
 # StructureStudio 3D View — Integration Plan
 
-> **Status:** ✅ Phases 1–4 IMPLEMENTED on branch `beta-2.0` (2026-07-02). Phases 5 (DB migration) and 6 (3D editing) remain future work.  
+> **Status:** ✅ Phases 1–4 IMPLEMENTED on branch `beta-2.0` (2026-07-02), plus the first Phase 6 slice: doors/windows/rough openings are **drag-movable inside the 3D view** (§10.5), committing back to the shared `items` state. Phase 5 (DB migration) and the rest of Phase 6 (placing new items in 3D, loft/workbench drag) remain future work.  
 > **Date:** 2026-07-02 (updated with external research)  
 > **Constraint:** All 3D geometry generated parametrically from existing layout/catalog state. No SaaS, no Blender, no purchased model libraries. Three.js loaded as a CDN module is acceptable.  
 > **Stack validated by:** Live DOM inspection of IdeaRoom (Three.js r145, WebGL2, React+MUI) and Sensei3D (Three.js, WebGL2, Draco glTF) — both category leaders run the same engine we're choosing.
@@ -382,7 +382,7 @@ These are drawn from the R3F performance docs and apply equally to imperative Th
 
 ## 10. Phase 6 Detail — Editing in 3D (IdeaRoom Parity)
 
-> **Status:** Future phase. Phases 1–5 do not depend on it, and it does not change their design — it is additive.
+> **Status:** §10.5 wall-item drag SHIPPED on `beta-2.0` (2026-07-02): doors/windows/ROs raycast-pick with an amber hover outline and drag along walls (wall switching included) via the horizontal-plane pick → page-coords → `getWallFromClick`/`getNearestWall`/`snapToWall` pipeline — the literal 2D drag functions. Live model rebuild is rAF-throttled; the final position commits through `onItemMove` → `setItems`. Matching the 2D drag exactly: no collision check while moving, and ramps do NOT follow their door (2D parity). Remaining: placing NEW items in 3D (§10.4), loft/workbench drag, tap-to-select mobile refinements (§10.7).
 
 ### 10.1 The architecture win: 3D editing is an input adapter, not a rewrite
 

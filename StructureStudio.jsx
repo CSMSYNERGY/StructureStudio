@@ -398,27 +398,32 @@ function buildShed3DModel(THREE, p) {
     if (cursor < wf.len - 0.01) wallsGroup.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
 
     // Frames + fills per opening (trim-colored casing; doors get panels,
-    // windows get glass + muntins, rough openings stay empty).
+    // windows get glass + muntins, rough openings stay empty). Each opening's
+    // meshes live in their own tagged group so the 3D drag can raycast-pick
+    // the item they belong to.
     ops.forEach((o) => {
       const f = 0.17;
-      openingsGroup.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
-      openingsGroup.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
-      openingsGroup.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
+      const og = new THREE.Group();
+      og.userData = { itemId: o.it.id, wallItem: true };
+      og.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
+      og.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
+      og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
       if (o.it.type === "window") {
-        openingsGroup.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
-        openingsGroup.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+        og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
+        og.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
         const midY = (o.y0 + o.y1) / 2;
-        openingsGroup.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
-        openingsGroup.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
+        og.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
+        og.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor") {
         const doorMat = mat(D3_COLORS.door);
         if (o.it.type === "doubleDoor") {
-          openingsGroup.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
-          openingsGroup.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+          og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
+          og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
         } else {
-          openingsGroup.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+          og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
         }
       }
+      openingsGroup.add(og);
     });
   });
 
@@ -548,7 +553,18 @@ function buildShed3DModel(THREE, p) {
   root.add(openingsGroup);
   root.add(roofGroup);
   root.add(interiorGroup);
-  return { root, wallMat, roofGroup };
+  return { root, wallMat, roofGroup, openingsGroup };
+}
+
+// Free every geometry/material a buildShed3DModel() group holds — Three.js
+// doesn't GC WebGL resources, and drag-to-move rebuilds the model live.
+function disposeShed3DModel(model) {
+  const mats = new Set();
+  model.root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
+  });
+  mats.forEach((m) => m.dispose());
 }
 
 // Full-screen orbitable 3D view of the current design. Mounted only while open:
@@ -557,7 +573,7 @@ function buildShed3DModel(THREE, p) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, onItemMove, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -593,6 +609,185 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       scene.add(sun);
       const camera = new THREE.PerspectiveCamera(45, 1, 0.1, dist * 8);
       camera.position.set(camX, dist * 0.5, camZ);
+
+      // ── Drag-to-move wall items (first slice of Phase 6, plan §10.5) ──
+      // Doors/windows/rough openings drag along the walls exactly like the 2D
+      // drag: the pointer ray becomes page coordinates and runs the SAME module
+      // functions the 2D uses (getWallFromClick → getNearestWall → snapToWall),
+      // wall switching included; like 2D, no collision check while moving. The
+      // final position commits through onItemMove so the 2D plan, saved design,
+      // and estimate all see the move. The pointerdown handler is registered
+      // BEFORE OrbitControls is constructed, so stopImmediatePropagation keeps
+      // a grab on an item from also starting an orbit.
+      const canvas = canvasRef.current;
+      const pWpx = bldgW * scale, pHpx = bldgH * scale;
+      let liveItems = items;
+      let dragging3 = null;      // { id, moved }
+      let lastHoverId = null;
+      let rebuildQueued = false;
+      const raycaster = new THREE.Raycaster();
+      const ndc = new THREE.Vector2();
+      const dragPlane = new THREE.Plane();
+      const dragHit = new THREE.Vector3();
+      const highlight = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+        new THREE.LineBasicMaterial({ color: 0xFBBF24 })
+      );
+      highlight.visible = false;
+      scene.add(highlight);
+      const applyShellMode = (e) => {
+        e.model.roofGroup.visible = !e.interior;
+        e.model.wallMat.transparent = !!e.interior;
+        e.model.wallMat.opacity = e.interior ? 0.14 : 1;
+        e.model.wallMat.depthWrite = !e.interior;
+        e.model.wallMat.needsUpdate = true;
+      };
+      const setRay = (ev) => {
+        const rc = canvas.getBoundingClientRect();
+        ndc.x = ((ev.clientX - rc.left) / rc.width) * 2 - 1;
+        ndc.y = -((ev.clientY - rc.top) / rc.height) * 2 + 1;
+        raycaster.setFromCamera(ndc, camera);
+      };
+      const pickWallItem = (ev) => {
+        const e = engineRef.current;
+        if (!e) return null;
+        setRay(ev);
+        const hits = raycaster.intersectObjects(e.model.openingsGroup.children, true);
+        for (let h = 0; h < hits.length; h++) {
+          let n = hits[h].object;
+          while (n && !(n.userData && n.userData.itemId)) n = n.parent;
+          if (n) { const it = liveItems.find((i) => i.id === n.userData.itemId); if (it) return it; }
+        }
+        return null;
+      };
+      const openSpanOf = (it) => (it.type === "window" ? [D3.WINDOW_SILL, D3.WINDOW_SILL + D3.WINDOW_H] : [0, it.type === "roughOpening" ? D3.RO_H : D3.DOOR_H]);
+      const placeHighlight = (it) => {
+        const c = itemTypes[it.type] || {};
+        const w = it.widthFt || c.width || 3;
+        const ns = it.wall === "north" || it.wall === "south";
+        const len = ns ? bldgW : bldgH;
+        const along = ns ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+        const a = Math.max(w / 2, Math.min(along, len - w / 2)) - len / 2;
+        const sp = openSpanOf(it);
+        highlight.scale.set(w + 0.3, sp[1] - sp[0] + 0.3, D3.WALL_T + 0.4);
+        highlight.rotation.y = ns ? 0 : Math.PI / 2;
+        highlight.position.set(
+          ns ? a : (it.wall === "west" ? -bldgW / 2 : bldgW / 2),
+          (sp[0] + sp[1]) / 2,
+          ns ? (it.wall === "north" ? -bldgH / 2 : bldgH / 2) : a
+        );
+      };
+      const queueRebuild = () => {
+        if (rebuildQueued) return;
+        rebuildQueued = true;
+        requestAnimationFrame(() => {
+          rebuildQueued = false;
+          const e = engineRef.current;
+          if (!e) return;
+          scene.remove(e.model.root);
+          disposeShed3DModel(e.model);
+          // Recompute FRONT from the live items — dragging the only door to a
+          // different wall re-orients the roof exactly like the 2D labels.
+          e.model = buildShed3DModel(THREE, { bldgW, bldgH, items: liveItems, itemTypes, styleValue, bodyColor, trimColor, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY });
+          scene.add(e.model.root);
+          applyShellMode(e);
+          render();
+        });
+      };
+      const onPtr3Down = (ev) => {
+        if (ev.button !== undefined && ev.button !== 0) return;
+        const it = pickWallItem(ev);
+        if (!it) return;
+        ev.stopImmediatePropagation();
+        ev.preventDefault();
+        controls.enabled = false;
+        dragging3 = { id: it.id, moved: false };
+        lastHoverId = it.id;
+        placeHighlight(it);
+        highlight.visible = true;
+        canvas.style.cursor = "grabbing";
+        try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* synthetic pointer */ }
+        render();
+      };
+      const onPtr3Move = (ev) => {
+        if (dragging3) {
+          const it = liveItems.find((i) => i.id === dragging3.id);
+          if (!it) return;
+          setRay(ev);
+          // Pick against the horizontal plane at the opening's mid-height, so
+          // the item lands on whichever wall the cursor is nearest — same feel
+          // as the 2D drag following the mouse.
+          const sp = openSpanOf(it);
+          dragPlane.set(new THREE.Vector3(0, 1, 0), -((sp[0] + sp[1]) / 2));
+          let p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+          const lim = Math.max(bldgW, bldgH) * 4;
+          if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) {
+            // Grazing angle — track against the item's current wall plane instead.
+            if (it.wall === "north") dragPlane.set(new THREE.Vector3(0, 0, 1), bldgH / 2);
+            else if (it.wall === "south") dragPlane.set(new THREE.Vector3(0, 0, 1), -bldgH / 2);
+            else if (it.wall === "west") dragPlane.set(new THREE.Vector3(1, 0, 0), bldgW / 2);
+            else dragPlane.set(new THREE.Vector3(1, 0, 0), -bldgW / 2);
+            p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+            if (!p) return;
+          }
+          const pageX = mgX + (p.x + bldgW / 2) * scale;
+          const pageY = mgY + (p.z + bldgH / 2) * scale;
+          const c = itemTypes[it.type] || {};
+          const wFt = it.widthFt || c.width || 3;
+          const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+          const sn = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+          if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) {
+            liveItems = liveItems.map((i) => (i.id === it.id ? { ...i, ...sn } : i));
+            dragging3.moved = true;
+            placeHighlight(liveItems.find((i) => i.id === it.id));
+            queueRebuild();
+          }
+          ev.preventDefault();
+          return;
+        }
+        // Hover affordance: grab cursor + amber outline over movable items.
+        const hov = pickWallItem(ev);
+        canvas.style.cursor = hov ? "grab" : "";
+        const hid = hov ? hov.id : null;
+        if (hid !== lastHoverId) {
+          lastHoverId = hid;
+          if (hov) placeHighlight(hov);
+          highlight.visible = !!hov;
+          render();
+        }
+      };
+      const onPtr3Up = (ev) => {
+        if (!dragging3) return;
+        const d = dragging3;
+        dragging3 = null;
+        controls.enabled = true;
+        canvas.style.cursor = "";
+        try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* not captured */ }
+        highlight.visible = false;
+        lastHoverId = null;
+        render();
+        if (d.moved) {
+          const moved = liveItems.find((i) => i.id === d.id);
+          if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall });
+          // The design changed under any earlier shot — re-arm capture-on-close.
+          capturedRef.current = false;
+          setShotTaken(false);
+        }
+      };
+      canvas.addEventListener("pointerdown", onPtr3Down, true);
+      canvas.addEventListener("pointermove", onPtr3Move);
+      canvas.addEventListener("pointerup", onPtr3Up);
+      canvas.addEventListener("pointercancel", onPtr3Up);
+      const disposeInteraction = () => {
+        canvas.removeEventListener("pointerdown", onPtr3Down, true);
+        canvas.removeEventListener("pointermove", onPtr3Move);
+        canvas.removeEventListener("pointerup", onPtr3Up);
+        canvas.removeEventListener("pointercancel", onPtr3Up);
+        scene.remove(highlight);
+        highlight.geometry.dispose();
+        highlight.material.dispose();
+      };
+
       const controls = new OrbitControls(camera, canvasRef.current);
       controls.target.set(0, D3.WALL_H * 0.45, 0);
       controls.maxPolarAngle = Math.PI * 0.495; // never below the ground plane
@@ -612,7 +807,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
       if (ro && wrapRef.current) ro.observe(wrapRef.current);
       window.addEventListener("resize", resize);
-      engineRef.current = { renderer, scene, camera, controls, model, render, resize, ro };
+      engineRef.current = { renderer, scene, camera, controls, model, render, resize, ro, applyShellMode, disposeInteraction, interior: false };
       resize();
       setPhase("ready");
     }).catch((err) => {
@@ -627,12 +822,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       window.removeEventListener("resize", e.resize);
       if (e.ro) e.ro.disconnect();
       e.controls.dispose();
-      const mats = new Set();
-      e.model.root.traverse((o) => {
-        if (o.geometry) o.geometry.dispose();
-        if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
-      });
-      mats.forEach((m) => m.dispose());
+      e.disposeInteraction();
+      disposeShed3DModel(e.model);
       e.renderer.dispose();
     };
   // The modal mounts fresh on every open and the 2D designer can't change
@@ -645,11 +836,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   useEffect(() => {
     const e = engineRef.current;
     if (!e) return;
-    e.model.roofGroup.visible = !interior;
-    e.model.wallMat.transparent = interior;
-    e.model.wallMat.opacity = interior ? 0.14 : 1;
-    e.model.wallMat.depthWrite = !interior;
-    e.model.wallMat.needsUpdate = true;
+    e.interior = interior;             // survives live rebuilds during drags
+    e.applyShellMode(e);
     e.render();
   }, [interior, phase]);
 
@@ -684,7 +872,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", background: "#0F172A" }}>
         <div style={{ color: "#F8FAFC", fontWeight: 800, fontSize: 15 }}>
           3D Preview
-          <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12, marginLeft: 10 }}>{bldgW}×{bldgH} ft — drag to orbit, scroll or pinch to zoom</span>
+          <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12, marginLeft: 10 }}>{bldgW}×{bldgH} ft — drag to orbit · drag a door or window to move it · scroll to zoom</span>
         </div>
         <button onClick={handleClose} style={{ background: "none", border: "none", color: "#CBD5E1", fontSize: 22, cursor: "pointer", lineHeight: 1 }}>✕</button>
       </div>
@@ -2849,6 +3037,7 @@ function StructureStudioInner({ config }) {
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
+          onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}
           onSnapshot={(shot) => { render3DSnapshotRef.current = shot; setHas3DSnapshot(true); }}
           onClose={() => setShow3D(false)}
         />
