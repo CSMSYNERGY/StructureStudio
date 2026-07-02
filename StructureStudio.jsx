@@ -299,16 +299,41 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 
 // Resolve a style's 3D appearance: tenant config override (the style entry's
 // `d3` object) over the built-in per-style defaults, over the generic gable.
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt) {
+// sidingOverride (from d3SidingOverride) wins over everything — it's the
+// customer's selected siding upgrade.
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
   return {
     roof: { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) },
-    siding: o.siding !== undefined ? o.siding : (base.siding || null),
+    siding: sidingOverride || (o.siding !== undefined ? o.siding : (base.siding || null)),
     colors: { ...(base.colors || {}), ...(o.colors || {}) },
     wallHeightFt: o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
+}
+
+// Carolyn (2026-07-02): horizontal lap siding is THE universal upgrade —
+// vertical groove panel is standard everywhere. When the customer's selected
+// options say "lap siding", the 3D walls switch to horizontal lap boards.
+// Explicit config wins: `siding3d: { optionId, lapValue }` in the config blob
+// names the option to watch. Without it, any selected option whose id or
+// value reads as lap siding (e.g. a "Siding" option set to "Lap Siding")
+// triggers the switch — so a tenant just adding the option works untouched.
+function d3SidingOverride(config, sel) {
+  if (!config || !sel) return null;
+  const s3 = config.siding3d;
+  if (s3 && s3.optionId) {
+    const v = sel[s3.optionId];
+    const lapVal = String(s3.lapValue || "Lap Siding").trim().toLowerCase();
+    return v && String(v).trim().toLowerCase() === lapVal ? "lap" : null;
+  }
+  for (const k in sel) {
+    const v = sel[k];
+    if (typeof v !== "string") continue;
+    if (/lap/i.test(v) && (/sid/i.test(v) || /sid/i.test(k))) return "lap";
+  }
+  return null;
 }
 
 // Natural-material fallbacks for "No Paint" designs (and for palette values the
@@ -471,19 +496,29 @@ function buildShed3DModel(THREE, p) {
       cursor = rg.a1;
     });
     if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
-    // Board-and-batten relief for styles that declare it: thin body-colored
-    // strips on the exterior of the full-height segments (they break at
-    // openings, like real battens). Shading makes them read without textures.
-    if (p.styleSpec && p.styleSpec.siding === "batten") {
-      const bs = 1.5;
-      const addBattens = (b0, b1) => {
-        for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
-          wg.add(wallBox(wallMat, wf, a - 0.07, a + 0.07, 0, H, T / 2 + 0.03, 0.1));
+    // Siding relief on the exterior of the full-height segments (strips break
+    // at openings, like real siding). Shading makes it read without textures.
+    // "batten" = vertical board-and-batten (the standard groove-panel look);
+    // "lap" = horizontal lap boards — per Carolyn (2026-07-02) the universal
+    // UPGRADE, usually chosen via a siding option (see d3SidingOverride).
+    const sidingMode = p.styleSpec && p.styleSpec.siding;
+    if (sidingMode === "batten" || sidingMode === "lap") {
+      const relief = (b0, b1) => {
+        if (b1 - b0 < 0.3) return;
+        if (sidingMode === "batten") {
+          const bs = 1.5;
+          for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
+            wg.add(wallBox(wallMat, wf, a - 0.07, a + 0.07, 0, H, T / 2 + 0.03, 0.1));
+          }
+        } else {
+          for (let y = 0.8; y < H - 0.15; y += 0.8) {
+            wg.add(wallBox(wallMat, wf, b0 + 0.03, b1 - 0.03, y - 0.04, y + 0.04, T / 2 + 0.03, 0.1));
+          }
         }
       };
       let bc = 0;
-      ranges.forEach((rg) => { if (rg.a0 > bc + 0.01) addBattens(bc, rg.a0); bc = rg.a1; });
-      if (bc < wf.len - 0.01) addBattens(bc, wf.len);
+      ranges.forEach((rg) => { if (rg.a0 > bc + 0.01) relief(bc, rg.a0); bc = rg.a1; });
+      if (bc < wf.len - 0.01) relief(bc, wf.len);
     }
     wallsGroup.add(wg);
 
@@ -1514,12 +1549,14 @@ function StructureStudioInner({ config }) {
   });
 
   // A 3D snapshot must always show the layout it ships with: drop it whenever
-  // anything that feeds the 3D scene changes (also fires on design load, which
-  // is correct — the customer re-captures from the reopened design).
+  // anything that feeds the 3D scene changes — any selection counts, since
+  // options can change the 3D look too (e.g. the lap-siding upgrade). Also
+  // fires on design load, which is correct — the customer re-captures from
+  // the reopened design.
   useEffect(() => {
     render3DSnapshotRef.current = null;
     setHas3DSnapshot(false);
-  }, [items, sel.style, sel.size, sel.paint, paintColors, bldgW, bldgH]);
+  }, [items, sel, paintColors, bldgW, bldgH]);
 
   // ─── INTERACTION HANDLERS ───
   const getSvgPt = useCallback((e) => {
@@ -3365,7 +3402,7 @@ function StructureStudioInner({ config }) {
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt)}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel))}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
