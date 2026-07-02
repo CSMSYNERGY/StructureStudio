@@ -164,6 +164,21 @@ function getDisplayLabel(positionalWall, frontWall) {
   return map[frontWall][positionalWall];
 }
 
+// A ramp sits centered on the OUTSIDE of its door, so its placement is fully
+// derived from the door's position/wall + the ramp's depth. One source of
+// truth used by ramp placement AND by the 2D/3D door drags, so ramps follow
+// their door wherever it goes.
+function rampPlacementForDoor(door, rampDepthFt, pW, pH, mgX, mgY, scale) {
+  const dPx = (rampDepthFt || 2) * scale;
+  switch (door.wall) {
+    case "north": return { x: door.x, y: mgY - dPx / 2, rotation: 0, wall: "north" };
+    case "south": return { x: door.x, y: mgY + pH + dPx / 2, rotation: 0, wall: "south" };
+    case "west":  return { x: mgX - dPx / 2, y: door.y, rotation: 90, wall: "west" };
+    case "east":  return { x: mgX + pW + dPx / 2, y: door.y, rotation: 90, wall: "east" };
+    default: return null;
+  }
+}
+
 let idCounter = 1;
 
 // 10-char short code in format SS-XXXXXXXXXX. Alphabet drops 0/O/I/1 to avoid
@@ -903,7 +918,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
             const sn = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
-            if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) commitLive(it, sn);
+            if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) {
+              // The door's ramp follows live — same derived placement as 2D.
+              const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === it.id);
+              if (ramp) {
+                const rp = rampPlacementForDoor(sn, ramp.heightFt, pWpx, pHpx, mgX, mgY, scale);
+                if (rp) liveItems = liveItems.map((i) => (i.id === ramp.id ? { ...i, ...rp } : i));
+              }
+              commitLive(it, sn);
+            }
           } else if (it.type === "workbench") {
             // Same rules as the 2D wallSnap drag: snap to the nearest wall's
             // interior, blocked by doors and other benches on that wall.
@@ -1003,6 +1026,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (d.moved) {
           const moved = liveItems.find((i) => i.id === d.id);
           if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall });
+          // A moved door commits its ramp's new derived position too.
+          const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === d.id);
+          if (ramp && onItemMove) onItemMove(ramp.id, { x: ramp.x, y: ramp.y, rotation: ramp.rotation, wall: ramp.wall });
           // The design changed under any earlier shot — re-arm capture-on-close.
           capturedRef.current = false;
           setShotTaken(false);
@@ -1575,15 +1601,9 @@ function StructureStudioInner({ config }) {
       const doorCfg = ITEMS[closest.type];
       const doorW = doorCfg ? doorCfg.width : 3;
       const rampDepth = RAMP_SPACE_FT; // visual ramp depth in feet
-      const rampDepthPx = rampDepth * scale;
-      const rampWidthPx = doorW * scale;
-      let rx, ry, rot;
-      if (closest.wall === "north") { rx = closest.x; ry = mgY - rampDepthPx / 2; rot = 0; }
-      else if (closest.wall === "south") { rx = closest.x; ry = mgY + pH + rampDepthPx / 2; rot = 0; }
-      else if (closest.wall === "west") { rx = mgX - rampDepthPx / 2; ry = closest.y; rot = 90; }
-      else if (closest.wall === "east") { rx = mgX + pW + rampDepthPx / 2; ry = closest.y; rot = 90; }
-      else return;
-      const ni = { id: idCounter++, type: activeTool, x: rx, y: ry, rotation: rot, wall: closest.wall, widthFt: doorW, heightFt: rampDepth, snapDoorId: closest.id };
+      const rp = rampPlacementForDoor(closest, rampDepth, pW, pH, mgX, mgY, scale);
+      if (!rp) return;
+      const ni = { id: idCounter++, type: activeTool, ...rp, widthFt: doorW, heightFt: rampDepth, snapDoorId: closest.id };
       setItems((p) => [...p, ni]);
       setActiveTool(null);
       setToast(null);
@@ -1846,10 +1866,18 @@ function StructureStudioInner({ config }) {
     const iWidthFt = it.widthFt || cfg.width;
     if (cfg.wallOnly) {
       // Always snap to nearest wall during drag so the door follows the mouse
-      // and doesn't get stuck off-wall.
+      // and doesn't get stuck off-wall. The door's ramp (if any) follows too —
+      // its placement is derived from the door's position/wall.
       const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
       const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
-      setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
+      setItems((p) => p.map((i) => {
+        if (i.id === dragging.id) return { ...i, ...sn };
+        if (i.type === "ramp" && i.snapDoorId === dragging.id) {
+          const rp = rampPlacementForDoor(sn, i.heightFt, pW, pH, mgX, mgY, scale);
+          return rp ? { ...i, ...rp } : i;
+        }
+        return i;
+      }));
     } else if (cfg.wallSnap) {
       const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
       const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
@@ -1962,7 +1990,9 @@ function StructureStudioInner({ config }) {
     }
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
-  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId)); setSelectedId(null); } };
+  // Deleting a door also removes its attached ramp — a ramp can't exist
+  // without the door it's snapped to.
+  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); } };
   const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
   const clearAll = () => { setItems([]); setSelectedId(null); };
 

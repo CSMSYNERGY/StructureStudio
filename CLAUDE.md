@@ -84,7 +84,7 @@ Each entry in `options[]` may optionally declare `buildingStyles: ["Urban", "Nor
 **Item taxonomy via flags on `C.layoutItems`.** Placement rules are driven by per-type flags, not class hierarchies:
 - `wallOnly: true` — doors, windows, rough openings. Must click a wall; rendered as a bar on the wall line.
 - `wallSnap: true` — workbench. Snaps to the nearest wall's interior; can be resized along the wall (1D).
-- `doorSnap: true` — ramp. Attaches to an existing door (outside the building); cannot be dragged; only one per door.
+- `doorSnap: true` — ramp. Attaches to an existing door (outside the building); cannot be dragged directly; only one per door. Its placement is DERIVED from the door via `rampPlacementForDoor()` — it follows when the door is dragged (2D and 3D) and is deleted with its door (`delSel` cascade).
 - Neither — loft. Free-floating with 4-sided resize; must pass `checkLoftAttached` (both ends of at least one axis touching a wall or another loft).
 
 Adding a new item type usually means adding an entry to `layoutItems` + any new flag branch in `handleClick`, `onPtrMove` (drag), `startResize` logic, `generatePNG`, and the submit payload rollup.
