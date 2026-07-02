@@ -281,16 +281,35 @@ const D3 = {
   OVERHANG: 0.6,      // roof overhang past the walls
 };
 
-// Roof profile per building style, keyed by lowercased style value (plan §4.2).
-// pitch = rise/run; gambrel knee/ridge values are fractions of the half-span.
-// Styles not listed here get the default gable.
-const D3_ROOFS = {
-  econo:     { type: "shed",    pitch: 0.25 },
-  urban:     { type: "gable",   pitch: 0.33 },
-  northwood: { type: "gable",   pitch: 0.55 },
-  farmland:  { type: "gambrel", kneeU: 0.55, kneeRise: 0.55, ridgeRise: 0.8 },
+// Built-in 3D appearance per building style, keyed by lowercased style value
+// (plan §4.2). Each spec: roof { type: shed|gable|gambrel, pitch (rise/run),
+// ridgeOffset (gable ridge shifted toward one eave — saltbox looks), overhang,
+// gambrel knee/ridge fractions of the half-span }, siding ("batten" adds
+// board-and-batten relief strips), colors (unpainted naturals for body/trim/
+// roof). A tenant can override or define ANY style's appearance from its
+// config row — buildingStyles[].d3 = { roof, siding, colors, wallHeightFt } —
+// no code change needed (see d3ResolveStyleSpec).
+const D3_STYLE_DEFAULTS = {
+  econo:     { roof: { type: "shed", pitch: 0.25, overhang: 0.35 }, siding: null, colors: {} },
+  urban:     { roof: { type: "gable", pitch: 0.33, overhang: 0.85 }, siding: null, colors: { body: "#D6CCB6", trim: "#575044", roof: "#3E434A" } },
+  northwood: { roof: { type: "gable", pitch: 0.55, overhang: 0.6 }, siding: "batten", colors: { body: "#C7B183", roof: "#4E5560" } },
+  farmland:  { roof: { type: "gambrel", kneeU: 0.55, kneeRise: 0.55, ridgeRise: 0.8, overhang: 0.5 }, siding: "batten", colors: { body: "#C2A377", trim: "#8A6F4D", roof: "#5D5348" } },
 };
 const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
+
+// Resolve a style's 3D appearance: tenant config override (the style entry's
+// `d3` object) over the built-in per-style defaults, over the generic gable.
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt) {
+  const key = String(styleValue || "").trim().toLowerCase();
+  const base = D3_STYLE_DEFAULTS[key] || {};
+  const o = (styleCfg && styleCfg.d3) || {};
+  return {
+    roof: { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) },
+    siding: o.siding !== undefined ? o.siding : (base.siding || null),
+    colors: { ...(base.colors || {}), ...(o.colors || {}) },
+    wallHeightFt: o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
+  };
+}
 
 // Natural-material fallbacks for "No Paint" designs (and for palette values the
 // browser can't parse — the paint palette stores display names, not hex).
@@ -348,7 +367,7 @@ function d3CssColor(v, fallback) {
 // roofGroup } so the viewer can ghost the shell for the "look inside" mode and
 // dispose everything on close.
 function buildShed3DModel(THREE, p) {
-  const { bldgW, bldgH, items, itemTypes, styleValue, bodyColor, trimColor, frontWall, scale, mgX, mgY } = p;
+  const { bldgW, bldgH, items, itemTypes, bodyColor, trimColor, frontWall, scale, mgX, mgY } = p;
   // Wall height: config-driven when the tenant sets it (per-style wallHeightFt
   // in the config blob / building_sizes.wall_height_ft once 016 is applied),
   // else the D3 default (plan §6 gap #1).
@@ -357,7 +376,7 @@ function buildShed3DModel(THREE, p) {
   const mat = (color, extra) => new THREE.MeshLambertMaterial({ color, ...(extra || {}) });
   const wallMat = mat(bodyColor);
   const trimMat = mat(trimColor);
-  const roofMat = mat(D3_COLORS.roof);
+  const roofMat = mat(p.roofColor || D3_COLORS.roof);
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
 
   // Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
@@ -452,6 +471,20 @@ function buildShed3DModel(THREE, p) {
       cursor = rg.a1;
     });
     if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
+    // Board-and-batten relief for styles that declare it: thin body-colored
+    // strips on the exterior of the full-height segments (they break at
+    // openings, like real battens). Shading makes them read without textures.
+    if (p.styleSpec && p.styleSpec.siding === "batten") {
+      const bs = 1.5;
+      const addBattens = (b0, b1) => {
+        for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
+          wg.add(wallBox(wallMat, wf, a - 0.07, a + 0.07, 0, H, T / 2 + 0.03, 0.1));
+        }
+      };
+      let bc = 0;
+      ranges.forEach((rg) => { if (rg.a0 > bc + 0.01) addBattens(bc, rg.a0); bc = rg.a1; });
+      if (bc < wf.len - 0.01) addBattens(bc, wf.len);
+    }
     wallsGroup.add(wg);
 
     // Frames + fills per opening (trim-colored casing; doors get panels,
@@ -490,8 +523,8 @@ function buildShed3DModel(THREE, p) {
   // (derived from door placement, same rule the 2D labels use); the econo shed
   // slope descends front→back. No doors yet → longer axis.
   const roofGroup = new THREE.Group();
-  const styleKey = String(styleValue || "").trim().toLowerCase();
-  const roofCfg = D3_ROOFS[styleKey] || D3_DEFAULT_ROOF;
+  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
+  const OV = roofCfg.overhang != null ? roofCfg.overhang : D3.OVERHANG;
   const fw = frontWall || (bldgH >= bldgW ? "north" : "west");
   const frontNS = fw === "north" || fw === "south";
   // Profile u-axis: the axis the roof profile spans across. For gable/gambrel
@@ -518,8 +551,10 @@ function buildShed3DModel(THREE, p) {
     slopes.push([[-s2, H], [-kU, kY]], [[-kU, kY], [0, rY]], [[0, rY], [kU, kY]], [[kU, kY], [s2, H]]);
   } else {
     const rise = (S / 2) * (roofCfg.pitch || 0.4);
-    prof.push([-S / 2, H], [0, H + rise], [S / 2, H]);
-    slopes.push([[-S / 2, H], [0, H + rise]], [[0, H + rise], [S / 2, H]]);
+    // ridgeOffset shifts the ridge toward one eave (saltbox-style asymmetry).
+    const ru = S * Math.max(-0.35, Math.min(0.35, roofCfg.ridgeOffset || 0));
+    prof.push([-S / 2, H], [ru, H + rise], [S / 2, H]);
+    slopes.push([[-S / 2, H], [ru, H + rise]], [[ru, H + rise], [S / 2, H]]);
   }
   // Drop consecutive duplicate points (the shed profile produces one) before
   // building the shape; the open edge auto-closes along the wall-plate line.
@@ -532,7 +567,7 @@ function buildShed3DModel(THREE, p) {
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
     const slen = Math.sqrt(du * du + dy * dy);
-    const slab = box(roofMat, slen + D3.OVERHANG * 2, D3.ROOF_T, L + D3.OVERHANG * 2);
+    const slab = box(roofMat, slen + OV * 2, D3.ROOF_T, L + OV * 2);
     slab.rotation.z = Math.atan2(dy, du);
     const nx = -dy / slen, ny = du / slen; // 2D normal of the slope, pointing up-outward
     slab.position.set(
@@ -635,7 +670,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, wallHeightFt, paintEnabled, onPaintChange, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, paintEnabled, onPaintChange, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -674,11 +709,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       const scene = new THREE.Scene();
       scene.background = new THREE.Color("#E7EEF5");
+      // Per-style appearance (roof profile/pitch/overhang, siding relief,
+      // natural material colors, wall height) resolved by the parent from the
+      // tenant's config + built-in defaults.
+      const spec = style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
       // Live paint colors — swatch picks update these and recolor materials in
       // place; drag rebuilds read the same vars so colors survive rebuilds.
-      let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : D3_COLORS.body;
-      let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : D3_COLORS.trim;
-      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt, items, itemTypes, styleValue, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY });
+      // Unpainted falls back to the STYLE's natural material colors.
+      let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
+      let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
+      const roofCss = spec.colors.roof || D3_COLORS.roof;
+      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY });
       scene.add(model.root);
       scene.add(new THREE.HemisphereLight(0xFFFFFF, 0x8D8573, 1.8));
       // Start the camera on the FRONT side (same wall the 2D labels call FRONT),
@@ -816,16 +857,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           disposeShed3DModel(e.model);
           // Recompute FRONT from the live items — dragging the only door to a
           // different wall re-orients the roof exactly like the 2D labels.
-          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt, items: liveItems, itemTypes, styleValue, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY });
+          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY });
           scene.add(e.model.root);
           applyShellMode(e);
           render();
         });
       };
       // Swatch picks recolor the live materials in place — no rebuild needed.
+      // Clearing paint returns to the style's natural material colors.
       const setLiveColors = (bodyLabel, trimLabel) => {
-        liveBodyCss = bodyLabel ? d3SwatchCss(bodyLabel, D3_COLORS.body) : D3_COLORS.body;
-        liveTrimCss = trimLabel ? d3SwatchCss(trimLabel, D3_COLORS.trim) : D3_COLORS.trim;
+        liveBodyCss = bodyLabel ? d3SwatchCss(bodyLabel, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
+        liveTrimCss = trimLabel ? d3SwatchCss(trimLabel, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
         const e = engineRef.current;
         if (!e) return;
         e.model.wallMat.color.set(liveBodyCss);
@@ -3323,7 +3365,7 @@ function StructureStudioInner({ config }) {
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          wallHeightFt={(selectedStyle && selectedStyle.wallHeightFt) || C.wallHeightFt || null}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt)}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
