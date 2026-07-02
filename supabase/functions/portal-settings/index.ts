@@ -277,7 +277,7 @@ Deno.serve(async (req: Request) => {
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes] = await Promise.all([
       admin.from("building_styles").select("id, key, label, image_url, active").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
@@ -285,13 +285,15 @@ Deno.serve(async (req: Request) => {
       admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
+      // Paint palette for the Colors tab.
+      admin.from("colors").select("id, label, siding, trim, allow_custom, is_default, rate, pricing_method, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
-    for (const r of [styles, sizes, items, types, incl, lpRows]) if (r.error) return json({ error: r.error.message }, 500);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active)
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [] });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [] });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -560,6 +562,59 @@ Deno.serve(async (req: Request) => {
       i++;
     }
     return json({ ok: true });
+  }
+
+  // Full-replace this tenant's paint palette (Colors tab). Takes the COMPLETE desired list:
+  // rows carrying an id are updated, rows without one are inserted, and any existing colour
+  // absent from the list is deleted. clientId is JWT-resolved (own tenant only). The designer
+  // is selection-only today (get_config exposes label/siding/trim/allowCustom/isDefault/swatch,
+  // never a price); rate/pricing_method are persisted here for a later paint-pricing pass.
+  if (action === "save_colors") {
+    if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
+    const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
+    const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    const keptIds = new Set<string>();
+    let saved = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.colors) {
+      const label = String(row?.label ?? "").trim();
+      if (!label) { skipped.push(`row ${i}: blank label`); i++; continue; }
+      const method = String(row?.pricingMethod ?? "each").trim() || "each";
+      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"`); i++; continue; }
+      const rate = Number(row?.rate);
+      const rec: Record<string, unknown> = {
+        client_id: clientId,
+        label,
+        siding: row?.siding !== false,       // default true
+        trim: row?.trim !== false,           // default true
+        allow_custom: row?.allowCustom === true,
+        is_default: row?.isDefault === true,
+        active: row?.active !== false,       // default true
+        rate: Number.isFinite(rate) && rate >= 0 ? rate : 0,
+        pricing_method: method,
+        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
+        updated_at: new Date().toISOString(),
+      };
+      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
+        rec.image_url = String(row.imageUrl ?? "").trim() || null;
+      }
+      const rid = String(row?.id ?? "").trim();
+      const res = (rid && existingIds.has(rid))
+        ? (keptIds.add(rid), await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid))
+        : await admin.from("colors").insert(rec);
+      if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (toDelete.length) {
+      const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
+      if (del.error) return json({ error: del.error.message }, 500);
+      deleted = toDelete.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);

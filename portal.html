@@ -1090,6 +1090,197 @@ function LayoutPricing() {
   );
 }
 
+// ─── Colors (paint palette) ───
+// Common shed/barn paint colours for the one-click "quick add" library. Hexes are
+// APPROXIMATE — for on-screen recognition only; only the NAME is saved as the colour
+// label. Owners curate freely and can verify exact codes at hayleypaint.com. Carolyn's
+// examples (Mountain Red / Classic Red / Red Delicious) are included.
+const COLOR_LIBRARY = [
+  { name: "Bright White", hex: "#F6F6F1" }, { name: "White", hex: "#ECEAE0" },
+  { name: "Almond", hex: "#E7D9BE" }, { name: "Beige", hex: "#D8C7A0" },
+  { name: "Sandstone", hex: "#C9B489" }, { name: "Buckskin", hex: "#B79A6E" },
+  { name: "Desert Tan", hex: "#C2A579" }, { name: "Khaki", hex: "#A89468" },
+  { name: "Clay", hex: "#B08155" }, { name: "Mocha Tan", hex: "#9A8064" },
+  { name: "Coffee Brown", hex: "#5A4535" }, { name: "Chocolate", hex: "#3E2C22" },
+  { name: "Barn Red", hex: "#7B1E22" }, { name: "Mountain Red", hex: "#8C2A2A" },
+  { name: "Classic Red", hex: "#A32431" }, { name: "Red Delicious", hex: "#9E1B2A" },
+  { name: "Burgundy", hex: "#5E1F2B" }, { name: "Sage Green", hex: "#8A9A78" },
+  { name: "Hunter Green", hex: "#2F4A38" }, { name: "Forest Green", hex: "#274134" },
+  { name: "Ivy Green", hex: "#3B5E3A" }, { name: "Country Blue", hex: "#5E7C99" },
+  { name: "Slate Blue", hex: "#41566B" }, { name: "Navy Blue", hex: "#25324B" },
+  { name: "Light Gray", hex: "#C7CACC" }, { name: "Pewter Gray", hex: "#8C9194" },
+  { name: "Slate Gray", hex: "#5E676C" }, { name: "Charcoal Gray", hex: "#3A3F43" },
+  { name: "Quaker Gray", hex: "#9AA0A0" }, { name: "Black", hex: "#1C1C1C" },
+];
+
+function ColorsView() {
+  const [cat, setCat] = useState(null);
+  const [rows, setRows] = useState([]);      // [{ id, label, siding, trim, allow_custom, is_default, active, image_url }]
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [libOpen, setLibOpen] = useState(false);
+  const [imgBusyIdx, setImgBusyIdx] = useState(null);
+  const [imgFileKey, setImgFileKey] = useState(0);
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    setRows((data.colors || []).map((c) => ({
+      id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
+      allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
+      image_url: c.image_url || null,
+    })));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (idx, field, val) => setRows((rs) => rs.map((r, i) => i === idx ? { ...r, [field]: val } : r));
+  const addRow = (preset) => setRows((rs) => [...rs, {
+    id: null, label: preset ? preset.name : "", siding: true, trim: true,
+    allow_custom: false, is_default: false, active: true, image_url: null,
+  }]);
+  const removeRow = (idx) => setRows((rs) => rs.filter((_, i) => i !== idx));
+  const move = (idx, dir) => setRows((rs) => {
+    const j = idx + dir; if (j < 0 || j >= rs.length) return rs;
+    const next = rs.slice(); [next[idx], next[j]] = [next[j], next[idx]]; return next;
+  });
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onSwatch = async (idx, file) => {
+    if (!file) return;
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    setImgBusyIdx(idx); setMsg(null);
+    try {
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onerror = () => rej(new Error("Could not read that image."));
+        r.onload = () => res(r.result);
+        r.readAsDataURL(file);
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_layout_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRow(idx, "image_url", data.url);
+      setMsg({ ok: "Swatch added — click “Save colors” to apply." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
+  };
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const colors = rows.map((r, i) => ({
+        id: r.id || undefined, label: r.label, siding: !!r.siding, trim: !!r.trim,
+        allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
+        sortOrder: i, imageUrl: r.image_url ?? null,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const swatchBox = { width: 40, height: 30, borderRadius: 4, flexShrink: 0, border: "1px solid #CBD5E1", objectFit: "cover" };
+  const ctr = { ...S.td, textAlign: "center" };
+  const chk = (idx, field) => <input type="checkbox" checked={!!rows[idx][field]} onChange={(e) => setRow(idx, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Paint colors</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          These are the colors your customers pick from when they choose <b>Painted</b> in the designer.
+          Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+          Turn on <b>Custom</b> for a “their-own-color” option (the customer types the exact color, e.g. a Sherwin-Williams name).
+          <b> Default</b> pre-selects a color; <b>Active</b> shows/hides it without deleting. Drag order with ▲▼.
+          <br />Need color ideas? See <b>hayleypaint.com</b> (color gallery) or <b>classicbuildingssales.com</b>, or use the quick-add library below.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+          <>
+            {rows.length === 0 ? (
+              <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14, minWidth: 720 }}>
+                  <thead><tr>
+                    <th style={S.th}>Order</th><th style={S.th}>Swatch</th><th style={S.th}>Color name</th>
+                    <th style={S.th}>Siding</th><th style={S.th}>Trim</th><th style={S.th}>Custom</th>
+                    <th style={S.th}>Default</th><th style={S.th}>Active</th><th style={S.th}></th>
+                  </tr></thead>
+                  <tbody>
+                    {rows.map((r, idx) => (
+                      <tr key={r.id || `new-${idx}`}>
+                        <td style={ctr}>
+                          <button onClick={() => move(idx, -1)} disabled={idx === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                          <button onClick={() => move(idx, 1)} disabled={idx === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                        </td>
+                        <td style={ctr}>
+                          {r.image_url
+                            ? <img src={r.image_url} alt="" style={swatchBox} />
+                            : <label title="Add a swatch image" style={{ ...swatchBox, background: "#F1F5F9", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: imgBusyIdx === idx ? "default" : "pointer", color: "#94A3B8", fontSize: 16 }}>
+                                {imgBusyIdx === idx ? "…" : "+"}
+                                <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyIdx === idx} style={{ display: "none" }} onChange={(e) => onSwatch(idx, e.target.files && e.target.files[0])} />
+                              </label>}
+                        </td>
+                        <td style={S.td}>
+                          <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 140 }} />
+                        </td>
+                        <td style={ctr}>{chk(idx, "siding")}</td>
+                        <td style={ctr}>{chk(idx, "trim")}</td>
+                        <td style={ctr}>{chk(idx, "allow_custom")}</td>
+                        <td style={ctr}>{chk(idx, "is_default")}</td>
+                        <td style={ctr}>{chk(idx, "active")}</td>
+                        <td style={ctr}>
+                          <button onClick={() => removeRow(idx)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+              <button onClick={() => addRow()} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+              <button onClick={() => setLibOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{libOpen ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
+              <div style={{ flex: 1 }} />
+              <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+            </div>
+            {libOpen && (
+              <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to your list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {COLOR_LIBRARY.map((c) => (
+                    <button key={c.name} onClick={() => { addRow(c); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                      style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
+                      <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {msg && msg.skipped && msg.skipped.length > 0 && (
+              <div style={{ marginTop: 12, fontSize: 13 }}>
+                <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
+                <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+                  {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ─── Dashboard shell ───
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
@@ -1155,6 +1346,7 @@ function Dashboard({ session }) {
           {tabBtn("designs", "Designs & Leads")}
           {isAdmin && tabBtn("pricing", "Pricing")}
           {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
+          {isAdmin && tabBtn("colors", "Colors")}
           {isAdmin && tabBtn("settings", "Settings")}
         </div>
       </div>
@@ -1162,6 +1354,7 @@ function Dashboard({ session }) {
         {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
         {activeTab === "pricing" && isAdmin && <PricingCsv />}
         {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
+        {activeTab === "colors" && isAdmin && <ColorsView />}
         {activeTab === "settings" && isAdmin && <SettingsView />}
       </div>
     </div>

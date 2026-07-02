@@ -334,6 +334,9 @@ function StructureStudioInner({ config }) {
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
   const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
+  // Tracks when the shopper picked an "allow custom" color and is typing an exact value
+  // (so the custom text box stays open even while paintColors.body/trim is momentarily "").
+  const [paintCustom, setPaintCustom] = useState({ body: false, trim: false });
   const [customOptions, setCustomOptions] = useState([]);
   const [roDimensions, setRoDimensions] = useState({});
   const [bldgW, setShedW] = useState(10);
@@ -531,6 +534,7 @@ function StructureStudioInner({ config }) {
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
       setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
       setPaintColors(design.paint_colors || { body: "", trim: "" });
+      setPaintCustom({ body: false, trim: false });
       setCustomOptions(design.custom_options || []);
       setRoDimensions(design.ro_dimensions || {});
       // Items must be set after sel.size has propagated; the prevSizeRef guard
@@ -571,6 +575,7 @@ function StructureStudioInner({ config }) {
     prevSizeRef.current = vsel.size || prevSizeRef.current;
     setSel((prev) => ({ ...prev, ...vsel }));
     setPaintColors(vrow.paint_colors || { body: "", trim: "" });
+    setPaintCustom({ body: false, trim: false });
     setCustomOptions(vrow.custom_options || []);
     setRoDimensions(vrow.ro_dimensions || {});
     const loadedItems = Array.isArray(vrow.items) ? vrow.items : [];
@@ -1755,6 +1760,45 @@ function StructureStudioInner({ config }) {
       const isPaint = opt.id === "paint";
       const isPainted = isPaint && sel[opt.id] === "Painted";
       const hasImage = !!opt.img;
+      // Paint palette from config (the owner's Colors tab). Body = colors flagged siding,
+      // trim = colors flagged trim. If no palette is configured, fall back to free-text.
+      const palette = isPaint && Array.isArray(C.colors) ? C.colors : [];
+      const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
+      const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+      const paintField = (kind) => {
+        const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
+        const val = paintColors[kind] || "";
+        const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
+        const labelTxt = kind === "body" ? "Body:" : "Trim:";
+        if (colors.length === 0) {
+          return (
+            <label style={PAINT_LBL}>{labelTxt}
+              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Enter color or TBD" style={PAINT_INPUT} />
+            </label>
+          );
+        }
+        const match = colors.find((c) => c.label === val && !c.allowCustom);
+        const customColor = colors.find((c) => c.allowCustom);
+        const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
+        const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
+        const onSel = (label) => {
+          const c = colors.find((x) => x.label === label);
+          if (c && c.allowCustom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
+          else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
+        };
+        return (
+          <div style={{ ...PAINT_LBL, gap: 4 }}>
+            <span>{labelTxt}</span>
+            <select value={selectVal} onChange={(e) => onSel(e.target.value)} style={{ ...PAINT_INPUT, background: "#FFF", cursor: "pointer" }}>
+              <option value="">Select…</option>
+              {colors.map((c) => <option key={c.id} value={c.label}>{c.label}</option>)}
+            </select>
+            {isCustom && (
+              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
+            )}
+          </div>
+        );
+      };
       return (
         <div key={opt.id} style={{ marginBottom: 14 }}>
           <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
@@ -1766,22 +1810,17 @@ function StructureStudioInner({ config }) {
             )}
             <div style={{ display: "flex", gap: 6, flexWrap: hasImage ? "wrap" : "nowrap", flex: 1, alignItems: "center", maxWidth: hasImage ? "calc(100% - 110px)" : undefined }}>
               {opt.options.map((o) => (
-                <div key={o} onClick={() => { setSel((p) => ({ ...p, [opt.id]: o })); if (isPaint && o === "No Paint") setPaintColors({ body: "", trim: "" }); }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+                <div key={o} onClick={() => {
+                  const prev = sel[opt.id];
+                  setSel((p) => ({ ...p, [opt.id]: o }));
+                  if (isPaint && o === "No Paint") { setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false }); }
+                  if (isPaint && o === "Painted" && prev !== "Painted") { setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false }); }
+                }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
               ))}
               {isPainted && (
                 <>
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
-                    Body:
-                    <input type="text" value={paintColors.body} onChange={(e) => setPaintColors((p) => ({ ...p, body: e.target.value }))}
-                      placeholder="Enter color or TBD"
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                  </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
-                    Trim:
-                    <input type="text" value={paintColors.trim} onChange={(e) => setPaintColors((p) => ({ ...p, trim: e.target.value }))}
-                      placeholder="Enter color or TBD"
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                  </label>
+                  {paintField("body")}
+                  {paintField("trim")}
                 </>
               )}
             </div>
