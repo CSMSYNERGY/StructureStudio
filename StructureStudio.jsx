@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
 import { createClient } from "@supabase/supabase-js";
+import FeedbackWidget from "./FeedbackWidget.jsx";
 
 // ─── Supabase project ───
 // Single shared project across all white-label tenants. The anon key is browser-safe
@@ -3794,13 +3795,21 @@ export default function StructureStudio({ config: configProp = null }) {
   }
   if (state.status === "error") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
-        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
-        <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
-        <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
-      </div>
+      <>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
+          <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
+          <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
+        </div>
+        <FeedbackWidget />
+      </>
     );
   }
-  return <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>;
+  return (
+    <>
+      <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>
+      <FeedbackWidget />
+    </>
+  );
 }
