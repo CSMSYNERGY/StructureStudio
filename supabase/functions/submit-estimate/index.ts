@@ -248,6 +248,41 @@ Deno.serve(async (req: Request) => {
   if (!priced) {
     return json({ error: `No price is set for "${style} ${size}". Add it in the portal Pricing tab, then resubmit.` }, 400);
   }
+
+  // Self-heal legacy building-style images. Tenants seeded from the old single-tenant
+  // config carry building_styles.image_url as an inline `data:` URI, which the
+  // tenant-prefix guard in imgAttachments() rightly rejects — so those estimates rendered
+  // the building line with NO photo (Junior Barns bug report, 2026-07-06). On first use,
+  // decode the image, upload it to the public branding bucket under this tenant's prefix,
+  // persist the hosted URL back to building_styles, and attach that URL. Non-fatal on
+  // failure — worst case the line stays imageless, exactly as before.
+  if (styleRowId && styleImageUrl && styleImageUrl.startsWith("data:")) {
+    try {
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(styleImageUrl);
+      const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+      if (m && EXT[m[1]]) {
+        const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
+        const slug = norm(style).replace(/[^a-z0-9]+/g, "-") || "style";
+        const path = `${clientId}/style-${slug}-migrated.${EXT[m[1]]}`;
+        const up = await supabase.storage.from("branding").upload(path, bytes, { contentType: m[1], upsert: true });
+        if (!up.error) {
+          const { data: pub } = supabase.storage.from("branding").getPublicUrl(path);
+          if (pub?.publicUrl) {
+            await supabase.from("building_styles")
+              .update({ image_url: pub.publicUrl, updated_at: new Date().toISOString() })
+              .eq("client_id", clientId).eq("id", styleRowId);
+            styleImageUrl = pub.publicUrl;
+          }
+        } else {
+          console.warn("style-image self-heal upload failed:", up.error.message);
+        }
+      } else {
+        console.warn("style-image self-heal: unsupported data URI; leaving line imageless");
+      }
+    } catch (e) {
+      console.warn("style-image self-heal error:", (e as Error).message);
+    }
+  }
   targetItems.push({
     name: `${styleLabel} (${size} - ${paintStatus})`,
     qty: 1,

@@ -1801,7 +1801,10 @@ function StructureStudioInner({ config }) {
       // Paint palette from config (the owner's Colors tab). Body = colors flagged siding,
       // trim = colors flagged trim. If no palette is configured, fall back to free-text.
       const palette = isPaint && Array.isArray(C.colors) ? C.colors : [];
-      const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
+      // flex-basis 170px (not flex:1) so on a phone each color field wraps onto its own
+      // full-width row instead of being crushed beside the pills — the pills are
+      // flexShrink:0, so a one-line squeeze used to overflow the page horizontally.
+      const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
       const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
       const paintField = (kind) => {
         const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
@@ -1843,7 +1846,10 @@ function StructureStudioInner({ config }) {
                 <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
               </div>
             )}
-            <div style={{ display: "flex", gap: 6, flexWrap: hasImage ? "wrap" : "nowrap", flex: 1, alignItems: "center", maxWidth: hasImage ? "calc(100% - 110px)" : undefined }}>
+            {/* Always allow wrapping: the pills are flexShrink:0 and picking "Painted" appends
+                the Body/Trim color fields to this row — with nowrap that combination overflowed
+                the page horizontally on phones (the "page overflow while selecting colors" bug). */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
               {opt.options.map((o) => (
                 <div key={o} onClick={() => {
                   const prev = sel[opt.id];
