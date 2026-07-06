@@ -1,0 +1,1380 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio — Business Portal</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:920px;margin:0 auto}</style>
+</head><body><div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+const { createClient } = window.supabase;
+
+// ─── StructureStudio Business Portal ───
+// Standalone owner-facing page (login + dashboard). Unlike index.html /
+// StructureStudio.jsx — which are hand-mirrored siblings — this file has no
+// .jsx twin: it is only ever served by Netlify, never embedded by hosts.
+//
+// Auth: Supabase email/password. Each owner account maps to one client via the
+// client_users table; RLS confines every query to that tenant's rows. Secrets
+// (the GHL API key) never reach this page — settings reads/writes go through
+// the portal-settings edge function, which masks on read and is write-only for
+// the key.
+
+const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
+// never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
+// rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
+const SS_ERR_SOURCE = "portal";
+function ssLogError(source, message, code, context) {
+  try {
+    const params = new URLSearchParams(location.search);
+    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
+      body: JSON.stringify({
+        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
+        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
+        p_code: code == null ? null : String(code).slice(0, 100),
+        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: context || null,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* logging must never break the app */ }
+}
+window.ssLogError = ssLogError;
+window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
+  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
+// Capture every portal-settings edge-function error in one place by wrapping invoke.
+const __ssInvoke = sb.functions.invoke.bind(sb.functions);
+sb.functions.invoke = async (name, opts) => {
+  const res = await __ssInvoke(name, opts);
+  try {
+    if (res && (res.error || (res.data && res.data.error))) {
+      ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
+        (res.error && res.error.name) || null, { fn: name, action: opts && opts.body && opts.body.action });
+    }
+  } catch (_) {}
+  return res;
+};
+
+const ACCENT = "#3D3672";  // brand purple
+const S = {
+  page: { minHeight: "100vh", display: "flex", flexDirection: "column" },
+  header: { background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  badge: { background: "#75E6DA", color: "#3D3672", borderRadius: 8, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16, flexShrink: 0 },
+  card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
+  h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
+  lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
+  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
+  btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
+  err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  th: { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "2px solid #E2E8F0", whiteSpace: "nowrap" },
+  td: { fontSize: 13, color: "#1E293B", padding: "10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "top" },
+};
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+  catch { return iso; }
+}
+// Capitalize each word of a building-style name for display. Designs store the style as
+// either its label ("Farmland") or its lowercase key ("cabin"), so normalize to Title Case.
+function titleCase(s) {
+  return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
+// carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
+function PasswordInput({ style, wrapStyle, ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%", boxSizing: "border-box", ...wrapStyle }}>
+      <input {...rest} type={show ? "text" : "password"} style={{ ...style, width: "100%", boxSizing: "border-box", paddingRight: 38 }} />
+      <button type="button" tabIndex={-1} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"} onMouseDown={(e) => e.preventDefault()} onClick={() => setShow((v) => !v)} style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 34, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "#64748B" }}>
+        {show ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" /><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" /><line x1="2" x2="22" y1="2" y2="22" /></svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+// ─── Login ───
+function LoginView({ onRecoverySent }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [info, setInfo] = useState(null);
+
+  const signIn = async (e) => {
+    e.preventDefault();
+    setError(null); setInfo(null); setBusy(true);
+    const { error: err } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+    if (err) setError(err.message === "Invalid login credentials" ? "Wrong email or password." : err.message);
+    // success: onAuthStateChange in PortalApp takes over
+  };
+
+  const forgot = async () => {
+    setError(null); setInfo(null);
+    if (!email.trim()) { setError("Enter your email above first, then click “Forgot password” again."); return; }
+    setBusy(true);
+    const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    setBusy(false);
+    if (err) setError(err.message);
+    else setInfo("Password reset email sent — check your inbox (it can take a minute).");
+  };
+
+  return (
+    <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
+      <div style={S.card}>
+        <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Business Login</div>
+        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your leads, designs, and settings.</p>
+        {error && <div style={S.err}>{error}</div>}
+        {info && <div style={S.okMsg}>{info}</div>}
+        <form onSubmit={signIn}>
+          <div style={{ marginBottom: 12 }}>
+            <span style={S.lbl}>Email</span>
+            <input style={S.input} type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@yourbusiness.com" />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <span style={S.lbl}>Password</span>
+            <PasswordInput style={S.input} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+          </div>
+          <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Signing in…" : "Sign In"}</button>
+        </form>
+        <button onClick={forgot} disabled={busy} style={{ ...S.btn("transparent", "#64748B"), width: "100%", marginTop: 8, fontSize: 12 }}>Forgot password?</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Password reset (arrived via recovery email link) ───
+function ResetPasswordView({ onDone }) {
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (pw1.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (pw1 !== pw2) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    const { error: err } = await sb.auth.updateUser({ password: pw1 });
+    setBusy(false);
+    if (err) setError(err.message);
+    else onDone();
+  };
+
+  return (
+    <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
+      <div style={S.card}>
+        <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Set a New Password</div>
+        {error && <div style={S.err}>{error}</div>}
+        <form onSubmit={save}>
+          <div style={{ marginBottom: 12 }}>
+            <span style={S.lbl}>New password</span>
+            <PasswordInput style={S.input} autoComplete="new-password" value={pw1} onChange={(e) => setPw1(e.target.value)} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <span style={S.lbl}>Confirm password</span>
+            <PasswordInput style={S.input} autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          </div>
+          <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save Password"}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Share link card ───
+function ShareLinkCard({ clientId }) {
+  const [copied, setCopied] = useState(false);
+  const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}`;
+  const copy = () => {
+    navigator.clipboard.writeText(link).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Your Customer Design Link</div>
+      <p style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Share this link with customers (or embed it on your website). Every design submitted through it lands in your list below.</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input style={{ ...S.input, flex: "1 1 280px", fontFamily: "monospace", fontSize: 12 }} readOnly value={link} onFocus={(e) => e.target.select()} />
+        <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy"}</button>
+        <a href={link} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Open ↗</a>
+      </div>
+    </div>
+  );
+}
+
+// ─── Designs table ───
+function DesignsTable({ clientId }) {
+  const [rows, setRows] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+  const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
+  const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data, error: err } = await sb
+      .from("designs")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false });
+    if (err) { setError(err.message); setRows([]); return; }
+    setRows(data || []);
+    // Version history (newest first), grouped by design. Owner-scoped by RLS.
+    const { data: vdata } = await sb
+      .from("design_versions")
+      .select("short_code, version, created_at, selections, image_url")
+      .eq("client_id", clientId)
+      .order("version", { ascending: false });
+    const map = {};
+    (vdata || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+    setVmap(map);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Designs &amp; Leads {rows ? `(${rows.length})` : ""}</div>
+        <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+      </div>
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
+      )}
+      {rows && rows.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Contact</th>
+              <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Actions</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => {
+                const c = r.contact || {}; const sel = r.selections || {};
+                const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
+                const vs = vmap[r.short_code] || [];       // newest first
+                const older = vs.slice(1);                  // everything below the latest
+                const isOpen = !!expanded[r.short_code];
+                const verUrl = (v) => `${openUrl}&v=${v}`;
+                return (
+                  <React.Fragment key={r.short_code}>
+                  <tr>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.created_at)}</td>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{c.name || "—"}</td>
+                    <td style={S.td}>
+                      <div>{c.email || ""}</div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
+                    </td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      {[titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—"}
+                      {older.length > 0 && (
+                        <button onClick={() => setExpanded((p) => ({ ...p, [r.short_code]: !p[r.short_code] }))}
+                          style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontSize: 12, fontWeight: 700 }}>
+                          {isOpen ? "▴ hide" : `▾ ${vs.length} versions`}
+                        </button>
+                      )}
+                    </td>
+                    <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                      {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                    </td>
+                  </tr>
+                  {isOpen && older.map((v) => {
+                    const vsel = v.selections || {};
+                    return (
+                      <tr key={r.short_code + "-v" + v.version} style={{ background: "#F8FAFC" }}>
+                        <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>{fmtDate(v.created_at)}</td>
+                        <td style={S.td}></td>
+                        <td style={S.td}></td>
+                        <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>↳ v{v.version} · {[titleCase(vsel.style), vsel.size].filter(Boolean).join(" ") || "—"}</td>
+                        <td style={S.td}></td>
+                        <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                          <a href={verUrl(v.version)} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                          {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Settings (via portal-settings edge function; API key is write-only) ───
+function SettingsView() {
+  const [status, setStatus] = useState(null);   // response of action:"status"
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // GHL credential inputs are intentionally NOT prefilled: location id + API key
+  // come back masked/withheld, so prefilling would save the mask back. Leave
+  // blank = keep current value.
+  const [ghlLocationId, setGhlLocationId] = useState("");
+  const [ghlApiKey, setGhlApiKey] = useState("");
+  const [ghlBusy, setGhlBusy] = useState(false);
+  const [ghlMsg, setGhlMsg] = useState(null);   // { ok } | { err }
+  const [form, setForm] = useState({
+    ghlPipelineId: "", ghlStageSendQuoteId: "",
+    businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
+    addr1: "", addrCity: "", addrState: "", addrZip: "",
+    quoteTerms: "", betaMode: false, betaEmail: "",
+    // designer branding (client_configs — drives the public ?client= link)
+    brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
+  });
+  const set = (k) => (e) => {
+    const v = e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e;
+    setForm((p) => ({ ...p, [k]: v }));
+  };
+  // Branding logo upload state (separate save → client_configs via save_branding)
+  const [logoDataUrl, setLogoDataUrl] = useState("");   // new upload preview/payload
+  const [logoCt, setLogoCt] = useState("");
+  const [currentLogo, setCurrentLogo] = useState(null);  // saved logo from status
+  const [brandBusy, setBrandBusy] = useState(false);
+  const [brandMsg, setBrandMsg] = useState(null);
+  const onLogoFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 2_000_000) { setBrandMsg({ err: "Logo must be under 2MB." }); return; }
+    const r = new FileReader();
+    r.onload = () => { setLogoDataUrl(r.result); setLogoCt(f.type || "image/png"); setBrandMsg(null); };
+    r.readAsDataURL(f);
+  };
+  const saveBranding = async () => {
+    setBrandBusy(true); setBrandMsg(null);
+    const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
+      accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+    if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    setBrandBusy(false);
+    if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
+    setBrandMsg({ ok: "Branding saved — your designer link now reflects it." });
+    if (data.logoUrl) setCurrentLogo(data.logoUrl);
+    setLogoDataUrl(""); setLogoCt("");
+  };
+  // Business-logo (estimates) upload → uploads to the branding bucket and fills
+  // the Logo URL field with the public URL; persisted by the normal Save action.
+  const [bizLogoBusy, setBizLogoBusy] = useState(false);
+  const onBizLogoFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 2_000_000) { setError("Logo must be under 2MB."); return; }
+    const r = new FileReader();
+    r.onload = async () => {
+      setBizLogoBusy(true); setError(null);
+      const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "upload_logo", kind: "business", logoBase64: r.result, logoContentType: f.type || "image/png" } });
+      setBizLogoBusy(false);
+      if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+      setForm((p) => ({ ...p, businessLogoUrl: data.url }));
+    };
+    r.readAsDataURL(f);
+  };
+
+  useEffect(() => {
+    (async () => {
+      const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+      if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+      if (!data) { setError("Couldn't load settings (empty response). Please refresh."); return; }
+      setStatus(data);
+      const a = data.businessAddress || {};
+      const b = data.branding || {};
+      setCurrentLogo(b.logoUrl || null);
+      setForm({
+        ghlPipelineId: data.ghlPipelineId || "",
+        ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
+        businessName: data.businessName || "",
+        businessPhone: data.businessPhone || "",
+        businessWebsite: data.businessWebsite || "",
+        businessLogoUrl: data.businessLogoUrl || "",
+        addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
+        quoteTerms: data.quoteTerms || "",
+        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "",
+        brandName: b.companyName || "", brandTagline: b.tagline || "",
+        brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
+      });
+    })();
+  }, []);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setError(null); setSaved(false); setBusy(true);
+    const hasAddr = form.addr1 || form.addrCity || form.addrState || form.addrZip;
+    const body = {
+      action: "save",
+      businessName: form.businessName,
+      businessPhone: form.businessPhone,
+      businessWebsite: form.businessWebsite,
+      businessLogoUrl: form.businessLogoUrl,
+      businessAddress: hasAddr ? { addressLine1: form.addr1, city: form.addrCity, state: form.addrState, postalCode: form.addrZip, countryCode: "US" } : null,
+      quoteTerms: form.quoteTerms,
+      betaMode: form.betaMode,
+      betaEmail: form.betaEmail,
+    };
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    setBusy(false);
+    if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+    setSaved(true);
+    // refresh masked status
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // GHL connection: verify the location id + API key against GoHighLevel and save
+  // only if they're valid. Location/key fall back to the stored values when left
+  // blank. Also surfaces a warning when the location has no users (estimates would
+  // fail) or no products (line items unpriced).
+  const saveGhl = async () => {
+    setGhlMsg(null); setGhlBusy(true);
+    const body = {
+      action: "verify_save_ghl",
+      ghlPipelineId: form.ghlPipelineId,
+      ghlStageSendQuoteId: form.ghlStageSendQuoteId,
+    };
+    if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
+    if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    setGhlBusy(false);
+    if (err || (data && data.error)) { setGhlMsg({ err: (data && data.error) || (err && err.message) || "Verification failed." }); return; }
+    setGhlMsg({ ok: data.warning ? `Verified & saved. ${data.warning}` : "Verified & saved — the connection works.", warn: Boolean(data.warning) });
+    setGhlApiKey(""); setGhlLocationId("");
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
+
+  return (
+    <form onSubmit={save} autoComplete="off">
+      {error && <div style={S.err}>{error}</div>}
+      {saved && <div style={S.okMsg}>Settings saved.</div>}
+
+      <div style={S.card}>
+        <div style={S.h2}>GoHighLevel Connection</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+          {status && status.configured
+            ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
+            : <>Not connected yet. Estimates can't be sent until a GHL Location ID and API key are saved.</>}
+        </p>
+        {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
+        {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+          <div><span style={S.lbl}>GHL Location ID</span>
+            <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
+          <div><span style={S.lbl}>GHL API Key</span>
+            <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
+          <div><span style={S.lbl}>Pipeline ID (optional)</span>
+            <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
+          <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
+            <input style={S.input} name="ss-ghl-stage-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
+        </div>
+        <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against GoHighLevel and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Designer Branding (your customer link)</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+          Shown on your public designer link.{status && status.clientId && <> <a href={`/?client=${status.clientId}`} target="_blank" rel="noreferrer" style={{ color: ACCENT, fontWeight: 700 }}>Preview ↗</a></>}
+        </p>
+        {brandMsg && brandMsg.err && <div style={S.err}>{brandMsg.err}</div>}
+        {brandMsg && brandMsg.ok && <div style={S.okMsg}>{brandMsg.ok}</div>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} /></div>
+          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} placeholder="Design & Quote" /></div>
+          <div><span style={S.lbl}>Accent color</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
+              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} /></div></div>
+          <div><span style={S.lbl}>Header background</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
+              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} /></div></div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <span style={S.lbl}>Logo</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ width: 96, height: 64, borderRadius: 8, border: "1px solid #E2E8F0", background: form.brandHeaderBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+              {(logoDataUrl || currentLogo)
+                ? <img src={logoDataUrl || currentLogo} alt="logo" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+                : <span style={{ color: "#94A3B8", fontSize: 11 }}>no logo</span>}
+            </div>
+            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
+          </div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / SVG / WebP, under 2MB. Preview shows it on your header color.</div>
+        </div>
+        <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Business Details (shown on estimates)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <div><span style={S.lbl}>Business name</span><input style={S.input} value={form.businessName} onChange={set("businessName")} /></div>
+          <div><span style={S.lbl}>Phone</span><input style={S.input} value={form.businessPhone} onChange={set("businessPhone")} placeholder="+17075551234" /></div>
+          <div><span style={S.lbl}>Website</span><input style={S.input} value={form.businessWebsite} onChange={set("businessWebsite")} placeholder="yourbusiness.com" /></div>
+          <div><span style={S.lbl}>Logo URL</span>
+            <input style={S.input} value={form.businessLogoUrl} onChange={set("businessLogoUrl")} placeholder="https://…/logo.png" />
+            <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: ACCENT, cursor: bizLogoBusy ? "wait" : "pointer" }}>
+                {bizLogoBusy ? "Uploading…" : "⬆ Upload image"}
+                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onBizLogoFile} disabled={bizLogoBusy} style={{ display: "none" }} />
+              </label>
+              <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste a URL above</span>
+              {form.businessLogoUrl && <img src={form.businessLogoUrl} alt="" style={{ height: 24, maxWidth: 90, objectFit: "contain", borderRadius: 4, border: "1px solid #E2E8F0" }} />}
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div><span style={S.lbl}>Street address</span><input style={S.input} value={form.addr1} onChange={set("addr1")} /></div>
+          <div><span style={S.lbl}>City</span><input style={S.input} value={form.addrCity} onChange={set("addrCity")} /></div>
+          <div><span style={S.lbl}>State</span><input style={S.input} value={form.addrState} onChange={set("addrState")} /></div>
+          <div><span style={S.lbl}>Zip</span><input style={S.input} value={form.addrZip} onChange={set("addrZip")} /></div>
+        </div>
+        <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
+          <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Testing</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B", marginBottom: 10 }}>
+          <input type="checkbox" checked={form.betaMode} onChange={set("betaMode")} />
+          Beta mode — estimate emails go to the test inbox below instead of customers
+        </label>
+        <div style={{ maxWidth: 320 }}><span style={S.lbl}>Test inbox</span>
+          <input style={S.input} type="email" value={form.betaEmail} onChange={set("betaEmail")} placeholder="you@yourbusiness.com" /></div>
+      </div>
+
+      <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
+    </form>
+  );
+}
+
+// ─── CSV helpers (RFC-4180-ish) ───
+function csvEscape(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCSV(headers, rows) { return [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\r\n"); }
+function parseCSV(text) {
+  const rows = []; let row = [], field = "", inQ = false;
+  text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) { if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; } else field += c; }
+    else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ""));
+}
+function downloadFile(name, text) {
+  const b = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const u = URL.createObjectURL(b); const a = document.createElement("a");
+  a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
+}
+
+// ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
+function PricingCsv() {
+  const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [result, setResult] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  // building-style manager state
+  const [styleName, setStyleName] = useState("");
+  const [styleImg, setStyleImg] = useState(null);     // { base64, contentType, name }
+  const [styleBusy, setStyleBusy] = useState(false);
+  const [styleFileKey, setStyleFileKey] = useState(0);
+  const [pendingDelete, setPendingDelete] = useState(null);  // style pending permanent delete (confirm modal)
+  const [editStyle, setEditStyle] = useState(null);          // style being edited (name/photo modal)
+  const [editName, setEditName] = useState("");
+  const [editImg, setEditImg] = useState(null);              // { base64, contentType } | null
+  const [editFileKey, setEditFileKey] = useState(0);
+  const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+  };
+  useEffect(() => { load(); }, []);
+
+  const items = () => (cat && cat.items) || [];
+  const allStyles = () => (cat && cat.styles) || [];
+  const activeStyles = () => allStyles().filter((s) => s.active);
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onStyleImg = (file) => {
+    if (!file) { setStyleImg(null); return; }
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setStyleFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setStyleFileKey((k) => k + 1); return; }
+    const r = new FileReader();
+    r.onerror = () => setMsg({ err: "Could not read that image." });
+    r.onload = () => setStyleImg({ base64: r.result, contentType: file.type || "image/jpeg", name: file.name });
+    r.readAsDataURL(file);
+  };
+  const addStyle = async () => {
+    if (!styleName.trim()) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const body = { action: "create_style", label: styleName.trim() };
+      if (styleImg) { body.imageBase64 = styleImg.base64; body.imageContentType = styleImg.contentType; }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const added = styleName.trim();
+      setStyleName(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
+      await load();
+      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the CSV below.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  const toggleStyle = async (s) => {
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_active", styleId: s.id, active: !s.active } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  // Drag a style to a new position; persists the new order (sort_order = index), which is what
+  // the design page sorts styles by. Optimistic UI, reloads on failure to resync.
+  const moveStyle = async (from, to) => {
+    const arr = [...allStyles()];
+    if (from == null || to == null || from === to || from < 0 || to < 0 || from >= arr.length || to >= arr.length) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(to, 0, moved);
+    setCat((c) => ({ ...c, styles: arr }));
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "reorder_styles", orderedIds: arr.map((s) => s.id) } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setMsg({ ok: "Display order saved — this is the order customers see on the design page." });
+    } catch (e) { setMsg({ err: e.message }); await load(); }
+    setStyleBusy(false);
+  };
+  const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
+  const onEditImg = (file) => {
+    if (!file) { setEditImg(null); return; }
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setEditFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setEditFileKey((k) => k + 1); return; }
+    const r = new FileReader();
+    r.onerror = () => setMsg({ err: "Could not read that image." });
+    r.onload = () => setEditImg({ base64: r.result, contentType: file.type || "image/jpeg" });
+    r.readAsDataURL(file);
+  };
+  const saveEdit = async () => {
+    const s = editStyle;
+    if (!s || !editName.trim()) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const body = { action: "update_style", styleId: s.id, label: editName.trim() };
+      if (editImg) { body.imageBase64 = editImg.base64; body.imageContentType = editImg.contentType; }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      setMsg({ ok: `Building style updated.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+    setEditStyle(null);
+  };
+  const confirmDelete = async () => {
+    const s = pendingDelete;
+    if (!s) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "delete_style", styleId: s.id } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      setMsg({ ok: `Building style “${s.label}” and its sizes/prices were deleted.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+    setPendingDelete(null);
+  };
+  const downloadTemplate = () => {
+    if (!cat) return;
+    const its = items();
+    const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
+    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    const rows = [];
+    activeStyles().forEach((s) => {
+      const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
+      if (sizes.length === 0) {
+        // No sizes yet → one starter row: fill width/length/price and copy the line down.
+        rows.push([s.label, "", "", "", ...its.map(() => "no"), "yes"]);
+      } else {
+        sizes.forEach((z) => {
+          const inc = incBySize[z.id] || {};
+          rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
+            ...its.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+        });
+      }
+    });
+    downloadFile(`${cat.clientId || "pricing"}-pricing.csv`, toCSV(headers, rows));
+  };
+  const onUpload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null); setResult(null);
+    try {
+      if (file.size > 5_000_000) throw new Error("CSV too large (max 5MB).");
+      const matrix = parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      const header = matrix[0].map((h) => String(h).trim());
+      const lc = header.map((h) => h.toLowerCase());
+      const iStyle = lc.indexOf("style"), iWidth = lc.indexOf("width"), iLength = lc.indexOf("length"), iPrice = lc.indexOf("price"), iActive = lc.indexOf("active");
+      if (iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0) throw new Error('CSV needs "style", "width", "length" and "price" columns.');
+      const reserved = new Set([iStyle, iWidth, iLength, iPrice, iActive]);
+      const labelToKey = {}; items().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
+      const colKey = header.map((h, idx) => reserved.has(idx) ? null : (labelToKey[h.toLowerCase()] || null));
+      const rows = matrix.slice(1).map((cols) => {
+        const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
+        return { style: cols[iStyle], width: cols[iWidth], length: cols[iLength], price: cols[iPrice], active: iActive >= 0 ? cols[iActive] : "", inclusions };
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setResult(data); await load();
+      const parts = []; if (data.created) parts.push(`${data.created} added`); if (data.updated) parts.push(`${data.updated} updated`);
+      setMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : "") });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false); setFileKey((k) => k + 1);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0 };
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+
+      {editStyle && (
+        <div onClick={() => !styleBusy && setEditStyle(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>Edit building style</div>
+            <span style={S.lbl}>Name</span>
+            <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 14 }} />
+            <span style={S.lbl}>Photo</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
+              {(editImg || editStyle.image_url)
+                ? <img src={editImg ? editImg.base64 : editStyle.image_url} alt="" style={thumb} />
+                : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
+              <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer" }}>
+                {editImg ? "New image selected ✓" : "Replace image"}
+                <input key={editFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onEditImg(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setEditStyle(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              <button onClick={saveEdit} disabled={styleBusy || !editName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim()) ? 0.55 : 1 }}>
+                {styleBusy ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingDelete && (
+        <div onClick={() => !styleBusy && setPendingDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 10 }}>Delete “{pendingDelete.label}”?</div>
+            <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 18 }}>
+              This permanently deletes the style and <b>all of its sizes and prices</b>. Past designs that used it keep
+              their saved plan, but their estimate can no longer be regenerated. <b>This cannot be undone.</b> To just
+              stop offering it, use <b>Hide</b> instead.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setPendingDelete(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              <button onClick={confirmDelete} disabled={styleBusy} style={S.btn(styleBusy ? "#9CA3AF" : "#DC2626", "#FFF")}>
+                {styleBusy ? "Deleting…" : "OK – proceed and delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={S.card}>
+        <div style={S.h2}>Building styles</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
+          style using the CSV below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
+          sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
+          use it only when you’re sure you won’t need that style again.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+          <div>
+            {allStyles().length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                {allStyles().map((s, i) => (
+                  <div key={s.id}
+                    draggable={!styleBusy}
+                    onDragStart={(e) => { setDragIdx(i); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => { e.preventDefault(); moveStyle(dragIdx, i); setDragIdx(null); }}
+                    onDragEnd={() => setDragIdx(null)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: `1px solid ${dragIdx === i ? ACCENT : "#E2E8F0"}`, borderRadius: 8, opacity: dragIdx === i ? 0.4 : (s.active ? 1 : 0.55), background: "#FFF", cursor: styleBusy ? "default" : "grab" }}>
+                    <span title="Drag to reorder" style={{ color: "#CBD5E1", fontSize: 16, userSelect: "none", flexShrink: 0 }}>⠿</span>
+                    {s.image_url
+                      ? <img src={s.image_url} alt="" style={thumb} />
+                      : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <button onClick={() => openEdit(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
+                    <button onClick={() => toggleStyle(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>{s.active ? "Hide" : "Show"}</button>
+                    <button onClick={() => setPendingDelete(s)} disabled={styleBusy} style={S.btn("#FEF2F2", "#DC2626")}>Delete</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={styleName} onChange={(e) => setStyleName(e.target.value)} placeholder="Building style name (e.g. Lofted Barn)" style={{ ...S.input, minWidth: 220 }} />
+              <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer", display: "inline-block" }}>
+                {styleImg ? "Image selected ✓" : "Choose image"}
+                <input key={styleFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onStyleImg(e.target.files && e.target.files[0])} />
+              </label>
+              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Pricing &amp; included options (CSV)</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Download the template (one row per building style), then add a row for every size you offer: type the
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The yes/no columns mean “is this option
+          <b> included in the price?</b>” — leave them <b>no</b> to charge for it. Re-upload anytime to update prices
+          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
+          <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
+            <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
+            (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
+            <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+              {busy ? "Importing…" : "⬆ Upload filled CSV"}
+              <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
+                onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+            </label>
+          </div>
+        )}
+        {result && result.skipped && result.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp) ───
+// Edits the DEFAULT (all-styles) price for each enabled layout item. Per-style overrides
+// stay DB-managed. These rates feed estimates for tenants that don't price via GHL products.
+const LP_METHODS = [
+  { value: "each", label: "each" },
+  { value: "lineal_ft", label: "lineal ft" },
+  { value: "sqft_option", label: "sqft option" },
+  { value: "sqft_building", label: "sqft building" },
+  { value: "perimeter_building", label: "perimeter building" },
+  { value: "pct_building_price", label: "pct building price" },
+  { value: "pct_estimate_total", label: "pct estimate total" },
+];
+function LayoutPricing() {
+  const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
+  const [rows, setRows] = useState([]);      // [{ item_key, label, pricing_method, rate }]
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  const [imgBusyKey, setImgBusyKey] = useState(null);   // item_key currently uploading an image
+  const [imgFileKey, setImgFileKey] = useState(0);      // resets the hidden file inputs after a pick
+
+  const buildRows = (data) => {
+    const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
+    return (data.items || []).map((it) => {
+      const p = byKey[it.key] || {};
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null };
+    });
+  };
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data); setRows(buildRows(data));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (key, field, val) => setRows((rs) => rs.map((r) => r.item_key === key ? { ...r, [field]: val } : r));
+
+  // Optional per-item product image. Uploads immediately to get a public URL (branding
+  // bucket, via portal-settings), stores it on the row, and persists on "Save prices" →
+  // layout_item_pricing.image_url, which submit-estimate attaches to that item's estimate line.
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onRowImg = async (itemKey, file) => {
+    if (!file) return;
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    setImgBusyKey(itemKey); setMsg(null);
+    try {
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onerror = () => rej(new Error("Could not read that image."));
+        r.onload = () => res(r.result);
+        r.readAsDataURL(file);
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_layout_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRow(itemKey, "image_url", data.url);
+      setMsg({ ok: "Image added — click “Save prices” to apply it to estimates." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyKey(null); setImgFileKey((k) => k + 1);
+  };
+  const removeRowImg = (itemKey) => { setRow(itemKey, "image_url", null); setMsg({ ok: "Image removed — click “Save prices” to apply." }); };
+
+  const save = async (rowsToSave) => {
+    setBusy(true); setMsg(null);
+    try {
+      const payloadRows = (rowsToSave || rows).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: Number(r.rate) || 0, imageUrl: r.image_url ?? null }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} item price(s)` + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const downloadCsv = () => {
+    const headers = ["item", "method", "rate"];
+    downloadFile(`${(cat && cat.clientId) || "layout"}-layout-pricing.csv`, toCSV(headers, rows.map((r) => [r.item_key, r.pricing_method, r.rate])));
+  };
+
+  const onUpload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null);
+    try {
+      if (file.size > 2_000_000) throw new Error("CSV too large (max 2MB).");
+      const matrix = parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      const header = matrix[0].map((h) => String(h).trim().toLowerCase());
+      const iItem = header.indexOf("item"), iMethod = header.indexOf("method"), iRate = header.indexOf("rate");
+      if (iItem < 0 || iMethod < 0 || iRate < 0) throw new Error('CSV needs "item", "method" and "rate" columns.');
+      // Accept the item by key or label, and the method as its enum value or friendly label.
+      const keyByAny = {}; rows.forEach((r) => { keyByAny[r.item_key.toLowerCase()] = r.item_key; keyByAny[r.label.toLowerCase()] = r.item_key; });
+      const methodByAny = {}; LP_METHODS.forEach((m) => { methodByAny[m.value.toLowerCase()] = m.value; methodByAny[m.label.toLowerCase()] = m.value; });
+      const next = rows.map((r) => ({ ...r }));
+      const byKey = {}; next.forEach((r) => { byKey[r.item_key] = r; });
+      matrix.slice(1).forEach((cols) => {
+        const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
+        if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
+        const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
+        if (method) byKey[itemKey].pricing_method = method;
+        const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
+        if (rate !== "") byKey[itemKey].rate = rate;
+      });
+      setRows(next);
+      await save(next);
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false); setFileKey((k) => k + 1);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Layout item pricing</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Set how each item customers can place on the floor plan is priced —
+          <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
+          <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
+          <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
+          These rates are used on estimates when you don’t price through GoHighLevel products. Building sizes are priced on the <b>Pricing</b> tab.
+          <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
+        ) : (
+          <>
+            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+              <thead><tr>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.item_key}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}</td>
+                    <td style={S.td}>
+                      <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
+                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}>
+                      <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    <td style={S.td}>
+                      {r.image_url ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <img src={r.image_url} alt="" style={thumb} />
+                          <button onClick={() => removeRowImg(r.item_key)} disabled={busy || imgBusyKey === r.item_key} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
+                        </div>
+                      ) : (
+                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyKey === r.item_key ? "default" : "pointer", display: "inline-block" }}>
+                          {imgBusyKey === r.item_key ? "Uploading…" : "Add image"}
+                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyKey === r.item_key} style={{ display: "none" }} onChange={(e) => onRowImg(r.item_key, e.target.files && e.target.files[0])} />
+                        </label>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={() => save()} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save prices"}</button>
+              <button onClick={downloadCsv} disabled={busy || !cat} style={S.btn("#F1F5F9", "#334155")}>⬇ Download CSV</button>
+              <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+                {busy ? "Working…" : "⬆ Upload CSV"}
+                <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }} onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+          </>
+        )}
+        {msg && msg.skipped && msg.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} item(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Colors (paint palette) ───
+// Common shed/barn paint colours for the one-click "quick add" library. Hexes are
+// APPROXIMATE — for on-screen recognition only; only the NAME is saved as the colour
+// label. Owners curate freely and can verify exact codes at hayleypaint.com. Carolyn's
+// examples (Mountain Red / Classic Red / Red Delicious) are included.
+const COLOR_LIBRARY = [
+  { name: "Bright White", hex: "#F6F6F1" }, { name: "White", hex: "#ECEAE0" },
+  { name: "Almond", hex: "#E7D9BE" }, { name: "Beige", hex: "#D8C7A0" },
+  { name: "Sandstone", hex: "#C9B489" }, { name: "Buckskin", hex: "#B79A6E" },
+  { name: "Desert Tan", hex: "#C2A579" }, { name: "Khaki", hex: "#A89468" },
+  { name: "Clay", hex: "#B08155" }, { name: "Mocha Tan", hex: "#9A8064" },
+  { name: "Coffee Brown", hex: "#5A4535" }, { name: "Chocolate", hex: "#3E2C22" },
+  { name: "Barn Red", hex: "#7B1E22" }, { name: "Mountain Red", hex: "#8C2A2A" },
+  { name: "Classic Red", hex: "#A32431" }, { name: "Red Delicious", hex: "#9E1B2A" },
+  { name: "Burgundy", hex: "#5E1F2B" }, { name: "Sage Green", hex: "#8A9A78" },
+  { name: "Hunter Green", hex: "#2F4A38" }, { name: "Forest Green", hex: "#274134" },
+  { name: "Ivy Green", hex: "#3B5E3A" }, { name: "Country Blue", hex: "#5E7C99" },
+  { name: "Slate Blue", hex: "#41566B" }, { name: "Navy Blue", hex: "#25324B" },
+  { name: "Light Gray", hex: "#C7CACC" }, { name: "Pewter Gray", hex: "#8C9194" },
+  { name: "Slate Gray", hex: "#5E676C" }, { name: "Charcoal Gray", hex: "#3A3F43" },
+  { name: "Quaker Gray", hex: "#9AA0A0" }, { name: "Black", hex: "#1C1C1C" },
+];
+
+function ColorsView() {
+  const [cat, setCat] = useState(null);
+  const [rows, setRows] = useState([]);      // [{ id, label, siding, trim, allow_custom, is_default, active, image_url }]
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [libOpen, setLibOpen] = useState(false);
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    setRows((data.colors || []).map((c) => ({
+      id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
+      allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
+      hex: c.hex || null,
+    })));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (idx, field, val) => setRows((rs) => rs.map((r, i) => i === idx ? { ...r, [field]: val } : r));
+  const addRow = (preset) => setRows((rs) => [...rs, {
+    id: null, label: preset ? preset.name : "", siding: true, trim: true,
+    allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
+  }]);
+  const removeRow = (idx) => setRows((rs) => rs.filter((_, i) => i !== idx));
+  const move = (idx, dir) => setRows((rs) => {
+    const j = idx + dir; if (j < 0 || j >= rs.length) return rs;
+    const next = rs.slice(); [next[idx], next[j]] = [next[j], next[idx]]; return next;
+  });
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const colors = rows.map((r, i) => ({
+        id: r.id || undefined, label: r.label, siding: !!r.siding, trim: !!r.trim,
+        allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
+        sortOrder: i, hex: r.hex || null,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const swatchBox = { width: 40, height: 30, borderRadius: 4, flexShrink: 0, border: "1px solid #CBD5E1", objectFit: "cover" };
+  const ctr = { ...S.td, textAlign: "center" };
+  const chk = (idx, field) => <input type="checkbox" checked={!!rows[idx][field]} onChange={(e) => setRow(idx, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Paint colors</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          These are the colors your customers pick from when they choose <b>Painted</b> in the designer.
+          Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+          Turn on <b>Custom</b> for a “their-own-color” option (the customer types the exact color, e.g. a Sherwin-Williams name).
+          <b> Default</b> pre-selects a color; <b>Active</b> shows/hides it without deleting. Drag order with ▲▼.
+          <br />Need color ideas? See <b>hayleypaint.com</b> (color gallery) or <b>classicbuildingssales.com</b>, or use the quick-add library below.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+          <>
+            {rows.length === 0 ? (
+              <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14, minWidth: 720 }}>
+                  <thead><tr>
+                    <th style={S.th}>Order</th><th style={S.th}>Swatch</th><th style={S.th}>Color name</th>
+                    <th style={S.th}>Siding</th><th style={S.th}>Trim</th><th style={S.th}>Custom</th>
+                    <th style={S.th}>Default</th><th style={S.th}>Active</th><th style={S.th}></th>
+                  </tr></thead>
+                  <tbody>
+                    {rows.map((r, idx) => (
+                      <tr key={r.id || `new-${idx}`}>
+                        <td style={ctr}>
+                          <button onClick={() => move(idx, -1)} disabled={idx === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                          <button onClick={() => move(idx, 1)} disabled={idx === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                        </td>
+                        <td style={ctr}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ ...swatchBox, background: r.hex || "#F1F5F9", display: "inline-block" }} title={r.hex || "No color set"} />
+                            <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(idx, "hex", e.target.value)} title="Pick this color"
+                              style={{ width: 26, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                          </span>
+                        </td>
+                        <td style={S.td}>
+                          <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 140 }} />
+                        </td>
+                        <td style={ctr}>{chk(idx, "siding")}</td>
+                        <td style={ctr}>{chk(idx, "trim")}</td>
+                        <td style={ctr}>{chk(idx, "allow_custom")}</td>
+                        <td style={ctr}>{chk(idx, "is_default")}</td>
+                        <td style={ctr}>{chk(idx, "active")}</td>
+                        <td style={ctr}>
+                          <button onClick={() => removeRow(idx)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+              <button onClick={() => addRow()} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+              <button onClick={() => setLibOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{libOpen ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
+              <div style={{ flex: 1 }} />
+              <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+            </div>
+            {libOpen && (
+              <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to your list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {COLOR_LIBRARY.map((c) => (
+                    <button key={c.name} onClick={() => { addRow(c); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                      style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
+                      <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {msg && msg.skipped && msg.skipped.length > 0 && (
+              <div style={{ marginTop: 12, fontSize: 13 }}>
+                <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
+                <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+                  {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Dashboard shell ───
+function Dashboard({ session }) {
+  const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
+  const [tab, setTab] = useState("designs");
+
+  useEffect(() => {
+    (async () => {
+      const { data: mapping, error } = await sb.from("client_users").select("client_id, role").maybeSingle();
+      if (error || !mapping) { setTenant("none"); return; }
+      let businessName = mapping.client_id;
+      // client_configs is now column-structured (no monolithic `config` blob);
+      // read the dedicated company_name column for the dashboard heading.
+      const { data: cfg } = await sb.from("client_configs").select("company_name").eq("client_id", mapping.client_id).maybeSingle();
+      if (cfg && cfg.company_name) {
+        businessName = cfg.company_name;
+      }
+      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user" });
+    })();
+  }, [session]);
+
+  const signOut = () => sb.auth.signOut();
+
+  if (tenant === null) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
+  }
+  if (tenant === "none") {
+    return (
+      <div style={{ maxWidth: 420, margin: "60px auto", padding: "0 16px" }}>
+        <div style={{ ...S.card, textAlign: "center" }}>
+          <div style={{ ...S.h2, fontSize: 16 }}>No business linked to this account</div>
+          <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Your login works, but it isn't connected to a business yet. Contact CSM Synergy to finish your setup.</p>
+          <button onClick={signOut} style={S.btn("#1E293B", "#FFF")}>Sign Out</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Only owners/admins manage Pricing + Settings; regular team members see only
+  // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
+  // can't reach the other views even by forcing the tab state).
+  const isAdmin = tenant.role === "owner" || tenant.role === "admin";
+  const activeTab = (!isAdmin && tab !== "designs") ? "designs" : tab;
+
+  const tabBtn = (id, label) => (
+    <button onClick={() => setTab(id)} style={{
+      ...S.btn(activeTab === id ? "#75E6DA" : "transparent", activeTab === id ? "#3D3672" : "#75E6DA"),
+      borderRadius: "8px 8px 0 0", padding: "10px 18px",
+    }}>{label}</button>
+  );
+
+  return (
+    <div>
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "0 24px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 0 12px" }}>
+          <div style={S.badge}>SS</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 800, fontSize: 17, color: "#FFF" }}>{tenant.businessName}</div>
+            <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal · {session.user.email}</div>
+          </div>
+          <button onClick={signOut} style={{ ...S.btn("rgba(255,255,255,0.1)", "#E2E8F0"), border: "1px solid rgba(255,255,255,0.2)" }}>Sign Out</button>
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {tabBtn("designs", "Designs & Leads")}
+          {isAdmin && tabBtn("pricing", "Pricing")}
+          {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
+          {isAdmin && tabBtn("colors", "Colors")}
+          {isAdmin && tabBtn("settings", "Settings")}
+        </div>
+      </div>
+      <div style={{ padding: "20px 24px" }}>
+        {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
+        {activeTab === "pricing" && isAdmin && <PricingCsv />}
+        {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
+        {activeTab === "colors" && isAdmin && <ColorsView />}
+        {activeTab === "settings" && isAdmin && <SettingsView />}
+      </div>
+    </div>
+  );
+}
+
+// ─── App root: session + recovery routing ───
+function PortalApp() {
+  const [session, setSession] = useState(undefined); // undefined = booting
+  const [recovery, setRecovery] = useState(false);
+
+  useEffect(() => {
+    // A recovery- or invite-email link lands here with #…type=recovery or
+    // #…type=invite. supabase-js exchanges the token automatically
+    // (detectSessionInUrl); we route both to the set-password view so a freshly
+    // invited owner sets a password instead of dropping into the dashboard with none.
+    const h = window.location.hash;
+    if (h.includes("type=recovery") || h.includes("type=invite")) setRecovery(true);
+    sb.auth.getSession().then(({ data }) => setSession(data.session || null));
+    const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
+      setSession(sess || null);
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) {
+    return <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading…</div>;
+  }
+  if (session && recovery) return <ResetPasswordView onDone={() => { setRecovery(false); window.location.hash = ""; }} />;
+  if (!session) return (
+    <div>
+      <div style={S.header}>
+        <div style={S.badge}>SS</div>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 17 }}>StructureStudio</div>
+          <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal</div>
+        </div>
+      </div>
+      <LoginView />
+    </div>
+  );
+  return <Dashboard session={session} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<PortalApp />);
+</script></body></html>

@@ -1,9 +1,41 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
 import { createClient } from "@supabase/supabase-js";
+import FeedbackWidget from "./FeedbackWidget.jsx";
 
-// ─── DEFAULT CONFIG (Junior Barns) ───
-// To use a different client: load their JSON config and pass to <StructureStudio config={clientConfig} />
-const DEFAULT_CONFIG = {"clientId": "junior-barns", "branding": {"companyName": "Junior Barns", "tagline": "Design & Quote", "accentColor": "#D97706", "headerBg": "linear-gradient(135deg, #1E293B 0%, #334155 100%)", "logo": null}, "contactFields": ["name", "email", "phone", "street", "city", "state", "zip"], "buildingStyles": [{"value": "Econo", "label": "Econo", "img": "data:image/jpeg;base64,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", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16", "8x20"]}, {"value": "Urban", "label": "Urban", "img": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABIMDRANCxIQDhAUExIVGywdGxgYGzYnKSAsQDlEQz85Pj1HUGZXR0thTT0+WXlaYWltcnNyRVV9hnxvhWZwcm7/2wBDARMUFBsXGzQdHTRuST5Jbm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm7/wAARCAB4AHgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDhqKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKlt7aW6lEcKFm9u1a6Wlppag3JE9z/cHRaTdhpXMOiukRdOvhyv2eT0cDB/pUc+hhOfK3L6xn+lLmQWOforUfS48fK7A+hqF9MkH3XU/XiqEUaKstYXC/8ALPP0NQtFIn3kYfUUAMooooAKKKKACiiigArSsdIeZPPum8i3HOW6n6Vno2x1bGcEHFacVzPqt0wmYYClgo6L9KTGi016safZ9Mj8qPvJ/E1NgsScs/J681at7VUHSrWJF4UR4wD93/69ZXNUrFQWi7cY547VLGJrYkwSEDP3TyPyqxmf++o+iL/hTWLtIiSNK3Oc8bR/9fmkNsQ3MExxeQbWH/LRP85qteRpBsMLiWOTvnkVceIEHikmtlFuDgcn+tNNicUZaXCEHIYBfUU9Z4myN44qZrZPT1pps0wcDrVcwuVELRQS9Vjb8qhk06BhnaV+hqwbEAEDvUZs2VMIxH0p8wuQoTaY68xMH9jwapujRth1Kn0IrZMU4wA59885pkglKkSIrjsCKfMTysx6KsXCRjdgbHHVc0VRJXrS0D/j9f8A65H+lZtaWgf8fz/9c2/pSew1udAoqQ9f+Aio1qRuv/ARWJuL607+A/7wpnrT/wDlmf8AeFAMaRwafMP9GX6/1pp70+b/AI9h9f600JlUj+tGODSn/Gj1oAaRTSOKeaQ9KAIyvNRsgqY9ajamBz2pDF9KPcfyFFLqn/IQl/D+QorVGDKtaWg/8fzf9c2/pWbWjoX/AB/N/wBc2pPYa3OgWpAzoxwQQVBwwziolNSE9P8AdFYmxJ5snPEf/fP/ANemsrO4lZyNpxsHC898etJnrTwf3Z/3hQFgPeny/wDHsPr/AFqM/wAVPl/49R9f600DK5/xo7GkP+NL60AIaQ9KDSHpQA09aY1O701qYjA1T/kIS/h/IUUap/yEJPw/kKK1RiypWjof/H8f+ubVnU+KWSF98TFW6ZFDBHWKal2MwBUEjaK5hdVulH+tyfdRThrFyDk7D+BH9az5Wa86Om2Pz8ppGk2MIyr5bkHbxx71gLr069VH4MRUo8QueHiJH+//APWpcrDmRunvT5f+PX8f61ipr8b5zA447MDT38Q25i2CGXPvihJjbReP+NHY1jSa8f8AlnAP+BNmq761dN90on0X/GnysXMjoD1prkKvzED6nFczJf3Mn3p3/A4qBmZjliT9afKLnOke9toz806fgc1Wk1W2X7u9voMVh0U+UXOya7nFxctKF2g44P0oqGiqICiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD/2Q==", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16", "8x20", "10x12", "10x16", "10x20", "10x24", "12x12", "12x16", "12x20", "12x24", "12x28", "12x32"]}, {"value": "Northwood", "label": "Northwood", "img": "data:image/jpeg;base64,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", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16", "8x20"]}, {"value": "Farmland", "label": "Farmland", "img": "data:image/jpeg;base64,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", "sizes": ["8x8", "8x10", "8x12", "8x14", "8x16", "8x20"]}], "defaultSizes": ["8x8", "8x10", "8x12", "8x14", "8x16", "8x20"], "options": [{"id": "paint", "label": "Paint Option", "type": "counter", "options": ["No Paint", "Painted"]}], "layoutItems": {"singleDoor": {"label": "Single Door (36\")", "width": 3, "height": 0.5, "color": "#D97706", "wallOnly": true, "wallSnap": false, "icon": "🚪", "shortLabel": "SD"}, "doubleDoor": {"label": "Double Door (60\")", "width": 5, "height": 0.5, "color": "#B45309", "wallOnly": true, "wallSnap": false, "icon": "🚪🚪", "shortLabel": "DD"}, "window": {"label": "Window (24\")", "width": 2, "height": 0.5, "color": "#0EA5E9", "wallOnly": true, "wallSnap": false, "icon": "🪟", "shortLabel": "W"}, "workbench": {"label": "Workbench", "width": 4, "height": 2, "color": "#8B5E3C", "wallOnly": false, "wallSnap": true, "icon": "🔧", "shortLabel": "WB"}, "loft": {"label": "Loft Area", "width": 6, "height": 4, "color": "#7C3AED", "wallOnly": false, "wallSnap": false, "icon": "⬆️", "shortLabel": "LF"}, "ramp": {"label": "Ramp", "width": 3, "height": 3, "color": "#78716C", "wallOnly": false, "wallSnap": false, "doorSnap": true, "icon": "⬛", "shortLabel": "RAMP"}, "roughOpening": {"label": "Rough Opening", "width": 3, "height": 0.5, "color": "#000000", "wallOnly": true, "wallSnap": false, "icon": "⬜", "shortLabel": "RO"}}, "supabase": {"url": "https://xymafcepzjixcbeotzje.supabase.co", "anonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh5bWFmY2VwemppeGNiZW90emplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0ODM5NTcsImV4cCI6MjA5NzA1OTk1N30.PRt5LSeSSCbb8DBj4YXrxSTtUj3HuKjYGyx48XAhs7M"}, "googleMapsApiKey": "AIzaSyDEKe7mODI2xKnUQ5-z7L0ZZnUfBgE6dok"};
+// Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
+// carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
+function PasswordInput({ style, wrapStyle, ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%", boxSizing: "border-box", ...wrapStyle }}>
+      <input {...rest} type={show ? "text" : "password"} style={{ ...style, width: "100%", boxSizing: "border-box", paddingRight: 38 }} />
+      <button type="button" tabIndex={-1} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"} onMouseDown={(e) => e.preventDefault()} onClick={() => setShow((v) => !v)} style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 34, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "#64748B" }}>
+        {show ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" /><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" /><line x1="2" x2="22" y1="2" y2="22" /></svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+// ─── Supabase project ───
+// Single shared project across all white-label tenants. The anon key is browser-safe
+// (RLS + capability RPCs); the service-role key never leaves the Edge Functions.
+const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+
+// Address-autocomplete key used when a tenant's config row doesn't carry its own
+// googleMapsApiKey.
+const DEFAULT_GOOGLE_MAPS_API_KEY = "AIzaSyDEKe7mODI2xKnUQ5-z7L0ZZnUfBgE6dok";
+
+// ─── Default tenant ───
+// When neither ?client= nor a tenant subdomain nor a design owner resolves a
+// client, the loader fetches this client's config from public.client_configs.
+// There is no in-source config copy — the table row is the source of truth.
+// To change Junior Barns, edit the row, not this file.
+const DEFAULT_CLIENT_ID = "junior-barns";
 
 // ─── STRUCTURE STUDIO ENGINE ───
 const WALL_THICKNESS = 6;
@@ -15,6 +47,47 @@ const BUILT_IN_TOOLS = {
   textNote: { label: "Note", color: "#0F172A", icon: "📝", shortLabel: "Note", noteType: true, width: 4, height: 1 },
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
+
+// Title-case a building-style name for display (designs store either the label
+// "Farmland" or the lowercase key "cabin").
+function capWords(s) { return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase()); }
+
+// Board-and-batten door glyph for the palette buttons (single + double), modeled on the
+// real shed doors: cream frame, vertical planks, a mid cross-rail, black T-hinges, and a
+// latch. Replaces the generic door emoji so the button reads as the actual product.
+function DoorIcon({ double = false }) {
+  const FRAME = "#ECE4D3", PANEL = "#B99A82", PLANK = "#8B7058", IRON = "#2C2A28";
+  const leaf = (x, w, hingeLeft) => {
+    const planks = [];
+    for (let i = 1; i <= 3; i++) { const px = x + (w * i) / 4; planks.push(<line key={i} x1={px} y1={2.6} x2={px} y2={15.4} stroke={PLANK} strokeWidth={0.4} />); }
+    const hx = hingeLeft ? x + 0.5 : x + w - 1.8;
+    return (
+      <g key={x}>
+        <rect x={x} y={1} width={w} height={16} rx={0.5} fill={FRAME} stroke="#B5A98E" strokeWidth={0.7} />
+        <rect x={x + 1.1} y={2.2} width={w - 2.2} height={13.6} fill={PANEL} />
+        {planks}
+        <rect x={x + 1.1} y={8.1} width={w - 2.2} height={1.2} fill={FRAME} />
+        <rect x={hx} y={3.4} width={1.3} height={0.9} fill={IRON} />
+        <rect x={hx} y={12.8} width={1.3} height={0.9} fill={IRON} />
+      </g>
+    );
+  };
+  if (double) {
+    return (
+      <svg width={18} height={16} viewBox="0 0 20 18" style={{ display: "block" }} aria-hidden="true">
+        {leaf(0.5, 9, true)}
+        {leaf(10.5, 9, false)}
+        <rect x={9.2} y={8.3} width={1.6} height={0.9} fill={IRON} />
+      </svg>
+    );
+  }
+  return (
+    <svg width={11} height={16} viewBox="0 0 12 18" style={{ display: "block" }} aria-hidden="true">
+      {leaf(0.5, 11, true)}
+      <rect x={9.4} y={8.2} width={1.4} height={0.9} fill={IRON} />
+    </svg>
+  );
+}
 
 // Closest point distance from (px,py) to the segment (x1,y1)-(x2,y2)
 function _distToSeg(px, py, x1, y1, x2, y2) {
@@ -144,12 +217,14 @@ function getDisplayLabel(positionalWall, frontWall) {
 
 let idCounter = 1;
 
-// 6-char short code in format SS-XXXXXX. Alphabet drops 0/O/I/1 to avoid
-// look-alikes when read aloud or shared. ~1B combinations.
+// 10-char short code in format SS-XXXXXXXXXX. Alphabet drops 0/O/I/1 to avoid
+// look-alikes when read aloud or shared. 32^10 ≈ 2^50 combinations — the code is
+// the capability for loading/saving a design via the RPCs, so it must not be
+// guessable. (Legacy 6-char codes from before the RPC data path still load fine.)
 const _SHORT_ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function genShortCode() {
   let s = "";
-  for (let i = 0; i < 6; i++) s += _SHORT_ALPHA[Math.floor(Math.random() * _SHORT_ALPHA.length)];
+  for (let i = 0; i < 10; i++) s += _SHORT_ALPHA[Math.floor(Math.random() * _SHORT_ALPHA.length)];
   return `SS-${s}`;
 }
 
@@ -195,11 +270,59 @@ function loadGoogleMapsPlaces(apiKey) {
   return _googleMapsLoadPromise;
 }
 
+// ─── Per-option building-style scoping ───
+// An option may declare `buildingStyles: ["Urban", "Northwood"]` to limit when
+// it's shown. Without that field (or with an empty array) the option always
+// applies. Unrestricted options also show before any style is picked; scoped
+// options hide until the user picks a style they target.
+function isOptionApplicable(opt, styleValue) {
+  if (!opt || !Array.isArray(opt.buildingStyles) || opt.buildingStyles.length === 0) return true;
+  return !!styleValue && opt.buildingStyles.includes(styleValue);
+}
+
 // ─── MAIN COMPONENT ───
-export default function StructureStudio({ config = DEFAULT_CONFIG }) {
+// Custom color dropdown: a native <select> can't render a color swatch per option, so this
+// shows a color chip + name in the closed button and in each list row (matching the palette).
+function ColorSelect({ value, colors, onPick }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    document.addEventListener("touchstart", h);
+    return () => { document.removeEventListener("mousedown", h); document.removeEventListener("touchstart", h); };
+  }, [open]);
+  const sel = colors.find((c) => c.label === value);
+  const chip = (hex) => <span style={{ width: 14, height: 14, borderRadius: 3, background: hex || "transparent", border: "1px solid rgba(0,0,0,0.25)", flexShrink: 0, display: "inline-block" }} />;
+  return (
+    <div ref={ref} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        style={{ width: "100%", display: "flex", alignItems: "center", gap: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, background: "#FFF", cursor: "pointer", color: sel ? "#334155" : "#94A3B8" }}>
+        {sel && chip(sel.hex)}
+        <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel ? sel.label : "Select…"}</span>
+        <span style={{ fontSize: 10, color: "#94A3B8" }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 30, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,0.15)", maxHeight: 220, overflowY: "auto" }}>
+          {colors.map((c) => (
+            <div key={c.id || c.label} onClick={() => { onPick(c.label); setOpen(false); }}
+              style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12, background: c.label === value ? "#F1F5F9" : "#FFF", color: "#334155" }}>
+              {chip(c.hex)}<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StructureStudioInner({ config }) {
   const C = config;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
   const accent = C.branding.accentColor || "#D97706";
+  // White-label initials for the logo placeholder shown when no logo is set.
+  const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
   // Admin gate: ?admin=1 surfaces the GHL credentials panel. The credentials never
   // round-trip through the browser — admin types them in, the Edge Function stores
   // them in Supabase, and customers' browsers never see them.
@@ -214,8 +337,43 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     return init;
   });
 
+  // Options the user currently sees. Options without scoping are always in the
+  // list; scoped options join/leave as the user picks/changes building style.
+  const visibleOptions = useMemo(
+    () => C.options.filter((o) => isOptionApplicable(o, sel.style)),
+    [C.options, sel.style]
+  );
+
+  // When the building style changes, snap any now-inapplicable option back to
+  // its default so a stale "Painted" (etc.) selection can't be silently sent
+  // along in the submit payload.
+  useEffect(() => {
+    setSel((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      C.options.forEach((opt) => {
+        if (isOptionApplicable(opt, prev.style)) return;
+        const def = opt.type === "counter" ? opt.options[0] : "";
+        if (next[opt.id] !== def) { next[opt.id] = def; changed = true; }
+      });
+      return changed ? next : prev;
+    });
+  }, [sel.style, C.options]);
+
+  // Phase 4a: which placeable items are INCLUDED (free) with the selected
+  // style+size — from get_config's per-style sizeInclusions map. Everything else
+  // is an "additional" (chargeable) option. Empty until a style+size is chosen.
+  const includedItemKeys = useMemo(() => {
+    if (!sel.style || !sel.size) return [];
+    const st = C.buildingStyles.find((s) => s.value === sel.style);
+    return st && st.sizeInclusions && Array.isArray(st.sizeInclusions[sel.size]) ? st.sizeInclusions[sel.size] : [];
+  }, [sel.style, sel.size, C.buildingStyles]);
+
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
   const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
+  // Tracks when the shopper picked an "allow custom" color and is typing an exact value
+  // (so the custom text box stays open even while paintColors.body/trim is momentarily "").
+  const [paintCustom, setPaintCustom] = useState({ body: false, trim: false });
   const [customOptions, setCustomOptions] = useState([]);
   const [roDimensions, setRoDimensions] = useState({});
   const [bldgW, setShedW] = useState(10);
@@ -227,12 +385,20 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
   const [resizing, setResizing] = useState(null);
   const [showExport, setShowExport] = useState(false);
   const [exportUrl, setExportUrl] = useState(null);
-  const [configOpen, setConfigOpen] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   // After a successful save, holds { code, viewUrl, imageUrl } for the success screen
   const [savedDesign, setSavedDesign] = useState(null);
+  // Current design's short code (set when a design is loaded or saved). Drives the
+  // "all designs on this estimate" version list shown in the editor + success screen.
+  const [designCode, setDesignCode] = useState(null);
+  // All versions of the current design (this estimate), newest first.
+  const [estimateVersions, setEstimateVersions] = useState([]);
+  // Which version is currently loaded in the editor (null = the latest). Marks "Viewing".
+  const [viewingVersion, setViewingVersion] = useState(null);
+  // Whether the "all designs on this estimate" dropdown is expanded (collapsed by default).
+  const [versionsOpen, setVersionsOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -255,12 +421,9 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // ─── Supabase client (browser-safe anon key) ───
-  const supabase = useMemo(() => {
-    const cfg = C.supabase;
-    if (!cfg || !cfg.url || !cfg.anonKey) return null;
-    return createClient(cfg.url, cfg.anonKey);
-  }, [C.supabase]);
+  // ─── Supabase client (browser-safe anon key, baked-in — config rows can't
+  // redirect the data connection) ───
+  const supabase = useMemo(() => createClient(SUPABASE_URL, SUPABASE_ANON_KEY), []);
 
   // Tracks the design currently being edited (set on load via ?id=, then on save)
   const currentDesignIdRef = useRef(null);
@@ -293,49 +456,45 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
   // components and populate street / city / state / zip. When the key is empty,
   // this is a no-op and the container renders empty (the row hides itself).
   const attachStreetAutocomplete = useCallback((container) => {
-    if (!container || !C.googleMapsApiKey) return;
-    loadGoogleMapsPlaces(C.googleMapsApiKey).then(async (google) => {
+    const mapsKey = C.googleMapsApiKey || DEFAULT_GOOGLE_MAPS_API_KEY;
+    if (!container || !mapsKey) return;
+    loadGoogleMapsPlaces(mapsKey).then(async (google) => {
       if (!container.isConnected) return;
       const { PlaceAutocompleteElement } = await google.maps.importLibrary("places");
       const pa = new PlaceAutocompleteElement({ includedRegionCodes: ["us"] });
+      // Google's gmp-place-autocomplete now uses a CLOSED shadow root, so its
+      // inner input can't be styled from here (pa.shadowRoot is null). The HOST
+      // element is stylable from outside, though: give it the same light-gray
+      // border/radius as S.sel and pin its height to the sibling address fields
+      // so the search box lines up with them instead of Google's tall default.
       pa.style.width = "100%";
       pa.style.display = "block";
+      pa.style.boxSizing = "border-box";
+      pa.style.border = "1px solid #CBD5E1";
+      pa.style.borderRadius = "6px";
+      // Font properties inherit across the closed shadow boundary (Google's inner
+      // input uses font: inherit), so set them on the host to match S.sel.
+      pa.style.fontFamily = "Arial, sans-serif";
+      pa.style.fontSize = "13px";
+      pa.style.fontWeight = "600";
+      pa.style.color = "#000";
+      // Force a light theme so the search box matches the white sibling address
+      // fields — the gmp element otherwise defaults to a dark background, which
+      // looked like the brand color "bleeding" into the search box. color-scheme
+      // crosses the closed shadow boundary; backgroundColor covers the host.
+      pa.style.colorScheme = "light";
+      pa.style.backgroundColor = "#FFF";
       container.replaceChildren(pa);
 
-      // Reach into the open shadow root and inject styles that make the input
-      // match S.sel (border, radius, padding, font, height), and strip any
-      // wrapper border/shadow Google paints around it. The shadow may not be
-      // attached on the same frame the element is constructed, so retry on rAF.
-      const restyleShadow = () => {
-        if (!pa.shadowRoot) { requestAnimationFrame(restyleShadow); return; }
-        if (pa.shadowRoot.querySelector('style[data-ss="input-style"]')) return;
-        const styleEl = document.createElement("style");
-        styleEl.setAttribute("data-ss", "input-style");
-        styleEl.textContent = `
-          input {
-            border: 1px solid #CBD5E1 !important;
-            border-radius: 6px !important;
-            padding: 5px 8px !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            background: #FFF !important;
-            box-sizing: border-box !important;
-            width: 100% !important;
-            min-height: 30px !important;
-            height: auto !important;
-            outline: none !important;
-            box-shadow: none !important;
-          }
-          div[class*="container"], div[class*="wrapper"], div[class*="surface"], div[class*="border"] {
-            border: none !important;
-            box-shadow: none !important;
-            background: transparent !important;
-            padding: 0 !important;
-          }
-        `;
-        pa.shadowRoot.appendChild(styleEl);
+      let sizeTries = 0;
+      const sizeToFields = () => {
+        const ref = document.querySelector('input[autocomplete="street-address"], input[autocomplete="postal-code"], input[autocomplete="address-level2"]');
+        const h = ref ? Math.round(ref.getBoundingClientRect().height) : 0;
+        if (h) { pa.style.height = h + "px"; return; }
+        if (sizeTries++ < 20) requestAnimationFrame(sizeToFields);
+        else pa.style.height = "28px";
       };
-      requestAnimationFrame(restyleShadow);
+      requestAnimationFrame(sizeToFields);
 
       pa.addEventListener("gmp-select", async (ev) => {
         const place = ev.placePrediction.toPlace();
@@ -383,26 +542,88 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     if (!id) return;
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase.from("designs").select("*").eq("short_code", id).single();
+      // Capability RPC: returns the one row matching the code (or nothing).
+      // Direct table reads are blocked for the anon key after cutover.
+      const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
+      const data = Array.isArray(rows) ? rows[0] : rows;
       if (cancelled || error || !data) return;
       currentDesignIdRef.current = data.short_code;
+      setDesignCode(data.short_code);
       // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
       ghlContactIdRef.current = data.ghl_contact_id || null;
       ghlEstimateIdRef.current = data.ghl_estimate_id || null;
       ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
       setHasExistingEstimate(!!data.ghl_estimate_id);
+
+      // Optionally open a specific saved version (?v=N) for review/resubmit. The design
+      // DATA comes from that version's snapshot; the GHL refs above stay from the current
+      // row so a resubmit updates the same one estimate rather than creating a new one.
+      let design = data;
+      const vParam = parseInt(params.get("v") || "", 10);
+      if (Number.isFinite(vParam) && vParam > 0) {
+        const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
+        const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+        if (!cancelled && vrow) design = vrow;
+      }
+      if (cancelled) return;
+      setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
+
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
-      setSel(data.selections || {});
-      setPaintColors(data.paint_colors || { body: "", trim: "" });
-      setCustomOptions(data.custom_options || []);
-      setRoDimensions(data.ro_dimensions || {});
+      setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
+      setPaintColors(design.paint_colors || { body: "", trim: "" });
+      setPaintCustom({ body: false, trim: false });
+      setCustomOptions(design.custom_options || []);
+      setRoDimensions(design.ro_dimensions || {});
       // Items must be set after sel.size has propagated; the prevSizeRef guard
       // above keeps the size effect from wiping them.
-      setItems(Array.isArray(data.items) ? data.items : []);
+      const loadedItems = Array.isArray(design.items) ? design.items : [];
+      setItems(loadedItems);
+      // Keep the global id counter ahead of any restored ids so the next placement can't
+      // reuse an existing id (which collided in select/drag/delete/resize).
+      idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
+
+  // On the submit-success screen, load every version of this design (this estimate) so the
+  // customer/rep can see and reopen all designs on the estimate. Capability read by code.
+  useEffect(() => {
+    if (!supabase || !designCode) { setEstimateVersions([]); return; }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.rpc("list_design_versions", { p_code: designCode });
+      if (cancelled || error) return;
+      setEstimateVersions(Array.isArray(data) ? data : []);
+    })();
+    return () => { cancelled = true; };
+  }, [supabase, designCode, submitted]);
+
+  // Switch to another saved version in place (no page reload). Loads that version's design
+  // data and keeps the current GHL refs (same estimate), marking it as the one being viewed.
+  const openVersion = useCallback(async (version) => {
+    if (!supabase || !designCode) return;
+    const { data: vrows, error } = await supabase.rpc("load_design_version", { p_code: designCode, p_version: version });
+    const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+    if (error || !vrow) return;
+    const vsel = vrow.selections || {};
+    // Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
+    // user size-change and wipe the items we're loading (same guard the initial load uses).
+    prevSizeRef.current = vsel.size || prevSizeRef.current;
+    setSel((prev) => ({ ...prev, ...vsel }));
+    setPaintColors(vrow.paint_colors || { body: "", trim: "" });
+    setPaintCustom({ body: false, trim: false });
+    setCustomOptions(vrow.custom_options || []);
+    setRoDimensions(vrow.ro_dimensions || {});
+    const loadedItems = Array.isArray(vrow.items) ? vrow.items : [];
+    setItems(loadedItems);
+    setSelectedId(null);
+    idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
+    setViewingVersion(version);
+    const p = new URLSearchParams(window.location.search);
+    p.set("v", String(version));
+    window.history.replaceState({}, "", `?${p.toString()}`);
+  }, [supabase, designCode]);
 
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
   // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
@@ -435,7 +656,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
 
   // Get sizes for selected style
   const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
-  const sizeOpts = selectedStyle ? selectedStyle.sizes : (C.defaultSizes || []);
+  const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
   const frontWall = getFrontWall(items);
   // Detect unattached lofts for warning banner
   const lofts = items.filter((i) => i.type === "loft");
@@ -950,7 +1171,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     }
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
-  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId)); setSelectedId(null); } };
+  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); } };
   const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
   const clearAll = () => { setItems([]); setSelectedId(null); };
 
@@ -1276,7 +1497,10 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
       const shortCode = currentDesignIdRef.current || genShortCode();
-      const filePath = `${shortCode}.pdf`;
+      // Store the PDF under a per-tenant prefix ({client_id}/<code>-<ts>.pdf). The
+      // timestamp suffix keeps each submitted version's PDF instead of overwriting the
+      // previous one (design_versions history); the storage policy allows the -<digits>.
+      const filePath = `${C.clientId}/${shortCode}-${Date.now()}.pdf`;
 
       // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
@@ -1293,29 +1517,36 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
       const imageUrl = urlData.publicUrl;
 
-      // 4. Upsert the design row (insert on first save, update on subsequent saves)
-      const designRow = {
-        short_code: shortCode,
-        client_id: C.clientId,
-        contact,
-        selections: sel,
-        paint_colors: paintColors,
-        items,
-        custom_options: customOptions,
-        ro_dimensions: roDimensions,
-        bldg_w: bldgW,
-        bldg_h: bldgH,
-        image_url: imageUrl,
-      };
-      const { error: dbErr } = await supabase
-        .from("designs")
-        .upsert(designRow, { onConflict: "short_code" });
+      // 4. Save the design row via the capability RPC (insert on first save,
+      //    update on subsequent saves; keyed by the unguessable short code).
+      //    The RPC also pins client_id — a saved design can never be re-homed
+      //    to a different tenant.
+      const { error: dbErr } = await supabase.rpc("save_design", {
+        p_code: shortCode,
+        p_client_id: C.clientId,
+        p_contact: contact,
+        p_selections: sel,
+        p_paint_colors: paintColors,
+        p_items: items,
+        p_custom_options: customOptions,
+        p_ro_dimensions: roDimensions,
+        p_bldg_w: bldgW,
+        p_bldg_h: bldgH,
+        p_image_url: imageUrl,
+      });
       if (dbErr) throw new Error(`Save failed: ${dbErr.message}`);
 
-      // 5. Update the URL so a refresh / share-link reopens the same design
-      const viewUrl = `${window.location.origin}${window.location.pathname}?id=${shortCode}`;
-      window.history.replaceState({}, "", `?id=${shortCode}`);
+      // 5. Update the URL so a refresh / share-link reopens the same design.
+      //    Keep the ?client= tenant param so the link reopens with the right branding.
+      const shareParams = new URLSearchParams();
+      const tenantParam = new URLSearchParams(window.location.search).get("client");
+      if (tenantParam) shareParams.set("client", tenantParam);
+      shareParams.set("id", shortCode);
+      const viewUrl = `${window.location.origin}${window.location.pathname}?${shareParams.toString()}`;
+      window.history.replaceState({}, "", `?${shareParams.toString()}`);
       currentDesignIdRef.current = shortCode;
+      setDesignCode(shortCode);
+      setViewingVersion(null);
 
       const payload = {
         // New fields — n8n can use these for GHL linking + image embed
@@ -1324,6 +1555,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
         viewUrl,
         source: "StructureStudio",
         clientId: C.clientId,
+        deliveryFee: Number(sel.deliveryFee) || 0,
         contact: {
           name: contact.name,
           email: contact.email,
@@ -1370,6 +1602,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
           }),
           lofts: items.filter((i) => i.type === "loft").length,
+          loftSqft: Math.round(items.filter((i) => i.type === "loft").reduce((s, i) => s + (i.widthFt || 0) * (i.heightFt || 0), 0)),
           ramp: items.filter((i) => i.type === "ramp").length > 0 ? "yes" : "no",
           lines: items.filter((i) => i.type === "line").length,
           notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
@@ -1391,10 +1624,28 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
       // Call the submit-estimate Edge Function. It looks up the GHL credentials for
       // this clientId in Supabase (admin-configured), then either creates a new GHL
       // estimate or updates the existing one for this design and emails it.
+      // betaMode (detected from the deploy host, e.g. beta.structurestudio.app or a
+      // beta--* branch preview) makes the Edge Function redirect the estimate email
+      // to the internal QA inbox instead of the customer. The per-client beta_mode
+      // switch in client_settings does the same thing server-side.
+      const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
-        body: payload,
+        body: { ...payload, betaMode },
       });
-      if (fnErr) throw new Error(fnErr.message || "Submit failed");
+      // supabase-js flattens a non-2xx Edge Function response to the generic
+      // "Edge Function returned a non-2xx status code". The function's real reason
+      // (e.g. a GHL validation message like an invalid zip-for-state) lives in the
+      // JSON body on fnErr.context — surface it so failures aren't a mystery.
+      if (fnErr) {
+        let detail = fnErr.message || "Submit failed";
+        try {
+          if (fnErr.context && typeof fnErr.context.json === "function") {
+            const errBody = await fnErr.context.json();
+            if (errBody && errBody.error) detail = errBody.error;
+          }
+        } catch (_) { /* body unreadable — keep the generic message */ }
+        throw new Error(detail);
+      }
       if (!result?.ok) throw new Error(result?.error || "Submit failed");
 
       // Persist the returned GHL IDs so subsequent edits update the same estimate.
@@ -1416,6 +1667,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     } catch (err) {
       setSubmitError(err.message || "Something went wrong submitting your quote. Please try again.");
       console.error("Submit error:", err);
+      if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "submit failed", null, { phase: "submitQuote", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null });
     } finally {
       setSubmitting(false);
     }
@@ -1546,6 +1798,45 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
       const isPaint = opt.id === "paint";
       const isPainted = isPaint && sel[opt.id] === "Painted";
       const hasImage = !!opt.img;
+      // Paint palette from config (the owner's Colors tab). Body = colors flagged siding,
+      // trim = colors flagged trim. If no palette is configured, fall back to free-text.
+      const palette = isPaint && Array.isArray(C.colors) ? C.colors : [];
+      // flex-basis 170px (not flex:1) so on a phone each color field wraps onto its own
+      // full-width row instead of being crushed beside the pills — the pills are
+      // flexShrink:0, so a one-line squeeze used to overflow the page horizontally.
+      const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
+      const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+      const paintField = (kind) => {
+        const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
+        const val = paintColors[kind] || "";
+        const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
+        const labelTxt = kind === "body" ? "Body:" : "Trim:";
+        if (colors.length === 0) {
+          return (
+            <label style={PAINT_LBL}>{labelTxt}
+              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Enter color or TBD" style={PAINT_INPUT} />
+            </label>
+          );
+        }
+        const match = colors.find((c) => c.label === val && !c.allowCustom);
+        const customColor = colors.find((c) => c.allowCustom);
+        const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
+        const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
+        const onSel = (label) => {
+          const c = colors.find((x) => x.label === label);
+          if (c && c.allowCustom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
+          else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
+        };
+        return (
+          <div style={{ ...PAINT_LBL, gap: 4 }}>
+            <span>{labelTxt}</span>
+            <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
+            {isCustom && (
+              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
+            )}
+          </div>
+        );
+      };
       return (
         <div key={opt.id} style={{ marginBottom: 14 }}>
           <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
@@ -1555,24 +1846,22 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
                 <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
               </div>
             )}
-            <div style={{ display: "flex", gap: 6, flexWrap: hasImage ? "wrap" : "nowrap", flex: 1, alignItems: "center", maxWidth: hasImage ? "calc(100% - 110px)" : undefined }}>
+            {/* Always allow wrapping: the pills are flexShrink:0 and picking "Painted" appends
+                the Body/Trim color fields to this row — with nowrap that combination overflowed
+                the page horizontally on phones (the "page overflow while selecting colors" bug). */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
               {opt.options.map((o) => (
-                <div key={o} onClick={() => { setSel((p) => ({ ...p, [opt.id]: o })); if (isPaint && o === "No Paint") setPaintColors({ body: "", trim: "" }); }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+                <div key={o} onClick={() => {
+                  const prev = sel[opt.id];
+                  setSel((p) => ({ ...p, [opt.id]: o }));
+                  if (isPaint && o === "No Paint") { setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false }); }
+                  if (isPaint && o === "Painted" && prev !== "Painted") { setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false }); }
+                }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
               ))}
               {isPainted && (
                 <>
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
-                    Body:
-                    <input type="text" value={paintColors.body} onChange={(e) => setPaintColors((p) => ({ ...p, body: e.target.value }))}
-                      placeholder="Enter color or TBD"
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                  </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
-                    Trim:
-                    <input type="text" value={paintColors.trim} onChange={(e) => setPaintColors((p) => ({ ...p, trim: e.target.value }))}
-                      placeholder="Enter color or TBD"
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                  </label>
+                  {paintField("body")}
+                  {paintField("trim")}
                 </>
               )}
             </div>
@@ -1588,14 +1877,16 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
     <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: "100vh" }}>
       {/* Header */}
       <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>SS</div>
+        {C.branding.logo
+          ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
+          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>StructureStudio</div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.companyName} — {C.branding.tagline || "Design & Quote"}</div>
+          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
         </div>
-        <button onClick={() => setConfigOpen(!configOpen)} style={{ ...S.btn(configOpen ? "#FFF" : "rgba(255,255,255,0.15)", configOpen ? "#1E293B" : "#FFF"), border: "1px solid rgba(255,255,255,0.25)" }}>
-          {configOpen ? "▴ Hide" : "▾ Show"} Options
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
+        </div>
       </div>
 
       {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
@@ -1610,9 +1901,9 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
             Set the GHL Location ID and Private Integration Token for this client. Once saved, credentials live in Supabase and are only read server-side — they never reach customer browsers.
           </p>
           <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
-            <input type="password" value={adminPwd} onChange={(e) => setAdminPwd(e.target.value)} placeholder="Admin password" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+            <PasswordInput value={adminPwd} onChange={(e) => setAdminPwd(e.target.value)} placeholder="Admin password" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
             <input type="text" value={adminLocId} onChange={(e) => setAdminLocId(e.target.value)} placeholder="GHL Location ID" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-            <input type="password" value={adminApiKey} onChange={(e) => setAdminApiKey(e.target.value)} placeholder="GHL API Key (pit-…)" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+            <PasswordInput value={adminApiKey} onChange={(e) => setAdminApiKey(e.target.value)} placeholder="GHL API Key (pit-…)" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
             <button onClick={saveAdminSettings} disabled={adminBusy} style={{ ...S.btn(adminBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 18px", fontSize: 13, cursor: adminBusy ? "wait" : "pointer" }}>
@@ -1639,7 +1930,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
       )}
 
       {/* Configuration Panel */}
-      {configOpen && (
+      {(
         <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
           {/* Building Styles */}
           <div style={{ marginBottom: 14 }}>
@@ -1671,8 +1962,8 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
             </div>
           )}
 
-          {/* Dynamic Options */}
-          {C.options.map((opt) => renderOption(opt))}
+          {/* Dynamic Options (filtered by selected building style — see isOptionApplicable) */}
+          {visibleOptions.map((opt) => renderOption(opt))}
 
           {/* Custom/Additional Options */}
           <div style={{ marginTop: 6 }}>
@@ -1734,8 +2025,8 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
 
       {/* Tool Palette */}
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
-        {Object.entries(ITEMS).map(([key, cfg]) => (
+        {(() => {
+          const btn = ([key, cfg]) => (
             <button key={key} onClick={() => { setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
@@ -1743,10 +2034,26 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
                 color: activeTool === key ? "#FFF" : "#334155",
                 border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
               }}>
-              <span style={{ fontSize: 14 }}>{cfg.icon}</span>{cfg.label}
+              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
-        ))}
+          );
+          const entries = Object.entries(ITEMS);
+          const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
+          const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
+          if (incl.length === 0) {
+            return (<>
+              <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
+              {addl.map(btn)}
+            </>);
+          }
+          return (<>
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place these:</span>
+            {incl.map(btn)}
+            <span style={{ ...S.lbl, marginLeft: 10, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            {addl.map(btn)}
+          </>);
+        })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           {selectedId && (
@@ -2071,7 +2378,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
               </div>
             )}
           </div>
-          {C.googleMapsApiKey && C.contactFields.includes("street") && (
+          {(C.googleMapsApiKey || DEFAULT_GOOGLE_MAPS_API_KEY) && C.contactFields.includes("street") && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <span style={{ ...S.lbl, fontSize: 10, whiteSpace: "nowrap" }}>Search for address</span>
               <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "stretch", boxSizing: "border-box" }} />
@@ -2119,6 +2426,17 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
               {submitError}
             </div>
           )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <span style={{ ...S.lbl, fontSize: 11 }}>Delivery fee (optional)</span>
+            <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+              <span style={{ position: "absolute", left: 8, color: "#94A3B8", fontSize: 13, pointerEvents: "none" }}>$</span>
+              <input type="text" inputMode="decimal" value={sel.deliveryFee || ""}
+                onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                placeholder="0.00"
+                style={{ width: 110, border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 8px 8px 18px", fontSize: 13, fontWeight: 600, color: "#1E293B", boxSizing: "border-box" }} />
+            </div>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
+          </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
               {hasExistingEstimate
@@ -2138,6 +2456,44 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
               {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
             </button>
           </div>
+          {estimateVersions.length > 0 && (() => {
+            const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
+            const others = estimateVersions.filter((v) => v.version !== cur.version);
+            const csel = cur.selections || {};
+            return (
+              <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
+                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (viewing)</span>
+                    {others.length > 0 && (
+                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
+                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                    <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
+                    {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                  </div>
+                </div>
+                {versionsOpen && others.map((v) => {
+                  const vsel = v.selections || {};
+                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                  return (
+                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
+                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
+                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                        <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
+                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2165,45 +2521,75 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>EST-{savedDesign.estimateNumber}</span>
                 </div>
               )}
-              <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>View / edit:</span>
-                <input readOnly value={savedDesign.viewUrl}
-                  style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
-                  onClick={(e) => e.target.select()} />
-                <button onClick={() => { navigator.clipboard.writeText(savedDesign.viewUrl).catch(() => {}); }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
-              </div>
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>Image PNG:</span>
-                <input readOnly value={savedDesign.imageUrl}
-                  style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
-                  onClick={(e) => e.target.select()} />
-                <button onClick={() => { navigator.clipboard.writeText(savedDesign.imageUrl).catch(() => {}); }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
-              </div>
             </div>
           )}
-          <button
-            onClick={() => {
-              setSubmitted(false);
-              setSavedDesign(null);
-              setItems([]);
-              setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-              setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
-              setPaintColors({ body: "", trim: "" });
-              setCustomOptions([]);
-              setRoDimensions({});
-              currentDesignIdRef.current = null;
-              ghlContactIdRef.current = null;
-              ghlEstimateIdRef.current = null;
-              ghlEstimateNumberRef.current = null;
-              setHasExistingEstimate(false);
-              window.history.replaceState({}, "", window.location.pathname);
-            }}
-            style={{ ...S.btn("#166534", "#FFF"), marginTop: 20, padding: "10px 24px", fontSize: 14 }}
-          >
-            Start New Quote
-          </button>
+          {estimateVersions.length > 0 && (() => {
+            const cur = estimateVersions[0];
+            const others = estimateVersions.slice(1);
+            const csel = cur.selections || {};
+            return (
+              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
+                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (current)</span>
+                    {others.length > 0 && (
+                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
+                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
+                      </button>
+                    )}
+                  </div>
+                  {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
+                </div>
+                {versionsOpen && others.map((v) => {
+                  const vsel = v.selections || {};
+                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                  return (
+                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
+                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
+                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                        <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
+                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
+            <button
+              onClick={() => { setSubmitted(false); }}
+              style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "10px 24px", fontSize: 14 }}
+            >
+              Resubmit for an Updated Estimate
+            </button>
+            <button
+              onClick={() => {
+                setSubmitted(false);
+                setSavedDesign(null);
+                setItems([]);
+                setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
+                setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+                setPaintColors({ body: "", trim: "" });
+                setCustomOptions([]);
+                setRoDimensions({});
+                currentDesignIdRef.current = null;
+                ghlContactIdRef.current = null;
+                ghlEstimateIdRef.current = null;
+                ghlEstimateNumberRef.current = null;
+                setHasExistingEstimate(false);
+                setDesignCode(null);
+                setEstimateVersions([]);
+                setViewingVersion(null);
+                window.history.replaceState({}, "", window.location.pathname);
+              }}
+              style={{ ...S.btn(accent, "#FFF"), padding: "10px 24px", fontSize: 14 }}
+            >
+              Start New Quote
+            </button>
+          </div>
         </div>
       )}
       {toast && (
@@ -2226,7 +2612,7 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
           <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>StructureStudio Export</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} Export</h3>
               <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
             </div>
             {exportUrl && (
@@ -2245,5 +2631,166 @@ export default function StructureStudio({ config = DEFAULT_CONFIG }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Client-config loader (default export) ───
+// Every page load fetches the tenant's config from public.client_configs — there
+// is no in-source copy of any client. Resolution order:
+//   1. `config` prop (e.g. supplied by index.html's postMessage re-render handler)
+//      wins and is used as-is, no fetch.
+//   2. `?client=<id>` URL param — explicit override, wins over hostname.
+//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns". Skipped for
+//      the apex, IPs, localhost, *.pages.dev / *.netlify.app deploy hosts, and the
+//      reserved env labels (www/beta/dev/staging/app).
+//   4. `?id=<short_code>` share-link — the design row records its owning tenant;
+//      resolved via the load_design RPC (NOT a direct table read — that dies at
+//      cutover) so a rep clicking someone else's link gets that tenant's branding.
+//   5. Fallback: DEFAULT_CLIENT_ID.
+// On fetch failure (network error or unknown client_id) we render an error screen
+// with a retry button rather than silently falling back to a wrong-tenant config.
+// The fetched config's clientId is always forced to the row key so a config blob
+// can never point a tenant's designs at another tenant.
+
+// A partial config row (e.g. branding-only) would crash the designer mid-render,
+// so fail loud on the error screen instead. Every row must be authored complete —
+// see the onboarding runbook in CLAUDE.md.
+const REQUIRED_CONFIG_KEYS = ["branding", "contactFields", "buildingStyles", "defaultSizes", "options", "layoutItems"];
+
+// Catches render-time throws inside the designer (e.g. a malformed-but-complete
+// config row that passes REQUIRED_CONFIG_KEYS but has a bad nested shape) so the
+// user gets a recoverable message instead of a blank white screen.
+class DesignerErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "render error", err && err.name, { phase: "render", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null }); }
+  render() {
+    if (this.state.err) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>This designer couldn't be displayed</div>
+          <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480, marginBottom: 4 }}>There's a problem with this builder's configuration. Please contact support.</div>
+          <button onClick={() => window.location.reload()} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Reload</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// Cutover marker: lets us verify from the deployed site which data path this
+// bundle uses (multi-tenant RPC vs. legacy direct table access).
+console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
+
+export default function StructureStudio({ config: configProp = null }) {
+  // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
+  const [state, setState] = useState(() => (
+    configProp ? { status: "ready", config: configProp } : { status: "loading" }
+  ));
+
+  // White-label the browser tab: show the tenant's business name once config loads.
+  useEffect(() => {
+    if (state.status === "ready" && typeof document !== "undefined") {
+      document.title = (state.config.branding && state.config.branding.companyName) || "Design Studio";
+    }
+  }, [state]);
+
+  useEffect(() => {
+    if (state.status !== "loading") return;
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    let clientId = params.get("client");
+    const designShortCode = params.get("id");
+    // Tenant subdomains: only derive a client_id from <sub>.structurestudio.app.
+    // Anything else (apex, *.pages.dev / *.netlify.app deploy hosts, localhost,
+    // IPs, env labels) falls through — a deploy hostname is never a tenant.
+    if (!clientId) {
+      const host = window.location.hostname;
+      const BASE = "structurestudio.app";
+      const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
+      if (host.endsWith("." + BASE)) {
+        const sub = host.slice(0, host.length - BASE.length - 1).toLowerCase();
+        if (sub && !sub.includes(".") && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
+      }
+    }
+    // Bare product root: no tenant link (?client= / subdomain) and no design code.
+    // This isn't any tenant's page — it's where business owners land, so send
+    // them to the portal; they copy their customer design link from the dashboard.
+    if (!clientId && !designShortCode) {
+      window.location.replace("/portal.html");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        // Share-link path: ?id=<short_code> without ?client= or a tenant subdomain
+        // means someone opened a saved design's bare link. The design row records
+        // which tenant owns it; look that up so the right config wraps the load.
+        if (!clientId && designShortCode) {
+          const { data: rows, error: dErr } = await sb.rpc("load_design", { p_code: designShortCode });
+          const design = Array.isArray(rows) ? rows[0] : rows;
+          if (cancelled) return;
+          if (dErr || !design || !design.client_id) {
+            console.warn(`Design "${designShortCode}" not found while resolving client; using default.`, dErr);
+            clientId = DEFAULT_CLIENT_ID;
+          } else {
+            clientId = design.client_id;
+          }
+        }
+        if (!clientId) clientId = DEFAULT_CLIENT_ID;
+        // Fetch this tenant's config via the get_config RPC (capability read),
+        // not a direct client_configs table query: anon can no longer bulk-read
+        // every tenant's config — only the one client_id it asks for. The RPC is
+        // SECURITY DEFINER, so it keeps working after the table's anon SELECT is
+        // revoked at cutover. Returns the config jsonb, or null for an unknown
+        // client (→ the error screen, same as a missing row used to do).
+        const { data: cfg, error } = await sb.rpc("get_config", { p_client_id: clientId });
+        if (cancelled) return;
+        if (error || !cfg) {
+          console.warn(`Could not load config for client "${clientId}":`, error);
+          setState({ status: "error", clientId, message: (error && error.message) || "Configuration not found." });
+          return;
+        }
+        const missing = REQUIRED_CONFIG_KEYS.filter((k) => !cfg[k]);
+        if (missing.length > 0) {
+          setState({ status: "error", clientId, message: `Configuration row is incomplete (missing: ${missing.join(", ")}).` });
+          return;
+        }
+        setState({ status: "ready", config: { ...cfg, clientId } });
+      } catch (e) {
+        if (cancelled) return;
+        console.warn("Client config fetch error:", e);
+        setState({ status: "error", clientId: clientId || DEFAULT_CLIENT_ID, message: (e && e.message) || "Network error." });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [state.status]);
+
+  if (state.status === "loading") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "system-ui, -apple-system, sans-serif", color: "#64748B", fontSize: 14 }}>
+        Loading…
+      </div>
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
+          <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
+          <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
+        </div>
+        <FeedbackWidget />
+      </>
+    );
+  }
+  return (
+    <>
+      <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>
+      <FeedbackWidget />
+    </>
   );
 }

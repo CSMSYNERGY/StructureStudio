@@ -16,3 +16,6 @@ _archive/
 # Environment / secrets
 .env
 .env.local
+
+# Supabase CLI local cache (linked project, pooler URL, versions)
+supabase/.temp/
