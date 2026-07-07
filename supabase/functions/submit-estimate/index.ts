@@ -27,7 +27,7 @@ Deno.serve(async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee, declinedItems } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -398,13 +398,16 @@ Deno.serve(async (req: Request) => {
   }
   if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem("Ramp", "ramp", "", { count: 1 });
 
-  // Rough openings — webhook supplies name/dims/qty/amount directly, not from GHL products
+  // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
+  // owner can charge their own price; no hardcoded amount). One line per placed RO at that
+  // rate, with the dimensions in the description. If no rate is configured, the line is $0.
   if (Array.isArray(roughOpenings)) {
+    const roRate = layoutRates.get("roughOpening")?.rate || 0;
     roughOpenings.forEach((ro: any) => {
       targetItems.push({
         name: ro.name || "Rough Opening",
         qty: ro.qty || 1,
-        amount: typeof ro.amount === "number" ? ro.amount : 0,
+        amount: roRate,
         priceId: "",
         productId: "",
         attachments: [],
@@ -431,6 +434,89 @@ Deno.serve(async (req: Request) => {
         description: "",
       });
     });
+  }
+
+  // Declined included items — the customer opted out of an item the building normally includes,
+  // so credit its catalog value (the owner's layout_item_pricing rate). GHL rejects negative
+  // line amounts, so we instead (a) keep a $0 line per declined item as the on-estimate RECORD
+  // of what was credited (the discount object has no description of its own), and (b) sum the
+  // credits and apply them as a fixed invoice-level discount below. Items with no rate (0) are
+  // skipped (nothing to credit).
+  let declinedCredit = 0;
+  if (Array.isArray(declinedItems)) {
+    for (const d of declinedItems) {
+      const key = String(d?.key ?? "").trim();
+      if (!key) continue;
+      const rate = layoutRates.get(key)?.rate || 0;
+      if (rate <= 0) continue;
+      declinedCredit += Math.abs(rate);
+      targetItems.push({
+        name: `${d?.label || key} — declined (−$${Math.abs(rate).toFixed(2)} credit)`,
+        qty: 1,
+        amount: 0,
+        priceId: "",
+        productId: "",
+        attachments: [],
+        currency: "USD",
+        type: "one_time",
+        description: "Included item declined — credited via the estimate discount",
+      });
+    }
+  }
+
+  // Paint-color pricing — same catalog-driven model as layout add-ons. When the building is
+  // Painted, each selected color (body / trim) that carries a rate adds a line, priced by its
+  // pricing_method. A typed custom color (no palette match) is priced at the tenant's
+  // allow_custom color's rate. The same color on both siding + trim is charged once.
+  if (paintStatus === "Paint") {
+    try {
+      const colRes = await supabase.from("colors")
+        .select("id, label, rate, pricing_method, allow_custom")
+        .eq("client_id", clientId).eq("active", true);
+      const palette = (colRes.data || []) as any[];
+      const customRow = palette.find((c) => c.allow_custom);
+      const resolveColor = (val: unknown) => {
+        const v = String(val ?? "").trim();
+        if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
+        return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
+      };
+      const picks = [
+        { kind: "Body", row: resolveColor(selections.paintBodyColor) },
+        { kind: "Trim", row: resolveColor(selections.paintTrimColor) },
+      ].filter((p) => p.row);
+      // Charge each DISTINCT color once (body + trim same color → one line).
+      const byId = new Map<string, { row: any; kinds: string[] }>();
+      for (const p of picks) {
+        const e = byId.get(p.row.id);
+        if (e) e.kinds.push(p.kind); else byId.set(p.row.id, { row: p.row, kinds: [p.kind] });
+      }
+      for (const { row, kinds } of byId.values()) {
+        const rate = Number(row.rate) || 0;
+        if (rate <= 0) continue;   // included / free color
+        const method = String(row.pricing_method || "each");
+        let amount = rate;
+        switch (method) {
+          case "sqft_building":      amount = rate * buildingArea; break;
+          case "perimeter_building": amount = rate * buildingPerimeter; break;
+          case "pct_building_price": amount = (rate / 100) * buildingPrice; break;
+          case "pct_estimate_total": amount = 0; break;   // resolved after every other line
+          default:                   amount = rate; break; // each / lineal_ft / sqft_option → flat
+        }
+        const item = {
+          name: `Paint — ${row.label}`,
+          qty: 1,
+          amount,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: kinds.join(" + "),
+        };
+        targetItems.push(item);
+        if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
+      }
+    } catch { /* colors lookup failed → skip paint pricing, estimate still goes out */ }
   }
 
   // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
@@ -627,7 +713,10 @@ Deno.serve(async (req: Request) => {
       ...(estimateAddress ? { address: estimateAddress } : {}),
       ...(contactId ? { id: String(contactId) } : {}),
     },
-    discount: { value: 0, type: "percentage" },
+    // Declined-item credits are applied here as a fixed dollar discount (GHL won't take
+    // negative line amounts). The matching $0 "— declined" line items above are the record
+    // of what this discount covers.
+    discount: declinedCredit > 0 ? { value: declinedCredit, type: "fixed" } : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
     // off per-estimate inside GHL (this only sets the initial state). Requires that the

@@ -348,7 +348,7 @@ function SettingsView() {
     ghlPipelineId: "", ghlStageSendQuoteId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
-    quoteTerms: "", betaMode: false, betaEmail: "",
+    quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -418,7 +418,7 @@ function SettingsView() {
         businessLogoUrl: data.businessLogoUrl || "",
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
-        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "",
+        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -439,6 +439,7 @@ function SettingsView() {
       quoteTerms: form.quoteTerms,
       betaMode: form.betaMode,
       betaEmail: form.betaEmail,
+      showPricing: form.showPricing,
     };
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
@@ -561,6 +562,17 @@ function SettingsView() {
         </div>
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Pricing</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+          <input type="checkbox" checked={form.showPricing} onChange={set("showPricing")} />
+          Show pricing to customers on the design page
+        </label>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+          When on, layout-item prices (e.g. rough openings) show on the customer designer. When off, customers see no prices there.
+        </p>
       </div>
 
       <div style={S.card}>
@@ -1115,7 +1127,7 @@ const COLOR_LIBRARY = [
 
 function ColorsView() {
   const [cat, setCat] = useState(null);
-  const [rows, setRows] = useState([]);      // [{ id, label, siding, trim, allow_custom, is_default, active, image_url }]
+  const [rows, setRows] = useState([]);      // [{ id, label, siding, trim, allow_custom, is_default, active, hex, pricing_method, rate }]
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [libOpen, setLibOpen] = useState(false);
@@ -1127,7 +1139,7 @@ function ColorsView() {
     setRows((data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
-      hex: c.hex || null,
+      hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
     })));
   };
   useEffect(() => { load(); }, []);
@@ -1136,6 +1148,7 @@ function ColorsView() {
   const addRow = (preset) => setRows((rs) => [...rs, {
     id: null, label: preset ? preset.name : "", siding: true, trim: true,
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
+    pricing_method: "each", rate: "0",
   }]);
   const removeRow = (idx) => setRows((rs) => rs.filter((_, i) => i !== idx));
   const move = (idx, dir) => setRows((rs) => {
@@ -1149,7 +1162,7 @@ function ColorsView() {
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label, siding: !!r.siding, trim: !!r.trim,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
-        sortOrder: i, hex: r.hex || null,
+        sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -1175,7 +1188,9 @@ function ColorsView() {
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           These are the colors your customers pick from when they choose <b>Painted</b> in the designer.
           Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
-          Turn on <b>Custom</b> for a “their-own-color” option (the customer types the exact color, e.g. a Sherwin-Williams name).
+          Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
+          (same methods as Layout Pricing; leave the rate at <b>0</b> for colors included in the base price). If the same color is
+          chosen for both siding and trim it’s only charged once.
           <b> Default</b> pre-selects a color; <b>Active</b> shows/hides it without deleting. Drag order with ▲▼.
           <br />Need color ideas? See <b>hayleypaint.com</b> (color gallery) or <b>classicbuildingssales.com</b>, or use the quick-add library below.
         </p>
@@ -1185,10 +1200,10 @@ function ColorsView() {
               <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
             ) : (
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14, minWidth: 720 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14, minWidth: 860 }}>
                   <thead><tr>
                     <th style={S.th}>Order</th><th style={S.th}>Swatch</th><th style={S.th}>Color name</th>
-                    <th style={S.th}>Siding</th><th style={S.th}>Trim</th><th style={S.th}>Custom</th>
+                    <th style={S.th}>Siding</th><th style={S.th}>Trim</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th>
                     <th style={S.th}>Default</th><th style={S.th}>Active</th><th style={S.th}></th>
                   </tr></thead>
                   <tbody>
@@ -1210,7 +1225,14 @@ function ColorsView() {
                         </td>
                         <td style={ctr}>{chk(idx, "siding")}</td>
                         <td style={ctr}>{chk(idx, "trim")}</td>
-                        <td style={ctr}>{chk(idx, "allow_custom")}</td>
+                        <td style={S.td}>
+                          <select value={r.pricing_method || "each"} onChange={(e) => setRow(idx, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 150 }}>
+                            {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                          </select>
+                        </td>
+                        <td style={ctr}>
+                          <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(idx, "rate", e.target.value)} style={{ ...S.input, width: 110 }} />
+                        </td>
                         <td style={ctr}>{chk(idx, "is_default")}</td>
                         <td style={ctr}>{chk(idx, "active")}</td>
                         <td style={ctr}>
