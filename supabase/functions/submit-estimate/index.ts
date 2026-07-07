@@ -433,26 +433,30 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // Declined included items — the customer opted out of an item the building normally
-  // includes, so credit its catalog value back as a negative "deduction" line. The amount
-  // is the item's layout_item_pricing rate (per the owner's Layout Pricing); items with no
-  // rate (0) produce no line. Resolved before pct_estimate_total so the credit lowers that base.
+  // Declined included items — the customer opted out of an item the building normally includes,
+  // so credit its catalog value (the owner's layout_item_pricing rate). GHL rejects negative
+  // line amounts, so we instead (a) keep a $0 line per declined item as the on-estimate RECORD
+  // of what was credited (the discount object has no description of its own), and (b) sum the
+  // credits and apply them as a fixed invoice-level discount below. Items with no rate (0) are
+  // skipped (nothing to credit).
+  let declinedCredit = 0;
   if (Array.isArray(declinedItems)) {
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();
       if (!key) continue;
       const rate = layoutRates.get(key)?.rate || 0;
       if (rate <= 0) continue;
+      declinedCredit += Math.abs(rate);
       targetItems.push({
-        name: `${d?.label || key} — declined`,
+        name: `${d?.label || key} — declined (−$${Math.abs(rate).toFixed(2)} credit)`,
         qty: 1,
-        amount: -Math.abs(rate),
+        amount: 0,
         priceId: "",
         productId: "",
         attachments: [],
         currency: "USD",
         type: "one_time",
-        description: "Deduction — included item declined",
+        description: "Included item declined — credited via the estimate discount",
       });
     }
   }
@@ -651,7 +655,10 @@ Deno.serve(async (req: Request) => {
       ...(estimateAddress ? { address: estimateAddress } : {}),
       ...(contactId ? { id: String(contactId) } : {}),
     },
-    discount: { value: 0, type: "percentage" },
+    // Declined-item credits are applied here as a fixed dollar discount (GHL won't take
+    // negative line amounts). The matching $0 "— declined" line items above are the record
+    // of what this discount covers.
+    discount: declinedCredit > 0 ? { value: declinedCredit, type: "fixed" } : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
     // off per-estimate inside GHL (this only sets the initial state). Requires that the
