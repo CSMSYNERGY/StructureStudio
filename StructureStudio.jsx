@@ -1630,7 +1630,6 @@ function StructureStudioInner({ config }) {
           name: `RO-${idx + 1}`,
           dimensions: (roDimensions[ro.id] || "").trim(),
           qty: 1,
-          amount: 100,
         })),
         submittedAt: new Date().toISOString(),
       };
@@ -2018,7 +2017,7 @@ function StructureStudioInner({ config }) {
 
           {items.filter((i) => i.type === "roughOpening").length > 0 && (
             <div style={{ marginTop: 14 }}>
-              <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings ($100 each)</div>
+              <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings</div>
               {items.filter((i) => i.type === "roughOpening").map((ro, idx) => {
                 const dim = roDimensions[ro.id] || "";
                 const invalid = !dim.trim();
@@ -2028,7 +2027,6 @@ function StructureStudioInner({ config }) {
                     <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
                       onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
                       style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
-                    <span style={{ fontSize: 12, color: "#64748B", fontWeight: 600 }}>$100</span>
                   </div>
                 );
               })}

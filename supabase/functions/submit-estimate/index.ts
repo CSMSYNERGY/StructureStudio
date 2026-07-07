@@ -398,13 +398,16 @@ Deno.serve(async (req: Request) => {
   }
   if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem("Ramp", "ramp", "", { count: 1 });
 
-  // Rough openings — webhook supplies name/dims/qty/amount directly, not from GHL products
+  // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
+  // owner can charge their own price; no hardcoded amount). One line per placed RO at that
+  // rate, with the dimensions in the description. If no rate is configured, the line is $0.
   if (Array.isArray(roughOpenings)) {
+    const roRate = layoutRates.get("roughOpening")?.rate || 0;
     roughOpenings.forEach((ro: any) => {
       targetItems.push({
         name: ro.name || "Rough Opening",
         qty: ro.qty || 1,
-        amount: typeof ro.amount === "number" ? ro.amount : 0,
+        amount: roRate,
         priceId: "",
         productId: "",
         attachments: [],
