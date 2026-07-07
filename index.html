@@ -2023,8 +2023,6 @@ function StructureStudioInner({ config }) {
               style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
               + Add Custom Option
             </button>
-          </div>
-          )}
 
           {items.filter((i) => i.type === "roughOpening").length > 0 && (
             <div style={{ marginTop: 14 }}>
@@ -2058,6 +2056,8 @@ function StructureStudioInner({ config }) {
             </div>
             <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
           </div>
+          </div>
+          )}
         </div>
       )}
 
