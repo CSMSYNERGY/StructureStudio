@@ -399,6 +399,8 @@ function StructureStudioInner({ config }) {
   const [viewingVersion, setViewingVersion] = useState(null);
   // Whether the "all designs on this estimate" dropdown is expanded (collapsed by default).
   const [versionsOpen, setVersionsOpen] = useState(false);
+  // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
+  const [additionalOpen, setAdditionalOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -1979,9 +1981,15 @@ function StructureStudioInner({ config }) {
           {/* Dynamic Options (filtered by selected building style — see isOptionApplicable) */}
           {visibleOptions.map((opt) => renderOption(opt))}
 
-          {/* Custom/Additional Options */}
-          <div style={{ marginTop: 6 }}>
-            <div style={{ ...S.lbl, marginBottom: 8 }}>Additional Options</div>
+          {/* Custom/Additional Options — deliberately understated: a faint gray line with a
+              small arrow at the far right; click to reveal the add-option UI. */}
+          <div onClick={() => setAdditionalOpen((o) => !o)}
+            style={{ marginTop: 10, borderTop: "1px solid #E2E8F0", paddingTop: 7, display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", userSelect: "none" }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Additional options</span>
+            <span style={{ fontSize: 11, color: "#CBD5E1" }}>{additionalOpen ? "▾" : "▸"}</span>
+          </div>
+          {additionalOpen && (
+          <div style={{ marginTop: 8 }}>
             {customOptions.map((row, idx) => {
               const invalid = !row.name || !row.name.trim();
               return (
@@ -2008,6 +2016,7 @@ function StructureStudioInner({ config }) {
               + Add Custom Option
             </button>
           </div>
+          )}
 
           {items.filter((i) => i.type === "roughOpening").length > 0 && (
             <div style={{ marginTop: 14 }}>
@@ -2027,6 +2036,20 @@ function StructureStudioInner({ config }) {
               })}
             </div>
           )}
+
+          {/* Delivery fee — last thing in this section (moved up from the submit bar); the
+              optional Rough Openings block sits above it. */}
+          <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ ...S.lbl, fontSize: 11 }}>Delivery fee (optional)</span>
+            <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+              <span style={{ position: "absolute", left: 8, color: "#94A3B8", fontSize: 13, pointerEvents: "none" }}>$</span>
+              <input type="text" inputMode="decimal" value={sel.deliveryFee || ""}
+                onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                placeholder="0.00"
+                style={{ width: 110, border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 8px 8px 18px", fontSize: 13, fontWeight: 600, color: "#1E293B", boxSizing: "border-box" }} />
+            </div>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
+          </div>
         </div>
       )}
 
@@ -2467,17 +2490,6 @@ function StructureStudioInner({ config }) {
               {submitError}
             </div>
           )}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            <span style={{ ...S.lbl, fontSize: 11 }}>Delivery fee (optional)</span>
-            <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
-              <span style={{ position: "absolute", left: 8, color: "#94A3B8", fontSize: 13, pointerEvents: "none" }}>$</span>
-              <input type="text" inputMode="decimal" value={sel.deliveryFee || ""}
-                onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                placeholder="0.00"
-                style={{ width: 110, border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 8px 8px 18px", fontSize: 13, fontWeight: 600, color: "#1E293B", boxSizing: "border-box" }} />
-            </div>
-            <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
-          </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
               {hasExistingEstimate
