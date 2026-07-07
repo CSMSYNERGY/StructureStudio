@@ -1189,8 +1189,9 @@ function ColorsView() {
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
-  const swatchBox = { width: 40, height: 30, borderRadius: 4, flexShrink: 0, border: "1px solid #CBD5E1", objectFit: "cover" };
-  const ctr = { ...S.td, textAlign: "center" };
+  const ctr = { ...S.td, padding: "8px 5px", textAlign: "center" };
+  const tdc = { ...S.td, padding: "8px 5px" };
+  const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
   const chk = (idx, field) => <input type="checkbox" checked={!!rows[idx][field]} onChange={(e) => setRow(idx, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
 
   return (
@@ -1213,12 +1214,16 @@ function ColorsView() {
             {rows.length === 0 ? (
               <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
             ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14, minWidth: 860 }}>
-                  <thead><tr>
-                    <th style={S.th}>Order</th><th style={S.th}>Swatch</th><th style={S.th}>Color name</th>
-                    <th style={S.th}>Siding</th><th style={S.th}>Trim</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th>
-                    <th style={S.th}>Default</th><th style={S.th}>Active</th><th style={S.th}></th>
+              <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
+                <colgroup>
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
+                </colgroup>
+                <thead><tr>
+                    <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+                    <th style={thc}>Siding</th><th style={thc}>Trim</th><th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+                    <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
                   </tr></thead>
                   <tbody>
                     {rows.map((r, idx) => (
@@ -1228,24 +1233,21 @@ function ColorsView() {
                           <button onClick={() => move(idx, 1)} disabled={idx === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
                         </td>
                         <td style={ctr}>
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ ...swatchBox, background: r.hex || "#F1F5F9", display: "inline-block" }} title={r.hex || "No color set"} />
-                            <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(idx, "hex", e.target.value)} title="Pick this color"
-                              style={{ width: 26, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
-                          </span>
+                          <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(idx, "hex", e.target.value)} title={r.hex || "Pick this color"}
+                            style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
                         </td>
-                        <td style={S.td}>
-                          <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 140 }} />
+                        <td style={tdc}>
+                          <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
                         </td>
                         <td style={ctr}>{chk(idx, "siding")}</td>
                         <td style={ctr}>{chk(idx, "trim")}</td>
-                        <td style={S.td}>
-                          <select value={r.pricing_method || "each"} onChange={(e) => setRow(idx, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 150 }}>
+                        <td style={tdc}>
+                          <select value={r.pricing_method || "each"} onChange={(e) => setRow(idx, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
                             {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                           </select>
                         </td>
                         <td style={ctr}>
-                          <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(idx, "rate", e.target.value)} style={{ ...S.input, width: 110 }} />
+                          <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(idx, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
                         </td>
                         <td style={ctr}>{chk(idx, "is_default")}</td>
                         <td style={ctr}>{chk(idx, "active")}</td>
@@ -1256,7 +1258,6 @@ function ColorsView() {
                     ))}
                   </tbody>
                 </table>
-              </div>
             )}
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
               <button onClick={() => addRow()} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
