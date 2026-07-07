@@ -1968,9 +1968,11 @@ function StructureStudioInner({ config }) {
           {sizeOpts.length > 0 && (
             <div style={{ marginBottom: 14 }}>
               <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {sizeOpts.map((s) => <div key={s} onClick={() => setSel((p) => ({ ...p, size: s }))} style={S.pill(sel.size === s)}>{s}</div>)}
-              </div>
+              <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
+                style={{ minWidth: 160, border: `1px solid ${sel.size ? accent : "#CBD5E1"}`, borderRadius: 8, padding: "9px 12px", fontSize: 14, fontWeight: 700, color: "#1E293B", background: "#FFF", cursor: "pointer" }}>
+                <option value="" disabled>Select a size…</option>
+                {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
             </div>
           )}
 
