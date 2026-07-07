@@ -348,7 +348,7 @@ function SettingsView() {
     ghlPipelineId: "", ghlStageSendQuoteId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
-    quoteTerms: "", betaMode: false, betaEmail: "",
+    quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -418,7 +418,7 @@ function SettingsView() {
         businessLogoUrl: data.businessLogoUrl || "",
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
-        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "",
+        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -439,6 +439,7 @@ function SettingsView() {
       quoteTerms: form.quoteTerms,
       betaMode: form.betaMode,
       betaEmail: form.betaEmail,
+      showPricing: form.showPricing,
     };
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
@@ -561,6 +562,17 @@ function SettingsView() {
         </div>
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Pricing</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+          <input type="checkbox" checked={form.showPricing} onChange={set("showPricing")} />
+          Show pricing to customers on the design page
+        </label>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+          When on, layout-item prices (e.g. rough openings) show on the customer designer. When off, customers see no prices there.
+        </p>
       </div>
 
       <div style={S.card}>

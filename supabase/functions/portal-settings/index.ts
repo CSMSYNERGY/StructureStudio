@@ -141,7 +141,7 @@ Deno.serve(async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);
@@ -168,6 +168,7 @@ Deno.serve(async (req: Request) => {
       quoteTerms: data?.quote_terms ?? null,
       betaMode: Boolean(data?.beta_mode),
       betaEmail: data?.beta_email ?? null,
+      showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)
       branding: {
@@ -197,6 +198,7 @@ Deno.serve(async (req: Request) => {
     if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms);
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
+    if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
     if ("businessAddress" in payload) {
       const a = payload.businessAddress;
       updates.business_address = a && typeof a === "object" ? a : null;
