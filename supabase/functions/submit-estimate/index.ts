@@ -226,15 +226,17 @@ Deno.serve(async (req: Request) => {
   let styleRowId: string | null = null;
   let styleLabel = style;            // display-name fallback if the style row isn't found
   let styleImageUrl: string | null = null;   // building-style photo, attached to the building line
+  let styleShowImage = true;                 // per-style toggle: attach the photo to the estimate? (default yes)
   let buildingPrice = 0, priced = false;
   let buildingWidthFt = 0, buildingDepthFt = 0;   // drive sqft_building / perimeter_building add-ons
   try {
-    const stRes = await supabase.from("building_styles").select("id, key, label, image_url").eq("client_id", clientId);
+    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate").eq("client_id", clientId);
     const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
       styleImageUrl = styleRow.image_url || null;
+      styleShowImage = styleRow.show_image_on_estimate !== false;
       const szRes = await supabase.from("building_sizes").select("base_price, label, width_ft, length_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
       const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
       if (sizeRow && sizeRow.base_price != null) {
@@ -256,7 +258,7 @@ Deno.serve(async (req: Request) => {
   // decode the image, upload it to the public branding bucket under this tenant's prefix,
   // persist the hosted URL back to building_styles, and attach that URL. Non-fatal on
   // failure — worst case the line stays imageless, exactly as before.
-  if (styleRowId && styleImageUrl && styleImageUrl.startsWith("data:")) {
+  if (styleShowImage && styleRowId && styleImageUrl && styleImageUrl.startsWith("data:")) {
     try {
       const m = /^data:([^;]+);base64,(.*)$/s.exec(styleImageUrl);
       const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
@@ -289,7 +291,7 @@ Deno.serve(async (req: Request) => {
     amount: buildingPrice,
     priceId: "",
     productId: "",
-    attachments: imgAttachments(styleImageUrl),
+    attachments: styleShowImage ? imgAttachments(styleImageUrl) : [],
     currency: "USD",
     type: "one_time",
     description: `Size: ${size}` + (selections.paint ? ` | Paint: ${selections.paint}` : ""),
