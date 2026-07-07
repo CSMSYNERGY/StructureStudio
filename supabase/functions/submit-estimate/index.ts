@@ -464,6 +464,61 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // Paint-color pricing — same catalog-driven model as layout add-ons. When the building is
+  // Painted, each selected color (body / trim) that carries a rate adds a line, priced by its
+  // pricing_method. A typed custom color (no palette match) is priced at the tenant's
+  // allow_custom color's rate. The same color on both siding + trim is charged once.
+  if (paintStatus === "Paint") {
+    try {
+      const colRes = await supabase.from("colors")
+        .select("id, label, rate, pricing_method, allow_custom")
+        .eq("client_id", clientId).eq("active", true);
+      const palette = (colRes.data || []) as any[];
+      const customRow = palette.find((c) => c.allow_custom);
+      const resolveColor = (val: unknown) => {
+        const v = String(val ?? "").trim();
+        if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
+        return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
+      };
+      const picks = [
+        { kind: "Body", row: resolveColor(selections.paintBodyColor) },
+        { kind: "Trim", row: resolveColor(selections.paintTrimColor) },
+      ].filter((p) => p.row);
+      // Charge each DISTINCT color once (body + trim same color → one line).
+      const byId = new Map<string, { row: any; kinds: string[] }>();
+      for (const p of picks) {
+        const e = byId.get(p.row.id);
+        if (e) e.kinds.push(p.kind); else byId.set(p.row.id, { row: p.row, kinds: [p.kind] });
+      }
+      for (const { row, kinds } of byId.values()) {
+        const rate = Number(row.rate) || 0;
+        if (rate <= 0) continue;   // included / free color
+        const method = String(row.pricing_method || "each");
+        let amount = rate;
+        switch (method) {
+          case "sqft_building":      amount = rate * buildingArea; break;
+          case "perimeter_building": amount = rate * buildingPerimeter; break;
+          case "pct_building_price": amount = (rate / 100) * buildingPrice; break;
+          case "pct_estimate_total": amount = 0; break;   // resolved after every other line
+          default:                   amount = rate; break; // each / lineal_ft / sqft_option → flat
+        }
+        const item = {
+          name: `Paint — ${row.label}`,
+          qty: 1,
+          amount,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: kinds.join(" + "),
+        };
+        targetItems.push(item);
+        if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
+      }
+    } catch { /* colors lookup failed → skip paint pricing, estimate still goes out */ }
+  }
+
   // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
   // line (building + non-percentage add-ons + custom options + rough openings + any
   // pct_building_price lines, which resolve earlier). Computed off a fixed base so multiple
