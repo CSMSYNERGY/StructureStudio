@@ -1482,6 +1482,14 @@ function StructureStudioInner({ config }) {
       setSubmitError("Please select a Building Style and Size.");
       return;
     }
+    // Every included item must be placed on the layout, or explicitly declined.
+    const declinedKeys = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
+    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k));
+    if (unplacedIncluded.length > 0) {
+      const names = unplacedIncluded.map((k) => (ITEMS[k] && ITEMS[k].label) || k).join(", ");
+      setSubmitError(`Please place all included items on your layout, or decline the ones you don't want: ${names}.`);
+      return;
+    }
     if (!supabase) {
       setSubmitError("Storage isn't configured. Contact support.");
       return;
@@ -1556,6 +1564,10 @@ function StructureStudioInner({ config }) {
         source: "StructureStudio",
         clientId: C.clientId,
         deliveryFee: Number(sel.deliveryFee) || 0,
+        // Included items the customer declined → the estimate adds a deduction line per item.
+        declinedItems: (Array.isArray(sel.declinedItems) ? sel.declinedItems : [])
+          .filter((k) => includedItemKeys.includes(k))
+          .map((k) => ({ key: k, label: (ITEMS[k] && ITEMS[k].label) || k })),
         contact: {
           name: contact.name,
           email: contact.email,
@@ -2041,6 +2053,29 @@ function StructureStudioInner({ config }) {
           const entries = Object.entries(ITEMS);
           const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
           const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
+          // Decline control for an included item: X it off (a deduction line is added on the
+          // estimate). Declined items don't have to be placed on the layout.
+          const declined = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
+          const toggleDecline = (key) => setSel((p) => {
+            const cur = Array.isArray(p.declinedItems) ? p.declinedItems : [];
+            return { ...p, declinedItems: cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key] };
+          });
+          const inclBtn = ([key, cfg]) => declined.includes(key)
+            ? (
+              <span key={key} title="You declined this included item — it'll show as a deduction on your estimate"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, background: "#F1F5F9", color: "#94A3B8", border: "2px dashed #CBD5E1" }}>
+                <span style={{ textDecoration: "line-through" }}>{cfg.label}</span>
+                <button onClick={() => toggleDecline(key)} title="Add it back" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 11 }}>Undo</button>
+              </span>
+            )
+            : (
+              <span key={key} style={{ display: "inline-flex", alignItems: "center" }}>
+                {btn([key, cfg])}
+                <button onClick={() => toggleDecline(key)} title={`Decline ${cfg.label} (deduction)`}
+                  style={{ marginLeft: 2, background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>✕</button>
+              </span>
+            );
+          const divider = <span style={{ width: 1, alignSelf: "stretch", minHeight: 26, background: "#CBD5E1", margin: "0 6px" }} />;
           if (incl.length === 0) {
             return (<>
               <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
@@ -2048,9 +2083,10 @@ function StructureStudioInner({ config }) {
             </>);
           }
           return (<>
-            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place these:</span>
-            {incl.map(btn)}
-            <span style={{ ...S.lbl, marginLeft: 10, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
+            {incl.map(inclBtn)}
+            {divider}
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
             {addl.map(btn)}
           </>);
         })()}

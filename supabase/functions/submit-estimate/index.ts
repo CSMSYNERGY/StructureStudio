@@ -27,7 +27,7 @@ Deno.serve(async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee, declinedItems } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -431,6 +431,30 @@ Deno.serve(async (req: Request) => {
         description: "",
       });
     });
+  }
+
+  // Declined included items — the customer opted out of an item the building normally
+  // includes, so credit its catalog value back as a negative "deduction" line. The amount
+  // is the item's layout_item_pricing rate (per the owner's Layout Pricing); items with no
+  // rate (0) produce no line. Resolved before pct_estimate_total so the credit lowers that base.
+  if (Array.isArray(declinedItems)) {
+    for (const d of declinedItems) {
+      const key = String(d?.key ?? "").trim();
+      if (!key) continue;
+      const rate = layoutRates.get(key)?.rate || 0;
+      if (rate <= 0) continue;
+      targetItems.push({
+        name: `${d?.label || key} — declined`,
+        qty: 1,
+        amount: -Math.abs(rate),
+        priceId: "",
+        productId: "",
+        attachments: [],
+        currency: "USD",
+        type: "one_time",
+        description: "Deduction — included item declined",
+      });
+    }
   }
 
   // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
