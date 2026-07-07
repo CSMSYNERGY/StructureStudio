@@ -280,7 +280,7 @@ Deno.serve(async (req: Request) => {
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
     const [styles, sizes, items, types, incl, lpRows, colorsRes] = await Promise.all([
-      admin.from("building_styles").select("id, key, label, image_url, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -467,6 +467,18 @@ Deno.serve(async (req: Request) => {
     if (!styleId) return json({ error: "styleId is required." }, 400);
     const { error } = await admin.from("building_styles")
       .update({ active: payload.active !== false })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  // Toggle whether this style's photo is attached to the GHL estimate's building line
+  // (default on). Only affects the estimate attachment — the designer still shows the photo.
+  if (action === "set_style_estimate_image") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error } = await admin.from("building_styles")
+      .update({ show_image_on_estimate: payload.show !== false })
       .eq("client_id", clientId).eq("id", styleId);
     if (error) return json({ error: error.message }, 500);
     return json({ ok: true });
