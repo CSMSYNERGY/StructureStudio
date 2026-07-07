@@ -2010,10 +2010,6 @@ function StructureStudioInner({ config }) {
                 </div>
               );
             })}
-            <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
-              style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-              + Add Custom Option
-            </button>
 
           {items.filter((i) => i.type === "roughOpening").length > 0 && (
             <div style={{ marginTop: 14 }}>
@@ -2032,6 +2028,11 @@ function StructureStudioInner({ config }) {
               })}
             </div>
           )}
+
+            <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
+              style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>
+              + Add Custom Option
+            </button>
 
           {/* Delivery fee — last thing in this section (moved up from the submit bar); the
               optional Rough Openings block sits above it. */}
