@@ -2023,6 +2023,10 @@ function StructureStudioInner({ config }) {
                     <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
                       onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
                       style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
+                    {C.showPricing && (<>
+                      <div style={{ width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" }}>1</div>
+                      <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>${Number((C.layoutPrices && C.layoutPrices.roughOpening) || 0).toFixed(2)}</div>
+                    </>)}
                   </div>
                 );
               })}
