@@ -2075,17 +2075,20 @@ function StructureStudioInner({ config }) {
                   style={{ marginLeft: 2, background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>✕</button>
               </span>
             );
-          const divider = <span style={{ width: 1, alignSelf: "stretch", minHeight: 26, background: "#CBD5E1", margin: "0 6px" }} />;
           if (incl.length === 0) {
             return (<>
               <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
               {addl.map(btn)}
             </>);
           }
+          // Included items on their own row, a full-width horizontal rule, then the additional
+          // options below (width:100% children force line breaks inside the wrapping flex row).
           return (<>
-            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
-            {incl.map(inclBtn)}
-            {divider}
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
+              <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
+              {incl.map(inclBtn)}
+            </div>
+            <div style={{ width: "100%", borderTop: "1px solid #CBD5E1", margin: "2px 0" }} />
             <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
             {addl.map(btn)}
           </>);
