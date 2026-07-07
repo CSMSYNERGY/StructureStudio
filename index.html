@@ -223,6 +223,116 @@ function getDisplayLabel(positionalWall, frontWall) {
   return map[frontWall][positionalWall];
 }
 
+// ─── Layout add-on pricing (browser mirror of submit-estimate's pushItem) ─────────
+// Compute one display row per priceable placed item type, applying the SAME 7
+// pricing_method formulas the edge function uses so the prices shown on the plan match
+// the emailed estimate to the penny. Needs C.layoutPricing ({key:{rate,method,byStyle}})
+// and C.sizePricing ({styleKey:{sizeLabel:{basePrice,widthFt,lengthFt}}}) — both are
+// present only when the tenant's show_pricing is on (else {} → returns no rows).
+const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "loft", "ramp"];
+function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
+function fmtMoney2(n) { return "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function computeLayoutPricingRows(items, sel, customOptions, C) {
+  if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
+  const pricing = C.layoutPricing;
+  const styleKey = sel && sel.style;
+  // Resolve rate + method for an item_key: a per-style override wins over the default,
+  // matching submit-estimate's layoutRates precedence.
+  const resolve = (key) => {
+    const lp = pricing[key];
+    if (!lp) return null;
+    const ov = (lp.byStyle && styleKey) ? lp.byStyle[styleKey] : null;
+    return {
+      rate: Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0,
+      method: (ov && ov.method) || lp.method || "each",
+    };
+  };
+  // Building geometry + base price for the building-dependent methods, from the selected
+  // size (0 when the size isn't priced/matched — same $0 the estimate would show).
+  const szMap = (C.sizePricing && styleKey) ? C.sizePricing[styleKey] : null;
+  let szRow = null;
+  if (szMap && sel && sel.size) {
+    szRow = szMap[sel.size];
+    if (!szRow) { const want = normSizeLabel(sel.size); for (const k in szMap) { if (normSizeLabel(k) === want) { szRow = szMap[k]; break; } } }
+  }
+  const bW = (szRow && szRow.widthFt != null) ? Number(szRow.widthFt) : 0;
+  const bL = (szRow && szRow.lengthFt != null) ? Number(szRow.lengthFt) : 0;
+  const buildingArea = bW * bL;
+  const buildingPerimeter = 2 * (bW + bL);
+  const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
+
+  // Roll placed items into counts + per-measure quantities (ramp is boolean in the
+  // estimate — one line regardless of how many are placed).
+  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0, rampPresent = false;
+  const workbenchFt = [];
+  for (const it of items) {
+    if (it.type === "singleDoor") singleDoors++;
+    else if (it.type === "doubleDoor") doubleDoors++;
+    else if (it.type === "window") windows++;
+    else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
+    else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
+    else if (it.type === "ramp") rampPresent = true;
+  }
+  loftSqft = Math.round(loftSqft);
+  const totalWorkbenchFt = workbenchFt.reduce((s, f) => s + f, 0);
+  const measures = {
+    singleDoor: { count: singleDoors },
+    doubleDoor: { count: doubleDoors },
+    window:     { count: windows },
+    workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
+    loft:       { count: lofts, optionSqft: loftSqft },
+    ramp:       { count: rampPresent ? 1 : 0 },
+  };
+
+  const lineFor = (rate, method, m) => {
+    const count = m.count || 0;
+    switch (method) {
+      case "lineal_ft":          return { qty: m.lengthFt != null ? m.lengthFt : count, total: rate * (m.lengthFt != null ? m.lengthFt : count), unit: fmtMoney2(rate) + " / ft" };
+      case "sqft_option":        return { qty: m.optionSqft != null ? m.optionSqft : count, total: rate * (m.optionSqft != null ? m.optionSqft : count), unit: fmtMoney2(rate) + " / sq ft" };
+      case "sqft_building":      return { qty: count, total: rate * buildingArea * count, unit: fmtMoney2(rate) + " / sq ft of building" };
+      case "perimeter_building": return { qty: count, total: rate * buildingPerimeter * count, unit: fmtMoney2(rate) + " / ft of perimeter" };
+      case "pct_building_price": return { qty: count, total: (rate / 100) * buildingPrice * count, unit: rate + "% of building price" };
+      case "pct_estimate_total": return { qty: count, total: null, pct: rate, unit: rate + "% of subtotal" };
+      case "each":
+      default:                   return { qty: count, total: rate * count, unit: fmtMoney2(rate) + " each" };
+    }
+  };
+
+  const rows = [];
+  const deferred = [];
+  let nonPctSubtotal = 0;
+  for (const key of LAYOUT_PRICE_ORDER) {
+    const m = measures[key];
+    if (!m || !m.count) continue;
+    const rp = resolve(key);
+    if (!rp) continue;
+    const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || key;
+    const ln = lineFor(rp.rate, rp.method, m);
+    const row = { key, label, qty: ln.qty, unit: ln.unit, total: ln.total };
+    rows.push(row);
+    if (ln.total == null) deferred.push({ row, pct: ln.pct });
+    else nonPctSubtotal += ln.total;
+  }
+
+  // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
+  // building price + all non-% add-ons + rough openings + custom options (delivery and
+  // the declined-item discount are excluded, matching submit-estimate).
+  if (deferred.length) {
+    const roRate = (resolve("roughOpening") || { rate: 0 }).rate;
+    const roCount = items.filter((i) => i.type === "roughOpening").length;
+    const customTotal = (customOptions || []).reduce((s, co) => {
+      if (!co || !co.name || !String(co.name).trim()) return s;
+      const amt = parseFloat(co.amount) || 0;
+      const q = co.qty ? (parseInt(co.qty, 10) || 1) : 1;
+      return s + amt * q;
+    }, 0);
+    const base = buildingPrice + nonPctSubtotal + roRate * roCount + customTotal;
+    for (const d of deferred) d.row.total = (d.pct / 100) * base;
+  }
+
+  return { rows };
+}
+
 let idCounter = 1;
 
 // 10-char short code in format SS-XXXXXXXXXX. Alphabet drops 0/O/I/1 to avoid
@@ -2018,6 +2128,26 @@ function StructureStudioInner({ config }) {
                 </div>
               );
             })}
+
+          {C.showPricing && (() => {
+            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C).rows;
+            if (!priceRows.length) return null;
+            return (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ ...S.lbl, marginBottom: 8 }}>Options on your plan</div>
+                {priceRows.map((r) => (
+                  <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                      <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.unit}</div>
+                    </div>
+                    <div style={{ width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" }}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
+                    <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>{fmtMoney2(r.total)}</div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
 
           {items.filter((i) => i.type === "roughOpening").length > 0 && (
             <div style={{ marginTop: 14 }}>
