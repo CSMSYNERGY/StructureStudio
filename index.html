@@ -2107,28 +2107,6 @@ function StructureStudioInner({ config }) {
           </div>
           {additionalOpen && (
           <div style={{ marginTop: 8 }}>
-            {customOptions.map((row, idx) => {
-              const invalid = !row.name || !row.name.trim();
-              return (
-                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
-                  <input type="text" value={row.name} placeholder="Item name (required)"
-                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
-                    style={{ flex: "1 1 55%", minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
-                  <input type="number" value={row.qty} placeholder="Qty"
-                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: e.target.value } : r))}
-                    style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
-                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
-                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
-                    <input type="number" value={row.amount} placeholder="0.00"
-                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
-                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                  </div>
-                  <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
-                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
-                </div>
-              );
-            })}
-
           {C.showPricing && (() => {
             const priceRows = computeLayoutPricingRows(items, sel, customOptions, C).rows;
             if (!priceRows.length) return null;
@@ -2170,6 +2148,28 @@ function StructureStudioInner({ config }) {
               })}
             </div>
           )}
+
+            {customOptions.map((row, idx) => {
+              const invalid = !row.name || !row.name.trim();
+              return (
+                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
+                  <input type="text" value={row.name} placeholder="Item name (required)"
+                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
+                    style={{ flex: "1 1 55%", minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
+                  <input type="number" value={row.qty} placeholder="Qty"
+                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: e.target.value } : r))}
+                    style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
+                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
+                    <input type="number" value={row.amount} placeholder="0.00"
+                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
+                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                  </div>
+                  <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
+                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
+                </div>
+              );
+            })}
 
             <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
               style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>
