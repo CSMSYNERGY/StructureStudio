@@ -535,12 +535,19 @@ Deno.serve(async (req: Request) => {
 
   // Custom options — name doubles as the line title; leaving description blank keeps GHL
   // from rendering it as a duplicate subtitle.
+  // Negative amounts (credits): GHL rejects a line `amount` < 0 ("amount must not be less than
+  // 0"). To still show a credit AS ITS OWN LINE, we keep `amount` positive and carry the sign on
+  // `qty` — the line total is qty × amount, so a −$75 option becomes amount 75, qty −1 → −$75.
   if (Array.isArray(customOptions)) {
     customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
+      const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
+      const rawQty = co.qty ? Math.abs(Number(co.qty)) || 1 : 1;
+      const amount = Math.abs(rawAmt);
+      const qty = rawAmt < 0 ? -rawQty : rawQty;   // sign of the credit rides on qty
       targetItems.push({
         name: String(co.name).trim(),
-        qty: co.qty ? Number(co.qty) || 1 : 1,
-        amount: co.amount ? Number(co.amount) || 0 : 0,
+        qty,
+        amount,
         priceId: "",
         productId: "",
         attachments: [],
