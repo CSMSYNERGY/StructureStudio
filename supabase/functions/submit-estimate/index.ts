@@ -578,9 +578,14 @@ Deno.serve(async (req: Request) => {
   }
 
   // 7a-ii. Delivery fee — added LAST (after the pct_estimate_total base is computed, so a
-  // percentage add-on never applies to delivery) and marked NON-TAXABLE via an explicit empty
-  // taxes array, which overrides the estimate's automatic tax for this one line. Amount comes
-  // from the designer's optional delivery-fee field; omitted entirely when 0/blank.
+  // percentage add-on never applies to delivery). Marked NON-TAXABLE the way GHL actually
+  // supports it: with automaticTaxesEnabled the tax engine taxes every line by its tax
+  // CATEGORY and IGNORES a per-line `taxes` array — so the old `taxes: []` did nothing and
+  // delivery was still taxed. Assigning the line GHL's global "Non-Taxable Product" category
+  // (code NT) is the documented way to exempt a single line while other lines stay taxable.
+  // Category id is a GoHighLevel-global value (not per-account) per GHL's "Automatic Tax
+  // Category IDs and Names" support doc. Amount is the designer's optional delivery-fee field;
+  // omitted entirely when 0/blank.
   const deliveryAmt = Number(deliveryFee) || 0;
   if (deliveryAmt > 0) {
     targetItems.push({
@@ -593,7 +598,7 @@ Deno.serve(async (req: Request) => {
       currency: "USD",
       type: "one_time",
       description: "Delivery fee (non-taxable)",
-      taxes: [],
+      automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
     });
   }
 
