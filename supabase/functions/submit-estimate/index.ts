@@ -285,8 +285,11 @@ Deno.serve(async (req: Request) => {
       console.warn("style-image self-heal error:", (e as Error).message);
     }
   }
+  // Building is line 1. Paint + roof used to ride in this name/description; they are now their
+  // own line items (2 = Paint Colors, 3 = Roof) pushed immediately below, so any charge on them
+  // shows as a real line rather than buried text.
   targetItems.push({
-    name: `${styleLabel} (${size} - ${paintStatus})`,
+    name: `${styleLabel} (${size})`,
     qty: 1,
     amount: buildingPrice,
     priceId: "",
@@ -294,7 +297,7 @@ Deno.serve(async (req: Request) => {
     attachments: styleShowImage ? imgAttachments(styleImageUrl) : [],
     currency: "USD",
     type: "one_time",
-    description: `Size: ${size}` + (selections.paint ? ` | Paint: ${selections.paint}` : ""),
+    description: `Size: ${size}`,
   });
 
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
@@ -378,6 +381,81 @@ Deno.serve(async (req: Request) => {
     targetItems.push(item);
     if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
+
+  // Price a single color (paint or roof) by its catalog rate + pricing_method — same math as
+  // layout add-ons. pct_estimate_total isn't supported on a combined color line (colors realistically
+  // use each / pct_building_price / flat), so it falls back to 0.
+  const colorAmount = (row: any): number => {
+    const rate = Number(row?.rate) || 0;
+    if (rate <= 0) return 0;
+    switch (String(row?.pricing_method || "each")) {
+      case "sqft_building":      return rate * buildingArea;
+      case "perimeter_building": return rate * buildingPerimeter;
+      case "pct_building_price": return (rate / 100) * buildingPrice;
+      case "pct_estimate_total": return 0;
+      default:                   return rate;   // each / lineal_ft / sqft_option → flat
+    }
+  };
+
+  // ── Line 2: Paint Colors ── always present. Body + Trim in the description; amount is the sum
+  // of the selected colors' rates (a color used for both sides is charged once).
+  {
+    let paintAmount = 0;
+    let paintDesc = "Unpainted";
+    if (paintStatus === "Paint") {
+      const b = String(selections.paintBodyColor || "TBD");
+      const t = String(selections.paintTrimColor || "TBD");
+      paintDesc = `Body: ${b}, Trim: ${t}`;
+      try {
+        const colRes = await supabase.from("colors")
+          .select("id, label, rate, pricing_method, allow_custom")
+          .eq("client_id", clientId).eq("active", true);
+        const palette = (colRes.data || []) as any[];
+        const customRow = palette.find((c) => c.allow_custom);
+        const resolve = (val: unknown) => {
+          const v = String(val ?? "").trim();
+          if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
+          return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
+        };
+        const seen = new Set<string>();
+        for (const row of [resolve(selections.paintBodyColor), resolve(selections.paintTrimColor)]) {
+          if (row && !seen.has(row.id)) { seen.add(row.id); paintAmount += colorAmount(row); }
+        }
+      } catch { /* colors lookup failed → still emit the line at $0 */ }
+    }
+    targetItems.push({
+      name: "Paint Colors", qty: 1, amount: paintAmount, priceId: "", productId: "",
+      attachments: [], currency: "USD", type: "one_time", description: paintDesc,
+    });
+  }
+
+  // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
+  // roofType key, possibly empty). Type + Color in the description; amount is the roof color's rate.
+  if (Object.prototype.hasOwnProperty.call(selections, "roofType")) {
+    const roofType = String(selections.roofType ?? "").trim();
+    const roofColor = String(selections.roofColor ?? "").trim();
+    let roofAmount = 0;
+    let roofDesc = "No roof selected";
+    if (roofType) {
+      roofDesc = roofColor ? `${roofType} — ${roofColor}` : `${roofType} — (color TBD)`;
+      if (roofColor && norm(roofColor) !== norm("TBD")) {
+        try {
+          const flag = norm(roofType) === norm("Metal") ? "metal" : "shingle";
+          const colRes = await supabase.from("colors")
+            .select("id, label, rate, pricing_method, allow_custom, shingle, metal")
+            .eq("client_id", clientId).eq("active", true).eq(flag, true);
+          const palette = (colRes.data || []) as any[];
+          const customRow = palette.find((c) => c.allow_custom);
+          const row = palette.find((c) => norm(c.label) === norm(roofColor)) || customRow || null;
+          roofAmount = colorAmount(row);
+        } catch { /* colors lookup failed → still emit the line at $0 */ }
+      }
+    }
+    targetItems.push({
+      name: "Roof", qty: 1, amount: roofAmount, priceId: "", productId: "",
+      attachments: [], currency: "USD", type: "one_time", description: roofDesc,
+    });
+  }
 
   if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
   if (summary.singleDoors > 0) pushItem("Single Door", "singleDoor", "", { count: summary.singleDoors });
@@ -466,104 +544,6 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // Paint-color pricing — same catalog-driven model as layout add-ons. When the building is
-  // Painted, each selected color (body / trim) that carries a rate adds a line, priced by its
-  // pricing_method. A typed custom color (no palette match) is priced at the tenant's
-  // allow_custom color's rate. The same color on both siding + trim is charged once.
-  if (paintStatus === "Paint") {
-    try {
-      const colRes = await supabase.from("colors")
-        .select("id, label, rate, pricing_method, allow_custom")
-        .eq("client_id", clientId).eq("active", true);
-      const palette = (colRes.data || []) as any[];
-      const customRow = palette.find((c) => c.allow_custom);
-      const resolveColor = (val: unknown) => {
-        const v = String(val ?? "").trim();
-        if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
-        return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
-      };
-      const picks = [
-        { kind: "Body", row: resolveColor(selections.paintBodyColor) },
-        { kind: "Trim", row: resolveColor(selections.paintTrimColor) },
-      ].filter((p) => p.row);
-      // Charge each DISTINCT color once (body + trim same color → one line).
-      const byId = new Map<string, { row: any; kinds: string[] }>();
-      for (const p of picks) {
-        const e = byId.get(p.row.id);
-        if (e) e.kinds.push(p.kind); else byId.set(p.row.id, { row: p.row, kinds: [p.kind] });
-      }
-      for (const { row, kinds } of byId.values()) {
-        const rate = Number(row.rate) || 0;
-        if (rate <= 0) continue;   // included / free color
-        const method = String(row.pricing_method || "each");
-        let amount = rate;
-        switch (method) {
-          case "sqft_building":      amount = rate * buildingArea; break;
-          case "perimeter_building": amount = rate * buildingPerimeter; break;
-          case "pct_building_price": amount = (rate / 100) * buildingPrice; break;
-          case "pct_estimate_total": amount = 0; break;   // resolved after every other line
-          default:                   amount = rate; break; // each / lineal_ft / sqft_option → flat
-        }
-        const item = {
-          name: `Paint — ${row.label}`,
-          qty: 1,
-          amount,
-          priceId: "",
-          productId: "",
-          attachments: [],
-          currency: "USD",
-          type: "one_time",
-          description: kinds.join(" + "),
-        };
-        targetItems.push(item);
-        if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
-      }
-    } catch { /* colors lookup failed → skip paint pricing, estimate still goes out */ }
-  }
-
-  // Roof-color pricing — same catalog-driven model as paint. The selected roof color (from the
-  // tenant's shingle/metal palette, chosen via Roof Type) adds a line priced by its
-  // pricing_method. A typed custom roof color is priced at that category's allow_custom rate.
-  const roofType = String(selections.roofType ?? "").trim();
-  const roofColor = String(selections.roofColor ?? "").trim();
-  if (roofType && roofColor) {
-    try {
-      const flag = norm(roofType) === norm("Metal") ? "metal" : "shingle";
-      const colRes = await supabase.from("colors")
-        .select("id, label, rate, pricing_method, allow_custom, shingle, metal")
-        .eq("client_id", clientId).eq("active", true).eq(flag, true);
-      const palette = (colRes.data || []) as any[];
-      const customRow = palette.find((c) => c.allow_custom);
-      const row = norm(roofColor) === norm("TBD")
-        ? null
-        : (palette.find((c) => norm(c.label) === norm(roofColor)) || customRow || null);
-      const rate = Number(row?.rate) || 0;
-      if (row && rate > 0) {   // included / free roof color adds no line
-        const method = String(row.pricing_method || "each");
-        let amount = rate;
-        switch (method) {
-          case "sqft_building":      amount = rate * buildingArea; break;
-          case "perimeter_building": amount = rate * buildingPerimeter; break;
-          case "pct_building_price": amount = (rate / 100) * buildingPrice; break;
-          case "pct_estimate_total": amount = 0; break;   // resolved after every other line
-          default:                   amount = rate; break; // each / lineal_ft / sqft_option → flat
-        }
-        const item = {
-          name: `Roof (${roofType}) — ${row.label}`,
-          qty: 1,
-          amount,
-          priceId: "",
-          productId: "",
-          attachments: [],
-          currency: "USD",
-          type: "one_time",
-          description: `${roofType} roof`,
-        };
-        targetItems.push(item);
-        if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
-      }
-    } catch { /* roof colors lookup failed → skip roof pricing, estimate still goes out */ }
-  }
 
   // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
   // line (building + non-percentage add-ons + custom options + rough openings + any

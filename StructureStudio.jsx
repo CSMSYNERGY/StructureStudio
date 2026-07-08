@@ -224,6 +224,67 @@ function getDisplayLabel(positionalWall, frontWall) {
 const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "loft", "ramp"];
 function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
 function fmtMoney2(n) { return "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Building / Paint Colors / Roof summary for the "Details" section, in the SAME order they appear
+// on the GHL estimate (Building, Paint, Roof). Prices use the same sizePricing + color rate/method
+// the estimate uses (total is null when show_pricing is off). The Roof row shows only when the
+// tenant offers roof colors (some color flagged shingle/metal).
+function computeSelectionRows(sel, paintColors, C) {
+  const styleKey = sel && sel.style;
+  const showP = !!(C && C.showPricing);
+  const colors = Array.isArray(C && C.colors) ? C.colors : [];
+  const szMap = (C && C.sizePricing && styleKey) ? C.sizePricing[styleKey] : null;
+  let szRow = null;
+  if (szMap && sel && sel.size) {
+    szRow = szMap[sel.size];
+    if (!szRow) { const want = normSizeLabel(sel.size); for (const k in szMap) { if (normSizeLabel(k) === want) { szRow = szMap[k]; break; } } }
+  }
+  const bW = (szRow && szRow.widthFt != null) ? Number(szRow.widthFt) : 0;
+  const bL = (szRow && szRow.lengthFt != null) ? Number(szRow.lengthFt) : 0;
+  const buildingArea = bW * bL, buildingPerimeter = 2 * (bW + bL);
+  const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
+  const charge = (c) => {
+    if (!c) return 0;
+    const rate = Number(c.rate) || 0;
+    if (rate <= 0) return 0;
+    switch (c.pricingMethod || "each") {
+      case "sqft_building": return rate * buildingArea;
+      case "perimeter_building": return rate * buildingPerimeter;
+      case "pct_building_price": return (rate / 100) * buildingPrice;
+      case "pct_estimate_total": return 0;
+      default: return rate;
+    }
+  };
+  const pick = (label, pred) => {
+    const v = String(label || "").trim(); if (!v) return null;
+    const list = colors.filter(pred);
+    return list.find((c) => c.label === v) || list.find((c) => c.allowCustom) || null;
+  };
+  const styleLabel = (((C && C.buildingStyles) || []).find((s) => s.value === styleKey) || {}).label || styleKey || "";
+  const rows = [];
+  rows.push({ key: "building", label: "Building", detail: [styleLabel, sel && sel.size].filter(Boolean).join(" ") || "—", total: showP ? buildingPrice : null });
+  const painted = sel && sel.paint === "Painted";
+  let pDetail = "Unpainted", pTotal = 0;
+  if (painted) {
+    const body = pick(paintColors && paintColors.body, (c) => c.siding);
+    const trim = pick(paintColors && paintColors.trim, (c) => c.trim);
+    const seen = {};
+    [body, trim].forEach((c) => { if (c && c.id && !seen[c.id]) { seen[c.id] = 1; pTotal += charge(c); } });
+    pDetail = `Body: ${(paintColors && paintColors.body) || "TBD"}, Trim: ${(paintColors && paintColors.trim) || "TBD"}`;
+  }
+  rows.push({ key: "paint", label: "Paint Colors", detail: pDetail, total: showP ? pTotal : null });
+  const offersRoof = colors.some((c) => c.shingle || c.metal);
+  if (offersRoof) {
+    const rt = (sel && sel.roofType) || "";
+    let rDetail = "No roof selected", rTotal = 0;
+    if (rt) {
+      const rc = pick(sel && sel.roofColor, (c) => (rt === "Metal" ? c.metal : c.shingle));
+      rTotal = charge(rc);
+      rDetail = (sel && sel.roofColor) ? `${rt} — ${sel.roofColor}` : `${rt} — (color TBD)`;
+    }
+    rows.push({ key: "roof", label: "Roof", detail: rDetail, total: showP ? rTotal : null });
+  }
+  return rows;
+}
 function computeLayoutPricingRows(items, sel, customOptions, C) {
   if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
   const pricing = C.layoutPricing;
@@ -1714,7 +1775,9 @@ function StructureStudioInner({ config }) {
           buildingSize: sel.size,
           paint: sel.paint || "No Paint",
           ...(sel.paint === "Painted" ? { paintBodyColor: paintColors.body || "TBD", paintTrimColor: paintColors.trim || "TBD" } : {}),
-          ...(sel.roofType ? { roofType: sel.roofType, roofColor: sel.roofColor || "" } : {}),
+          // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
+          // unselected, so the estimate always shows the Roof line in order.
+          ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "" } : {}),
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
@@ -2605,11 +2668,30 @@ function StructureStudioInner({ config }) {
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
           <div onClick={() => setAdditionalOpen((o) => !o)}
             style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", userSelect: "none" }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Additional options</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Details</span>
             <span style={{ fontSize: 11, color: "#CBD5E1" }}>{additionalOpen ? "▾" : "▸"}</span>
           </div>
           {additionalOpen && (
           <div style={{ marginTop: 8 }}>
+          {(() => {
+            // Building, Paint Colors, Roof — same order as the estimate; price shown when enabled.
+            const selRows = computeSelectionRows(sel, paintColors, C);
+            return (
+              <div style={{ marginBottom: 4 }}>
+                {selRows.map((r) => (
+                  <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                      <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.detail}</div>
+                    </div>
+                    {r.total != null && (
+                      <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>{fmtMoney2(r.total)}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {C.showPricing && (() => {
             const priceRows = computeLayoutPricingRows(items, sel, customOptions, C).rows;
             if (!priceRows.length) return null;
