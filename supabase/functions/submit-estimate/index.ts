@@ -224,6 +224,7 @@ Deno.serve(async (req: Request) => {
   // style-specific layout_item_pricing overrides.
   const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
   let styleRowId: string | null = null;
+  let sizeRowId: string | null = null;       // reused below for the size's included-item quantities
   let styleLabel = style;            // display-name fallback if the style row isn't found
   let styleImageUrl: string | null = null;   // building-style photo, attached to the building line
   let styleShowImage = true;                 // per-style toggle: attach the photo to the estimate? (default yes)
@@ -237,9 +238,10 @@ Deno.serve(async (req: Request) => {
       styleLabel = styleRow.label || style;
       styleImageUrl = styleRow.image_url || null;
       styleShowImage = styleRow.show_image_on_estimate !== false;
-      const szRes = await supabase.from("building_sizes").select("base_price, label, width_ft, length_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
+      const szRes = await supabase.from("building_sizes").select("id, base_price, label, width_ft, length_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
       const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
       if (sizeRow && sizeRow.base_price != null) {
+        sizeRowId = sizeRow.id;
         buildingPrice = Number(sizeRow.base_price) || 0; priced = true;
         buildingWidthFt = Number(sizeRow.width_ft) || 0;
         buildingDepthFt = Number(sizeRow.length_ft) || 0;   // building "depth" is stored as length_ft
@@ -439,21 +441,55 @@ Deno.serve(async (req: Request) => {
   }
 
   // Declined included items — the customer opted out of an item the building normally includes,
-  // so credit its catalog value (the owner's layout_item_pricing rate). GHL rejects negative
-  // line amounts, so we instead (a) keep a $0 line per declined item as the on-estimate RECORD
-  // of what was credited (the discount object has no description of its own), and (b) sum the
-  // credits and apply them as a fixed invoice-level discount below. Items with no rate (0) are
-  // skipped (nothing to credit).
+  // so credit its catalog value: the size's included QUANTITY (building_size_inclusions.qty,
+  // populated by the pricing CSV's quantity cells — loft = sq ft, doors = count) times the
+  // owner's layout_item_pricing rate, resolved per pricing_method exactly like pushItem. GHL
+  // rejects negative line amounts, so we instead (a) keep a $0 line per declined item as the
+  // on-estimate RECORD of what was credited (the discount object has no description of its
+  // own), and (b) sum the credits and apply them as a fixed invoice-level discount below.
+  // Items with no rate (0) are skipped (nothing to credit).
   let declinedCredit = 0;
-  if (Array.isArray(declinedItems)) {
+  if (Array.isArray(declinedItems) && declinedItems.length) {
+    // Included quantity per item for the submitted size. Rows imported before quantities
+    // existed default to qty 1, which reproduces the old flat-rate credit exactly.
+    const includedQty = new Map<string, number>();
+    if (sizeRowId) {
+      try {
+        const incRes = await supabase.from("building_size_inclusions")
+          .select("item_key, qty").eq("size_id", sizeRowId).eq("included", true);
+        for (const r of (incRes.data || []) as any[]) {
+          includedQty.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
+        }
+      } catch { /* fall back to qty 1 below */ }
+    }
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();
       if (!key) continue;
-      const rate = layoutRates.get(key)?.rate || 0;
+      const lp = layoutRates.get(key);
+      const rate = lp?.rate || 0;
       if (rate <= 0) continue;
-      declinedCredit += Math.abs(rate);
+      const method = lp?.method || "each";
+      // pct_estimate_total can't be resolved before the subtotal exists, so it keeps the
+      // legacy flat-rate credit — qty clamped to 1 so the percentage isn't scaled by sq ft.
+      const qty = method === "pct_estimate_total" ? 1 : (includedQty.get(key) ?? 1);
+      // Per-unit value mirrors pushItem's amount for each method, rounded to cents so the
+      // printed "qty × unit = credit" math is exact and the summed discount stays sub-cent-free.
+      let unitValue = rate, unitLabel = "";
+      switch (method) {
+        case "sqft_option":        unitLabel = " sq ft"; break;
+        case "lineal_ft":          unitLabel = " ft"; break;
+        case "sqft_building":      unitValue = rate * buildingArea; break;
+        case "perimeter_building": unitValue = rate * buildingPerimeter; break;
+        case "pct_building_price": unitValue = (rate / 100) * buildingPrice; break;
+        default:                   break; // each / sqft_option / lineal_ft / pct_estimate_total: rate as-is
+      }
+      unitValue = Math.round(unitValue * 100) / 100;
+      const credit = Math.round(unitValue * qty * 100) / 100;
+      if (credit <= 0) continue;
+      declinedCredit += credit;
+      const mathNote = qty > 1 ? `${qty}${unitLabel} × $${unitValue.toFixed(2)} = ` : "";
       targetItems.push({
-        name: `${d?.label || key} — declined (−$${Math.abs(rate).toFixed(2)} credit)`,
+        name: `${d?.label || key} — declined (${mathNote}−$${credit.toFixed(2)} credit)`,
         qty: 1,
         amount: 0,
         priceId: "",
@@ -461,7 +497,9 @@ Deno.serve(async (req: Request) => {
         attachments: [],
         currency: "USD",
         type: "one_time",
-        description: "Included item declined — credited via the estimate discount",
+        description: qty > 1
+          ? `Included item declined (${qty}${unitLabel || " included"}) — credited via the estimate discount`
+          : "Included item declined — credited via the estimate discount",
       });
     }
   }
@@ -608,7 +646,9 @@ Deno.serve(async (req: Request) => {
   // update it back to status "open". Failures here are non-fatal — the estimate still
   // goes out.
   const oppName = `${styleLabel} ${size}`.trim();
-  const oppValue = targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0);
+  // Line items minus the declined-item discount (credits live at the invoice level, not as
+  // negative lines), so the opportunity's pipeline value matches the estimate's actual total.
+  const oppValue = Math.max(0, targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0) - declinedCredit);
   let opportunityId: string | null = existingDesign.ghl_opportunity_id || null;
   if (contactId) {
     try {
@@ -767,7 +807,7 @@ Deno.serve(async (req: Request) => {
     // Declined-item credits are applied here as a fixed dollar discount (GHL won't take
     // negative line amounts). The matching $0 "— declined" line items above are the record
     // of what this discount covers.
-    discount: declinedCredit > 0 ? { value: declinedCredit, type: "fixed" } : { value: 0, type: "percentage" },
+    discount: declinedCredit > 0 ? { value: Math.round(declinedCredit * 100) / 100, type: "fixed" } : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
     // off per-estimate inside GHL (this only sets the initial state). Requires that the

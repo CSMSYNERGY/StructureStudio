@@ -223,7 +223,7 @@ function getDisplayLabel(positionalWall, frontWall) {
 // present only when the tenant's show_pricing is on (else {} → returns no rows).
 const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "loft", "ramp"];
 function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
-function fmtMoney2(n) { return "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v < 0 ? "−" + s : s; }
 function computeLayoutPricingRows(items, sel, customOptions, C) {
   if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
   const pricing = C.layoutPricing;
@@ -320,6 +320,53 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
     }, 0);
     const base = buildingPrice + nonPctSubtotal + roRate * roCount + customTotal;
     for (const d of deferred) d.row.total = (d.pct / 100) * base;
+  }
+
+  // Declined included items — mirror submit-estimate's credit: the size's included
+  // quantity (sizeInclusionQty; loft = sq ft, doors = count) × the per-unit value for
+  // the item's pricing method, rounded to cents like the estimate. Appended AFTER the
+  // % resolution because the estimate applies the credit as an invoice-level discount,
+  // outside the % base. Only keys still included with the CURRENT style+size produce a
+  // row — submitQuote filters stale declines the same way, so preview and estimate agree.
+  const declinedKeys = (sel && Array.isArray(sel.declinedItems)) ? sel.declinedItems : [];
+  if (declinedKeys.length && sel && sel.size) {
+    const stEntry = (C.buildingStyles || []).find((s) => s.value === styleKey);
+    // Size labels can drift between "12x16" and "12×16" — normalized fallback, like sizePricing.
+    const pick = (map) => {
+      if (!map || typeof map !== "object") return null;
+      if (map[sel.size] != null) return map[sel.size];
+      const want = normSizeLabel(sel.size);
+      for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
+      return null;
+    };
+    const rawQ = stEntry ? pick(stEntry.sizeInclusionQty) : null;
+    const qmap = (rawQ && typeof rawQ === "object" && !Array.isArray(rawQ)) ? rawQ : null;
+    const legacyArr = !qmap && stEntry ? pick(stEntry.sizeInclusions) : null;
+    let includedNow = {};
+    if (qmap) includedNow = qmap;
+    else if (Array.isArray(legacyArr)) { for (const k of legacyArr) includedNow[k] = 1; }
+    for (const k of declinedKeys) {
+      if (includedNow[k] == null) continue;   // stale decline from another style/size
+      const rp = resolve(k);
+      if (!rp || !(rp.rate > 0)) continue;
+      const q = rp.method === "pct_estimate_total" ? 1 : Math.max(1, Number(includedNow[k]) || 1);
+      let unitValue = rp.rate, unitLabel = "";
+      switch (rp.method) {
+        case "sqft_option":        unitLabel = " sq ft"; break;
+        case "lineal_ft":          unitLabel = " ft"; break;
+        case "sqft_building":      unitValue = rp.rate * buildingArea; break;
+        case "perimeter_building": unitValue = rp.rate * buildingPerimeter; break;
+        case "pct_building_price": unitValue = (rp.rate / 100) * buildingPrice; break;
+        default:                   break; // each / pct_estimate_total: rate as-is (matches submit-estimate)
+      }
+      unitValue = Math.round(unitValue * 100) / 100;
+      const credit = Math.round(unitValue * q * 100) / 100;
+      if (credit <= 0) continue;
+      const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+      rows.push({ key: `declined-${k}`, label: `${label} — declined`, qty: q,
+        unit: q > 1 ? `${q}${unitLabel} × ${fmtMoney2(unitValue)} credit` : `${fmtMoney2(unitValue)} credit`,
+        total: -credit });
+    }
   }
 
   return { rows };
@@ -482,11 +529,34 @@ function StructureStudioInner({ config }) {
   // Phase 4a: which placeable items are INCLUDED (free) with the selected
   // style+size — from get_config's per-style sizeInclusions map. Everything else
   // is an "additional" (chargeable) option. Empty until a style+size is chosen.
-  const includedItemKeys = useMemo(() => {
-    if (!sel.style || !sel.size) return [];
+  // includedItemQty maps item key -> included quantity (loft = sq ft, doors = count)
+  // from the parallel sizeInclusionQty map; configs predating migration 039 fall
+  // back to quantity 1 per included key.
+  const includedItemQty = useMemo(() => {
+    if (!sel.style || !sel.size) return {};
     const st = C.buildingStyles.find((s) => s.value === sel.style);
-    return st && st.sizeInclusions && Array.isArray(st.sizeInclusions[sel.size]) ? st.sizeInclusions[sel.size] : [];
+    if (!st) return {};
+    // Size labels can drift between "12x16" and "12×16" (CSV rewrite vs. saved design),
+    // so fall back to a normalized-label match like the sizePricing lookup does.
+    const pick = (map) => {
+      if (!map || typeof map !== "object") return null;
+      if (map[sel.size] != null) return map[sel.size];
+      const want = normSizeLabel(sel.size);
+      for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
+      return null;
+    };
+    const qmap = pick(st.sizeInclusionQty);
+    if (qmap && typeof qmap === "object" && !Array.isArray(qmap)) {
+      const out = {};
+      for (const k in qmap) out[k] = Math.max(1, Number(qmap[k]) || 1);
+      return out;
+    }
+    const arr = pick(st.sizeInclusions);
+    const out = {};
+    if (Array.isArray(arr)) for (const k of arr) out[k] = 1;
+    return out;
   }, [sel.style, sel.size, C.buildingStyles]);
+  const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
   // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
@@ -2202,7 +2272,14 @@ function StructureStudioInner({ config }) {
             const cur = Array.isArray(p.declinedItems) ? p.declinedItems : [];
             return { ...p, declinedItems: cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key] };
           });
-          const inclBtn = ([key, cfg]) => declined.includes(key)
+          // Included chips show the included quantity when it's more than a single unit
+          // (loft quantities are square footage; everything else is a count).
+          const withQty = (key, cfg) => {
+            const q = includedItemQty[key] || 1;
+            if (q <= 1) return cfg;
+            return { ...cfg, label: key === "loft" ? `${cfg.label} (${q} sq ft)` : `${cfg.label} ×${q}` };
+          };
+          const inclBtn = ([key, rawCfg]) => { const cfg = withQty(key, rawCfg); return declined.includes(key)
             ? (
               <span key={key} title="You declined this included item — it'll show as a deduction on your estimate"
                 style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, background: "#F1F5F9", color: "#94A3B8", border: "2px dashed #CBD5E1" }}>
@@ -2216,7 +2293,7 @@ function StructureStudioInner({ config }) {
                 <button onClick={() => toggleDecline(key)} title={`Decline ${cfg.label} (deduction)`}
                   style={{ marginLeft: 2, background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>✕</button>
               </span>
-            );
+            ); };
           if (incl.length === 0) {
             return (<>
               <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
