@@ -290,6 +290,17 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
     }
   };
 
+  // Included quantities for this style+size (part of the base price → not re-charged; only the
+  // amount placed BEYOND the inclusion is charged, matching submit-estimate's pushItem).
+  const incForRows = (() => {
+    const st = (C.buildingStyles || []).find((s) => s.value === styleKey);
+    if (!st || !sel || !sel.size) return {};
+    const pick = (map) => { if (!map || typeof map !== "object") return null; if (map[sel.size] != null) return map[sel.size]; const want = normSizeLabel(sel.size); for (const k in map) { if (normSizeLabel(k) === want) return map[k]; } return null; };
+    const q = pick(st.sizeInclusionQty);
+    if (q && typeof q === "object" && !Array.isArray(q)) { const o = {}; for (const k in q) o[k] = Math.max(1, Number(q[k]) || 1); return o; }
+    const arr = pick(st.sizeInclusions); const o = {}; if (Array.isArray(arr)) for (const k of arr) o[k] = 1; return o;
+  })();
+
   const rows = [];
   const deferred = [];
   let nonPctSubtotal = 0;
@@ -299,7 +310,17 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
     const rp = resolve(key);
     if (!rp) continue;
     const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || key;
-    const ln = lineFor(rp.rate, rp.method, m);
+    // Net out the included quantity for this item (loft = sq ft, others = count).
+    const inc = incForRows[key] || 0;
+    const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
+    const chargeable = Math.max(0, placedMeasure - inc);
+    if (inc > 0 && chargeable <= 0) {
+      rows.push({ key, label: label + " (included)", qty: placedMeasure, unit: "included", total: 0 });
+      continue;
+    }
+    let mNet = m;
+    if (inc > 0) mNet = rp.method === "lineal_ft" ? { ...m, lengthFt: chargeable } : rp.method === "sqft_option" ? { ...m, optionSqft: chargeable } : { ...m, count: chargeable };
+    const ln = lineFor(rp.rate, rp.method, mNet);
     const row = { key, label, qty: ln.qty, unit: ln.unit, total: ln.total };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
@@ -347,6 +368,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
     else if (Array.isArray(legacyArr)) { for (const k of legacyArr) includedNow[k] = 1; }
     for (const k of declinedKeys) {
       if (includedNow[k] == null) continue;   // stale decline from another style/size
+      if (items.some((i) => i.type === k)) continue;   // placed = kept, charged above, not credited
       const rp = resolve(k);
       if (!rp || !(rp.rate > 0)) continue;
       const q = rp.method === "pct_estimate_total" ? 1 : Math.max(1, Number(includedNow[k]) || 1);
