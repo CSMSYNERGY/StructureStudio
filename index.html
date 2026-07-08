@@ -2146,7 +2146,7 @@ function StructureStudioInner({ config }) {
                   else { setRoofCustom(false); setSel((p) => ({ ...p, roofColor: label })); }
                 };
                 return (
-                  <div>
+                  <div style={{ flex: 1, minWidth: 240 }}>
                     <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Options</span>
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569" }}>Type:
