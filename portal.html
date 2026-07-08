@@ -745,18 +745,20 @@ function PricingCsv() {
     if (!cat) return;
     const its = items();
     const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
-    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
+    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
+    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
     const rows = [];
     activeStyles().forEach((s) => {
       const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
       if (sizes.length === 0) {
         // No sizes yet → one starter row: fill width/length/price and copy the line down.
-        rows.push([s.label, "", "", "", ...its.map(() => "no"), "yes"]);
+        rows.push([s.label, "", "", "", ...its.map(() => "0"), "yes"]);
       } else {
         sizes.forEach((z) => {
           const inc = incBySize[z.id] || {};
           rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
-            ...its.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+            ...its.map((it) => String(inc[it.key] || 0)), z.active ? "yes" : "no"]);
         });
       }
     });
@@ -897,8 +899,10 @@ function PricingCsv() {
         <div style={S.h2}>Pricing &amp; included options (CSV)</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Download the template (one row per building style), then add a row for every size you offer: type the
-          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The yes/no columns mean “is this option
-          <b> included in the price?</b>” — leave them <b>no</b> to charge for it. Re-upload anytime to update prices
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
+          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
+          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
+          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (

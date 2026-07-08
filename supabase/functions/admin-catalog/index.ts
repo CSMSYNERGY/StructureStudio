@@ -70,7 +70,10 @@ async function assertClient(sb: any, clientId: string) {
 }
 
 // Shared CSV pricing + inclusion importer (also used by portal-settings).
-// rows: [{ style, width, length, price, active, inclusions: { item_key: yes/no } }].
+// rows: [{ style, width, length, price, active, inclusions: { item_key: qty } }].
+// Inclusion cells are QUANTITIES (2026-07-07): loft = included sq ft (e.g. 50),
+// doors = count (e.g. 1); 0/blank/"no" = not included. Legacy yes-style tokens
+// still import as quantity 1 so previously downloaded sheets keep working.
 // Resolves the style by label OR key (case-insensitive). CREATES the size if a
 // (style, width, length) combo doesn't exist yet, otherwise UPDATES it — keyed on
 // dimensions, so re-uploading the same sheet updates prices without ever creating
@@ -92,7 +95,24 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const cur = maxSort.get(z.style_id) ?? -1;
     if ((z.sort_order ?? 0) > cur) maxSort.set(z.style_id, z.sort_order ?? 0);
   }
-  const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Inclusion cell -> included quantity. 0 = not included (delete the row).
+  // Numbers win ("50" -> 50 sq ft, "2" -> 2); legacy yes-tokens mean quantity 1;
+  // anything else (blank, "no", garbage) is 0 — same delete behavior as before.
+  const parseInclusionQty = (v: unknown): number => {
+    if (v === true) return 1;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "") return 0;
+    if (["yes", "y", "true", "x", "included"].includes(s)) return 1;
+    const n = Number(s.replace(/[$,\s]/g, ""));
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  };
+  const isLegacyYes = (v: unknown) => v === true || ["yes", "y", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Existing inclusion quantities: a legacy "yes" cell (old saved sheet) PRESERVES a
+  // configured qty (e.g. loft 50 sq ft) instead of silently downgrading it to 1.
+  const existingQty = new Map<string, number>();   // `${size_id}|${item_key}` -> qty
+  const exq = await sb.from("building_size_inclusions").select("size_id, item_key, qty").eq("client_id", clientId);
+  if (exq.error) throw exq.error;
+  for (const r of exq.data ?? []) existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
   const inactiveWord = (v: unknown) => ["no", "n", "0", "false", "inactive"].includes(String(v ?? "").trim().toLowerCase());
   const num = (v: unknown) => { const blank = v === "" || v == null; if (blank) return { blank: true, n: NaN }; return { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) }; };
   const fmt = (n: number) => String(n);
@@ -131,8 +151,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
-      const incRes = truthy(val)
-        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" })
+      let qty = parseInclusionQty(val);
+      if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
+      const incRes = qty > 0
+        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true, qty }, { onConflict: "size_id,item_key" })
         : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
       if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
     }
@@ -178,7 +200,7 @@ Deno.serve(async (req: Request) => {
           sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
-          sb.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
+          sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
         ]);
         if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
         return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
@@ -399,11 +421,12 @@ Deno.serve(async (req: Request) => {
           for (const z of szSrc.data ?? []) { const ns = styleIdMap.get(z.style_id); if (!ns) continue; const nid = newSizeIdByKey.get(`${ns}|${z.label}`); if (nid) sizeIdMap.set(z.id, nid); }
           counts.building_sizes = sizeIdMap.size;
 
-          // 3. building_size_inclusions → remap size_id
-          const incSrc = await sb.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", T);
+          // 3. building_size_inclusions → remap size_id (qty travels with the row —
+          // previously dropped here, resetting every clone's quantities to the default 1)
+          const incSrc = await sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", T);
           if (incSrc.error) throw new Error(`clone inclusions read: ${incSrc.error.message}`);
           const incRows = (incSrc.data ?? []).filter((x: any) => sizeIdMap.has(x.size_id)).map((x: any) => ({
-            client_id: Cc, size_id: sizeIdMap.get(x.size_id), item_key: x.item_key, included: x.included,
+            client_id: Cc, size_id: sizeIdMap.get(x.size_id), item_key: x.item_key, included: x.included, qty: x.qty ?? 1,
           }));
           if (incRows.length) { const r = await sb.from("building_size_inclusions").insert(incRows); if (r.error) throw new Error(`clone inclusions: ${r.error.message}`); }
           counts.building_size_inclusions = incRows.length;

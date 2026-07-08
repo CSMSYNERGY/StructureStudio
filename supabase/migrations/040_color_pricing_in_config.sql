@@ -1,9 +1,10 @@
--- 039_color_pricing_in_config: expose each color's rate + pricing_method to the public designer
--- so it can show the price of the Paint Colors and Roof selections in the "Details" section,
--- matching what submit-estimate will charge. Same gating as layoutPricing/sizePricing: the price
--- fields are only populated when the tenant's client_settings.show_pricing is on; otherwise they
--- come back null so prices never leak to anon for hidden-pricing tenants. Selection fields
--- (label/flags/allowCustom/isDefault/hex/swatch) are unchanged and always returned.
+-- 040_color_pricing_in_config: expose each color's rate + pricing_method to the public designer
+-- (gated by show_pricing) so it can price the Paint Colors + Roof selections, matching what
+-- submit-estimate charges. Renumbered from an earlier 039_color_pricing_in_config that collided
+-- with 039_size_inclusion_qty_in_config (both recreated get_config); this version is layered on
+-- TOP of 039_size_inclusion_qty so BOTH changes are live — the buildingStyles.sizeInclusionQty
+-- map (039) AND the color rate/pricingMethod fields (this migration). Body copied from
+-- 039_size_inclusion_qty_in_config.sql; only the 'colors' object gained the two gated fields.
 --
 -- NB: applied to live via MCP on 2026-07-08; this NNN_ file is the repo record.
 
@@ -35,6 +36,16 @@ as $function$
                    where bsi.size_id = s2.id and bsi.included
                  ) inc
                  where s2.style_id = st.id and s2.active and jsonb_array_length(inc.keys) > 0
+               ), '{}'::jsonb),
+               'sizeInclusionQty', coalesce((
+                 select jsonb_object_agg(s2.label, inc.qmap)
+                 from public.building_sizes s2
+                 cross join lateral (
+                   select jsonb_object_agg(bsi.item_key, coalesce(bsi.qty, 1)) as qmap
+                   from public.building_size_inclusions bsi
+                   where bsi.size_id = s2.id and bsi.included
+                 ) inc
+                 where s2.style_id = st.id and s2.active and inc.qmap is not null
                ), '{}'::jsonb))
              order by st.sort_order, st.label)
       from public.building_styles st
@@ -59,7 +70,6 @@ as $function$
                'shingle', c.shingle, 'metal', c.metal,
                'allowCustom', c.allow_custom, 'isDefault', c.is_default,
                'hex', c.hex, 'swatch', c.image_url,
-               -- price fields gated by show_pricing (null when hidden)
                'rate', case when coalesce((select cs.show_pricing from public.client_settings cs where cs.client_id = cc.client_id), false) then c.rate else null end,
                'pricingMethod', case when coalesce((select cs.show_pricing from public.client_settings cs where cs.client_id = cc.client_id), false) then c.pricing_method::text else null end)
              order by c.sort_order, c.label)
