@@ -1487,7 +1487,7 @@ function StructureStudioInner({ config }) {
     if (sel.paint === "Painted") {
       const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
       bullets.push(`Painted — Body: ${body}, Trim: ${trim}`);
-    } else { bullets.push("No Paint"); }
+    } else { bullets.push("Unpainted"); }
     const sdCount = items.filter((i) => i.type === "singleDoor").length;
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
@@ -1927,7 +1927,6 @@ function StructureStudioInner({ config }) {
     }
     if (opt.type === "counter") {
       const isPaint = opt.id === "paint";
-      const isPainted = isPaint && sel[opt.id] === "Painted";
       const hasImage = !!opt.img;
       // Paint palette from config (the owner's Colors tab). Body = colors flagged siding,
       // trim = colors flagged trim. If no palette is configured, fall back to free-text.
@@ -1937,24 +1936,41 @@ function StructureStudioInner({ config }) {
       // flexShrink:0, so a one-line squeeze used to overflow the page horizontally.
       const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
       const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+      // Paint has no No-Paint/Painted pills — the Body + Trim selects are always shown and
+      // each carries an "Unpainted" choice. sel.paint ("No Paint"/"Painted") is still the
+      // source of truth (save/load/submit contract); it's derived from these selects here.
+      // "Both must match": picking Unpainted on either side unpaints the whole building;
+      // picking a real color on either side paints it (and clears the other side's Unpainted).
       const paintField = (kind) => {
-        const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
+        const baseColors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
         const val = paintColors[kind] || "";
         const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
         const labelTxt = kind === "body" ? "Body:" : "Trim:";
-        if (colors.length === 0) {
+        const unpainted = sel[opt.id] === "No Paint";
+        // No palette configured for this side → free-text. Empty = unpainted, any text = painted.
+        if (baseColors.length === 0) {
           return (
             <label style={PAINT_LBL}>{labelTxt}
-              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Enter color or TBD" style={PAINT_INPUT} />
+              <input type="text" value={unpainted ? "" : val}
+                onChange={(e) => { const v = e.target.value; setSel((p) => ({ ...p, [opt.id]: v ? "Painted" : "No Paint" })); set(v); }}
+                placeholder="Unpainted / enter color" style={PAINT_INPUT} />
             </label>
           );
         }
-        const match = colors.find((c) => c.label === val && !c.allowCustom);
-        const customColor = colors.find((c) => c.allowCustom);
-        const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
-        const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
+        // Prepend a synthetic "Unpainted" row (no swatch) as the top dropdown choice.
+        const colors = [{ id: "__unpainted__", label: "Unpainted", hex: null }, ...baseColors];
+        const match = baseColors.find((c) => c.label === val && !c.allowCustom);
+        const customColor = baseColors.find((c) => c.allowCustom);
+        const isCustom = !unpainted && (paintCustom[kind] || (!match && !!val && !!customColor));
+        const selectVal = unpainted ? "Unpainted" : (isCustom && customColor ? customColor.label : (match ? match.label : ""));
         const onSel = (label) => {
-          const c = colors.find((x) => x.label === label);
+          if (label === "Unpainted") {
+            setSel((p) => ({ ...p, [opt.id]: "No Paint" }));
+            setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false });
+            return;
+          }
+          setSel((p) => ({ ...p, [opt.id]: "Painted" }));
+          const c = baseColors.find((x) => x.label === label);
           if (c && c.allowCustom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
           else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
         };
@@ -1977,23 +1993,18 @@ function StructureStudioInner({ config }) {
                 <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
               </div>
             )}
-            {/* Always allow wrapping: the pills are flexShrink:0 and picking "Painted" appends
-                the Body/Trim color fields to this row — with nowrap that combination overflowed
-                the page horizontally on phones (the "page overflow while selecting colors" bug). */}
+            {/* Always wrap: on a phone the two color selects drop onto their own full-width
+                rows instead of overflowing the page horizontally. */}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
-              {opt.options.map((o) => (
-                <div key={o} onClick={() => {
-                  const prev = sel[opt.id];
-                  setSel((p) => ({ ...p, [opt.id]: o }));
-                  if (isPaint && o === "No Paint") { setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false }); }
-                  if (isPaint && o === "Painted" && prev !== "Painted") { setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false }); }
-                }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
-              ))}
-              {isPainted && (
+              {isPaint ? (
                 <>
                   {paintField("body")}
                   {paintField("trim")}
                 </>
+              ) : (
+                opt.options.map((o) => (
+                  <div key={o} onClick={() => setSel((p) => ({ ...p, [opt.id]: o }))} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+                ))
               )}
             </div>
           </div>
