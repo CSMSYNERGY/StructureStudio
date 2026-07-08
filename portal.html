@@ -1141,10 +1141,12 @@ const COLOR_LIBRARY = [
 
 function ColorsView() {
   const [cat, setCat] = useState(null);
-  const [rows, setRows] = useState([]);      // [{ id, label, siding, trim, allow_custom, is_default, active, hex, pricing_method, rate }]
+  // One flat list across all categories; a row's category is set by its flags:
+  // paint = siding/trim (and not shingle/metal), shingle = shingle, metal = metal.
+  const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [libOpen, setLibOpen] = useState(false);
+  const [libOpen, setLibOpen] = useState(null);   // which section's library is open
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -1152,29 +1154,34 @@ function ColorsView() {
     setCat(data);
     setRows((data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
+      shingle: !!c.shingle, metal: !!c.metal,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
       hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
     })));
   };
   useEffect(() => { load(); }, []);
 
-  const setRow = (idx, field, val) => setRows((rs) => rs.map((r, i) => i === idx ? { ...r, [field]: val } : r));
-  const addRow = (preset) => setRows((rs) => [...rs, {
-    id: null, label: preset ? preset.name : "", siding: true, trim: true,
+  const setRow = (gi, field, val) => setRows((rs) => rs.map((r, i) => i === gi ? { ...r, [field]: val } : r));
+  // New rows are tagged for the section they're added from.
+  const addRow = (preset, category) => setRows((rs) => [...rs, {
+    id: null, label: preset ? preset.name : "",
+    siding: category === "paint", trim: category === "paint",
+    shingle: category === "shingle", metal: category === "metal",
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
     pricing_method: "each", rate: "0",
   }]);
-  const removeRow = (idx) => setRows((rs) => rs.filter((_, i) => i !== idx));
-  const move = (idx, dir) => setRows((rs) => {
-    const j = idx + dir; if (j < 0 || j >= rs.length) return rs;
-    const next = rs.slice(); [next[idx], next[j]] = [next[j], next[idx]]; return next;
-  });
+  const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
+  // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
+  const swap = (gi, gj) => setRows((rs) => { if (gj < 0 || gj >= rs.length) return rs; const next = rs.slice(); [next[gi], next[gj]] = [next[gj], next[gi]]; return next; });
 
+  // One save persists every section at once — the whole list is always sent, so the
+  // server's "delete anything not in the payload" stays safe across categories.
   const save = async () => {
     setBusy(true); setMsg(null);
     try {
       const colors = rows.map((r, i) => ({
-        id: r.id || undefined, label: r.label, siding: !!r.siding, trim: !!r.trim,
+        id: r.id || undefined, label: r.label,
+        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
       }));
@@ -1192,104 +1199,136 @@ function ColorsView() {
   const ctr = { ...S.td, padding: "8px 5px", textAlign: "center" };
   const tdc = { ...S.td, padding: "8px 5px" };
   const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
-  const chk = (idx, field) => <input type="checkbox" checked={!!rows[idx][field]} onChange={(e) => setRow(idx, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+  const chk = (gi, field) => <input type="checkbox" checked={!!rows[gi][field]} onChange={(e) => setRow(gi, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+
+  // Render one category card. `ckey` selects which rows show; `showST` adds the paint-only
+  // Siding/Trim columns. Defined as a plain function (not a <Component/>) so inputs keep focus.
+  const renderSection = (ckey, title, desc, showST) => {
+    const entries = rows.map((r, gi) => ({ r, gi })).filter(({ r }) =>
+      ckey === "paint" ? (!r.shingle && !r.metal) : ckey === "shingle" ? r.shingle : r.metal);
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>{title}</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>{desc}</p>
+        {entries.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
+        ) : (
+          <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
+            <colgroup>
+              {showST ? (
+                <>
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
+                </>
+              ) : (
+                <>
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "29%" }} />
+                  <col style={{ width: "22%" }} /><col style={{ width: "13%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+                </>
+              )}
+            </colgroup>
+            <thead><tr>
+              <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+              {showST && <th style={thc}>Siding</th>}
+              {showST && <th style={thc}>Trim</th>}
+              <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+              <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+            </tr></thead>
+            <tbody>
+              {entries.map(({ r, gi }, pos) => (
+                <tr key={r.id || `new-${gi}`}>
+                  <td style={ctr}>
+                    <button onClick={() => { if (pos > 0) swap(gi, entries[pos - 1].gi); }} disabled={pos === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                    <button onClick={() => { if (pos < entries.length - 1) swap(gi, entries[pos + 1].gi); }} disabled={pos === entries.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                  </td>
+                  <td style={ctr}>
+                    <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(gi, "hex", e.target.value)} title={r.hex || "Pick this color"}
+                      style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                  </td>
+                  <td style={tdc}>
+                    <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(gi, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
+                  {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
+                  <td style={tdc}>
+                    <select value={r.pricing_method || "each"} onChange={(e) => setRow(gi, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
+                      {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </td>
+                  <td style={ctr}>
+                    <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(gi, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  <td style={ctr}>{chk(gi, "is_default")}</td>
+                  <td style={ctr}>{chk(gi, "active")}</td>
+                  <td style={ctr}>
+                    <button onClick={() => removeRow(gi)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+          <button onClick={() => addRow(undefined, ckey)} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+          <button onClick={() => setLibOpen((o) => o === ckey ? null : ckey)} style={S.btn("#F1F5F9", "#334155")}>{libOpen === ckey ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
+          <div style={{ flex: 1 }} />
+          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+        </div>
+        {libOpen === ckey && (
+          <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {COLOR_LIBRARY.map((c) => (
+                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                  style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
+                  <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                  {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const paintDesc = (<>
+    These are the colors your customers pick from for <b>paint</b> in the designer.
+    Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
+    (leave the rate at <b>0</b> for colors included in the base price). <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
+    <br />Need color ideas? See <b>hayleypaint.com</b> or use the quick-add library below.
+  </>);
+  const shingleDesc = (<>
+    Shingle roof colors your customers pick from when they choose a <b>Shingle</b> roof in the designer.
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge (leave <b>0</b> if included). <b>Default</b> pre-selects one; <b>Active</b> shows/hides it. Drag order with ▲▼.
+  </>);
+  const metalDesc = (<>
+    Metal roof colors your customers pick from when they choose a <b>Metal</b> roof in the designer.
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge (leave <b>0</b> if included). <b>Default</b> pre-selects one; <b>Active</b> shows/hides it. Drag order with ▲▼.
+  </>);
 
   return (
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      <div style={S.card}>
-        <div style={S.h2}>Paint colors</div>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          These are the colors your customers pick from when they choose <b>Painted</b> in the designer.
-          Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
-          Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
-          (same methods as Layout Pricing; leave the rate at <b>0</b> for colors included in the base price). If the same color is
-          chosen for both siding and trim it’s only charged once.
-          <b> Default</b> pre-selects a color; <b>Active</b> shows/hides it without deleting. Drag order with ▲▼.
-          <br />Need color ideas? See <b>hayleypaint.com</b> (color gallery) or <b>classicbuildingssales.com</b>, or use the quick-add library below.
-        </p>
-        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
-          <>
-            {rows.length === 0 ? (
-              <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
-            ) : (
-              <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
-                <colgroup>
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
-                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
-                </colgroup>
-                <thead><tr>
-                    <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
-                    <th style={thc}>Siding</th><th style={thc}>Trim</th><th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
-                    <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
-                  </tr></thead>
-                  <tbody>
-                    {rows.map((r, idx) => (
-                      <tr key={r.id || `new-${idx}`}>
-                        <td style={ctr}>
-                          <button onClick={() => move(idx, -1)} disabled={idx === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
-                          <button onClick={() => move(idx, 1)} disabled={idx === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
-                        </td>
-                        <td style={ctr}>
-                          <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(idx, "hex", e.target.value)} title={r.hex || "Pick this color"}
-                            style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
-                        </td>
-                        <td style={tdc}>
-                          <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
-                        </td>
-                        <td style={ctr}>{chk(idx, "siding")}</td>
-                        <td style={ctr}>{chk(idx, "trim")}</td>
-                        <td style={tdc}>
-                          <select value={r.pricing_method || "each"} onChange={(e) => setRow(idx, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
-                            {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-                          </select>
-                        </td>
-                        <td style={ctr}>
-                          <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(idx, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
-                        </td>
-                        <td style={ctr}>{chk(idx, "is_default")}</td>
-                        <td style={ctr}>{chk(idx, "active")}</td>
-                        <td style={ctr}>
-                          <button onClick={() => removeRow(idx)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-            )}
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
-              <button onClick={() => addRow()} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
-              <button onClick={() => setLibOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{libOpen ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
-              <div style={{ flex: 1 }} />
-              <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+      {!cat ? <div style={S.card}><div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div></div> : (
+        <>
+          {renderSection("paint", "Paint colors", paintDesc, true)}
+          {renderSection("shingle", "Shingle colors", shingleDesc, false)}
+          {renderSection("metal", "Metal colors", metalDesc, false)}
+          {msg && msg.skipped && msg.skipped.length > 0 && (
+            <div style={{ ...S.card, marginTop: 0, fontSize: 13 }}>
+              <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
+              <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+                {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+              </ul>
             </div>
-            {libOpen && (
-              <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
-                <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to your list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {COLOR_LIBRARY.map((c) => (
-                    <button key={c.name} onClick={() => { addRow(c); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
-                      style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
-                      <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
-                      {c.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {msg && msg.skipped && msg.skipped.length > 0 && (
-              <div style={{ marginTop: 12, fontSize: 13 }}>
-                <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
-                <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
-                  {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
-                </ul>
-              </div>
-            )}
-          </>
-        )}
-      </div>
+          )}
+        </>
+      )}
     </>
   );
 }

@@ -287,8 +287,8 @@ Deno.serve(async (req: Request) => {
       admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
-      // Paint palette for the Colors tab.
-      admin.from("colors").select("id, label, siding, trim, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
+      admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
@@ -613,6 +613,10 @@ Deno.serve(async (req: Request) => {
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
+      // Roof categories (shingle/metal). Only written when the caller sends them, so an older
+      // client that doesn't know about these keys can't clear a color's roof categorization.
+      if (Object.prototype.hasOwnProperty.call(row, "shingle")) rec.shingle = row.shingle === true;
+      if (Object.prototype.hasOwnProperty.call(row, "metal")) rec.metal = row.metal === true;
       if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
         rec.image_url = String(row.imageUrl ?? "").trim() || null;
       }
