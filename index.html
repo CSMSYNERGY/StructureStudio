@@ -2122,7 +2122,7 @@ function StructureStudioInner({ config }) {
                 <div>
                   <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
                   <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
-                    style={{ minWidth: 160, border: `1px solid ${sel.size ? accent : "#CBD5E1"}`, borderRadius: 8, padding: "9px 12px", fontSize: 14, fontWeight: 700, color: "#1E293B", background: "#FFF", cursor: "pointer" }}>
+                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                     <option value="" disabled>Select a size…</option>
                     {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
@@ -2151,7 +2151,7 @@ function StructureStudioInner({ config }) {
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569" }}>Type:
                         <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
-                          style={{ minWidth: 130, border: `1px solid ${sel.roofType ? accent : "#CBD5E1"}`, borderRadius: 6, padding: "6px 10px", fontSize: 13, fontWeight: 700, color: "#1E293B", background: "#FFF", cursor: "pointer" }}>
+                          style={{ minWidth: 130, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                           <option value="">Select…</option>
                           {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
                         </select>
