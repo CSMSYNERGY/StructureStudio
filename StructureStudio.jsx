@@ -442,7 +442,7 @@ function StructureStudioInner({ config }) {
   }, []);
 
   const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "" };
+    const init = { style: "", size: "", roofType: "", roofColor: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
@@ -453,6 +453,15 @@ function StructureStudioInner({ config }) {
     () => C.options.filter((o) => isOptionApplicable(o, sel.style)),
     [C.options, sel.style]
   );
+
+  // Roof colors come from the same palette (shingle/metal flags). A roof type is only offered
+  // when the tenant has >=1 active color in it; roof pricing is the chosen color's rate
+  // (server-side), exactly like paint. Empty until the owner adds roof colors in the portal.
+  const roofColorsFor = (type) => {
+    const list = Array.isArray(C.colors) ? C.colors : [];
+    return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
+  };
+  const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
 
   // When the building style changes, snap any now-inapplicable option back to
   // its default so a stale "Painted" (etc.) selection can't be silently sent
@@ -490,6 +499,9 @@ function StructureStudioInner({ config }) {
   // Tracks when the shopper picked an "allow custom" color and is typing an exact value
   // (so the custom text box stays open even while paintColors.body/trim is momentarily "").
   const [paintCustom, setPaintCustom] = useState({ body: false, trim: false });
+  // Roof: type (Shingle/Metal) + color live in `sel` (saved with the design); this tracks the
+  // transient "typing a custom roof color" state, same as paintCustom.
+  const [roofCustom, setRoofCustom] = useState(false);
   const [customOptions, setCustomOptions] = useState([]);
   const [roDimensions, setRoDimensions] = useState({});
   const [bldgW, setShedW] = useState(10);
@@ -1486,6 +1498,7 @@ function StructureStudioInner({ config }) {
       const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
       bullets.push(`Painted — Body: ${body}, Trim: ${trim}`);
     } else { bullets.push("Unpainted"); }
+    if (sel.roofType) bullets.push(`Roof — ${sel.roofType}${sel.roofColor ? `: ${sel.roofColor}` : ""}`);
     const sdCount = items.filter((i) => i.type === "singleDoor").length;
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
@@ -1701,6 +1714,7 @@ function StructureStudioInner({ config }) {
           buildingSize: sel.size,
           paint: sel.paint || "No Paint",
           ...(sel.paint === "Painted" ? { paintBodyColor: paintColors.body || "TBD", paintTrimColor: paintColors.trim || "TBD" } : {}),
+          ...(sel.roofType ? { roofType: sel.roofType, roofColor: sel.roofColor || "" } : {}),
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
@@ -2093,15 +2107,61 @@ function StructureStudioInner({ config }) {
             </div>
           </div>
 
-          {/* Building Size */}
-          {sizeOpts.length > 0 && (
-            <div style={{ marginBottom: 14 }}>
-              <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
-              <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
-                style={{ minWidth: 160, border: `1px solid ${sel.size ? accent : "#CBD5E1"}`, borderRadius: 8, padding: "9px 12px", fontSize: 14, fontWeight: 700, color: "#1E293B", background: "#FFF", cursor: "pointer" }}>
-                <option value="" disabled>Select a size…</option>
-                {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
+          {/* Building Size + Roof Options — one row; roof sits to the right of size, above Paint. */}
+          {(sizeOpts.length > 0 || roofTypes.length > 0) && (
+            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
+              {sizeOpts.length > 0 && (
+                <div>
+                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
+                  <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
+                    style={{ minWidth: 160, border: `1px solid ${sel.size ? accent : "#CBD5E1"}`, borderRadius: 8, padding: "9px 12px", fontSize: 14, fontWeight: 700, color: "#1E293B", background: "#FFF", cursor: "pointer" }}>
+                    <option value="" disabled>Select a size…</option>
+                    {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              )}
+              {roofTypes.length > 0 && (() => {
+                // Roof color list depends on the chosen type. Custom-color handling mirrors paint.
+                const roofList = roofColorsFor(sel.roofType);
+                const rMatch = roofList.find((c) => c.label === sel.roofColor && !c.allowCustom);
+                const rCustomColor = roofList.find((c) => c.allowCustom);
+                const rIsCustom = roofCustom || (!rMatch && !!sel.roofColor && !!rCustomColor);
+                const rSelectVal = rIsCustom && rCustomColor ? rCustomColor.label : (rMatch ? rMatch.label : "");
+                const onRoofType = (type) => {
+                  const dflt = roofColorsFor(type).find((c) => c.isDefault);
+                  setRoofCustom(false);
+                  setSel((p) => ({ ...p, roofType: type, roofColor: dflt ? dflt.label : "" }));
+                };
+                const onRoofColor = (label) => {
+                  const c = roofList.find((x) => x.label === label);
+                  if (c && c.allowCustom) { setRoofCustom(true); setSel((p) => ({ ...p, roofColor: "" })); }
+                  else { setRoofCustom(false); setSel((p) => ({ ...p, roofColor: label })); }
+                };
+                return (
+                  <div>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Options</span>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569" }}>Type:
+                        <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
+                          style={{ minWidth: 130, border: `1px solid ${sel.roofType ? accent : "#CBD5E1"}`, borderRadius: 6, padding: "6px 10px", fontSize: 13, fontWeight: 700, color: "#1E293B", background: "#FFF", cursor: "pointer" }}>
+                          <option value="">Select…</option>
+                          {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </label>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569", flex: "1 1 200px", minWidth: 0 }}>
+                        <span>Color:</span>
+                        {sel.roofType
+                          ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
+                          : <span style={{ flex: 1, fontSize: 12, color: "#94A3B8", fontStyle: "italic", fontWeight: 500 }}>pick a roof type first</span>}
+                        {rIsCustom && sel.roofType && (
+                          <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
+                            style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 

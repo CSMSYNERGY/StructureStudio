@@ -521,6 +521,50 @@ Deno.serve(async (req: Request) => {
     } catch { /* colors lookup failed → skip paint pricing, estimate still goes out */ }
   }
 
+  // Roof-color pricing — same catalog-driven model as paint. The selected roof color (from the
+  // tenant's shingle/metal palette, chosen via Roof Type) adds a line priced by its
+  // pricing_method. A typed custom roof color is priced at that category's allow_custom rate.
+  const roofType = String(selections.roofType ?? "").trim();
+  const roofColor = String(selections.roofColor ?? "").trim();
+  if (roofType && roofColor) {
+    try {
+      const flag = norm(roofType) === norm("Metal") ? "metal" : "shingle";
+      const colRes = await supabase.from("colors")
+        .select("id, label, rate, pricing_method, allow_custom, shingle, metal")
+        .eq("client_id", clientId).eq("active", true).eq(flag, true);
+      const palette = (colRes.data || []) as any[];
+      const customRow = palette.find((c) => c.allow_custom);
+      const row = norm(roofColor) === norm("TBD")
+        ? null
+        : (palette.find((c) => norm(c.label) === norm(roofColor)) || customRow || null);
+      const rate = Number(row?.rate) || 0;
+      if (row && rate > 0) {   // included / free roof color adds no line
+        const method = String(row.pricing_method || "each");
+        let amount = rate;
+        switch (method) {
+          case "sqft_building":      amount = rate * buildingArea; break;
+          case "perimeter_building": amount = rate * buildingPerimeter; break;
+          case "pct_building_price": amount = (rate / 100) * buildingPrice; break;
+          case "pct_estimate_total": amount = 0; break;   // resolved after every other line
+          default:                   amount = rate; break; // each / lineal_ft / sqft_option → flat
+        }
+        const item = {
+          name: `Roof (${roofType}) — ${row.label}`,
+          qty: 1,
+          amount,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: `${roofType} roof`,
+        };
+        targetItems.push(item);
+        if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
+      }
+    } catch { /* roof colors lookup failed → skip roof pricing, estimate still goes out */ }
+  }
+
   // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
   // line (building + non-percentage add-ons + custom options + rough openings + any
   // pct_building_price lines, which resolve earlier). Computed off a fixed base so multiple
