@@ -488,7 +488,13 @@ function StructureStudioInner({ config }) {
   }, [sel.style, sel.size, C.buildingStyles]);
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
-  const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
+  // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
+  // design overrides this from design.paint_colors on load.
+  const [paintColors, setPaintColors] = useState(() => {
+    const list = Array.isArray(C.colors) ? C.colors : [];
+    const dflt = (k) => { const d = list.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault); return d ? d.label : ""; };
+    return { body: dflt("body"), trim: dflt("trim") };
+  });
   // Tracks when the shopper picked an "allow custom" color and is typing an exact value
   // (so the custom text box stays open even while paintColors.body/trim is momentarily "").
   const [paintCustom, setPaintCustom] = useState({ body: false, trim: false });
@@ -1936,43 +1942,44 @@ function StructureStudioInner({ config }) {
       // flexShrink:0, so a one-line squeeze used to overflow the page horizontally.
       const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
       const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
-      // Paint has no No-Paint/Painted pills — the Body + Trim selects are always shown and
-      // each carries an "Unpainted" choice. sel.paint ("No Paint"/"Painted") is still the
-      // source of truth (save/load/submit contract); it's derived from these selects here.
-      // "Both must match": picking Unpainted on either side unpaints the whole building;
-      // picking a real color on either side paints it (and clears the other side's Unpainted).
+      // Paint has no No-Paint/Painted pills: the Body + Trim color selects are always shown.
+      // "Unpainted" is just the tenant's default palette color (owner-priced in the Colors tab,
+      // usually free) — it is NOT synthesized here. sel.paint ("No Paint"/"Painted") stays the
+      // save/load/estimate contract and is derived from the picks: the build is "Painted" once a
+      // chosen Body/Trim color differs from that side's default color (or is a custom color).
+      const defaultLabel = (k) => {
+        const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
+        return d ? d.label : "";
+      };
+      const sidePainted = (k, v, custom) => custom || (!!v && v !== defaultLabel(k));
       const paintField = (kind) => {
-        const baseColors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
+        const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
         const val = paintColors[kind] || "";
         const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
         const labelTxt = kind === "body" ? "Body:" : "Trim:";
-        const unpainted = sel[opt.id] === "No Paint";
-        // No palette configured for this side → free-text. Empty = unpainted, any text = painted.
-        if (baseColors.length === 0) {
+        const other = kind === "body" ? "trim" : "body";
+        // No palette configured for this side → free-text. Any text on either side = painted.
+        if (colors.length === 0) {
           return (
             <label style={PAINT_LBL}>{labelTxt}
-              <input type="text" value={unpainted ? "" : val}
-                onChange={(e) => { const v = e.target.value; setSel((p) => ({ ...p, [opt.id]: v ? "Painted" : "No Paint" })); set(v); }}
-                placeholder="Unpainted / enter color" style={PAINT_INPUT} />
+              <input type="text" value={val}
+                onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
+                placeholder="Enter color or leave blank" style={PAINT_INPUT} />
             </label>
           );
         }
-        // Prepend a synthetic "Unpainted" row (no swatch) as the top dropdown choice.
-        const colors = [{ id: "__unpainted__", label: "Unpainted", hex: null }, ...baseColors];
-        const match = baseColors.find((c) => c.label === val && !c.allowCustom);
-        const customColor = baseColors.find((c) => c.allowCustom);
-        const isCustom = !unpainted && (paintCustom[kind] || (!match && !!val && !!customColor));
-        const selectVal = unpainted ? "Unpainted" : (isCustom && customColor ? customColor.label : (match ? match.label : ""));
+        const match = colors.find((c) => c.label === val && !c.allowCustom);
+        const customColor = colors.find((c) => c.allowCustom);
+        const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
+        const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
         const onSel = (label) => {
-          if (label === "Unpainted") {
-            setSel((p) => ({ ...p, [opt.id]: "No Paint" }));
-            setPaintColors({ body: "", trim: "" }); setPaintCustom({ body: false, trim: false });
-            return;
-          }
-          setSel((p) => ({ ...p, [opt.id]: "Painted" }));
-          const c = baseColors.find((x) => x.label === label);
-          if (c && c.allowCustom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
+          const c = colors.find((x) => x.label === label);
+          const custom = !!(c && c.allowCustom);
+          if (custom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
           else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
+          // Recompute the build's paint state from both sides (a custom pick counts as painted).
+          const painted = sidePainted(kind, custom ? "" : label, custom) || sidePainted(other, paintColors[other], paintCustom[other]);
+          setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
         };
         return (
           <div style={{ ...PAINT_LBL, gap: 4 }}>
