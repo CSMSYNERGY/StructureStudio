@@ -535,31 +535,34 @@ Deno.serve(async (req: Request) => {
 
   // Custom options — name doubles as the line title; leaving description blank keeps GHL
   // from rendering it as a duplicate subtitle.
-  // Negative amounts (credits): GHL rejects a line `amount` < 0 ("amount must not be less than
-  // 0"). To still show a credit AS ITS OWN LINE, we keep `amount` positive and carry the sign on
-  // `qty` — the line total is qty × amount, so a −$75 option becomes amount 75, qty −1 → −$75.
+  // Credits: GHL rejects BOTH a negative line amount ("amount must not be less than 0") AND a
+  // negative/zero qty ("qty must not be less than 0.1") — so a true negative-total line is
+  // impossible via the API. A custom option whose intended total (qty × amount) is negative is
+  // therefore emitted as a $0 line that NAMES the credit, and its value is added to the
+  // invoice-level discount below (same mechanism as declined items) so the estimate total drops.
+  let customOptionCredit = 0;
   if (Array.isArray(customOptions)) {
     customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
+      const name = String(co.name).trim();
       const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
       const rawQty = co.qty ? Number(co.qty) || 1 : 1;
-      // Sign is derived from the intended LINE TOTAL (qty × amount), so a credit entered in
-      // EITHER field is handled and the sign can never accidentally flip positive. GHL needs
-      // amount >= 0, so amount is the absolute per-unit price and the credit's sign rides on qty.
-      const signedTotal = rawQty * rawAmt;
-      const amount = Math.abs(rawAmt);
-      const qtyMag = Math.abs(rawQty) || 1;
-      const qty = signedTotal < 0 ? -qtyMag : qtyMag;
-      targetItems.push({
-        name: String(co.name).trim(),
-        qty,
-        amount,
-        priceId: "",
-        productId: "",
-        attachments: [],
-        currency: "USD",
-        type: "one_time",
-        description: "",
-      });
+      const signedTotal = rawQty * rawAmt;   // intended line total; negative = a credit
+      if (signedTotal < 0) {
+        const credit = Math.round(Math.abs(signedTotal) * 100) / 100;
+        customOptionCredit += credit;
+        targetItems.push({
+          name: `${name} (−$${credit.toFixed(2)} credit)`,
+          qty: 1, amount: 0, priceId: "", productId: "", attachments: [],
+          currency: "USD", type: "one_time",
+          description: "Credit — applied via the estimate discount",
+        });
+      } else {
+        targetItems.push({
+          name, qty: Math.abs(rawQty) || 1, amount: Math.abs(rawAmt),
+          priceId: "", productId: "", attachments: [],
+          currency: "USD", type: "one_time", description: "",
+        });
+      }
     });
   }
 
@@ -829,10 +832,12 @@ Deno.serve(async (req: Request) => {
       ...(estimateAddress ? { address: estimateAddress } : {}),
       ...(contactId ? { id: String(contactId) } : {}),
     },
-    // Declined-item credits are applied here as a fixed dollar discount (GHL won't take
-    // negative line amounts). The matching $0 "— declined" line items above are the record
-    // of what this discount covers.
-    discount: declinedCredit > 0 ? { value: Math.round(declinedCredit * 100) / 100, type: "fixed" } : { value: 0, type: "percentage" },
+    // Credits are applied here as a fixed dollar discount (GHL won't take a negative line amount
+    // OR a negative qty). Covers declined included items AND negative custom options; the matching
+    // "— declined" / "(−$… credit)" $0 line items above are the on-estimate record of each.
+    discount: (declinedCredit + customOptionCredit) > 0
+      ? { value: Math.round((declinedCredit + customOptionCredit) * 100) / 100, type: "fixed" }
+      : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
     // off per-estimate inside GHL (this only sets the initial state). Requires that the
