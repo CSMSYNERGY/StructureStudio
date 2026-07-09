@@ -696,6 +696,46 @@ function d3CssColor(v, fallback) {
   return probe.color || fallback;
 }
 
+// Procedural surface textures for the 3D materials — no image assets (plan
+// constraint: parametric only). Each returns a small tileable grayscale
+// THREE.CanvasTexture that MULTIPLIES the material's base color (Lambert
+// map × color), so the chosen paint / roof color still drives the hue while
+// the pattern adds relief:
+//   metal   → vertical standing-seam ribs (AgPanel / Panel-Loc look)
+//   shingle → staggered horizontal shingle courses (Owens Corning Duration look)
+//   lap     → horizontal lap-siding boards
+//   groove  → vertical groove / board-and-batten panel (the standard siding look)
+// Regenerated per build (cheap) so disposeShed3DModel frees them with the
+// material — never a shared texture left disposed under a live model.
+function d3MakeTexture(THREE, kind) {
+  if (!kind || typeof document === "undefined") return null;
+  const N = 128, cv = document.createElement("canvas"); cv.width = cv.height = N;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#ffffff"; g.fillRect(0, 0, N, N);
+  if (kind === "metal") {
+    for (let x = 0; x <= N; x += 16) {
+      g.fillStyle = "rgba(0,0,0,0.30)"; g.fillRect(x, 0, 2.5, N);       // seam shadow
+      g.fillStyle = "rgba(255,255,255,0.55)"; g.fillRect(x + 2.5, 0, 2, N); // rib highlight
+    }
+  } else if (kind === "groove") {
+    for (let x = 0; x <= N; x += 21) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(x, 0, 2, N); }
+  } else if (kind === "lap") {
+    for (let y = 0; y <= N; y += 16) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(0, y, N, 3); g.fillStyle = "rgba(255,255,255,0.10)"; g.fillRect(0, y + 3, N, 2); }
+  } else if (kind === "shingle") {
+    const row = 20, tab = 26;
+    g.fillStyle = "#ededed"; g.fillRect(0, 0, N, N);
+    for (let y = 0, r = 0; y <= N; y += row, r++) {
+      g.fillStyle = "rgba(0,0,0,0.24)"; g.fillRect(0, y, N, 3);          // course shadow
+      g.fillStyle = "rgba(0,0,0,0.12)";
+      const off = (r % 2) * (tab / 2);
+      for (let x = -tab + off; x <= N; x += tab) g.fillRect(x, y, 1.5, row); // staggered tab gaps
+    }
+  } else return null;
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
 // Build the whole parametric building as one Group. World units are FEET; the
 // footprint is centered on the origin with the floor top at y=0; +x = east and
 // +z = south, matching the 2D plan (page-down = south). Returns { root, wallMat,
@@ -712,6 +752,10 @@ function buildShed3DModel(THREE, p) {
   const wallMat = mat(bodyColor);
   const trimMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
+  // Siding texture (vertical groove panel by default; horizontal lap boards when
+  // the customer picked a lap-siding upgrade) — multiplies the body color.
+  const wallTex = d3MakeTexture(THREE, (p.styleSpec && p.styleSpec.siding === "lap") ? "lap" : "groove");
+  if (wallTex) { wallTex.repeat.set(Math.max(2, Math.round((bldgW + bldgH) / 3)), Math.max(2, Math.round(H / 3))); wallMat.map = wallTex; }
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
 
   // Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
@@ -908,6 +952,13 @@ function buildShed3DModel(THREE, p) {
   dedup.forEach((pt, i) => (i === 0 ? shape.moveTo(pt[0], pt[1]) : shape.lineTo(pt[0], pt[1])));
   const rg = new THREE.Group(); // local space: x = profile u, y = up, z = 0..L along the ridge
   rg.add(new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false }), wallMat));
+  // Roof texture: metal standing-seam ribs vs shingle courses per the customer's
+  // roof-type pick (multiplies the roof color; flat when no roof type chosen).
+  const roofTex = d3MakeTexture(THREE, p.roofType === "Metal" ? "metal" : p.roofType === "Shingle" ? "shingle" : null);
+  if (roofTex) {
+    roofTex.repeat.set(Math.max(2, Math.round(S / (p.roofType === "Metal" ? 1.5 : 2.5))), Math.max(2, Math.round(L / 2.5)));
+    roofMat.map = roofTex; roofMat.needsUpdate = true;
+  }
   slopes.forEach((sl) => {
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
@@ -1015,7 +1066,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -1074,8 +1125,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // Unpainted falls back to the STYLE's natural material colors.
       let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
       let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
-      const roofCss = spec.colors.roof || D3_COLORS.roof;
-      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY });
+      const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
+      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY });
       scene.add(model.root);
       scene.add(new THREE.HemisphereLight(0xFFFFFF, 0x8D8573, 1.8));
       // Start the camera on the FRONT side (same wall the 2D labels call FRONT),
@@ -1213,7 +1264,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           disposeShed3DModel(e.model);
           // Recompute FRONT from the live items — dragging the only door to a
           // different wall re-orients the roof exactly like the 2D labels.
-          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY });
+          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY });
           scene.add(e.model.root);
           applyShellMode(e);
           render();
@@ -4369,6 +4420,8 @@ function StructureStudioInner({ config }) {
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
+          roofType={sel.roofType}
+          roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
