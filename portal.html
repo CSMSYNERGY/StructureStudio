@@ -25,11 +25,50 @@ const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const ACCENT = "#D97706";
+// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
+// never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
+// rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
+const SS_ERR_SOURCE = "portal";
+function ssLogError(source, message, code, context) {
+  try {
+    const params = new URLSearchParams(location.search);
+    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
+      body: JSON.stringify({
+        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
+        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
+        p_code: code == null ? null : String(code).slice(0, 100),
+        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: context || null,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* logging must never break the app */ }
+}
+window.ssLogError = ssLogError;
+window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
+  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
+// Capture every portal-settings edge-function error in one place by wrapping invoke.
+const __ssInvoke = sb.functions.invoke.bind(sb.functions);
+sb.functions.invoke = async (name, opts) => {
+  const res = await __ssInvoke(name, opts);
+  try {
+    if (res && (res.error || (res.data && res.data.error))) {
+      ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
+        (res.error && res.error.name) || null, { fn: name, action: opts && opts.body && opts.body.action });
+    }
+  } catch (_) {}
+  return res;
+};
+
+const ACCENT = "#3D3672";  // brand purple
 const S = {
   page: { minHeight: "100vh", display: "flex", flexDirection: "column" },
-  header: { background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
-  badge: { background: ACCENT, borderRadius: 8, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16, flexShrink: 0 },
+  header: { background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  badge: { background: "#75E6DA", color: "#3D3672", borderRadius: 8, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16, flexShrink: 0 },
   card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
   h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
   lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
@@ -45,6 +84,29 @@ function fmtDate(iso) {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
   catch { return iso; }
+}
+// Capitalize each word of a building-style name for display. Designs store the style as
+// either its label ("Farmland") or its lowercase key ("cabin"), so normalize to Title Case.
+function titleCase(s) {
+  return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
+// carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
+function PasswordInput({ style, wrapStyle, ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%", boxSizing: "border-box", ...wrapStyle }}>
+      <input {...rest} type={show ? "text" : "password"} style={{ ...style, width: "100%", boxSizing: "border-box", paddingRight: 38 }} />
+      <button type="button" tabIndex={-1} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"} onMouseDown={(e) => e.preventDefault()} onClick={() => setShow((v) => !v)} style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 34, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "#64748B" }}>
+        {show ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" /><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" /><line x1="2" x2="22" y1="2" y2="22" /></svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+        )}
+      </button>
+    </div>
+  );
 }
 
 // ─── Login ───
@@ -90,7 +152,7 @@ function LoginView({ onRecoverySent }) {
           </div>
           <div style={{ marginBottom: 16 }}>
             <span style={S.lbl}>Password</span>
-            <input style={S.input} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+            <PasswordInput style={S.input} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
           </div>
           <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Signing in…" : "Sign In"}</button>
         </form>
@@ -127,11 +189,11 @@ function ResetPasswordView({ onDone }) {
         <form onSubmit={save}>
           <div style={{ marginBottom: 12 }}>
             <span style={S.lbl}>New password</span>
-            <input style={S.input} type="password" autoComplete="new-password" value={pw1} onChange={(e) => setPw1(e.target.value)} />
+            <PasswordInput style={S.input} autoComplete="new-password" value={pw1} onChange={(e) => setPw1(e.target.value)} />
           </div>
           <div style={{ marginBottom: 16 }}>
             <span style={S.lbl}>Confirm password</span>
-            <input style={S.input} type="password" autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+            <PasswordInput style={S.input} autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
           </div>
           <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save Password"}</button>
         </form>
@@ -167,15 +229,27 @@ function ShareLinkCard({ clientId }) {
 function DesignsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
+  const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
+  const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
 
   const load = useCallback(async () => {
     setError(null);
     const { data, error: err } = await sb
       .from("designs")
       .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+      .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
     setRows(data || []);
+    // Version history (newest first), grouped by design. Owner-scoped by RLS.
+    const { data: vdata } = await sb
+      .from("design_versions")
+      .select("short_code, version, created_at, selections, image_url")
+      .eq("client_id", clientId)
+      .order("version", { ascending: false });
+    const map = {};
+    (vdata || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+    setVmap(map);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -202,21 +276,51 @@ function DesignsTable({ clientId }) {
               {rows.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
+                const vs = vmap[r.short_code] || [];       // newest first
+                const older = vs.slice(1);                  // everything below the latest
+                const isOpen = !!expanded[r.short_code];
+                const verUrl = (v) => `${openUrl}&v=${v}`;
                 return (
-                  <tr key={r.short_code}>
+                  <React.Fragment key={r.short_code}>
+                  <tr>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.created_at)}</td>
                     <td style={{ ...S.td, fontWeight: 700 }}>{c.name || "—"}</td>
                     <td style={S.td}>
                       <div>{c.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
                     </td>
-                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{[sel.style, sel.size].filter(Boolean).join(" ") || "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      {[titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—"}
+                      {older.length > 0 && (
+                        <button onClick={() => setExpanded((p) => ({ ...p, [r.short_code]: !p[r.short_code] }))}
+                          style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontSize: 12, fontWeight: 700 }}>
+                          {isOpen ? "▴ hide" : `▾ ${vs.length} versions`}
+                        </button>
+                      )}
+                    </td>
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
                       {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
                     </td>
                   </tr>
+                  {isOpen && older.map((v) => {
+                    const vsel = v.selections || {};
+                    return (
+                      <tr key={r.short_code + "-v" + v.version} style={{ background: "#F8FAFC" }}>
+                        <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>{fmtDate(v.created_at)}</td>
+                        <td style={S.td}></td>
+                        <td style={S.td}></td>
+                        <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>↳ v{v.version} · {[titleCase(vsel.style), vsel.size].filter(Boolean).join(" ") || "—"}</td>
+                        <td style={S.td}></td>
+                        <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                          <a href={verUrl(v.version)} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                          {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  </React.Fragment>
                 );
               })}
             </tbody>
@@ -244,7 +348,7 @@ function SettingsView() {
     ghlPipelineId: "", ghlStageSendQuoteId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
-    quoteTerms: "", betaMode: false, betaEmail: "",
+    quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -300,6 +404,7 @@ function SettingsView() {
     (async () => {
       const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
       if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
+      if (!data) { setError("Couldn't load settings (empty response). Please refresh."); return; }
       setStatus(data);
       const a = data.businessAddress || {};
       const b = data.branding || {};
@@ -313,7 +418,7 @@ function SettingsView() {
         businessLogoUrl: data.businessLogoUrl || "",
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
-        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "",
+        betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -334,6 +439,7 @@ function SettingsView() {
       quoteTerms: form.quoteTerms,
       betaMode: form.betaMode,
       betaEmail: form.betaEmail,
+      showPricing: form.showPricing,
     };
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
@@ -381,12 +487,12 @@ function SettingsView() {
             : <>Not connected yet. Estimates can't be sent until a GHL Location ID and API key are saved.</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
-        {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#FFFBEB", color: "#92400E", border: "1px solid #FDE68A" } : S.okMsg}>{ghlMsg.ok}</div>}
+        {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
           <div><span style={S.lbl}>GHL Location ID</span>
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
           <div><span style={S.lbl}>GHL API Key</span>
-            <input style={S.input} type="password" name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
+            <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
           <div><span style={S.lbl}>Pipeline ID (optional)</span>
             <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
           <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
@@ -423,7 +529,7 @@ function SettingsView() {
                 ? <img src={logoDataUrl || currentLogo} alt="logo" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
                 : <span style={{ color: "#94A3B8", fontSize: 11 }}>no logo</span>}
             </div>
-            <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
+            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
           </div>
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / SVG / WebP, under 2MB. Preview shows it on your header color.</div>
         </div>
@@ -441,7 +547,7 @@ function SettingsView() {
             <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8 }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: ACCENT, cursor: bizLogoBusy ? "wait" : "pointer" }}>
                 {bizLogoBusy ? "Uploading…" : "⬆ Upload image"}
-                <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={onBizLogoFile} disabled={bizLogoBusy} style={{ display: "none" }} />
+                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onBizLogoFile} disabled={bizLogoBusy} style={{ display: "none" }} />
               </label>
               <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste a URL above</span>
               {form.businessLogoUrl && <img src={form.businessLogoUrl} alt="" style={{ height: 24, maxWidth: 90, objectFit: "contain", borderRadius: 4, border: "1px solid #E2E8F0" }} />}
@@ -456,6 +562,17 @@ function SettingsView() {
         </div>
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Pricing</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+          <input type="checkbox" checked={form.showPricing} onChange={set("showPricing")} />
+          Show pricing to customers on the design page
+        </label>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+          When on, layout-item prices (e.g. rough openings) show on the customer designer. When off, customers see no prices there.
+        </p>
       </div>
 
       <div style={S.card}>
@@ -503,6 +620,17 @@ function PricingCsv() {
   const [msg, setMsg] = useState(null);
   const [result, setResult] = useState(null);
   const [fileKey, setFileKey] = useState(0);
+  // building-style manager state
+  const [styleName, setStyleName] = useState("");
+  const [styleImg, setStyleImg] = useState(null);     // { base64, contentType, name }
+  const [styleBusy, setStyleBusy] = useState(false);
+  const [styleFileKey, setStyleFileKey] = useState(0);
+  const [pendingDelete, setPendingDelete] = useState(null);  // style pending permanent delete (confirm modal)
+  const [editStyle, setEditStyle] = useState(null);          // style being edited (name/photo modal)
+  const [editName, setEditName] = useState("");
+  const [editImg, setEditImg] = useState(null);              // { base64, contentType } | null
+  const [editFileKey, setEditFileKey] = useState(0);
+  const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -512,23 +640,125 @@ function PricingCsv() {
   useEffect(() => { load(); }, []);
 
   const items = () => (cat && cat.items) || [];
-  const activeStyles = () => ((cat && cat.styles) || []).filter((s) => s.active);
+  const allStyles = () => (cat && cat.styles) || [];
+  const activeStyles = () => allStyles().filter((s) => s.active);
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onStyleImg = (file) => {
+    if (!file) { setStyleImg(null); return; }
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setStyleFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setStyleFileKey((k) => k + 1); return; }
+    const r = new FileReader();
+    r.onerror = () => setMsg({ err: "Could not read that image." });
+    r.onload = () => setStyleImg({ base64: r.result, contentType: file.type || "image/jpeg", name: file.name });
+    r.readAsDataURL(file);
+  };
+  const addStyle = async () => {
+    if (!styleName.trim()) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const body = { action: "create_style", label: styleName.trim() };
+      if (styleImg) { body.imageBase64 = styleImg.base64; body.imageContentType = styleImg.contentType; }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const added = styleName.trim();
+      setStyleName(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
+      await load();
+      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the CSV below.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  const toggleStyle = async (s) => {
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_active", styleId: s.id, active: !s.active } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  // Toggle whether this style's photo is attached to the GHL estimate (default on).
+  const toggleStyleImage = async (s) => {
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_estimate_image", styleId: s.id, show: s.show_image_on_estimate === false } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
+  // Drag a style to a new position; persists the new order (sort_order = index), which is what
+  // the design page sorts styles by. Optimistic UI, reloads on failure to resync.
+  const moveStyle = async (from, to) => {
+    const arr = [...allStyles()];
+    if (from == null || to == null || from === to || from < 0 || to < 0 || from >= arr.length || to >= arr.length) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(to, 0, moved);
+    setCat((c) => ({ ...c, styles: arr }));
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "reorder_styles", orderedIds: arr.map((s) => s.id) } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setMsg({ ok: "Display order saved — this is the order customers see on the design page." });
+    } catch (e) { setMsg({ err: e.message }); await load(); }
+    setStyleBusy(false);
+  };
+  const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
+  const onEditImg = (file) => {
+    if (!file) { setEditImg(null); return; }
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setEditFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setEditFileKey((k) => k + 1); return; }
+    const r = new FileReader();
+    r.onerror = () => setMsg({ err: "Could not read that image." });
+    r.onload = () => setEditImg({ base64: r.result, contentType: file.type || "image/jpeg" });
+    r.readAsDataURL(file);
+  };
+  const saveEdit = async () => {
+    const s = editStyle;
+    if (!s || !editName.trim()) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const body = { action: "update_style", styleId: s.id, label: editName.trim() };
+      if (editImg) { body.imageBase64 = editImg.base64; body.imageContentType = editImg.contentType; }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      setMsg({ ok: `Building style updated.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+    setEditStyle(null);
+  };
+  const confirmDelete = async () => {
+    const s = pendingDelete;
+    if (!s) return;
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "delete_style", styleId: s.id } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      setMsg({ ok: `Building style “${s.label}” and its sizes/prices were deleted.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+    setPendingDelete(null);
+  };
   const downloadTemplate = () => {
     if (!cat) return;
     const its = items();
     const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
-    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
+    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
+    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
     const rows = [];
     activeStyles().forEach((s) => {
       const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
       if (sizes.length === 0) {
         // No sizes yet → one starter row: fill width/length/price and copy the line down.
-        rows.push([s.label, "", "", "", ...its.map(() => "no"), "yes"]);
+        rows.push([s.label, "", "", "", ...its.map(() => "0"), "yes"]);
       } else {
         sizes.forEach((z) => {
           const inc = incBySize[z.id] || {};
           rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
-            ...its.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+            ...its.map((it) => String(inc[it.key] || 0)), z.active ? "yes" : "no"]);
         });
       }
     });
@@ -563,41 +793,580 @@ function PricingCsv() {
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0 };
   return (
-    <div style={S.card}>
-      <div style={S.h2}>Pricing &amp; included options (CSV)</div>
-      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-        Download the template (one row per building style), then add a row for every size you offer: type the
-        <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The yes/no columns mean “is this option
-        <b> included in the price?</b>” — leave them <b>no</b> to charge for it. Re-upload anytime to update prices
-        (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
-      </p>
+    <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
-        <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", color: "#92400E", fontSize: 13, lineHeight: 1.5 }}>
-          <b>Add your building styles first.</b> The pricing template is built from your styles — once you’ve created at
-          least one (Settings → building styles, or ask your admin), come back here to download it and set sizes &amp; prices.
-        </div>
-      ) : (
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
-          <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
-            {busy ? "Importing…" : "⬆ Upload filled CSV"}
-            <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
-              onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
-          </label>
+
+      {editStyle && (
+        <div onClick={() => !styleBusy && setEditStyle(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>Edit building style</div>
+            <span style={S.lbl}>Name</span>
+            <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 14 }} />
+            <span style={S.lbl}>Photo</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
+              {(editImg || editStyle.image_url)
+                ? <img src={editImg ? editImg.base64 : editStyle.image_url} alt="" style={thumb} />
+                : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
+              <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer" }}>
+                {editImg ? "New image selected ✓" : "Replace image"}
+                <input key={editFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onEditImg(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setEditStyle(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              <button onClick={saveEdit} disabled={styleBusy || !editName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim()) ? 0.55 : 1 }}>
+                {styleBusy ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
-      {result && result.skipped && result.skipped.length > 0 && (
-        <div style={{ marginTop: 12, fontSize: 13 }}>
-          <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
-          <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
-            {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
-          </ul>
+
+      {pendingDelete && (
+        <div onClick={() => !styleBusy && setPendingDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 10 }}>Delete “{pendingDelete.label}”?</div>
+            <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 18 }}>
+              This permanently deletes the style and <b>all of its sizes and prices</b>. Past designs that used it keep
+              their saved plan, but their estimate can no longer be regenerated. <b>This cannot be undone.</b> To just
+              stop offering it, use <b>Hide</b> instead.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setPendingDelete(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              <button onClick={confirmDelete} disabled={styleBusy} style={S.btn(styleBusy ? "#9CA3AF" : "#DC2626", "#FFF")}>
+                {styleBusy ? "Deleting…" : "OK – proceed and delete"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
-    </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Building styles</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
+          style using the CSV below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
+          sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
+          use it only when you’re sure you won’t need that style again.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+          <div>
+            {allStyles().length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                {allStyles().map((s, i) => (
+                  <div key={s.id}
+                    draggable={!styleBusy}
+                    onDragStart={(e) => { setDragIdx(i); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => { e.preventDefault(); moveStyle(dragIdx, i); setDragIdx(null); }}
+                    onDragEnd={() => setDragIdx(null)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: `1px solid ${dragIdx === i ? ACCENT : "#E2E8F0"}`, borderRadius: 8, opacity: dragIdx === i ? 0.4 : (s.active ? 1 : 0.55), background: "#FFF", cursor: styleBusy ? "default" : "grab" }}>
+                    <span title="Drag to reorder" style={{ color: "#CBD5E1", fontSize: 16, userSelect: "none", flexShrink: 0 }}>⠿</span>
+                    {s.image_url
+                      ? <img src={s.image_url} alt="" style={thumb} />
+                      : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <label title="Attach this style's photo to the GHL estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                      <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+                      Image on estimate
+                    </label>
+                    <button onClick={() => openEdit(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
+                    <button onClick={() => toggleStyle(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>{s.active ? "Hide" : "Show"}</button>
+                    <button onClick={() => setPendingDelete(s)} disabled={styleBusy} style={S.btn("#FEF2F2", "#DC2626")}>Delete</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={styleName} onChange={(e) => setStyleName(e.target.value)} placeholder="Building style name (e.g. Lofted Barn)" style={{ ...S.input, minWidth: 220 }} />
+              <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer", display: "inline-block" }}>
+                {styleImg ? "Image selected ✓" : "Choose image"}
+                <input key={styleFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onStyleImg(e.target.files && e.target.files[0])} />
+              </label>
+              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={S.h2}>Pricing &amp; included options (CSV)</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Download the template (one row per building style), then add a row for every size you offer: type the
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
+          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
+          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
+          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
+          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
+          <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
+            <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
+            (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
+            <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+              {busy ? "Importing…" : "⬆ Upload filled CSV"}
+              <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
+                onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+            </label>
+          </div>
+        )}
+        {result && result.skipped && result.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp) ───
+// Edits the DEFAULT (all-styles) price for each enabled layout item. Per-style overrides
+// stay DB-managed. These rates feed estimates for tenants that don't price via GHL products.
+const LP_METHODS = [
+  { value: "each", label: "each" },
+  { value: "lineal_ft", label: "lineal ft" },
+  { value: "sqft_option", label: "sqft option" },
+  { value: "sqft_building", label: "sqft building" },
+  { value: "perimeter_building", label: "perimeter building" },
+  { value: "pct_building_price", label: "pct building price" },
+  { value: "pct_estimate_total", label: "pct estimate total" },
+];
+function LayoutPricing() {
+  const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
+  const [rows, setRows] = useState([]);      // [{ item_key, label, pricing_method, rate }]
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  const [imgBusyKey, setImgBusyKey] = useState(null);   // item_key currently uploading an image
+  const [imgFileKey, setImgFileKey] = useState(0);      // resets the hidden file inputs after a pick
+
+  const buildRows = (data) => {
+    const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
+    return (data.items || []).map((it) => {
+      const p = byKey[it.key] || {};
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null };
+    });
+  };
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data); setRows(buildRows(data));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (key, field, val) => setRows((rs) => rs.map((r) => r.item_key === key ? { ...r, [field]: val } : r));
+
+  // Optional per-item product image. Uploads immediately to get a public URL (branding
+  // bucket, via portal-settings), stores it on the row, and persists on "Save prices" →
+  // layout_item_pricing.image_url, which submit-estimate attaches to that item's estimate line.
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onRowImg = async (itemKey, file) => {
+    if (!file) return;
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    setImgBusyKey(itemKey); setMsg(null);
+    try {
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onerror = () => rej(new Error("Could not read that image."));
+        r.onload = () => res(r.result);
+        r.readAsDataURL(file);
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_layout_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRow(itemKey, "image_url", data.url);
+      setMsg({ ok: "Image added — click “Save prices” to apply it to estimates." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyKey(null); setImgFileKey((k) => k + 1);
+  };
+  const removeRowImg = (itemKey) => { setRow(itemKey, "image_url", null); setMsg({ ok: "Image removed — click “Save prices” to apply." }); };
+
+  const save = async (rowsToSave) => {
+    setBusy(true); setMsg(null);
+    try {
+      const payloadRows = (rowsToSave || rows).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: Number(r.rate) || 0, imageUrl: r.image_url ?? null }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} item price(s)` + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const downloadCsv = () => {
+    const headers = ["item", "method", "rate"];
+    downloadFile(`${(cat && cat.clientId) || "layout"}-layout-pricing.csv`, toCSV(headers, rows.map((r) => [r.item_key, r.pricing_method, r.rate])));
+  };
+
+  const onUpload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null);
+    try {
+      if (file.size > 2_000_000) throw new Error("CSV too large (max 2MB).");
+      const matrix = parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      const header = matrix[0].map((h) => String(h).trim().toLowerCase());
+      const iItem = header.indexOf("item"), iMethod = header.indexOf("method"), iRate = header.indexOf("rate");
+      if (iItem < 0 || iMethod < 0 || iRate < 0) throw new Error('CSV needs "item", "method" and "rate" columns.');
+      // Accept the item by key or label, and the method as its enum value or friendly label.
+      const keyByAny = {}; rows.forEach((r) => { keyByAny[r.item_key.toLowerCase()] = r.item_key; keyByAny[r.label.toLowerCase()] = r.item_key; });
+      const methodByAny = {}; LP_METHODS.forEach((m) => { methodByAny[m.value.toLowerCase()] = m.value; methodByAny[m.label.toLowerCase()] = m.value; });
+      const next = rows.map((r) => ({ ...r }));
+      const byKey = {}; next.forEach((r) => { byKey[r.item_key] = r; });
+      matrix.slice(1).forEach((cols) => {
+        const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
+        if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
+        const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
+        if (method) byKey[itemKey].pricing_method = method;
+        const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
+        if (rate !== "") byKey[itemKey].rate = rate;
+      });
+      setRows(next);
+      await save(next);
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false); setFileKey((k) => k + 1);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Layout item pricing</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Set how each item customers can place on the floor plan is priced —
+          <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
+          <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
+          <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
+          These rates are used on estimates when you don’t price through GoHighLevel products. Building sizes are priced on the <b>Pricing</b> tab.
+          <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
+        </p>
+        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
+        ) : (
+          <>
+            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+              <thead><tr>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.item_key}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}</td>
+                    <td style={S.td}>
+                      <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
+                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}>
+                      <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    <td style={S.td}>
+                      {r.image_url ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <img src={r.image_url} alt="" style={thumb} />
+                          <button onClick={() => removeRowImg(r.item_key)} disabled={busy || imgBusyKey === r.item_key} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
+                        </div>
+                      ) : (
+                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyKey === r.item_key ? "default" : "pointer", display: "inline-block" }}>
+                          {imgBusyKey === r.item_key ? "Uploading…" : "Add image"}
+                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyKey === r.item_key} style={{ display: "none" }} onChange={(e) => onRowImg(r.item_key, e.target.files && e.target.files[0])} />
+                        </label>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={() => save()} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save prices"}</button>
+              <button onClick={downloadCsv} disabled={busy || !cat} style={S.btn("#F1F5F9", "#334155")}>⬇ Download CSV</button>
+              <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+                {busy ? "Working…" : "⬆ Upload CSV"}
+                <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }} onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+          </>
+        )}
+        {msg && msg.skipped && msg.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} item(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Colors (paint palette) ───
+// Common shed/barn paint colours for the one-click "quick add" library. Hexes are
+// APPROXIMATE — for on-screen recognition only; only the NAME is saved as the colour
+// label. Owners curate freely and can verify exact codes at hayleypaint.com. Carolyn's
+// examples (Mountain Red / Classic Red / Red Delicious) are included.
+const COLOR_LIBRARY = [
+  { name: "Bright White", hex: "#F6F6F1" }, { name: "White", hex: "#ECEAE0" },
+  { name: "Almond", hex: "#E7D9BE" }, { name: "Beige", hex: "#D8C7A0" },
+  { name: "Sandstone", hex: "#C9B489" }, { name: "Buckskin", hex: "#B79A6E" },
+  { name: "Desert Tan", hex: "#C2A579" }, { name: "Khaki", hex: "#A89468" },
+  { name: "Clay", hex: "#B08155" }, { name: "Mocha Tan", hex: "#9A8064" },
+  { name: "Coffee Brown", hex: "#5A4535" }, { name: "Chocolate", hex: "#3E2C22" },
+  { name: "Barn Red", hex: "#7B1E22" }, { name: "Mountain Red", hex: "#8C2A2A" },
+  { name: "Classic Red", hex: "#A32431" }, { name: "Red Delicious", hex: "#9E1B2A" },
+  { name: "Burgundy", hex: "#5E1F2B" }, { name: "Sage Green", hex: "#8A9A78" },
+  { name: "Hunter Green", hex: "#2F4A38" }, { name: "Forest Green", hex: "#274134" },
+  { name: "Ivy Green", hex: "#3B5E3A" }, { name: "Country Blue", hex: "#5E7C99" },
+  { name: "Slate Blue", hex: "#41566B" }, { name: "Navy Blue", hex: "#25324B" },
+  { name: "Light Gray", hex: "#C7CACC" }, { name: "Pewter Gray", hex: "#8C9194" },
+  { name: "Slate Gray", hex: "#5E676C" }, { name: "Charcoal Gray", hex: "#3A3F43" },
+  { name: "Quaker Gray", hex: "#9AA0A0" }, { name: "Black", hex: "#1C1C1C" },
+];
+
+// Roof-color quick-add sets are supplier-specific, NOT the generic paint palette above.
+// Shingle = Owens Corning TruDefinition Duration lineup; Metal = Central States Panel-Loc Plus
+// (Built Rite Buildings' supplier). Hexes are close on-screen approximations of the printed
+// chart swatches — owners can fine-tune the exact code per row after quick-adding.
+const SHINGLE_LIBRARY = [
+  { name: "Shasta White", hex: "#D9D9D2" }, { name: "Desert Tan", hex: "#B49B74" },
+  { name: "Amber", hex: "#7C5A34" }, { name: "Teak", hex: "#6B4A30" },
+  { name: "Brownwood", hex: "#584434" }, { name: "Terra Cotta", hex: "#8B4A39" },
+  { name: "Driftwood", hex: "#8A8073" }, { name: "Sierra Gray", hex: "#6E6862" },
+  { name: "Colonial Slate", hex: "#6D6960" }, { name: "Antique Silver", hex: "#9AA0A0" },
+  { name: "Quarry Gray", hex: "#78797B" }, { name: "Slatestone Gray", hex: "#5C6468" },
+  { name: "Williamsburg Gray", hex: "#5E5E5C" }, { name: "Estate Gray", hex: "#565A5C" },
+  { name: "Chateau Green", hex: "#4A5A4A" }, { name: "Harbour Blue", hex: "#45586A" },
+  { name: "Onyx Black", hex: "#262626" },
+];
+const METAL_LIBRARY = [
+  { name: "Brilliant White", hex: "#F5F3EE" }, { name: "Alamo White", hex: "#EBE9DF" },
+  { name: "Ivory", hex: "#EEDFB4" }, { name: "Light Stone", hex: "#CDC3AE" },
+  { name: "Tan", hex: "#B99167" }, { name: "Taupe", hex: "#9E9880" },
+  { name: "Desert Sand", hex: "#9F966E" }, { name: "Hickory Moss", hex: "#A89F90" },
+  { name: "Gray", hex: "#D8D4C6" }, { name: "Pewter Gray", hex: "#B2AFA4" },
+  { name: "Lunar Gray", hex: "#909696" }, { name: "Charcoal", hex: "#6E6960" },
+  { name: "Brown", hex: "#493421" }, { name: "Burnished Slate", hex: "#3C3D2D" },
+  { name: "Copper Metallic", hex: "#8B5321" }, { name: "Galvalume", hex: "#BFC1BF" },
+  { name: "Black", hex: "#171717" }, { name: "Matte Black", hex: "#1C1C1C" },
+  { name: "Rustic Red", hex: "#842424" }, { name: "Crimson", hex: "#A82A21" },
+  { name: "Burgundy", hex: "#3A1C22" }, { name: "Colony Green", hex: "#6A7A54" },
+  { name: "Hunter Green", hex: "#365637" }, { name: "Forest Green", hex: "#193E20" },
+  { name: "Gallery Blue", hex: "#0E3A52" }, { name: "Ocean Blue", hex: "#3D6678" },
+];
+
+function ColorsView() {
+  const [cat, setCat] = useState(null);
+  // One flat list across all categories; a row's category is set by its flags:
+  // paint = siding/trim (and not shingle/metal), shingle = shingle, metal = metal.
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [libOpen, setLibOpen] = useState(null);   // which section's library is open
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    setRows((data.colors || []).map((c) => ({
+      id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
+      shingle: !!c.shingle, metal: !!c.metal,
+      allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
+      hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
+    })));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (gi, field, val) => setRows((rs) => rs.map((r, i) => i === gi ? { ...r, [field]: val } : r));
+  // New rows are tagged for the section they're added from.
+  const addRow = (preset, category) => setRows((rs) => [...rs, {
+    id: null, label: preset ? preset.name : "",
+    siding: category === "paint", trim: category === "paint",
+    shingle: category === "shingle", metal: category === "metal",
+    allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
+    pricing_method: "each", rate: "0",
+  }]);
+  const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
+  // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
+  const swap = (gi, gj) => setRows((rs) => { if (gj < 0 || gj >= rs.length) return rs; const next = rs.slice(); [next[gi], next[gj]] = [next[gj], next[gi]]; return next; });
+
+  // One save persists every section at once — the whole list is always sent, so the
+  // server's "delete anything not in the payload" stays safe across categories.
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const colors = rows.map((r, i) => ({
+        id: r.id || undefined, label: r.label,
+        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal,
+        allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
+        sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const ctr = { ...S.td, padding: "8px 5px", textAlign: "center" };
+  const tdc = { ...S.td, padding: "8px 5px" };
+  const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
+  const chk = (gi, field) => <input type="checkbox" checked={!!rows[gi][field]} onChange={(e) => setRow(gi, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+
+  // Render one category card. `ckey` selects which rows show; `showST` adds the paint-only
+  // Siding/Trim columns. Defined as a plain function (not a <Component/>) so inputs keep focus.
+  const renderSection = (ckey, title, desc, showST) => {
+    const entries = rows.map((r, gi) => ({ r, gi })).filter(({ r }) =>
+      ckey === "paint" ? (!r.shingle && !r.metal) : ckey === "shingle" ? r.shingle : r.metal);
+    // Each section quick-adds from its own supplier palette, not the shared paint set.
+    const lib = ckey === "metal" ? METAL_LIBRARY : ckey === "shingle" ? SHINGLE_LIBRARY : COLOR_LIBRARY;
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>{title}</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>{desc}</p>
+        {entries.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
+        ) : (
+          <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
+            <colgroup>
+              {showST ? (
+                <>
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
+                </>
+              ) : (
+                <>
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "29%" }} />
+                  <col style={{ width: "22%" }} /><col style={{ width: "13%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+                </>
+              )}
+            </colgroup>
+            <thead><tr>
+              <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+              {showST && <th style={thc}>Siding</th>}
+              {showST && <th style={thc}>Trim</th>}
+              <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+              <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+            </tr></thead>
+            <tbody>
+              {entries.map(({ r, gi }, pos) => (
+                <tr key={r.id || `new-${gi}`}>
+                  <td style={ctr}>
+                    <button onClick={() => { if (pos > 0) swap(gi, entries[pos - 1].gi); }} disabled={pos === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                    <button onClick={() => { if (pos < entries.length - 1) swap(gi, entries[pos + 1].gi); }} disabled={pos === entries.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                  </td>
+                  <td style={ctr}>
+                    <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(gi, "hex", e.target.value)} title={r.hex || "Pick this color"}
+                      style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                  </td>
+                  <td style={tdc}>
+                    <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(gi, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
+                  {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
+                  <td style={tdc}>
+                    <select value={r.pricing_method || "each"} onChange={(e) => setRow(gi, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
+                      {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </td>
+                  <td style={ctr}>
+                    <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(gi, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  <td style={ctr}>{chk(gi, "is_default")}</td>
+                  <td style={ctr}>{chk(gi, "active")}</td>
+                  <td style={ctr}>
+                    <button onClick={() => removeRow(gi)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+          <button onClick={() => addRow(undefined, ckey)} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+          <button onClick={() => setLibOpen((o) => o === ckey ? null : ckey)} style={S.btn("#F1F5F9", "#334155")}>{libOpen === ckey ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
+          <div style={{ flex: 1 }} />
+          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+        </div>
+        {libOpen === ckey && (
+          <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {lib.map((c) => (
+                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                  style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
+                  <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                  {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const paintDesc = (<>
+    These are the colors your customers pick from for <b>paint</b> in the designer.
+    Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
+    (leave the rate at <b>0</b> for colors included in the base price). <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
+    <br />Need color ideas? See <b>hayleypaint.com</b> or use the quick-add library below.
+  </>);
+  const shingleDesc = (<>
+    Shingle roof colors your customers pick from when they choose a <b>Shingle</b> roof in the designer.
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge (leave <b>0</b> if included). <b>Default</b> pre-selects one; <b>Active</b> shows/hides it. Drag order with ▲▼.
+  </>);
+  const metalDesc = (<>
+    Metal roof colors your customers pick from when they choose a <b>Metal</b> roof in the designer.
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge (leave <b>0</b> if included). <b>Default</b> pre-selects one; <b>Active</b> shows/hides it. Drag order with ▲▼.
+  </>);
+
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      {!cat ? <div style={S.card}><div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div></div> : (
+        <>
+          {renderSection("paint", "Paint colors", paintDesc, true)}
+          {renderSection("shingle", "Shingle colors", shingleDesc, false)}
+          {renderSection("metal", "Metal colors", metalDesc, false)}
+          {msg && msg.skipped && msg.skipped.length > 0 && (
+            <div style={{ ...S.card, marginTop: 0, fontSize: 13 }}>
+              <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
+              <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+                {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </>
   );
 }
 
@@ -646,14 +1415,14 @@ function Dashboard({ session }) {
 
   const tabBtn = (id, label) => (
     <button onClick={() => setTab(id)} style={{
-      ...S.btn(activeTab === id ? "#FFF" : "transparent", activeTab === id ? "#1E293B" : "#CBD5E1"),
+      ...S.btn(activeTab === id ? "#75E6DA" : "transparent", activeTab === id ? "#3D3672" : "#75E6DA"),
       borderRadius: "8px 8px 0 0", padding: "10px 18px",
     }}>{label}</button>
   );
 
   return (
     <div>
-      <div style={{ background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", padding: "0 24px" }}>
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "0 24px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 0 12px" }}>
           <div style={S.badge}>SS</div>
           <div style={{ flex: 1 }}>
@@ -665,12 +1434,16 @@ function Dashboard({ session }) {
         <div style={{ display: "flex", gap: 4 }}>
           {tabBtn("designs", "Designs & Leads")}
           {isAdmin && tabBtn("pricing", "Pricing")}
+          {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
+          {isAdmin && tabBtn("colors", "Colors")}
           {isAdmin && tabBtn("settings", "Settings")}
         </div>
       </div>
       <div style={{ padding: "20px 24px" }}>
         {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
         {activeTab === "pricing" && isAdmin && <PricingCsv />}
+        {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
+        {activeTab === "colors" && isAdmin && <ColorsView />}
         {activeTab === "settings" && isAdmin && <SettingsView />}
       </div>
     </div>
@@ -683,10 +1456,12 @@ function PortalApp() {
   const [recovery, setRecovery] = useState(false);
 
   useEffect(() => {
-    // A recovery-email link lands here with #…type=recovery. supabase-js
-    // exchanges the token automatically (detectSessionInUrl); we just route
-    // to the set-password view.
-    if (window.location.hash.includes("type=recovery")) setRecovery(true);
+    // A recovery- or invite-email link lands here with #…type=recovery or
+    // #…type=invite. supabase-js exchanges the token automatically
+    // (detectSessionInUrl); we route both to the set-password view so a freshly
+    // invited owner sets a password instead of dropping into the dashboard with none.
+    const h = window.location.hash;
+    if (h.includes("type=recovery") || h.includes("type=invite")) setRecovery(true);
     sb.auth.getSession().then(({ data }) => setSession(data.session || null));
     const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
       setSession(sess || null);

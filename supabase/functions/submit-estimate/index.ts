@@ -7,12 +7,10 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// Beta routing: either the request body sets `betaMode: true` (staging deploys) or the
-// client's settings row has beta_mode = true (per-tenant test switch). When active, the
-// estimate-send step redirects the outbound email to the client's beta_email (or this
-// QA inbox as a last resort) instead of the customer. Everything else (contact upsert,
-// estimate create, opportunity link) still runs full-fidelity against the real GHL location.
-const BETA_TEST_EMAIL = "beta@csmsynergy.com";
+// The estimate email always goes to the customer — in every environment, beta included.
+// `betaMode` (request flag or the client's beta_mode setting) is still surfaced for
+// telemetry, but it no longer redirects the recipient: a previous QA-inbox redirect sent
+// beta estimates to a non-deliverable address and they silently failed to send.
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -29,7 +27,7 @@ Deno.serve(async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee, declinedItems } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -83,11 +81,17 @@ Deno.serve(async (req: Request) => {
   //    browser right before calling us, so it must exist here.
   const { data: existingDesign, error: designErr } = await supabase
     .from("designs")
-    .select("ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id")
+    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
     return json({ error: `Design ${designId} not found in Supabase` }, 404);
+  }
+  // Cross-tenant guard: the design must belong to the clientId in the request. Without this,
+  // an anon caller could pass another tenant's clientId + a known design code and drive
+  // estimates (and customer emails) through the victim tenant's GHL account.
+  if (existingDesign.client_id && existingDesign.client_id !== clientId) {
+    return json({ error: "This design does not belong to the specified client." }, 403);
   }
   const existingEstimateId: string | null = existingDesign.ghl_estimate_id || null;
 
@@ -139,33 +143,21 @@ Deno.serve(async (req: Request) => {
     return json({ error: `Contact upsert error: ${(e as Error).message}` }, 502);
   }
 
-  // 4. Fetch GHL products
+  // 4. Fetch GHL products — pricing NEVER comes from GHL (every line item is priced from this
+  //    tenant's StructureStudio catalog below). We still read the product list solely to borrow
+  //    a userId for the estimate (products[0].createdBy). It's best-effort: a products-API hiccup
+  //    must not block an estimate, and userId falls back to the users API.
   let products: any[] = [];
   try {
     const r = await fetch(
       `https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`,
       { headers: ghlHeaders }
     );
-    if (!r.ok) return json({ error: `Failed to fetch products: ${r.status} ${await r.text()}` }, 502);
-    const d = await r.json();
-    products = d?.products || [];
+    if (r.ok) { const d = await r.json(); products = d?.products || []; }
+    else console.warn("Products fetch (userId only) failed:", r.status, (await r.text()).slice(0, 300));
   } catch (e) {
-    return json({ error: `Products fetch error: ${(e as Error).message}` }, 502);
+    console.warn("Products fetch (userId only) error:", (e as Error).message);
   }
-
-  // 5. Fetch all prices, parallel
-  const allPrices: any[] = [];
-  await Promise.all(products.map(async (p: any) => {
-    try {
-      const r = await fetch(
-        `https://services.leadconnectorhq.com/products/${p._id}/price?locationId=${encodeURIComponent(locationId)}`,
-        { headers: ghlHeaders }
-      );
-      if (!r.ok) return;
-      const d = await r.json();
-      if (Array.isArray(d?.prices)) allPrices.push(...d.prices);
-    } catch { /* ignore single-product failure */ }
-  }));
 
   const dynamicLocationId = (products[0]?.locationId) || locationId;
 
@@ -201,111 +193,336 @@ Deno.serve(async (req: Request) => {
     }, 400);
   }
 
-  // 6. Product matching helper — ported from n8n verbatim
-  function getProductDetails(searchString: string, userSelection = "") {
-    if (!searchString || allPrices.length === 0) return null;
-    const isNoVariant = (name: string) => name.split("@")[0].trim().toLowerCase().startsWith("no ");
-
-    let matchedPrice = allPrices.find((p) => {
-      if (!p.name) return false;
-      if (isNoVariant(p.name)) return false;
-      const cleanName = p.name.split("@")[0].trim().toLowerCase();
-      return cleanName === searchString.toLowerCase();
-    });
-
-    if (!matchedPrice) {
-      const searchTerms = searchString.toLowerCase().split(/\s+/);
-      matchedPrice = allPrices.find((p) => {
-        if (!p.name) return false;
-        if (isNoVariant(p.name)) return false;
-        const pName = p.name.toLowerCase();
-        const isMatch = searchTerms.every((t) => pName.includes(t));
-        if (isMatch) {
-          if (/\bno\b/i.test(userSelection) && /\bno\b/i.test(pName)) return false;
-          if (searchTerms.includes("paint") && !searchTerms.includes("unpaint") && pName.includes("unpaint")) return false;
-        }
-        return isMatch;
-      });
-    }
-
-    if (matchedPrice) {
-      const cleanName = matchedPrice.name.split(" @")[0].trim();
-      const parentProduct = products.find((prod: any) => prod._id === matchedPrice.product);
-      const itemImage = parentProduct ? (parentProduct.image || parentProduct.imageUrl || "") : "";
-      return {
-        name: cleanName,
-        amount: matchedPrice.amount,
-        priceId: matchedPrice._id,
-        productId: matchedPrice.product,
-        imageUrl: itemImage,
-      };
-    }
-    return null;
-  }
-
-  // 7. Build line items
+  // 7. Build line items — every amount comes from this tenant's StructureStudio catalog
+  //    (building_sizes for the building, layout_item_pricing for add-ons). GHL products are
+  //    never consulted for pricing.
   const summary = itemSummary || {};
   const targetItems: any[] = [];
+
+  // Per-line product image (the "image inside the app" the owner uploaded → shown on the
+  // estimate line). Images live in this tenant's public 'branding' bucket; only attach a URL
+  // under that tenant prefix so a tampered catalog row can't graft an arbitrary link onto the
+  // branded estimate. GHL renders a line item's attachments as the product photo.
+  const brandingPrefix = `${supabaseUrl}/storage/v1/object/public/branding/${clientId}/`;
+  // GHL line-item attachments are an array of plain image-URL STRINGS (proven by the working
+  // n8n payload: `attachments: [imageUrl]`). An array of objects is rejected. Only attach a
+  // URL under this tenant's branding prefix so a tampered catalog row can't inject a link.
+  const imgAttachments = (url: unknown): string[] => {
+    const u = String(url || "");
+    if (!u || !u.startsWith(brandingPrefix)) return [];
+    return [u];
+  };
 
   const style = selections.buildingStyle || "";
   const size = selections.buildingSize || "";
   const paintStatus = (selections.paint && String(selections.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint";
-  const shed = getProductDetails(`${style} ${size} ${paintStatus}`);
+
+  // Building price — always from this tenant's StructureStudio catalog (building_sizes.base_price).
+  // The designer submits the style's KEY (e.g. "test"), not its label ("Test"), and sizes can
+  // render with × vs x. Normalize both sides (lowercase, ×→x, strip spaces) and match the style
+  // by key OR label so the price reliably resolves. styleRowId is reused below for any
+  // style-specific layout_item_pricing overrides.
+  const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
+  let styleRowId: string | null = null;
+  let sizeRowId: string | null = null;       // reused below for the size's included-item quantities
+  let styleLabel = style;            // display-name fallback if the style row isn't found
+  let styleImageUrl: string | null = null;   // building-style photo, attached to the building line
+  let styleShowImage = true;                 // per-style toggle: attach the photo to the estimate? (default yes)
+  let buildingPrice = 0, priced = false;
+  let buildingWidthFt = 0, buildingDepthFt = 0;   // drive sqft_building / perimeter_building add-ons
+  try {
+    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate").eq("client_id", clientId);
+    const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
+    if (styleRow) {
+      styleRowId = styleRow.id;
+      styleLabel = styleRow.label || style;
+      styleImageUrl = styleRow.image_url || null;
+      styleShowImage = styleRow.show_image_on_estimate !== false;
+      const szRes = await supabase.from("building_sizes").select("id, base_price, label, width_ft, length_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
+      const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
+      if (sizeRow && sizeRow.base_price != null) {
+        sizeRowId = sizeRow.id;
+        buildingPrice = Number(sizeRow.base_price) || 0; priced = true;
+        buildingWidthFt = Number(sizeRow.width_ft) || 0;
+        buildingDepthFt = Number(sizeRow.length_ft) || 0;   // building "depth" is stored as length_ft
+      }
+    }
+  } catch { /* leave unpriced; handled below */ }
+  // Fail loudly instead of emailing a $0 quote when the size has no price set.
+  if (!priced) {
+    return json({ error: `No price is set for "${style} ${size}". Add it in the portal Pricing tab, then resubmit.` }, 400);
+  }
+
+  // Self-heal legacy building-style images. Tenants seeded from the old single-tenant
+  // config carry building_styles.image_url as an inline `data:` URI, which the
+  // tenant-prefix guard in imgAttachments() rightly rejects — so those estimates rendered
+  // the building line with NO photo (Junior Barns bug report, 2026-07-06). On first use,
+  // decode the image, upload it to the public branding bucket under this tenant's prefix,
+  // persist the hosted URL back to building_styles, and attach that URL. Non-fatal on
+  // failure — worst case the line stays imageless, exactly as before.
+  if (styleShowImage && styleRowId && styleImageUrl && styleImageUrl.startsWith("data:")) {
+    try {
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(styleImageUrl);
+      const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+      if (m && EXT[m[1]]) {
+        const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
+        const slug = norm(style).replace(/[^a-z0-9]+/g, "-") || "style";
+        const path = `${clientId}/style-${slug}-migrated.${EXT[m[1]]}`;
+        const up = await supabase.storage.from("branding").upload(path, bytes, { contentType: m[1], upsert: true });
+        if (!up.error) {
+          const { data: pub } = supabase.storage.from("branding").getPublicUrl(path);
+          if (pub?.publicUrl) {
+            await supabase.from("building_styles")
+              .update({ image_url: pub.publicUrl, updated_at: new Date().toISOString() })
+              .eq("client_id", clientId).eq("id", styleRowId);
+            styleImageUrl = pub.publicUrl;
+          }
+        } else {
+          console.warn("style-image self-heal upload failed:", up.error.message);
+        }
+      } else {
+        console.warn("style-image self-heal: unsupported data URI; leaving line imageless");
+      }
+    } catch (e) {
+      console.warn("style-image self-heal error:", (e as Error).message);
+    }
+  }
+  // Building is line 1. Paint + roof used to ride in this name/description; they are now their
+  // own line items (2 = Paint Colors, 3 = Roof) pushed immediately below, so any charge on them
+  // shows as a real line rather than buried text.
   targetItems.push({
-    name: shed ? shed.name : `${style} ${businessName} (${size} - ${paintStatus})`,
+    name: `${styleLabel} (${size})`,
     qty: 1,
-    amount: shed ? shed.amount : 0,
-    priceId: shed?.priceId || "",
-    productId: shed?.productId || "",
-    attachments: shed?.imageUrl ? [shed.imageUrl] : [],
+    amount: buildingPrice,
+    priceId: "",
+    productId: "",
+    attachments: styleShowImage ? imgAttachments(styleImageUrl) : [],
     currency: "USD",
     type: "one_time",
-    description: `Size: ${size}` + (selections.paint ? ` | Paint: ${selections.paint}` : ""),
+    description: `Size: ${size}`,
   });
 
-  // GHL renders `description` as a subtitle under the line-item name. Pass "" when the
-  // description would just repeat the name, otherwise it shows up redundantly on the PDF.
-  const pushItem = (qty: number, search: string | string[], description: string) => {
+  // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
+  // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
+  // default. Items without a configured row price at $0.
+  const layoutRates = new Map<string, { method: string; rate: number; imageUrl: string | null }>();
+  try {
+    const lpRes = await supabase
+      .from("layout_item_pricing")
+      .select("item_key, style_id, pricing_method, rate, image_url")
+      .eq("client_id", clientId);
+    for (const r of (lpRes.data || []) as any[]) {
+      if (r.style_id && r.style_id !== styleRowId) continue;   // a different style's override — ignore
+      const existing = layoutRates.get(r.item_key);
+      if (!existing || r.style_id) {                            // override (style_id set) wins over the default
+        layoutRates.set(r.item_key, {
+          method: String(r.pricing_method),
+          rate: Number(r.rate) || 0,
+          // the product image lives on the DEFAULT (style_id NULL) row; don't let an
+          // imageless style-override clear it.
+          imageUrl: r.image_url || existing?.imageUrl || null,
+        });
+      } else if (!existing.imageUrl && r.image_url) {
+        existing.imageUrl = r.image_url;
+      }
+    }
+  } catch { /* no layout pricing → add-ons stay $0 */ }
+
+  // Per-size included quantities (building_size_inclusions.qty, keyed by item_key). Included
+  // quantity is part of the base building price, so a placed included item is NOT charged for
+  // the included portion — only the amount placed BEYOND it. Fully-included items show as a
+  // $0 "(included)" line; declined includes are credited (see below). Rows imported before the
+  // quantity feature default to qty 1.
+  const includedMap = new Map<string, number>();
+  if (sizeRowId) {
+    try {
+      const incRes = await supabase.from("building_size_inclusions").select("item_key, qty").eq("size_id", sizeRowId).eq("included", true);
+      for (const r of (incRes.data || []) as any[]) includedMap.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
+    } catch { /* no inclusions → everything placed is charged as-is */ }
+  }
+
+  // Building geometry available to area/perimeter pricing methods.
+  const buildingArea = buildingWidthFt * buildingDepthFt;             // sqft_building
+  const buildingPerimeter = 2 * (buildingWidthFt + buildingDepthFt);  // perimeter_building
+
+  // Resolve a layout add-on to a GHL line item using its configured pricing_method. `amount`
+  // is always PER-UNIT; GHL multiplies it by qty. `count` is how many of the item were placed;
+  // lengthFt / optionSqft carry the per-measure quantity for the two measured methods:
+  //   each               -> qty=count,     amount=rate
+  //   lineal_ft          -> qty=totalFeet, amount=rate
+  //   sqft_option        -> qty=totalSqft, amount=rate
+  //   sqft_building      -> qty=count,     amount=rate × (width×depth)
+  //   perimeter_building -> qty=count,     amount=rate × 2(width+depth)
+  //   pct_building_price -> qty=count,     amount=(rate/100) × base building price
+  //   pct_estimate_total -> qty=count,     amount resolved LAST against the running subtotal
+  // An item with no configured pricing row (or rate) lands at $0. GHL products are never consulted.
+  const deferredPctLines: { item: any; rate: number }[] = [];
+  const pushItem = (
+    search: string | string[],
+    itemKey: string | undefined,
+    description: string,
+    measures: { count?: number; lengthFt?: number; optionSqft?: number } = {},
+  ) => {
     const searches = Array.isArray(search) ? search : [search];
-    let pd: any = null;
-    for (const s of searches) { pd = pd || getProductDetails(s); }
-    targetItems.push({
-      name: pd?.name || searches[0],
+    const lp = itemKey ? layoutRates.get(itemKey) : null;
+    const method = lp?.method || "each";
+    const rate = lp?.rate || 0;
+    const count = measures.count ?? 1;
+
+    // Placed measure for this pricing method (count / total feet / total sqft).
+    const placed = method === "lineal_ft" ? (measures.lengthFt ?? count)
+      : method === "sqft_option" ? (measures.optionSqft ?? count)
+      : count;
+    // The building size includes some of this item already (in the base price), so charge only
+    // the portion placed BEYOND the included quantity.
+    const includedQty = itemKey ? (includedMap.get(itemKey) || 0) : 0;
+    const chargeable = Math.max(0, placed - includedQty);
+
+    // Fully covered by the inclusion → a $0 line so the customer sees it's part of the building
+    // at no charge (never a positive charge for an included item).
+    if (includedQty > 0 && chargeable <= 0) {
+      targetItems.push({
+        name: `${searches[0]} (included)`, qty: placed, amount: 0,
+        priceId: "", productId: "",
+        attachments: lp ? imgAttachments(lp.imageUrl) : [],
+        currency: "USD", type: "one_time",
+        description: description || "Included with this size",
+      });
+      return;
+    }
+
+    let qty = chargeable;
+    let amount = rate;
+    switch (method) {
+      case "lineal_ft":          amount = rate; break;
+      case "sqft_option":        amount = rate; break;
+      case "sqft_building":      amount = rate * buildingArea; break;
+      case "perimeter_building": amount = rate * buildingPerimeter; break;
+      case "pct_building_price": amount = (rate / 100) * buildingPrice; break;
+      case "pct_estimate_total": amount = 0; break; // resolved after every other line
+      case "each":
+      default:                   amount = rate; break;
+    }
+
+    const item = {
+      name: searches[0],
       qty,
-      amount: pd?.amount || 0,
-      priceId: pd?.priceId || "",
-      productId: pd?.productId || "",
-      attachments: pd?.imageUrl ? [pd.imageUrl] : [],
+      amount,
+      priceId: "",
+      productId: "",
+      attachments: lp ? imgAttachments(lp.imageUrl) : [],
       currency: "USD",
       type: "one_time",
       description,
-    });
+    };
+    targetItems.push(item);
+    if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
 
-  if (summary.doubleDoors > 0) pushItem(summary.doubleDoors, "Double Door", "");
-  if (summary.singleDoors > 0) pushItem(summary.singleDoors, "Single Door", "");
-  if (summary.windows > 0) pushItem(summary.windows, "Window", "");
+  // Price a single color (paint or roof) by its catalog rate + pricing_method — same math as
+  // layout add-ons. pct_estimate_total isn't supported on a combined color line (colors realistically
+  // use each / pct_building_price / flat), so it falls back to 0.
+  const colorAmount = (row: any): number => {
+    const rate = Number(row?.rate) || 0;
+    if (rate <= 0) return 0;
+    switch (String(row?.pricing_method || "each")) {
+      case "sqft_building":      return rate * buildingArea;
+      case "perimeter_building": return rate * buildingPerimeter;
+      case "pct_building_price": return (rate / 100) * buildingPrice;
+      case "pct_estimate_total": return 0;
+      default:                   return rate;   // each / lineal_ft / sqft_option → flat
+    }
+  };
 
-  if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) {
-    summary.workbenches.forEach((wb: any) => {
-      const lengthFt = wb.lengthFt || 1;
-      const wall = wb.wall || "";
-      const descParts: string[] = [];
-      if (wall) descParts.push(`${wall} wall`);
-      descParts.push(`${lengthFt}ft (priced per foot)`);
-      pushItem(lengthFt, ["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], descParts.join(" - "));
+  // ── Line 2: Paint Colors ── always present. Body + Trim in the description; amount is the sum
+  // of the selected colors' rates (a color used for both sides is charged once).
+  {
+    let paintAmount = 0;
+    let paintDesc = "Unpainted";
+    if (paintStatus === "Paint") {
+      const b = String(selections.paintBodyColor || "TBD");
+      const t = String(selections.paintTrimColor || "TBD");
+      paintDesc = `Body: ${b}, Trim: ${t}`;
+      try {
+        const colRes = await supabase.from("colors")
+          .select("id, label, rate, pricing_method, allow_custom")
+          .eq("client_id", clientId).eq("active", true);
+        const palette = (colRes.data || []) as any[];
+        const customRow = palette.find((c) => c.allow_custom);
+        const resolve = (val: unknown) => {
+          const v = String(val ?? "").trim();
+          if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
+          return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
+        };
+        const seen = new Set<string>();
+        for (const row of [resolve(selections.paintBodyColor), resolve(selections.paintTrimColor)]) {
+          if (row && !seen.has(row.id)) { seen.add(row.id); paintAmount += colorAmount(row); }
+        }
+      } catch { /* colors lookup failed → still emit the line at $0 */ }
+    }
+    targetItems.push({
+      name: "Paint Colors", qty: 1, amount: paintAmount, priceId: "", productId: "",
+      attachments: [], currency: "USD", type: "one_time", description: paintDesc,
     });
   }
-  if (summary.lofts > 0) pushItem(summary.lofts, ["Loft", "Loft Kit", "Loft Storage"], "");
-  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem(1, "Ramp", "");
 
-  // Rough openings — webhook supplies name/dims/qty/amount directly, not from GHL products
+  // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
+  // roofType key, possibly empty). Type + Color in the description; amount is the roof color's rate.
+  if (Object.prototype.hasOwnProperty.call(selections, "roofType")) {
+    const roofType = String(selections.roofType ?? "").trim();
+    const roofColor = String(selections.roofColor ?? "").trim();
+    let roofAmount = 0;
+    let roofDesc = "No roof selected";
+    if (roofType) {
+      roofDesc = roofColor ? `${roofType} — ${roofColor}` : `${roofType} — (color TBD)`;
+      if (roofColor && norm(roofColor) !== norm("TBD")) {
+        try {
+          const flag = norm(roofType) === norm("Metal") ? "metal" : "shingle";
+          const colRes = await supabase.from("colors")
+            .select("id, label, rate, pricing_method, allow_custom, shingle, metal")
+            .eq("client_id", clientId).eq("active", true).eq(flag, true);
+          const palette = (colRes.data || []) as any[];
+          const customRow = palette.find((c) => c.allow_custom);
+          const row = palette.find((c) => norm(c.label) === norm(roofColor)) || customRow || null;
+          roofAmount = colorAmount(row);
+        } catch { /* colors lookup failed → still emit the line at $0 */ }
+      }
+    }
+    targetItems.push({
+      name: "Roof", qty: 1, amount: roofAmount, priceId: "", productId: "",
+      attachments: [], currency: "USD", type: "one_time", description: roofDesc,
+    });
+  }
+
+  if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
+  if (summary.singleDoors > 0) pushItem("Single Door", "singleDoor", "", { count: summary.singleDoors });
+  if (summary.windows > 0) pushItem("Window", "window", "", { count: summary.windows });
+
+  if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) {
+    // ONE aggregated workbench line (total feet), so the inclusion is netted once — matching
+    // the designer preview, which also rolls all workbenches into a single row. (Pushing a line
+    // per workbench would subtract the included footage from each, under-charging.)
+    const totalFt = summary.workbenches.reduce((s: number, wb: any) => s + (Number(wb.lengthFt) || 1), 0);
+    const desc = summary.workbenches.map((wb: any) => `${wb.wall ? wb.wall + " wall " : ""}${wb.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
+    pushItem(["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], "workbench", desc, { count: summary.workbenches.length, lengthFt: totalFt });
+  }
+  if (summary.lofts > 0) {
+    // qty/amount are derived from the loft's configured method inside pushItem: per-unit (each)
+    // uses the loft count, per-area (sqft_option) uses total loft sqft.
+    pushItem(["Loft", "Loft Kit", "Loft Storage"], "loft", "", { count: summary.lofts, optionSqft: Number(summary.loftSqft) || 0 });
+  }
+  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem("Ramp", "ramp", "", { count: 1 });
+
+  // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
+  // owner can charge their own price; no hardcoded amount). One line per placed RO at that
+  // rate, with the dimensions in the description. If no rate is configured, the line is $0.
   if (Array.isArray(roughOpenings)) {
+    const roRate = layoutRates.get("roughOpening")?.rate || 0;
     roughOpenings.forEach((ro: any) => {
       targetItems.push({
         name: ro.name || "Rough Opening",
         qty: ro.qty || 1,
-        amount: typeof ro.amount === "number" ? ro.amount : 0,
+        amount: roRate,
         priceId: "",
         productId: "",
         attachments: [],
@@ -318,19 +535,136 @@ Deno.serve(async (req: Request) => {
 
   // Custom options — name doubles as the line title; leaving description blank keeps GHL
   // from rendering it as a duplicate subtitle.
+  // Credits: GHL rejects BOTH a negative line amount ("amount must not be less than 0") AND a
+  // negative/zero qty ("qty must not be less than 0.1") — so a true negative-total line is
+  // impossible via the API. A custom option whose intended total (qty × amount) is negative is
+  // therefore emitted as a $0 line that NAMES the credit, and its value is added to the
+  // invoice-level discount below (same mechanism as declined items) so the estimate total drops.
+  let customOptionCredit = 0;
   if (Array.isArray(customOptions)) {
     customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
+      const name = String(co.name).trim();
+      const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
+      const rawQty = co.qty ? Number(co.qty) || 1 : 1;
+      const signedTotal = rawQty * rawAmt;   // intended line total; negative = a credit
+      if (signedTotal < 0) {
+        const credit = Math.round(Math.abs(signedTotal) * 100) / 100;
+        customOptionCredit += credit;
+        targetItems.push({
+          name: `${name} (−$${credit.toFixed(2)} credit)`,
+          qty: 1, amount: 0, priceId: "", productId: "", attachments: [],
+          currency: "USD", type: "one_time",
+          description: "Credit — applied via the estimate discount",
+        });
+      } else {
+        targetItems.push({
+          name, qty: Math.abs(rawQty) || 1, amount: Math.abs(rawAmt),
+          priceId: "", productId: "", attachments: [],
+          currency: "USD", type: "one_time", description: "",
+        });
+      }
+    });
+  }
+
+  // Declined included items — the customer opted out of an item the building normally includes,
+  // so credit its catalog value: the size's included QUANTITY (building_size_inclusions.qty,
+  // populated by the pricing CSV's quantity cells — loft = sq ft, doors = count) times the
+  // owner's layout_item_pricing rate, resolved per pricing_method exactly like pushItem. GHL
+  // rejects negative line amounts, so we instead (a) keep a $0 line per declined item as the
+  // on-estimate RECORD of what was credited (the discount object has no description of its
+  // own), and (b) sum the credits and apply them as a fixed invoice-level discount below.
+  // Items with no rate (0) are skipped (nothing to credit).
+  let declinedCredit = 0;
+  if (Array.isArray(declinedItems) && declinedItems.length) {
+    // A placed item is KEPT (charged/netted above), so it is never also credited — this guards
+    // the stray place+decline of the same item (which would otherwise go uncharged AND credited).
+    const placedKeys = new Set<string>();
+    if (summary.singleDoors > 0) placedKeys.add("singleDoor");
+    if (summary.doubleDoors > 0) placedKeys.add("doubleDoor");
+    if (summary.windows > 0) placedKeys.add("window");
+    if (summary.lofts > 0) placedKeys.add("loft");
+    if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) placedKeys.add("workbench");
+    if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") placedKeys.add("ramp");
+    if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
+    for (const d of declinedItems) {
+      const key = String(d?.key ?? "").trim();
+      if (!key) continue;
+      if (placedKeys.has(key)) continue;   // placed = kept, not a decline → no credit
+      const lp = layoutRates.get(key);
+      const rate = lp?.rate || 0;
+      if (rate <= 0) continue;
+      const method = lp?.method || "each";
+      // Credit the included quantity for this size (shared includedMap; defaults to 1 for rows
+      // imported before the quantity feature). pct_estimate_total can't be resolved before the
+      // subtotal exists, so it keeps a flat credit — qty clamped to 1 so % isn't scaled by sq ft.
+      const qty = method === "pct_estimate_total" ? 1 : (includedMap.get(key) ?? 1);
+      // Per-unit value mirrors pushItem's amount for each method, rounded to cents so the
+      // printed "qty × unit = credit" math is exact and the summed discount stays sub-cent-free.
+      let unitValue = rate, unitLabel = "";
+      switch (method) {
+        case "sqft_option":        unitLabel = " sq ft"; break;
+        case "lineal_ft":          unitLabel = " ft"; break;
+        case "sqft_building":      unitValue = rate * buildingArea; break;
+        case "perimeter_building": unitValue = rate * buildingPerimeter; break;
+        case "pct_building_price": unitValue = (rate / 100) * buildingPrice; break;
+        default:                   break; // each / sqft_option / lineal_ft / pct_estimate_total: rate as-is
+      }
+      unitValue = Math.round(unitValue * 100) / 100;
+      const credit = Math.round(unitValue * qty * 100) / 100;
+      if (credit <= 0) continue;
+      declinedCredit += credit;
+      const mathNote = qty > 1 ? `${qty}${unitLabel} × $${unitValue.toFixed(2)} = ` : "";
       targetItems.push({
-        name: String(co.name).trim(),
-        qty: co.qty ? Number(co.qty) || 1 : 1,
-        amount: co.amount ? Number(co.amount) || 0 : 0,
+        name: `${d?.label || key} — declined (${mathNote}−$${credit.toFixed(2)} credit)`,
+        qty: 1,
+        amount: 0,
         priceId: "",
         productId: "",
         attachments: [],
         currency: "USD",
         type: "one_time",
-        description: "",
+        description: qty > 1
+          ? `Included item declined (${qty}${unitLabel || " included"}) — credited via the estimate discount`
+          : "Included item declined — credited via the estimate discount",
       });
+    }
+  }
+
+
+  // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
+  // line (building + non-percentage add-ons + custom options + rough openings + any
+  // pct_building_price lines, which resolve earlier). Computed off a fixed base so multiple
+  // such add-ons don't compound on each other.
+  if (deferredPctLines.length > 0) {
+    const baseSubtotal = targetItems.reduce(
+      (s, it) => s + (deferredPctLines.some((d) => d.item === it) ? 0 : (Number(it.qty) || 0) * (Number(it.amount) || 0)),
+      0,
+    );
+    for (const d of deferredPctLines) d.item.amount = (d.rate / 100) * baseSubtotal;
+  }
+
+  // 7a-ii. Delivery fee — added LAST (after the pct_estimate_total base is computed, so a
+  // percentage add-on never applies to delivery). Marked NON-TAXABLE the way GHL actually
+  // supports it: with automaticTaxesEnabled the tax engine taxes every line by its tax
+  // CATEGORY and IGNORES a per-line `taxes` array — so the old `taxes: []` did nothing and
+  // delivery was still taxed. Assigning the line GHL's global "Non-Taxable Product" category
+  // (code NT) is the documented way to exempt a single line while other lines stay taxable.
+  // Category id is a GoHighLevel-global value (not per-account) per GHL's "Automatic Tax
+  // Category IDs and Names" support doc. Amount is the designer's optional delivery-fee field;
+  // omitted entirely when 0/blank.
+  const deliveryAmt = Number(deliveryFee) || 0;
+  if (deliveryAmt > 0) {
+    targetItems.push({
+      name: "Delivery",
+      qty: 1,
+      amount: deliveryAmt,
+      priceId: "",
+      productId: "",
+      attachments: [],
+      currency: "USD",
+      type: "one_time",
+      description: "Delivery fee (non-taxable)",
+      automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
     });
   }
 
@@ -339,8 +673,10 @@ Deno.serve(async (req: Request) => {
   // (won deals are closed shed sales — a fresh quote is a new pursuit). If it's lost we
   // update it back to status "open". Failures here are non-fatal — the estimate still
   // goes out.
-  const oppName = `${style} ${size}`.trim();
-  const oppValue = targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0);
+  const oppName = `${styleLabel} ${size}`.trim();
+  // Line items minus the declined-item discount (credits live at the invoice level, not as
+  // negative lines), so the opportunity's pipeline value matches the estimate's actual total.
+  const oppValue = Math.max(0, targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0) - declinedCredit);
   let opportunityId: string | null = existingDesign.ghl_opportunity_id || null;
   if (contactId) {
     try {
@@ -413,12 +749,17 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // 8. Estimate payload — America/Los_Angeles to match the business address
-  const tzString = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
-  const localNow = new Date(tzString);
-  const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const today = fmt(localNow);
-  const exp = new Date(localNow); exp.setDate(exp.getDate() + 30);
+  // 8. Estimate payload — issue/expiry dates.
+  // GHL validates issueDate against the LOCATION's clock and rejects anything "in the
+  // future" (code estimate_date_invalid). A date-only value is read at 00:00 in the
+  // location's timezone, so for locations west of UTC an early-UTC submission could push
+  // "today" into the future. Anchor the issue date 12h behind UTC now: that's <= the
+  // current local date in every real timezone (UTC-12..UTC+14), so it's never in the
+  // future, while still reading as "today" during normal business hours.
+  const fmt = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  const issueAnchor = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  const today = fmt(issueAnchor);
+  const exp = new Date(issueAnchor.getTime() + 30 * 24 * 60 * 60 * 1000);
   const expiryFormatted = fmt(exp);
 
   let formattedPhone = "";
@@ -430,8 +771,11 @@ Deno.serve(async (req: Request) => {
 
   // The browser uploads a single-page letter PDF of the floor plan to Storage and passes
   // its public URL here as `imageUrl` (the column is still named image_url for legacy reasons).
+  // Only attach a URL that points at THIS tenant's floor-plans prefix — never a caller-supplied
+  // external URL — so an attacker can't graft arbitrary links onto a tenant's branded estimate.
+  const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
   const estimateAttachments: any[] = [];
-  if (imageUrl && !String(imageUrl).startsWith("data:")) {
+  if (imageUrl && String(imageUrl).startsWith(expectedPdfPrefix)) {
     estimateAttachments.push({
       id: designId,
       name: `${designId}.pdf`,
@@ -442,12 +786,21 @@ Deno.serve(async (req: Request) => {
   }
 
   const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
-  const estimateName = `${firstName} - ${style} ${size}`.trim();
+  const estimateName = `${firstName} - ${styleLabel} ${size}`.trim();
   // Collision-resistant invoice sequence: low 8 digits of the epoch-ms clock
   // (unique within any ~28h window) + 2 random digits to cover two submissions
   // landing in the same millisecond. Replaces a plain 5-digit random, which by
   // the birthday bound collided after only a few hundred estimates.
   const uniqueSequence = (Date.now() % 100_000_000) * 100 + Math.floor(Math.random() * 100);
+
+  // GHL renders termsNotes as HTML, which collapses the plain-text line breaks the owner
+  // typed in their quote_terms into a single paragraph. Escape HTML, then convert newlines
+  // to <br> so the terms display with the same line/paragraph structure as saved in the portal.
+  const termsNotesHtml = quoteTerms
+    ? quoteTerms.replace(/\r\n/g, "\n")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/\n/g, "<br>")
+    : "";
 
   const finalPayload: any = {
     altId: dynamicLocationId,
@@ -457,11 +810,14 @@ Deno.serve(async (req: Request) => {
     title: "ESTIMATE",
     invoiceNumberPrefix: "EST-",
     estimateNumberPrefix: "EST-",
-    invoiceNumber: uniqueSequence.toString(),
+    invoiceNumber: (existingEstimateId && existingDesign.ghl_estimate_number) ? String(existingDesign.ghl_estimate_number) : uniqueSequence.toString(),
     currency: "USD",
     issueDate: today,
     expiryDate: expiryFormatted,
-    terms: quoteTerms,
+    // Terms & Conditions: always populate the estimate's Terms & Notes from the tenant's
+    // quote_terms (client_settings). GHL's field is `termsNotes` — the old `terms` key was
+    // silently ignored, so quote terms never appeared on the estimate.
+    termsNotes: termsNotesHtml,
     businessDetails: {
       name: businessName,
       ...(businessPhone ? { phoneNo: businessPhone } : {}),
@@ -476,7 +832,12 @@ Deno.serve(async (req: Request) => {
       ...(estimateAddress ? { address: estimateAddress } : {}),
       ...(contactId ? { id: String(contactId) } : {}),
     },
-    discount: { value: 0, type: "percentage" },
+    // Credits are applied here as a fixed dollar discount (GHL won't take a negative line amount
+    // OR a negative qty). Covers declined included items AND negative custom options; the matching
+    // "— declined" / "(−$… credit)" $0 line items above are the on-estimate record of each.
+    discount: (declinedCredit + customOptionCredit) > 0
+      ? { value: Math.round((declinedCredit + customOptionCredit) * 100) / 100, type: "fixed" }
+      : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
     // off per-estimate inside GHL (this only sets the initial state). Requires that the
@@ -495,12 +856,22 @@ Deno.serve(async (req: Request) => {
   // 9. Create or update
   let estimateId: string | null = existingEstimateId;
   let estimateNumber: string | null = null;
+  const hadLineImages = targetItems.some((it) => Array.isArray(it.attachments) && it.attachments.length > 0);
+  let lineImagesStripped = false;
   try {
     const url = existingEstimateId
       ? `https://services.leadconnectorhq.com/invoices/estimate/${existingEstimateId}`
       : `https://services.leadconnectorhq.com/invoices/estimate`;
     const method = existingEstimateId ? "PUT" : "POST";
-    const r = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(finalPayload) });
+    let r = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(finalPayload) });
+    // Resilience: the optional per-line product images must never break an estimate. If GHL
+    // rejects the payload and we attached line-item images, retry once WITHOUT them so the
+    // estimate (and the customer email) still goes out — imageless in the worst case.
+    if (!r.ok && hadLineImages) {
+      const stripped = { ...finalPayload, items: targetItems.map((it) => ({ ...it, attachments: [] })) };
+      const r2 = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(stripped) });
+      if (r2.ok) { r = r2; lineImagesStripped = true; console.warn("Estimate retried without line-item images (GHL rejected attachments)."); }
+    }
     if (!r.ok) {
       return json({ error: `Failed to ${existingEstimateId ? "update" : "create"} estimate: ${r.status} ${await r.text()}` }, 502);
     }
@@ -511,12 +882,10 @@ Deno.serve(async (req: Request) => {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
   }
 
-  // 10. Send (re-emails on update, per requirements). In beta mode (request flag OR the
-  //     client's beta_mode setting) the outbound email is redirected to the client's
-  //     beta_email (falling back to the QA inbox) so test runs don't reach real customers.
-  //     We capture the GHL response (status + body) and return it as `sendDebug` so
-  //     failures don't hide behind a generic 200 — the React app or curl caller can
-  //     inspect what GHL rejected.
+  // 10. Send (re-emails on update, per requirements). The estimate email always goes to the
+  //     customer's own email — beta deploys included. We capture the GHL response
+  //     (status + body) and return it as `sendDebug` so failures don't hide behind a generic
+  //     200 — the React app or curl caller can inspect what GHL rejected.
   let sendDebug: { status: number | null; ok: boolean; body: string; sentTo: string[] } = {
     status: null,
     ok: false,
@@ -525,9 +894,7 @@ Deno.serve(async (req: Request) => {
   };
   try {
     if (estimateId) {
-      const recipients = effectiveBetaMode
-        ? [settings.beta_email || BETA_TEST_EMAIL]
-        : [contact?.email].filter(Boolean);
+      const recipients = [contact?.email].filter(Boolean);
       sendDebug.sentTo = recipients;
       const sendBody = {
         altId: dynamicLocationId,
@@ -574,6 +941,7 @@ Deno.serve(async (req: Request) => {
     opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
     updated: Boolean(existingEstimateId),
     betaMode: effectiveBetaMode,
+    lineImagesStripped,
     sendDebug,
   });
 });

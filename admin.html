@@ -22,9 +22,40 @@ const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const ACCENT = "#92400E";
+// Hide the operator "Email Sender" card for now. Flip to true to restore it — all
+// the wiring (connect/disconnect/test + the admin-catalog actions) stays in place.
+const SHOW_EMAIL_SENDER = false;
+
+// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
+// never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
+// rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
+const SS_ERR_SOURCE = "admin";
+function ssLogError(source, message, code, context) {
+  try {
+    const params = new URLSearchParams(location.search);
+    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
+      body: JSON.stringify({
+        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
+        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
+        p_code: code == null ? null : String(code).slice(0, 100),
+        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: context || null,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* logging must never break the app */ }
+}
+window.ssLogError = ssLogError;
+window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
+  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
+
+const ACCENT = "#3D3672";  // brand purple
 const S = {
-  header: { background: "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  header: { background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
   badge: { background: ACCENT, borderRadius: 8, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 15 },
   wrap: { padding: 20 },
   card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 18, marginBottom: 14 },
@@ -33,19 +64,93 @@ const S = {
   input: { border: "1px solid #CBD5E1", borderRadius: 6, padding: "7px 9px", fontSize: 13, fontWeight: 600, background: "#FFF", boxSizing: "border-box" },
   btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
   tab: (on) => ({ padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155" }),
-  pill: (on) => ({ padding: "6px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? "#FFFBEB" : "#FFF", color: on ? ACCENT : "#64748B" }),
+  pill: (on) => ({ padding: "6px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `2px solid ${on ? ACCENT : "#E2E8F0"}`, background: on ? "#DBEAFF" : "#FFF", color: on ? ACCENT : "#64748B" }),
   err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   ok:  { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   row: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" },
 };
 
-function api(action, password, body) {
-  return sb.functions.invoke("admin-catalog", { body: { action, adminPassword: password, ...(body || {}) } })
-    .then(({ data, error }) => {
-      if (error) throw new Error(error.message || "request failed");
-      if (data && data.error) throw new Error(data.error);
-      return data;
-    });
+// Board-and-batten door glyph — mirrors the designer's palette icon so the door items
+// look the same here as in the layout. Rendered for the singleDoor/doubleDoor item keys
+// (via layoutItemGlyph) instead of the generic door emoji.
+function DoorIcon({ double = false }) {
+  const FRAME = "#ECE4D3", PANEL = "#B99A82", PLANK = "#8B7058", IRON = "#2C2A28";
+  const leaf = (x, w, hingeLeft) => {
+    const planks = [];
+    for (let i = 1; i <= 3; i++) { const px = x + (w * i) / 4; planks.push(<line key={i} x1={px} y1={2.6} x2={px} y2={15.4} stroke={PLANK} strokeWidth={0.4} />); }
+    const hx = hingeLeft ? x + 0.5 : x + w - 1.8;
+    return (
+      <g key={x}>
+        <rect x={x} y={1} width={w} height={16} rx={0.5} fill={FRAME} stroke="#B5A98E" strokeWidth={0.7} />
+        <rect x={x + 1.1} y={2.2} width={w - 2.2} height={13.6} fill={PANEL} />
+        {planks}
+        <rect x={x + 1.1} y={8.1} width={w - 2.2} height={1.2} fill={FRAME} />
+        <rect x={hx} y={3.4} width={1.3} height={0.9} fill={IRON} />
+        <rect x={hx} y={12.8} width={1.3} height={0.9} fill={IRON} />
+      </g>
+    );
+  };
+  if (double) {
+    return (
+      <svg width={18} height={16} viewBox="0 0 20 18" style={{ display: "block" }} aria-hidden="true">
+        {leaf(0.5, 9, true)}
+        {leaf(10.5, 9, false)}
+        <rect x={9.2} y={8.3} width={1.6} height={0.9} fill={IRON} />
+      </svg>
+    );
+  }
+  return (
+    <svg width={11} height={16} viewBox="0 0 12 18" style={{ display: "block" }} aria-hidden="true">
+      {leaf(0.5, 11, true)}
+      <rect x={9.4} y={8.2} width={1.4} height={0.9} fill={IRON} />
+    </svg>
+  );
+}
+// Icon for a layout-item row: the board-and-batten DoorIcon for the door items, the
+// item's emoji otherwise.
+function layoutItemGlyph(it) {
+  if (it.item_key === "singleDoor") return <DoorIcon />;
+  if (it.item_key === "doubleDoor") return <DoorIcon double />;
+  return it.icon;
+}
+
+// Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
+// carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
+function PasswordInput({ style, wrapStyle, ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%", boxSizing: "border-box", ...wrapStyle }}>
+      <input {...rest} type={show ? "text" : "password"} style={{ ...style, width: "100%", boxSizing: "border-box", paddingRight: 38 }} />
+      <button type="button" tabIndex={-1} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"} onMouseDown={(e) => e.preventDefault()} onClick={() => setShow((v) => !v)} style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 34, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "#64748B" }}>
+        {show ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" /><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" /><line x1="2" x2="22" y1="2" y2="22" /></svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+async function api(action, password, body) {
+  const { data, error } = await sb.functions.invoke("admin-catalog", { body: { action, adminPassword: password, ...(body || {}) } });
+  if (error) {
+    // supabase-js wraps any non-2xx response in a FunctionsHttpError whose .message is the
+    // opaque "Edge Function returned a non-2xx status code". The real { error } body the
+    // function sent is on error.context (the raw Response) — read it so the operator sees
+    // the actual reason (e.g. "No Supabase user with email …. Create the login first").
+    let msg = error.message || "request failed";
+    try {
+      const ctx = error.context;
+      if (ctx && typeof ctx.json === "function") {
+        const b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+        if (b && b.error) msg = b.error;
+      }
+    } catch (_) { /* fall back to the generic message */ }
+    throw new Error(msg);
+  }
+  if (data && data.error) throw new Error(data.error);
+  return data;
 }
 
 // ── CSV helpers (RFC-4180-ish) ──────────────────────────────────────────────
@@ -99,8 +204,21 @@ function AdminApp() {
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
+  const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink, movedFrom }
+  const [reassignFrom, setReassignFrom] = useState(null); // email already linked elsewhere: { email, role, fromClient } — drives the one-click Reassign prompt
+  const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
+  const [delOpen, setDelOpen] = useState(false);
+  const [delConfirm, setDelConfirm] = useState("");
+  // Operator-global email sender (Supabase Auth custom SMTP → a Google account).
+  const [emailSender, setEmailSender] = useState(null); // null=unloaded · {connected,senderEmail} · {error}
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [emailAddr, setEmailAddr] = useState("carolyn@csmsynergy.com");
+  const [emailPwd, setEmailPwd] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailTestTo, setEmailTestTo] = useState(""); // recipient for the "Send test email" button (must be an existing login)
+  const [emailTestBusy, setEmailTestBusy] = useState(false);
 
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); };
+  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
   const login = async () => {
     setBusy(true); setMsg(null);
@@ -108,12 +226,54 @@ function AdminApp() {
       const c = await api("list_clients", pwd);
       const m = await api("get_master", pwd);
       setClients(c.clients || []); setMaster(m); setAuthed(true);
+      loadEmailSender();   // best-effort; never blocks login
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
+  // Read the current Auth email-sender status (best-effort: a missing
+  // MGMT_TOKEN or API hiccup must never break the admin page).
+  const loadEmailSender = async () => {
+    try { setEmailSender(await api("get_email_sender", pwd)); }
+    catch (e) { setEmailSender({ error: e.message }); }
+  };
+  const connectEmail = async () => {
+    const addr = emailAddr.trim();
+    const pass = emailPwd.replace(/\s+/g, "");   // Google shows it as 4 spaced groups
+    if (!addr || !pass) return;
+    setEmailBusy(true); setMsg(null);
+    try {
+      const r = await api("connect_email", pwd, { email: addr, appPassword: pass });
+      setEmailSender({ connected: true, senderEmail: r.senderEmail || addr });
+      setEmailPwd(""); setEmailOpen(false);
+      flash({ ok: `Connected — login & invite emails now send from ${r.senderEmail || addr}.` });
+    } catch (e) { flash({ err: e.message }); }
+    setEmailBusy(false);
+  };
+  const disconnectEmail = async () => {
+    setEmailBusy(true); setMsg(null);
+    try {
+      await api("disconnect_email", pwd);
+      setEmailSender({ connected: false, senderEmail: null });
+      flash({ ok: "Disconnected — emails will use the Supabase default sender." });
+    } catch (e) { flash({ err: e.message }); }
+    setEmailBusy(false);
+  };
+  // Send a real auth email (a password reset) through the connected sender to
+  // confirm delivery + the From address. Recipient must be an existing login.
+  const sendTestEmail = async () => {
+    const to = emailTestTo.trim();
+    if (!to) return;
+    setEmailTestBusy(true); setMsg(null);
+    try {
+      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal.html" });
+      flash({ ok: `Test sent to ${r.sentTo}${r.senderEmail ? ` from ${r.senderEmail}` : ""} — check the inbox. It's a password-reset email; nothing changes unless you click the link.` });
+    } catch (e) { flash({ err: e.message }); }
+    setEmailTestBusy(false);
+  };
   const loadClient = async (cid) => {
-    setSel(cid); setCat(null); setMsg(null); setCsvResult(null);
+    setSel(cid); setCat(null); setMsg(null); setCsvResult(null); setReassignFrom(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
+    setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -133,25 +293,96 @@ function AdminApp() {
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
-  const linkOwner = async () => {
+  // reassign=false → normal link; reassign=true → move a login already mapped to another
+  // client (the backend refuses to silently re-home one without this explicit flag).
+  const linkOwner = async (reassign = false) => {
     if (!sel || !ownerEmail.trim()) return;
+    setBusy(true); setMsg(null); setLinkResult(null);
+    try {
+      const email = ownerEmail.trim();
+      const r = await api("link_owner", pwd, {
+        clientId: sel, email, role: linkRole,
+        portalUrl: location.origin + "/portal.html",
+        ...(reassign ? { reassign: true } : {}),
+      });
+      const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
+      const movedFrom = (reassign && reassignFrom) ? reassignFrom.fromClient : null;
+      // keep the panel open so the operator can copy the setup link
+      setLinkResult({ email, client: sel, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null, movedFrom });
+      setOwnerEmail(""); setReassignFrom(null);
+      flash({ ok: `"${email}" ${movedFrom ? `reassigned from "${movedFrom}" to` : "linked to"} "${sel}" as ${roleLabel}.` });
+    } catch (e) {
+      // Email already belongs to another tenant: rather than dead-end on the error, offer a
+      // one-click Reassign. We key off the backend's stable "reassign:true" instruction and
+      // pull the current client out of its message so the prompt can name it.
+      const errMsg = (e && e.message) || String(e);
+      if (/reassign\s*:\s*true/i.test(errMsg)) {
+        const m = /already linked to client "([^"]+)"/.exec(errMsg);
+        setReassignFrom({ email: ownerEmail.trim(), role: linkRole, fromClient: m ? m[1] : null });
+      } else {
+        setReassignFrom(null);
+      }
+      flash({ err: errMsg });
+    }
+    setBusy(false);
+  };
+  // Operator hard-delete: server wipes the tenant + all its data (catalog,
+  // designs, settings, logins, storage). Guarded by typing the client id.
+  const deleteClient = async () => {
+    const id = sel;
+    if (!id || delConfirm.trim() !== id) return;
     setBusy(true); setMsg(null);
     try {
-      const r = await api("link_owner", pwd, { clientId: sel, email: ownerEmail.trim(), role: linkRole });
-      setLinkOpen(false); setOwnerEmail("");
-      const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
-      flash({ ok: `"${ownerEmail.trim()}" linked to "${sel}" as ${roleLabel} — they can now sign into the portal.` });
+      const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
+      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
+      const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+      flash({ ok: `Client "${id}" deleted${parts ? ` (${parts})` : ""}.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
   const act = async (action, body, ok) => {
     setBusy(true); setMsg(null);
     try {
-      await api(action, pwd, body);
-      if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));
-      const m = await api("get_master", pwd); setMaster(m);
-      flash({ ok: ok || "Saved" });
-    } catch (e) { flash({ err: e.message }); }
+      await api(action, pwd, body);                 // the actual write
+    } catch (e) { flash({ err: e.message }); setBusy(false); return; }
+    flash({ ok: ok || "Saved" });                   // write succeeded — report it BEFORE refreshing
+    try {                                            // refresh reads are best-effort; a failure here must not
+      if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));  // mask the successful write or
+      const m = await api("get_master", pwd); setMaster(m);                       // corrupt the on-screen pill state
+    } catch (_) { /* UI catches up on the next action */ }
+    setBusy(false);
+  };
+
+  // Layout-item editing is staged: the pills toggle a local selection and nothing is
+  // written until "Save". Re-sync the staged set whenever the loaded client/catalog
+  // changes (client switch or a post-save refresh). cat only changes on an explicit
+  // load/refresh, so an operator's in-progress ticks are never clobbered mid-edit.
+  useEffect(() => {
+    setItemSel(new Set((((cat && cat.clientLayoutItems) || []).filter((i) => i.active)).map((i) => i.item_key)));
+  }, [sel, cat]);
+  const toggleItemSel = (key) => setItemSel((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const selectAllItems = () => setItemSel(new Set(((master && master.layoutItemTypes) || []).map((i) => i.item_key)));
+  const clearAllItems = () => setItemSel(new Set());
+  // Diff the staged set against what's actually assigned, then apply only the changes
+  // (enable newly-ticked, disable newly-unticked) and refresh once at the end — so the
+  // operator ticks everything and clicks Save once instead of one request per pill.
+  const saveItems = async () => {
+    if (!sel || !cat || !master) return;
+    const saved = new Set(((cat.clientLayoutItems) || []).filter((i) => i.active).map((i) => i.item_key));
+    const keys = (master.layoutItemTypes || []).map((i) => i.item_key);
+    const toEnable  = keys.filter((k) => itemSel.has(k) && !saved.has(k));
+    const toDisable = keys.filter((k) => !itemSel.has(k) && saved.has(k));
+    const total = toEnable.length + toDisable.length;
+    if (total === 0) { flash({ ok: "No changes to save." }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      for (const k of toEnable)  await api("toggle_item", pwd, { clientId: sel, itemKey: k, active: true });
+      for (const k of toDisable) await api("toggle_item", pwd, { clientId: sel, itemKey: k, active: false });
+    } catch (e) { flash({ err: e.message }); setBusy(false); return; }
+    flash({ ok: `Saved ${total} change${total === 1 ? "" : "s"}.` });
+    try { setCat(await api("get_client_catalog", pwd, { clientId: sel })); setMaster(await api("get_master", pwd)); }
+    catch (_) { /* UI catches up on the next action */ }
     setBusy(false);
   };
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -190,17 +421,19 @@ function AdminApp() {
   const downloadTemplate = () => {
     const items = csvItems();
     const headers = ["style", "width", "length", "price", ...items.map((it) => it.label), "active"];
-    const incBySize = {}; ((cat && cat.inclusions) || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
+    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
+    const incBySize = {}; ((cat && cat.inclusions) || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
     const rows = [];
     ((cat && cat.buildingStyles) || []).filter((s) => s.active).forEach((s) => {
       const sizes = ((cat && cat.buildingSizes) || []).filter((z) => z.style_id === s.id);
       if (sizes.length === 0) {
-        rows.push([s.label, "", "", "", ...items.map(() => "no"), "yes"]);
+        rows.push([s.label, "", "", "", ...items.map(() => "0"), "yes"]);
       } else {
         sizes.forEach((z) => {
           const inc = incBySize[z.id] || {};
           rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
-            ...items.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+            ...items.map((it) => String(inc[it.key] || 0)), z.active ? "yes" : "no"]);
         });
       }
     });
@@ -241,8 +474,8 @@ function AdminApp() {
           <div style={S.card}>
             <div style={S.h2}>🔒 Enter operator password</div>
             {msg && msg.err && <div style={S.err}>{msg.err}</div>}
-            <input type="password" value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="ADMIN_PASSWORD"
-              onKeyDown={(e) => e.key === "Enter" && pwd && login()} style={{ ...S.input, width: "100%", marginBottom: 10 }} />
+            <PasswordInput value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="ADMIN_PASSWORD"
+              onKeyDown={(e) => e.key === "Enter" && pwd && login()} style={{ ...S.input, width: "100%" }} wrapStyle={{ marginBottom: 10 }} />
             <button onClick={login} disabled={busy || !pwd} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "…" : "Unlock"}</button>
           </div>
         </div>
@@ -251,7 +484,6 @@ function AdminApp() {
   }
 
   const styleAssigned = (key) => (cat?.buildingStyles || []).some((s) => s.key === key && s.active);
-  const itemAssigned  = (key) => (cat?.clientLayoutItems || []).some((i) => i.item_key === key && i.active);
 
   return (
     <div>
@@ -269,16 +501,17 @@ function AdminApp() {
           </select>
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
             <div style={S.tab(tab === "csv")} onClick={() => setTab("csv")}>CSV / Pricing</div>
-            <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Catalog</div>
+            <div style={S.tab(tab === "master")} onClick={() => setTab("master")}>Master Items</div>
           </div>
         </div>
 
         {newOpen && (
-          <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
+          <div style={{ ...S.card, background: "#DBEAFF", border: "1px solid #75E6DA" }}>
             <div style={S.h2}>Create a new client</div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
               Creates the tenant config. <b>No template</b> starts blank (standard contact form, no sizes/options — you
@@ -307,17 +540,73 @@ function AdminApp() {
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
-                  First create the login in <b>Supabase → Authentication → Add user</b>, then enter that email here to map it to <b>{sel}</b> so they can sign into the portal.
+                  Enter the owner's email — we'll create their portal login automatically (no manual Supabase step), map it to <b>{sel}</b>, and give you a one-time set-password link to send them (also emailed automatically if SMTP is configured).
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <input value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
+                  <input value={ownerEmail} onChange={(e) => { setOwnerEmail(e.target.value); setReassignFrom(null); }} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
                   <select value={linkRole} onChange={(e) => setLinkRole(e.target.value)} style={{ ...S.input, width: 230 }}>
                     <option value="owner">Admin (full access)</option>
                     <option value="user">Team member (Designs &amp; Leads only)</option>
                   </select>
-                  <button onClick={linkOwner} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
+                  <button onClick={() => linkOwner(false)} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
                 </div>
                 <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Admins see Pricing &amp; Settings; team members only see Designs &amp; Leads.</div>
+                {reassignFrom && (
+                  <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
+                    <div style={{ fontSize: 13, color: "#1B7895", marginBottom: 8, lineHeight: 1.5 }}>
+                      <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another client"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other client"}'s designs &amp; leads.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <button onClick={() => linkOwner(true)} disabled={busy} style={S.btn(busy ? "#9CA3AF" : "#B45309", "#FFF")}>{busy ? "Reassigning…" : `Reassign to ${sel}`}</button>
+                      <button onClick={() => setReassignFrom(null)} disabled={busy} style={S.btn("#E2E8F0", "#0F172A")}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+                {linkResult && (
+                  <div style={{ marginTop: 12, padding: 12, background: "#FFF", border: "1px solid #BFDBFE", borderRadius: 8 }}>
+                    <div style={{ fontSize: 13, color: "#15803D", fontWeight: 600, marginBottom: 6 }}>
+                      ✓ {linkResult.email} {linkResult.movedFrom ? `reassigned from ${linkResult.movedFrom} to` : "linked to"} {linkResult.client} as {linkResult.roleLabel}.
+                      {linkResult.movedFrom ? "" : (linkResult.created ? (linkResult.emailSent ? " Login created and invite email sent." : " Login created.") : " (login already existed)")}
+                    </div>
+                    {linkResult.setupLink ? (
+                      <div>
+                        <div style={{ fontSize: 12, color: "#475569", marginBottom: 6 }}>
+                          Send them this one-time set-password link{linkResult.emailSent ? " (in case the email doesn't arrive)" : ""}:
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <input readOnly value={linkResult.setupLink} onFocus={(e) => e.target.select()} style={{ ...S.input, flex: 1, minWidth: 260, fontSize: 12 }} />
+                          <button onClick={() => { (navigator.clipboard && navigator.clipboard.writeText(linkResult.setupLink)); flash({ ok: "Setup link copied." }); }} style={S.btn(ACCENT, "#FFF")}>Copy link</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: "#B45309" }}>Couldn't generate a setup link — have them use the portal's “Forgot password” to set one.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {delOpen && (
+          <div style={{ ...S.card, background: "#FEF2F2", border: "1px solid #FECACA" }}>
+            <div style={S.h2}>⚠️ Delete client</div>
+            {!sel ? (
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
+                  This permanently deletes <b>{sel}</b> and <b>all of its data</b> — designs/leads, building styles &amp; sizes,
+                  pricing &amp; inclusions, layout items, settings (incl. GHL credentials), error logs, owner/team logins, and
+                  uploaded floor-plan &amp; branding files. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates live in
+                  GHL and are not affected.)
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}
+                    onKeyDown={(e) => e.key === "Enter" && delConfirm.trim() === sel && deleteClient()} style={{ ...S.input, minWidth: 260 }} />
+                  <button onClick={deleteClient} disabled={busy || delConfirm.trim() !== sel}
+                    style={S.btn(busy || delConfirm.trim() !== sel ? "#9CA3AF" : "#DC2626", "#FFF")}>{busy ? "Deleting…" : "Delete permanently"}</button>
+                </div>
               </div>
             )}
           </div>
@@ -328,7 +617,7 @@ function AdminApp() {
             <div style={S.h2}>🧱 Master layout items</div>
             {master.layoutItemTypes.map((it) => (
               <div key={it.item_key} style={S.row}>
-                <span style={{ fontSize: 16 }}>{it.icon}</span>
+                <span style={{ fontSize: 16, display: "inline-flex", alignItems: "center" }}>{layoutItemGlyph(it)}</span>
                 <b style={{ minWidth: 120 }}>{it.item_key}</b>
                 <span style={{ color: "#64748B" }}>{it.label}</span>
                 <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>
@@ -336,39 +625,43 @@ function AdminApp() {
                 </span>
               </div>
             ))}
-            <div style={{ ...S.h2, marginTop: 18 }}>🏠 Master building styles</div>
-            {master.buildingStyleCatalog.map((st) => (
-              <div key={st.key} style={S.row}>
-                <b style={{ minWidth: 120 }}>{st.key}</b>
-                <span style={{ color: "#64748B" }}>{st.label}</span>
-                <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>
-                  {master.catalogSizes.filter((z) => z.style_key === st.key).length} default sizes{st.active ? "" : " · INACTIVE"}
-                </span>
-              </div>
-            ))}
-            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Editing master defs affects every client via inheritance. (Add/edit forms can be wired to <code>save_master_item</code> / <code>save_master_style</code>.)</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Global layout-item defaults. Per-client building styles &amp; sizes live under the <b>Building Styles</b> and <b>CSV / Pricing</b> tabs; new clients are seeded with the <b>Clone</b> feature.</div>
           </div>
         )}
 
         {tab !== "master" && !sel && <div style={S.card}>Select a client above to manage their styles and items.</div>}
 
-        {tab === "items" && sel && cat && master && (
+        {tab === "items" && sel && cat && master && (() => {
+          const saved = new Set((cat.clientLayoutItems || []).filter((i) => i.active).map((i) => i.item_key));
+          const pending = (master.layoutItemTypes || []).reduce((acc, it) => acc + ((itemSel.has(it.item_key) !== saved.has(it.item_key)) ? 1 : 0), 0);
+          return (
           <div style={S.card}>
-            <div style={S.h2}>Layout items for <span style={{ color: ACCENT }}>{sel}</span></div>
-            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Tick the placeable items this client gets.</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ ...S.h2, marginBottom: 0 }}>Layout items for <span style={{ color: ACCENT }}>{sel}</span></div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={selectAllItems} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Select all</button>
+                <button onClick={clearAllItems} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Clear</button>
+                <button onClick={saveItems} disabled={busy || pending === 0} style={S.btn(busy || pending === 0 ? "#9CA3AF" : ACCENT, "#FFF")}>
+                  {busy ? "Saving…" : (pending > 0 ? `Save (${pending})` : "Saved")}
+                </button>
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "#64748B", margin: "8px 0 10px" }}>Tick the placeable items this client gets, then click <b>Save</b> to apply them all at once.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {master.layoutItemTypes.map((it) => {
-                const on = itemAssigned(it.item_key);
+                const on = itemSel.has(it.item_key);
                 return (
                   <div key={it.item_key} style={S.pill(on)}
-                    onClick={() => !busy && act("toggle_item", { clientId: sel, itemKey: it.item_key, active: !on }, on ? "Removed" : "Added")}>
-                    <span style={{ marginRight: 6 }}>{it.icon}</span>{it.label} {on ? "✓" : ""}
+                    onClick={() => !busy && toggleItemSel(it.item_key)}>
+                    <span style={{ marginRight: 6, display: "inline-flex", alignItems: "center", verticalAlign: "middle" }}>{layoutItemGlyph(it)}</span>{it.label} {on ? "✓" : ""}
                   </div>
                 );
               })}
             </div>
+            {pending > 0 && <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, marginTop: 10 }}>{pending} unsaved change{pending === 1 ? "" : "s"} — click Save to apply.</div>}
           </div>
-        )}
+          );
+        })()}
 
         {tab === "styles" && sel && cat && master && (
           <div style={S.card}>
@@ -377,7 +670,7 @@ function AdminApp() {
             {/* This client's own styles (created here or assigned from master) */}
             <span style={S.lbl}>This client's styles</span>
             {(cat.buildingStyles || []).length === 0 &&
-              <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below or assign from the master catalog.</div>}
+              <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below.</div>}
             {(cat.buildingStyles || []).map((row) => {
               const sizes = (cat.buildingSizes || []).filter((z) => z.style_id === row.id);
               return (
@@ -413,7 +706,7 @@ function AdminApp() {
             })}
 
             {/* Create a new per-client style (name + image) */}
-            <div style={{ marginTop: 16, padding: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+            <div style={{ marginTop: 16, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
               <span style={S.lbl}>Create a new style for this client</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
                 <input value={newStyleName} onChange={(e) => setNewStyleName(e.target.value)} placeholder="Style name (e.g. Garage)" style={{ ...S.input, minWidth: 200 }} />
@@ -421,25 +714,9 @@ function AdminApp() {
                 {newStyleImg && <img src={newStyleImg.base64} alt="" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />}
                 <button onClick={createStyle} disabled={busy || !newStyleName.trim()} style={S.btn(busy || !newStyleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create style</button>
               </div>
-              <div style={{ fontSize: 11, color: "#92400E", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
+              <div style={{ fontSize: 11, color: "#1B7895", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
             </div>
 
-            {/* Assign from the shared master catalog */}
-            <div style={{ marginTop: 16 }}>
-              <span style={S.lbl}>Or assign from the master catalog</span>
-              {master.buildingStyleCatalog.map((st) => {
-                // presence (regardless of active) so re-clicking "Assign" can't overwrite a hidden custom row's label/image
-                const on = (cat.buildingStyles || []).some((s) => s.key === st.key);
-                return (
-                  <div key={st.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1F5F9" }}>
-                    <div style={S.pill(on)} onClick={() => !busy && act(on ? "unassign_style" : "assign_style", { clientId: sel, styleKey: st.key }, on ? "Unassigned" : "Assigned")}>
-                      {on ? "✓ Assigned" : "Assign"}
-                    </div>
-                    <b style={{ minWidth: 110 }}>{st.key}</b><span style={{ color: "#64748B" }}>{st.label}</span>
-                  </div>
-                );
-              })}
-            </div>
           </div>
         )}
 
@@ -448,8 +725,10 @@ function AdminApp() {
             <div style={S.h2}>CSV pricing &amp; inclusions for <span style={{ color: ACCENT }}>{sel}</span></div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
               Download the template (one row per style, pre-filled with any existing sizes), then add a row for every
-              size: type <b>width</b> and <b>length</b> (feet) and the <b>price</b>. The yes/no columns mean “is this option
-              <b> included in the price?</b>”. Sizes are created/updated on upload, matched by style + width + length (no duplicates).
+              size: type <b>width</b> and <b>length</b> (feet) and the <b>price</b>. The option columns hold the
+              <b> quantity included in the price</b> — loft = included <b>sq ft</b> (e.g. 50), doors/windows = <b>count</b>
+              (e.g. 1); <b>0</b> = not included (charged). Declined included items credit quantity × rate on the estimate.
+              Sizes are created/updated on upload, matched by style + width + length (no duplicates).
               <b> Styles must exist first</b> (Building Styles tab). A blank price — or <b>active = no</b> — hides that size.
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -474,6 +753,56 @@ function AdminApp() {
               </div>
             )}
           </div>
+        )}
+
+        {/* Email Sender card (operator-global) — HIDDEN FOR NOW via SHOW_EMAIL_SENDER
+            (flip the flag near the top to true to restore). Connects a Google account so
+            the portal's login / invite / password-reset emails send from it, not Supabase. */}
+        {SHOW_EMAIL_SENDER && (
+        <div style={{ ...S.card, marginTop: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ ...S.h2, marginBottom: 0 }}>📧 Email Sender</div>
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+              {emailSender && emailSender.connected &&
+                <button onClick={disconnectEmail} disabled={emailBusy} style={S.btn("#FEE2E2", "#B91C1C")}>{emailBusy ? "…" : "Disconnect"}</button>}
+              <button onClick={() => setEmailOpen((o) => !o)} style={S.btn(emailOpen ? "#F1F5F9" : ACCENT, emailOpen ? "#334155" : "#FFF")}>
+                {emailOpen ? "Cancel" : (emailSender && emailSender.connected ? "Reconnect Google account" : "Connect Google account")}
+              </button>
+            </div>
+          </div>
+          <div style={{ fontSize: 13, color: "#475569", marginTop: 8, lineHeight: 1.5 }}>
+            {emailSender && emailSender.error
+              ? <span style={{ color: "#B45309" }}>⚠ Couldn't read email status: {emailSender.error}</span>
+              : emailSender && emailSender.connected
+                ? <span>Portal login &amp; invite emails send from <b style={{ color: ACCENT }}>{emailSender.senderEmail}</b>.</span>
+                : <span>Not connected — login &amp; invite emails use the <b>Supabase default sender</b>. Connect a Google account to send them from your own address.</span>}
+          </div>
+          {emailSender && emailSender.connected && !emailOpen && (
+            <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={emailTestTo} onChange={(e) => setEmailTestTo(e.target.value)} placeholder="send a test to an owner/operator login email"
+                autoComplete="off" onKeyDown={(e) => e.key === "Enter" && emailTestTo.trim() && sendTestEmail()} style={{ ...S.input, minWidth: 300 }} />
+              <button onClick={sendTestEmail} disabled={emailTestBusy || !emailTestTo.trim()}
+                style={S.btn(emailTestBusy || !emailTestTo.trim() ? "#9CA3AF" : "#F1F5F9", emailTestBusy || !emailTestTo.trim() ? "#FFF" : "#334155")}>
+                {emailTestBusy ? "Sending…" : "Send test email"}
+              </button>
+            </div>
+          )}
+          {emailOpen && (
+            <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#475569", marginBottom: 8, lineHeight: 1.5 }}>
+                Enter the Google account and its <b>app password</b> (Google Account → Security → 2-Step Verification → App passwords).
+                2-step verification must be on. The password is stored securely server-side and never shown again.
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <input value={emailAddr} onChange={(e) => setEmailAddr(e.target.value)} placeholder="name@yourdomain.com" autoComplete="off" style={{ ...S.input, minWidth: 240 }} />
+                <PasswordInput value={emailPwd} onChange={(e) => setEmailPwd(e.target.value)} placeholder="paste the 16-char app password" autoComplete="new-password"
+                  onKeyDown={(e) => e.key === "Enter" && emailAddr.trim() && emailPwd.trim() && connectEmail()} style={S.input} wrapStyle={{ minWidth: 240 }} />
+                <button onClick={connectEmail} disabled={emailBusy || !emailAddr.trim() || !emailPwd.trim()}
+                  style={S.btn(emailBusy || !emailAddr.trim() || !emailPwd.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>{emailBusy ? "Connecting…" : "Connect & save"}</button>
+              </div>
+            </div>
+          )}
+        </div>
         )}
       </div>
     </div>

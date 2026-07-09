@@ -35,7 +35,10 @@ function maskId(v: string | null): string | null {
 }
 
 // Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
-// [{ style, width, length, price, active, inclusions: { item_key: yes/no } }].
+// [{ style, width, length, price, active, inclusions: { item_key: qty } }].
+// Inclusion cells are QUANTITIES (2026-07-07): loft = included sq ft (e.g. 50),
+// doors = count (e.g. 1); 0/blank/"no" = not included. Legacy yes-style tokens
+// still import as quantity 1 so previously downloaded sheets keep working.
 // clientId is the JWT-resolved tenant — never trusted from the request body.
 // CREATES the size if a (style, width, length) doesn't exist yet, otherwise UPDATES
 // it — keyed on dimensions, so re-uploading the same sheet updates prices without
@@ -56,7 +59,24 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const cur = maxSort.get(z.style_id) ?? -1;
     if ((z.sort_order ?? 0) > cur) maxSort.set(z.style_id, z.sort_order ?? 0);
   }
-  const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Inclusion cell -> included quantity. 0 = not included (delete the row).
+  // Numbers win ("50" -> 50 sq ft, "2" -> 2); legacy yes-tokens mean quantity 1;
+  // anything else (blank, "no", garbage) is 0 — same delete behavior as before.
+  const parseInclusionQty = (v: unknown): number => {
+    if (v === true) return 1;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "") return 0;
+    if (["yes", "y", "true", "x", "included"].includes(s)) return 1;
+    const n = Number(s.replace(/[$,\s]/g, ""));
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  };
+  const isLegacyYes = (v: unknown) => v === true || ["yes", "y", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Existing inclusion quantities: a legacy "yes" cell (old saved sheet) PRESERVES a
+  // configured qty (e.g. loft 50 sq ft) instead of silently downgrading it to 1.
+  const existingQty = new Map<string, number>();   // `${size_id}|${item_key}` -> qty
+  const exq = await sb.from("building_size_inclusions").select("size_id, item_key, qty").eq("client_id", clientId);
+  if (exq.error) throw exq.error;
+  for (const r of exq.data ?? []) existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
   const inactiveWord = (v: unknown) => ["no", "n", "0", "false", "inactive"].includes(String(v ?? "").trim().toLowerCase());
   const num = (v: unknown) => { const blank = v === "" || v == null; if (blank) return { blank: true, n: NaN }; return { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) }; };
   const fmt = (n: number) => String(n);
@@ -95,11 +115,12 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
-      if (truthy(val)) {
-        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
-      } else {
-        await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
-      }
+      let qty = parseInclusionQty(val);
+      if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
+      const incRes = qty > 0
+        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true, qty }, { onConflict: "size_id,item_key" })
+        : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
+      if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
     }
   }
   return { imported: created + updated, created, updated, skipped };
@@ -142,7 +163,7 @@ Deno.serve(async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);
@@ -169,6 +190,7 @@ Deno.serve(async (req: Request) => {
       quoteTerms: data?.quote_terms ?? null,
       betaMode: Boolean(data?.beta_mode),
       betaEmail: data?.beta_email ?? null,
+      showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)
       branding: {
@@ -198,6 +220,7 @@ Deno.serve(async (req: Request) => {
     if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms);
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
+    if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
     if ("businessAddress" in payload) {
       const a = payload.businessAddress;
       updates.business_address = a && typeof a === "object" ? a : null;
@@ -231,7 +254,9 @@ Deno.serve(async (req: Request) => {
     if (typeof payload.logoBase64 === "string" && payload.logoBase64.trim()) {
       const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
       const ct = String(payload.logoContentType || "image/png");
-      const ext = (ct.split("/")[1] || "png").split("+")[0].replace(/[^a-z0-9]/gi, "") || "png";
+      const EXT_BY_CT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+      const ext = EXT_BY_CT[ct];
+      if (!ext) return json({ error: "Unsupported image type (use PNG, JPG, WEBP or GIF)." }, 400);
       let bytes: Uint8Array;
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
       catch { return json({ error: "Invalid logo data." }, 400); }
@@ -258,7 +283,9 @@ Deno.serve(async (req: Request) => {
     if (typeof payload.logoBase64 !== "string" || !payload.logoBase64.trim()) return json({ error: "No logo data." }, 400);
     const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
     const ct = String(payload.logoContentType || "image/png");
-    const ext = (ct.split("/")[1] || "png").split("+")[0].replace(/[^a-z0-9]/gi, "") || "png";
+    const EXT_BY_CT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT_BY_CT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use PNG, JPG, WEBP or GIF)." }, 400);
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
     catch { return json({ error: "Invalid logo data." }, 400); }
@@ -274,19 +301,23 @@ Deno.serve(async (req: Request) => {
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl] = await Promise.all([
-      admin.from("building_styles").select("id, key, label, active").eq("client_id", clientId).order("sort_order"),
+    const [styles, sizes, items, types, incl, lpRows, colorsRes] = await Promise.all([
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
-      admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
+      admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
+      // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
+      admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
+      // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
+      admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
-    for (const r of [styles, sizes, items, types, incl]) if (r.error) return json({ error: r.error.message }, 500);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active)
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [] });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -297,6 +328,47 @@ Deno.serve(async (req: Request) => {
       const r = await importPricingRows(admin, clientId, payload.rows);
       return json({ ok: true, ...r });
     } catch (e) { return json({ error: (e as Error).message || String(e) }, 500); }
+  }
+
+  // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
+  // only DEFAULT rows (style_id IS NULL); per-style overrides stay DB-managed and are
+  // still honored at estimate time. Manual upsert (not PostgREST onConflict) because the
+  // unique index is partial — (client_id, item_key) WHERE style_id IS NULL — and can't be
+  // inferred by the upsert API. clientId is JWT-resolved, never trusted from the body.
+  if (action === "save_layout_pricing") {
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
+    const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
+    if (itemsRes.error) return json({ error: itemsRes.error.message }, 500);
+    const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
+    const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const idByKey = new Map<string, string>();
+    for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
+    let saved = 0; const skipped: string[] = [];
+    for (const row of payload.rows) {
+      const itemKey = String(row?.item_key ?? "").trim();
+      const method = String(row?.pricing_method ?? "").trim();
+      const rate = Number(row?.rate);
+      if (!itemKey) continue;
+      if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
+      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
+      if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
+      // Optional per-item image (shown on the estimate line for this product). Only written
+      // when the row carries an imageUrl field, so a save from an older client never blanks
+      // it; an explicit empty string clears it.
+      const hasImg = Object.prototype.hasOwnProperty.call(row, "imageUrl");
+      const imageUrl = hasImg ? (String(row.imageUrl ?? "").trim() || null) : undefined;
+      const existingId = idByKey.get(itemKey);
+      const patch: Record<string, unknown> = { pricing_method: method, rate };
+      if (hasImg) patch.image_url = imageUrl;
+      const res = existingId
+        ? await admin.from("layout_item_pricing").update(patch).eq("id", existingId)
+        : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: itemKey, style_id: null, ...patch });
+      if (res.error) { skipped.push(`${itemKey}: ${res.error.message}`); continue; }
+      saved++;
+    }
+    return json({ ok: true, saved, skipped });
   }
 
   // Verify the GHL Location ID + API key against GoHighLevel, then save ONLY if they
@@ -362,10 +434,229 @@ Deno.serve(async (req: Request) => {
     const { error: upErr } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
     if (upErr) return json({ error: `Verified, but the save failed: ${upErr.message}` }, 500);
 
+    // Pricing comes from the per-tenant CSV catalog (building_sizes), not GHL products, so a
+    // missing product catalog is no longer worth warning about. A missing USER still blocks
+    // estimates (GHL requires a userId on the estimate), so keep that one.
     const warning = !hasUsers
       ? "But this GHL location has no users yet — estimates will be rejected until you assign at least one user to the sub-account."
-      : (!hasProducts ? "Note: this location has no products, so estimate line items won't be priced yet." : "");
+      : "";
     return json({ ok: true, verified: true, ghlLocationIdMasked: maskId(locationId), hasUsers, hasProducts, warning });
+  }
+
+  // Create a building style for THIS tenant (clientId is JWT-resolved, never from the
+  // body) so owners can self-serve styles before pricing. An optional base64 image is
+  // uploaded to the public 'branding' bucket. Key allocation mirrors admin-catalog's
+  // create_style: derive a slug and retry on unique-violation so a concurrent create
+  // never silently overwrites a style.
+  if (action === "create_style") {
+    const label = String(payload.label ?? "").trim();
+    if (!label) return json({ error: "Building style name is required." }, 400);
+    let imageUrl: string | null = null;
+    if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
+      const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+      const ct = String(payload.imageContentType || "image/jpeg");
+      const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+      const ext = EXT[ct];
+      if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+      let bytes: Uint8Array;
+      try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+      if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+      imageUrl = pub.publicUrl;
+    }
+    const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
+    // INSERT then retry on a unique-violation (23505) for a per-client key collision. The
+    // global building_style_catalog key-reservation was removed with that table in 030.
+    let key = base, n = 1;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const ins = await admin.from("building_styles").insert(
+        { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
+        .select("id, key").maybeSingle();
+      if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
+      if (ins.error.code !== "23505") return json({ error: ins.error.message }, 500);
+      key = `${base}-${++n}`;
+    }
+    return json({ error: "Could not allocate a unique style key." }, 500);
+  }
+
+  // Show/hide one of this tenant's styles (a hidden style drops out of the designer and
+  // the pricing template). Scoped to clientId so an owner can only touch their own styles.
+  if (action === "set_style_active") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error } = await admin.from("building_styles")
+      .update({ active: payload.active !== false })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  // Toggle whether this style's photo is attached to the GHL estimate's building line
+  // (default on). Only affects the estimate attachment — the designer still shows the photo.
+  if (action === "set_style_estimate_image") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error } = await admin.from("building_styles")
+      .update({ show_image_on_estimate: payload.show !== false })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  // Upload-only: store a layout-item image in the 'branding' bucket and return its public
+  // URL (no DB write). The portal places the URL on the row and persists it via
+  // save_layout_pricing → layout_item_pricing.image_url, which submit-estimate then attaches
+  // to that item's estimate line. clientId is JWT-resolved (own tenant only).
+  if (action === "upload_layout_image") {
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+    const path = `${clientId}/layout-${Date.now()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
+  // Permanently delete one of this tenant's styles. The FK cascade removes the style's
+  // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
+  // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
+  // Irreversible — prefer set_style_active(false) to merely hide a style. Scoped to clientId
+  // so an owner can only delete their own styles. Past designs that used this style keep their
+  // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
+  // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
+  if (action === "delete_style") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error, count } = await admin.from("building_styles")
+      .delete({ count: "exact" })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true });
+  }
+
+  // Update one of this tenant's styles: rename and/or replace its image. Scoped to clientId.
+  // Only fields present in the body are written; an absent image leaves the current one intact.
+  // Does not touch sizes/prices (CSV) or active state (set_style_active).
+  if (action === "update_style") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const updates: Record<string, unknown> = {};
+    if ("label" in payload) {
+      const label = String(payload.label ?? "").trim();
+      if (!label) return json({ error: "Building style name can't be empty." }, 400);
+      updates.label = label;
+    }
+    if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
+      const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+      const ct = String(payload.imageContentType || "image/jpeg");
+      const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+      const ext = EXT[ct];
+      if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+      let bytes: Uint8Array;
+      try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+      if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+      updates.image_url = pub.publicUrl;
+    }
+    if (Object.keys(updates).length === 0) return json({ error: "Nothing to update." }, 400);
+    updates.updated_at = new Date().toISOString();
+    const { error, count } = await admin.from("building_styles")
+      .update(updates, { count: "exact" })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, imageUrl: updates.image_url ?? null });
+  }
+
+  // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
+  // each style's sort_order is set to its index, which is what get_config / the designer sort
+  // by (so the first id becomes the first style shown on the design page). Scoped to clientId.
+  if (action === "reorder_styles") {
+    if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    let i = 0;
+    for (const styleId of payload.orderedIds) {
+      const sid = String(styleId ?? "").trim();
+      if (!sid) continue;
+      const { error } = await admin.from("building_styles")
+        .update({ sort_order: i })
+        .eq("client_id", clientId).eq("id", sid);
+      if (error) return json({ error: error.message }, 500);
+      i++;
+    }
+    return json({ ok: true });
+  }
+
+  // Full-replace this tenant's paint palette (Colors tab). Takes the COMPLETE desired list:
+  // rows carrying an id are updated, rows without one are inserted, and any existing colour
+  // absent from the list is deleted. clientId is JWT-resolved (own tenant only). The designer
+  // is selection-only today (get_config exposes label/siding/trim/allowCustom/isDefault/swatch,
+  // never a price); rate/pricing_method are persisted here for a later paint-pricing pass.
+  if (action === "save_colors") {
+    if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
+    const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
+    const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    const keptIds = new Set<string>();
+    let saved = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.colors) {
+      const label = String(row?.label ?? "").trim();
+      if (!label) { skipped.push(`row ${i}: blank label`); i++; continue; }
+      const method = String(row?.pricingMethod ?? "each").trim() || "each";
+      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"`); i++; continue; }
+      const rate = Number(row?.rate);
+      const rec: Record<string, unknown> = {
+        client_id: clientId,
+        label,
+        siding: row?.siding !== false,       // default true
+        trim: row?.trim !== false,           // default true
+        allow_custom: row?.allowCustom === true,
+        is_default: row?.isDefault === true,
+        active: row?.active !== false,       // default true
+        rate: Number.isFinite(rate) && rate >= 0 ? rate : 0,
+        pricing_method: method,
+        // Optional swatch color as a hex string (#RGB / #RRGGBB). Anything else → null.
+        hex: (typeof row?.hex === "string" && /^#[0-9a-fA-F]{3,8}$/.test(row.hex.trim())) ? row.hex.trim() : null,
+        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
+        updated_at: new Date().toISOString(),
+      };
+      // Roof categories (shingle/metal). Only written when the caller sends them, so an older
+      // client that doesn't know about these keys can't clear a color's roof categorization.
+      if (Object.prototype.hasOwnProperty.call(row, "shingle")) rec.shingle = row.shingle === true;
+      if (Object.prototype.hasOwnProperty.call(row, "metal")) rec.metal = row.metal === true;
+      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
+        rec.image_url = String(row.imageUrl ?? "").trim() || null;
+      }
+      const rid = String(row?.id ?? "").trim();
+      const res = (rid && existingIds.has(rid))
+        ? (keptIds.add(rid), await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid))
+        : await admin.from("colors").insert(rec);
+      if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (toDelete.length) {
+      const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
+      if (del.error) return json({ error: del.error.message }, 500);
+      deleted = toDelete.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);

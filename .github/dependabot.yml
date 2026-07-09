@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # No npm/package.json exists on this branch yet (React is loaded via Babel-standalone
+  # CDN scripts in index.html/portal.html/admin.html, and StructureStudio.jsx has no
+  # build of its own) — nothing for an npm ecosystem entry to scan until a build step
+  # and package.json land. Add one then.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10

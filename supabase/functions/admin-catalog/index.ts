@@ -3,9 +3,9 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
-// admin-save-settings). Manages the GLOBAL master catalog (layout_item_types,
-// building_style_catalog + sizes) and per-client assignments (client_layout_items,
-// building_styles/building_sizes). All writes use the service role (bypass RLS).
+// admin-save-settings). Manages the GLOBAL master layout-item palette (layout_item_types)
+// and per-client catalog (client_layout_items, building_styles/building_sizes). All writes
+// use the service role (bypass RLS).
 // Kept separate from admin-save-settings so GHL-credential logic stays isolated.
 
 const cors = {
@@ -27,6 +27,38 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
+// ── Supabase Auth custom-SMTP config via the Management API ──────────────────
+// Powers the admin.html "Email Sender" card. Pointing the project's Auth SMTP at
+// a Google account (Gmail host + app password) makes ALL auth emails — owner
+// invites, password resets, email changes — send from that address instead of
+// Supabase's default sender, with no per-flow code. Requires a Supabase personal
+// access token in the MGMT_TOKEN secret — NOT "SUPABASE_MGMT_TOKEN": Supabase
+// reserves the SUPABASE_ prefix and rejects any edge secret named with it. The app
+// password is write-only: it lives only inside this Auth config, never returned by GET.
+const PROJECT_REF = "jzeamjbhdrsbygdnphbm";
+async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
+  const token = Deno.env.get("MGMT_TOKEN");
+  if (!token) {
+    throw new Error(
+      "Email sending isn't set up on the server yet: the MGMT_TOKEN secret is missing. " +
+      "Create a Supabase personal access token at https://supabase.com/dashboard/account/tokens and add " +
+      "it as an Edge Function secret named MGMT_TOKEN.");
+  }
+  const r = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth`, {
+    method,
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
+  if (!r.ok) {
+    const msg = (data && (data.message || data.error || data.msg)) || text || `request failed (${r.status})`;
+    throw new Error(`Supabase Management API: ${String(msg).slice(0, 500)}`);
+  }
+  return data;
+}
+
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
 // write/upload can never land under a typo'd or malformed tenant prefix.
 async function assertClient(sb: any, clientId: string) {
@@ -38,7 +70,10 @@ async function assertClient(sb: any, clientId: string) {
 }
 
 // Shared CSV pricing + inclusion importer (also used by portal-settings).
-// rows: [{ style, width, length, price, active, inclusions: { item_key: yes/no } }].
+// rows: [{ style, width, length, price, active, inclusions: { item_key: qty } }].
+// Inclusion cells are QUANTITIES (2026-07-07): loft = included sq ft (e.g. 50),
+// doors = count (e.g. 1); 0/blank/"no" = not included. Legacy yes-style tokens
+// still import as quantity 1 so previously downloaded sheets keep working.
 // Resolves the style by label OR key (case-insensitive). CREATES the size if a
 // (style, width, length) combo doesn't exist yet, otherwise UPDATES it — keyed on
 // dimensions, so re-uploading the same sheet updates prices without ever creating
@@ -60,7 +95,24 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const cur = maxSort.get(z.style_id) ?? -1;
     if ((z.sort_order ?? 0) > cur) maxSort.set(z.style_id, z.sort_order ?? 0);
   }
-  const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Inclusion cell -> included quantity. 0 = not included (delete the row).
+  // Numbers win ("50" -> 50 sq ft, "2" -> 2); legacy yes-tokens mean quantity 1;
+  // anything else (blank, "no", garbage) is 0 — same delete behavior as before.
+  const parseInclusionQty = (v: unknown): number => {
+    if (v === true) return 1;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "") return 0;
+    if (["yes", "y", "true", "x", "included"].includes(s)) return 1;
+    const n = Number(s.replace(/[$,\s]/g, ""));
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  };
+  const isLegacyYes = (v: unknown) => v === true || ["yes", "y", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Existing inclusion quantities: a legacy "yes" cell (old saved sheet) PRESERVES a
+  // configured qty (e.g. loft 50 sq ft) instead of silently downgrading it to 1.
+  const existingQty = new Map<string, number>();   // `${size_id}|${item_key}` -> qty
+  const exq = await sb.from("building_size_inclusions").select("size_id, item_key, qty").eq("client_id", clientId);
+  if (exq.error) throw exq.error;
+  for (const r of exq.data ?? []) existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
   const inactiveWord = (v: unknown) => ["no", "n", "0", "false", "inactive"].includes(String(v ?? "").trim().toLowerCase());
   const num = (v: unknown) => { const blank = v === "" || v == null; if (blank) return { blank: true, n: NaN }; return { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) }; };
   const fmt = (n: number) => String(n);
@@ -99,11 +151,12 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
-      if (truthy(val)) {
-        await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" });
-      } else {
-        await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
-      }
+      let qty = parseInclusionQty(val);
+      if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
+      const incRes = qty > 0
+        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true, qty }, { onConflict: "size_id,item_key" })
+        : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
+      if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
     }
   }
   return { imported: created + updated, created, updated, skipped };
@@ -134,13 +187,12 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, clients: data });
       }
       case "get_master": {
-        const [items, styles, sizes] = await Promise.all([
-          sb.from("layout_item_types").select("*").order("sort_order").order("item_key"),
-          sb.from("building_style_catalog").select("*").order("sort_order").order("key"),
-          sb.from("building_style_catalog_sizes").select("*").order("style_key").order("sort_order"),
-        ]);
-        if (items.error) throw items.error; if (styles.error) throw styles.error; if (sizes.error) throw sizes.error;
-        return json({ ok: true, layoutItemTypes: items.data, buildingStyleCatalog: styles.data, catalogSizes: sizes.data });
+        // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
+        // (migration 030) — tenants get styles via the Clone feature or per-client
+        // create_style, not by assigning from a global master template.
+        const items = await sb.from("layout_item_types").select("*").order("sort_order").order("item_key");
+        if (items.error) throw items.error;
+        return json({ ok: true, layoutItemTypes: items.data });
       }
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
@@ -148,7 +200,7 @@ Deno.serve(async (req: Request) => {
           sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
-          sb.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
+          sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
         ]);
         if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
         return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
@@ -173,28 +225,7 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true });
       }
 
-      // ── building-style assignment ───────────────────────────────────────
-      case "assign_style": {
-        const clientId = reqStr(p.clientId, "clientId");
-        const styleKey = reqStr(p.styleKey, "styleKey");
-        const cat = await sb.from("building_style_catalog").select("label, default_image_url").eq("key", styleKey).maybeSingle();
-        if (cat.error) throw cat.error;
-        if (!cat.data) throw new Error("unknown style key");
-        const up = await sb.from("building_styles").upsert(
-          { client_id: clientId, key: styleKey, label: cat.data.label, image_url: cat.data.default_image_url, active: true },
-          { onConflict: "client_id,key" }).select("id").maybeSingle();
-        if (up.error) throw up.error;
-        const styleId = up.data!.id;
-        // clone master default sizes (only where missing), base_price null
-        const ms = await sb.from("building_style_catalog_sizes").select("label, width_ft, length_ft, sort_order").eq("style_key", styleKey);
-        if (ms.error) throw ms.error;
-        for (const s of ms.data ?? []) {
-          await sb.from("building_sizes").upsert(
-            { client_id: clientId, style_id: styleId, label: s.label, width_ft: s.width_ft, length_ft: s.length_ft,
-              sort_order: s.sort_order, active: true }, { onConflict: "style_id,label" });
-        }
-        return json({ ok: true, styleId });
-      }
+      // ── building-style management (per-client; the global master was retired in 030) ──
       case "unassign_style": {
         const clientId = reqStr(p.clientId, "clientId");
         const styleKey = reqStr(p.styleKey, "styleKey");
@@ -238,17 +269,11 @@ Deno.serve(async (req: Request) => {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const label    = reqStr(p.label, "label");
         const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
-        // Reserve master catalog keys: a created style must not share a key with
-        // a master style, else a later assign_style upsert would overwrite it.
-        const masterKeys = new Set<string>();
-        const mk = await sb.from("building_style_catalog").select("key");
-        if (mk.error) throw mk.error;
-        for (const m of mk.data ?? []) masterKeys.add(String(m.key));
-        // INSERT (not upsert) so a concurrent same-key create surfaces as a 23505
-        // we retry — never a silent overwrite of an existing style.
+        // INSERT (not upsert) so a concurrent same-key create surfaces as a 23505 we
+        // retry — never a silent overwrite of an existing style. (The global master
+        // key-reservation was removed with the building_style_catalog table in 030.)
         let key = base, n = 1;
         for (let attempt = 0; attempt < 50; attempt++) {
-          if (masterKeys.has(key)) { key = `${base}-${++n}`; continue; }
           const ins = await sb.from("building_styles").insert(
             { client_id: clientId, key, label, image_url: p.imageUrl ?? null,
               sort_order: Number.isFinite(p.sortOrder) ? p.sortOrder : 0, active: true })
@@ -297,23 +322,6 @@ Deno.serve(async (req: Request) => {
         if (error) throw error;
         return json({ ok: true });
       }
-      case "save_master_style": {
-        const key = reqStr(p.key, "key");
-        const { error } = await sb.from("building_style_catalog").upsert({
-          key, label: reqStr(p.label, "label"), default_image_url: p.defaultImageUrl ?? null,
-          sort_order: p.sortOrder ?? 0, active: p.active !== false, updated_at: new Date().toISOString(),
-        }, { onConflict: "key" });
-        if (error) throw error;
-        if (Array.isArray(p.sizes)) {
-          for (const s of p.sizes) {
-            await sb.from("building_style_catalog_sizes").upsert({
-              style_key: key, label: reqStr(s.label, "size.label"),
-              width_ft: s.widthFt, length_ft: s.lengthFt, sort_order: s.sortOrder ?? 0,
-            }, { onConflict: "style_key,label" });
-          }
-        }
-        return json({ ok: true });
-      }
 
       // ── CSV pricing + inclusion import ──────────────────────────────────
       // body.rows: [{ style, width, length, price, active, inclusions: {item_key: yes/no} }]
@@ -345,6 +353,7 @@ Deno.serve(async (req: Request) => {
         // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
         const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__";
         let contactFields: unknown, defaultSizes: unknown, options: unknown;
+        let templateId: string | null = null;
         if (blank) {
           contactFields = ["name", "email", "phone", "street", "city", "state", "zip"];
           defaultSizes = [];
@@ -355,6 +364,7 @@ Deno.serve(async (req: Request) => {
           if (tmpl.error) throw tmpl.error;
           if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
           contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
+          templateId = tmplId;
         }
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
@@ -364,19 +374,114 @@ Deno.serve(async (req: Request) => {
           updated_at: new Date().toISOString(),
         });
         if (ins.error) throw ins.error;
-        return json({ ok: true, clientId, blank });
+
+        // Clone the template's FULL catalog so the new client is usable immediately — the
+        // config row alone has no styles/sizes/prices/items/colors (the old bug: a cloned
+        // client "didn't bring it all over"). New rows get fresh ids; foreign keys are
+        // remapped old→new. client_settings is intentionally NOT copied (GHL credentials +
+        // business identity are per-client). Inserts only — nothing is dropped or removed.
+        let clonedCounts: Record<string, number> | null = null;
+        if (templateId) {
+          const T = templateId, Cc = clientId;
+          const counts: Record<string, number> = {};
+
+          // 1. building_styles → old id → new id (matched by stable per-client key)
+          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active").eq("client_id", T);
+          if (stSrc.error) throw new Error(`clone styles read: ${stSrc.error.message}`);
+          if ((stSrc.data ?? []).length) {
+            const r = await sb.from("building_styles").insert((stSrc.data ?? []).map((s: any) => ({
+              client_id: Cc, key: s.key, label: s.label, image_url: s.image_url, sort_order: s.sort_order, active: s.active,
+            })));
+            if (r.error) throw new Error(`clone styles: ${r.error.message}`);
+          }
+          const [oldStyles, newStyles] = await Promise.all([
+            sb.from("building_styles").select("id, key").eq("client_id", T),
+            sb.from("building_styles").select("id, key").eq("client_id", Cc),
+          ]);
+          if (oldStyles.error) throw oldStyles.error; if (newStyles.error) throw newStyles.error;
+          const newStyleIdByKey = new Map<string, string>();
+          for (const s of newStyles.data ?? []) newStyleIdByKey.set(String(s.key), s.id);
+          const styleIdMap = new Map<string, string>();   // old style id → new style id
+          for (const s of oldStyles.data ?? []) { const nid = newStyleIdByKey.get(String(s.key)); if (nid) styleIdMap.set(s.id, nid); }
+          counts.building_styles = styleIdMap.size;
+
+          // 2. building_sizes → remap style_id; old size id → new size id (by new style_id|label)
+          const szSrc = await sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", T);
+          if (szSrc.error) throw new Error(`clone sizes read: ${szSrc.error.message}`);
+          const szRows = (szSrc.data ?? []).filter((z: any) => styleIdMap.has(z.style_id)).map((z: any) => ({
+            client_id: Cc, style_id: styleIdMap.get(z.style_id), label: z.label, width_ft: z.width_ft,
+            length_ft: z.length_ft, base_price: z.base_price, sort_order: z.sort_order, active: z.active,
+          }));
+          if (szRows.length) { const r = await sb.from("building_sizes").insert(szRows); if (r.error) throw new Error(`clone sizes: ${r.error.message}`); }
+          const newSizes = await sb.from("building_sizes").select("id, style_id, label").eq("client_id", Cc);
+          if (newSizes.error) throw newSizes.error;
+          const newSizeIdByKey = new Map<string, string>();
+          for (const z of newSizes.data ?? []) newSizeIdByKey.set(`${z.style_id}|${z.label}`, z.id);
+          const sizeIdMap = new Map<string, string>();   // old size id → new size id
+          for (const z of szSrc.data ?? []) { const ns = styleIdMap.get(z.style_id); if (!ns) continue; const nid = newSizeIdByKey.get(`${ns}|${z.label}`); if (nid) sizeIdMap.set(z.id, nid); }
+          counts.building_sizes = sizeIdMap.size;
+
+          // 3. building_size_inclusions → remap size_id (qty travels with the row —
+          // previously dropped here, resetting every clone's quantities to the default 1)
+          const incSrc = await sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", T);
+          if (incSrc.error) throw new Error(`clone inclusions read: ${incSrc.error.message}`);
+          const incRows = (incSrc.data ?? []).filter((x: any) => sizeIdMap.has(x.size_id)).map((x: any) => ({
+            client_id: Cc, size_id: sizeIdMap.get(x.size_id), item_key: x.item_key, included: x.included, qty: x.qty ?? 1,
+          }));
+          if (incRows.length) { const r = await sb.from("building_size_inclusions").insert(incRows); if (r.error) throw new Error(`clone inclusions: ${r.error.message}`); }
+          counts.building_size_inclusions = incRows.length;
+
+          // 4. client_layout_items (no style FK)
+          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override").eq("client_id", T);
+          if (liSrc.error) throw new Error(`clone items read: ${liSrc.error.message}`);
+          if ((liSrc.data ?? []).length) {
+            const r = await sb.from("client_layout_items").insert((liSrc.data ?? []).map((i: any) => ({ client_id: Cc, ...i })));
+            if (r.error) throw new Error(`clone items: ${r.error.message}`);
+          }
+          counts.client_layout_items = (liSrc.data ?? []).length;
+
+          // 5. layout_item_pricing → remap style_id (NULL default stays NULL)
+          const lpSrc = await sb.from("layout_item_pricing").select("item_key, style_id, pricing_method, rate, image_url").eq("client_id", T);
+          if (lpSrc.error) throw new Error(`clone pricing read: ${lpSrc.error.message}`);
+          const lpRows = (lpSrc.data ?? []).filter((q: any) => !q.style_id || styleIdMap.has(q.style_id)).map((q: any) => ({
+            client_id: Cc, item_key: q.item_key, style_id: q.style_id ? styleIdMap.get(q.style_id) : null,
+            pricing_method: q.pricing_method, rate: q.rate, image_url: q.image_url,
+          }));
+          if (lpRows.length) { const r = await sb.from("layout_item_pricing").insert(lpRows); if (r.error) throw new Error(`clone pricing: ${r.error.message}`); }
+          counts.layout_item_pricing = lpRows.length;
+
+          // 6. colors (no FK) — copy every column except identity/timestamps
+          const colSrc = await sb.from("colors").select("*").eq("client_id", T);
+          if (colSrc.error) throw new Error(`clone colors read: ${colSrc.error.message}`);
+          if ((colSrc.data ?? []).length) {
+            const colRows = (colSrc.data ?? []).map((c0: any) => { const { id, client_id, created_at, updated_at, ...rest } = c0; return { client_id: Cc, ...rest }; });
+            const r = await sb.from("colors").insert(colRows); if (r.error) throw new Error(`clone colors: ${r.error.message}`);
+          }
+          counts.colors = (colSrc.data ?? []).length;
+
+          clonedCounts = counts;
+        }
+        return json({ ok: true, clientId, blank, cloned: clonedCounts });
       }
 
       // ── link a user login to a client (with a role) ────────────────────
-      // Finds the Supabase auth user by email (admin API) and maps it to the
-      // client in client_users. role: "owner"/"admin" (full access incl. Pricing +
-      // Settings) or "user" (Designs & Leads only). The login itself must already
-      // exist (Authentication → Add user) — account creation stays out of scope.
+      // Finds-or-CREATES the Supabase auth user for the email, then maps it to the
+      // client in client_users. No manual "Authentication → Add user" step: if the
+      // login doesn't exist we create it and try to email an invite (best-effort,
+      // needs SMTP), and either way we return a one-time set-password link the
+      // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
+      // Settings) or "user" (Designs & Leads only).
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const email = reqStr(p.email, "email").toLowerCase();
         const role = ["owner", "admin", "user"].includes(String(p.role || "").toLowerCase())
           ? String(p.role).toLowerCase() : "owner";
+        // Where the set-password link lands (the portal). The panel passes
+        // location.origin + "/portal.html"; fall back to production.
+        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
+          ? p.portalUrl : "https://structurestudio.app/portal.html";
+
+        // 1. find an existing auth user by email (admin API, paginated)
         let user: any = null;
         for (let page = 1; page <= 20 && !user; page++) {
           const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
@@ -385,11 +490,181 @@ Deno.serve(async (req: Request) => {
           user = users.find((u: any) => String(u.email || "").toLowerCase() === email) || null;
           if (users.length < 1000) break;
         }
-        if (!user) throw new Error(`No Supabase user with email "${email}". Create the login first in Authentication → Add user.`);
+
+        // 2. create the login if missing. inviteUserByEmail creates + emails the
+        // invite when SMTP is set up; if that fails (e.g. no SMTP) we still want the
+        // account, so fall back to a plain confirmed createUser.
+        let created = false, emailSent = false;
+        if (!user) {
+          const inv = await sb.auth.admin.inviteUserByEmail(email, { redirectTo: portalUrl });
+          if (!inv.error && inv.data?.user) {
+            user = inv.data.user; created = true; emailSent = true;
+          } else {
+            const cu = await sb.auth.admin.createUser({ email, email_confirm: true });
+            if (cu.error && !/already|registered|exist/i.test(cu.error.message || "")) throw cu.error;
+            user = cu.data?.user || null;
+            if (!user) {
+              const relist = await sb.auth.admin.listUsers({ page: 1, perPage: 1000 });
+              user = (relist.data?.users || []).find((u: any) => String(u.email || "").toLowerCase() === email) || null;
+            }
+            if (!user) throw new Error(`Could not create a login for "${email}".`);
+            created = !cu.error; emailSent = false;
+          }
+        }
+
+        // 3. map the user to this client with the chosen role. Refuse to SILENTLY re-home a
+        //    login already linked to a different client (operator typo / isolation footgun);
+        //    require an explicit reassign:true to move them.
+        const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
+        if (existingLink.error) throw existingLink.error;
+        if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
+          throw new Error(`"${email}" is already linked to client "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
+        }
         const up = await sb.from("client_users").upsert(
           { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
         if (up.error) throw up.error;
-        return json({ ok: true, userId: user.id, email, role });
+
+        // 4. always hand back a one-time set-password link (works without SMTP)
+        let setupLink: string | null = null;
+        try {
+          const gl = await sb.auth.admin.generateLink({ type: "recovery", email, options: { redirectTo: portalUrl } });
+          if (!gl.error) setupLink = gl.data?.properties?.action_link || null;
+        } catch (_) { /* link is best-effort */ }
+
+        return json({ ok: true, userId: user.id, email, role, created, emailSent, setupLink });
+      }
+
+      // ── email sender: connect a Google account so auth emails send from it ──
+      // (Supabase Auth custom SMTP via the Management API — see mgmtAuthConfig.)
+      case "get_email_sender": {
+        const cfg = await mgmtAuthConfig("GET");
+        const host = (cfg && cfg.smtp_host) || "";
+        return json({ ok: true, connected: !!host, senderEmail: (cfg && cfg.smtp_admin_email) || null, host: host || null });
+      }
+      case "connect_email": {
+        const email = reqStr(p.email, "email").toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Enter a valid Google email address.");
+        // Google shows app passwords as 4 space-separated groups; strip whitespace
+        // to the raw 16 chars. Required on every connect (it's tied to the account),
+        // so we never PATCH an empty smtp_pass — the stored secret can't be blanked
+        // by an empty save; clearing is the explicit disconnect_email action.
+        const appPassword = String(p.appPassword ?? "").replace(/\s+/g, "");
+        if (!appPassword) throw new Error("Paste the 16-character Google app password.");
+        if (appPassword.length < 16) throw new Error("That app password looks too short — paste the full 16-character code from Google.");
+        await mgmtAuthConfig("PATCH", {
+          external_email_enabled: true,
+          smtp_host: "smtp.gmail.com",
+          // String, not number: the Management API's auth-config schema types
+          // smtp_port as a string and rejects a number ("Expected string, received number").
+          smtp_port: "465",
+          smtp_user: email,
+          smtp_pass: appPassword,
+          smtp_admin_email: email,
+          smtp_sender_name: (typeof p.senderName === "string" && p.senderName.trim()) ? p.senderName.trim().slice(0, 100) : "Structure Studio",
+        });
+        return json({ ok: true, connected: true, senderEmail: email });
+      }
+      case "disconnect_email": {
+        // Revert to Supabase's built-in sender by clearing the custom SMTP fields.
+        // Leave external_email_enabled untouched so email logins keep working.
+        await mgmtAuthConfig("PATCH", { smtp_host: "", smtp_user: "", smtp_pass: "", smtp_admin_email: "", smtp_sender_name: "" });
+        return json({ ok: true, connected: false, senderEmail: null });
+      }
+      // ── send a test email through the connected sender ──────────────────
+      // Proves the configured SMTP actually delivers by pushing a REAL auth email
+      // through it — a password-recovery email, which is one of the flows this
+      // feature powers and has no side effects: nothing is created, and nothing
+      // changes unless the recipient clicks the link (which only lets them set a
+      // password they already own). The recipient must be an existing login: GoTrue
+      // recover returns 200 even when it skips a non-user, so we verify first rather
+      // than report a misleading "sent".
+      case "test_email": {
+        const email = reqStr(p.email, "email").toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Enter a valid email address to send the test to.");
+
+        // Refuse to "test" when there's no custom sender — the email would quietly
+        // go out via Supabase's default sender and prove nothing about the connection.
+        const cfg = await mgmtAuthConfig("GET");
+        if (!(cfg && cfg.smtp_host)) throw new Error("Connect a Google account first — there's no custom sender to test yet.");
+
+        // Confirm the recipient is a real login (recovery only emails existing users).
+        let exists = false;
+        for (let page = 1; page <= 20 && !exists; page++) {
+          const list = await sb.auth.admin.listUsers({ page, perPage: 1000 });
+          if (list.error) throw list.error;
+          const users = list.data?.users || [];
+          exists = users.some((u: any) => String(u.email || "").toLowerCase() === email);
+          if (users.length < 1000) break;
+        }
+        if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
+
+        // Where the reset link lands; the panel passes location.origin + "/portal.html".
+        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
+          ? p.portalUrl : "https://structurestudio.app/portal.html";
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: portalUrl });
+        if (error) throw error;
+        return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });
+      }
+
+      // ── delete a tenant and ALL of its data (operator hard delete) ──────
+      // Removes the client's designs, catalog (styles/sizes/inclusions/layout
+      // items), settings, error logs, user mappings + their now-orphaned auth
+      // logins, and uploaded storage objects (floor-plans + branding), then the
+      // client_configs row itself. Requires the typed client id to match
+      // (confirmClientId) so a stray/mistaken call can't nuke a tenant.
+      // Irreversible. GHL-side contacts/estimates are external and untouched.
+      case "delete_client": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
+          throw new Error("Confirmation text does not match the client id.");
+        }
+        const deleted: Record<string, number> = {};
+        const wipe = async (table: string) => {
+          const { error, count } = await sb.from(table).delete({ count: "exact" }).eq("client_id", clientId);
+          if (error) throw new Error(`${table}: ${error.message}`);
+          deleted[table] = count ?? 0;
+        };
+        // Catalog/design rows first, config last. Order respects FKs
+        // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
+        await wipe("designs");
+        await wipe("layout_item_pricing");      // FK style_id → building_styles
+        await wipe("colors");                   // standalone per-tenant palette
+        await wipe("building_size_inclusions");
+        await wipe("building_sizes");
+        await wipe("building_styles");
+        await wipe("client_layout_items");
+        await wipe("client_settings");
+        try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
+
+        // Capture the logins mapped to this client, unmap them, then delete any
+        // that aren't also attached to another client.
+        const cu = await sb.from("client_users").select("user_id").eq("client_id", clientId);
+        if (cu.error) throw cu.error;
+        const userIds = [...new Set((cu.data ?? []).map((r: any) => r.user_id).filter(Boolean))];
+        await wipe("client_users");
+        let deletedUsers = 0;
+        for (const uid of userIds) {
+          const still = await sb.from("client_users").select("user_id").eq("user_id", uid).maybeSingle();
+          if (!still.error && !still.data) { const d = await sb.auth.admin.deleteUser(uid); if (!d.error) deletedUsers++; }
+        }
+        deleted["auth_logins"] = deletedUsers;
+
+        // Storage: remove everything under <clientId>/ in both buckets.
+        let files = 0;
+        for (const bucket of ["floor-plans", "branding"]) {
+          try {
+            const { data: list } = await sb.storage.from(bucket).list(clientId, { limit: 1000 });
+            const paths = (list ?? []).map((o: any) => `${clientId}/${o.name}`);
+            if (paths.length) { const rm = await sb.storage.from(bucket).remove(paths); if (!rm.error) files += paths.length; }
+          } catch (_) { /* storage cleanup is best-effort */ }
+        }
+        deleted["storage_files"] = files;
+
+        const cc = await sb.from("client_configs").delete({ count: "exact" }).eq("client_id", clientId);
+        if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
+        deleted["client_configs"] = cc.count ?? 0;
+
+        return json({ ok: true, clientId, deleted });
       }
 
       default:

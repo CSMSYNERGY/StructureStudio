@@ -1,5 +1,24 @@
 import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
 import { createClient } from "@supabase/supabase-js";
+import FeedbackWidget from "./FeedbackWidget.jsx";
+
+// Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
+// carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
+function PasswordInput({ style, wrapStyle, ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%", boxSizing: "border-box", ...wrapStyle }}>
+      <input {...rest} type={show ? "text" : "password"} style={{ ...style, width: "100%", boxSizing: "border-box", paddingRight: 38 }} />
+      <button type="button" tabIndex={-1} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"} onMouseDown={(e) => e.preventDefault()} onClick={() => setShow((v) => !v)} style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 34, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "#64748B" }}>
+        {show ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" /><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" /><line x1="2" x2="22" y1="2" y2="22" /></svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
 
 // ─── Supabase project ───
 // Single shared project across all white-label tenants. The anon key is browser-safe
@@ -28,6 +47,47 @@ const BUILT_IN_TOOLS = {
   textNote: { label: "Note", color: "#0F172A", icon: "📝", shortLabel: "Note", noteType: true, width: 4, height: 1 },
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
+
+// Title-case a building-style name for display (designs store either the label
+// "Farmland" or the lowercase key "cabin").
+function capWords(s) { return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase()); }
+
+// Board-and-batten door glyph for the palette buttons (single + double), modeled on the
+// real shed doors: cream frame, vertical planks, a mid cross-rail, black T-hinges, and a
+// latch. Replaces the generic door emoji so the button reads as the actual product.
+function DoorIcon({ double = false }) {
+  const FRAME = "#ECE4D3", PANEL = "#B99A82", PLANK = "#8B7058", IRON = "#2C2A28";
+  const leaf = (x, w, hingeLeft) => {
+    const planks = [];
+    for (let i = 1; i <= 3; i++) { const px = x + (w * i) / 4; planks.push(<line key={i} x1={px} y1={2.6} x2={px} y2={15.4} stroke={PLANK} strokeWidth={0.4} />); }
+    const hx = hingeLeft ? x + 0.5 : x + w - 1.8;
+    return (
+      <g key={x}>
+        <rect x={x} y={1} width={w} height={16} rx={0.5} fill={FRAME} stroke="#B5A98E" strokeWidth={0.7} />
+        <rect x={x + 1.1} y={2.2} width={w - 2.2} height={13.6} fill={PANEL} />
+        {planks}
+        <rect x={x + 1.1} y={8.1} width={w - 2.2} height={1.2} fill={FRAME} />
+        <rect x={hx} y={3.4} width={1.3} height={0.9} fill={IRON} />
+        <rect x={hx} y={12.8} width={1.3} height={0.9} fill={IRON} />
+      </g>
+    );
+  };
+  if (double) {
+    return (
+      <svg width={18} height={16} viewBox="0 0 20 18" style={{ display: "block" }} aria-hidden="true">
+        {leaf(0.5, 9, true)}
+        {leaf(10.5, 9, false)}
+        <rect x={9.2} y={8.3} width={1.6} height={0.9} fill={IRON} />
+      </svg>
+    );
+  }
+  return (
+    <svg width={11} height={16} viewBox="0 0 12 18" style={{ display: "block" }} aria-hidden="true">
+      {leaf(0.5, 11, true)}
+      <rect x={9.4} y={8.2} width={1.4} height={0.9} fill={IRON} />
+    </svg>
+  );
+}
 
 // Closest point distance from (px,py) to the segment (x1,y1)-(x2,y2)
 function _distToSeg(px, py, x1, y1, x2, y2) {
@@ -168,6 +228,246 @@ function rampPlacementForDoor(door, rampDepthFt, pW, pH, mgX, mgY, scale) {
     case "east":  return { x: mgX + pW + dPx / 2, y: door.y, rotation: 90, wall: "east" };
     default: return null;
   }
+}
+
+// ─── Layout add-on pricing (browser mirror of submit-estimate's pushItem) ─────────
+// Compute one display row per priceable placed item type, applying the SAME 7
+// pricing_method formulas the edge function uses so the prices shown on the plan match
+// the emailed estimate to the penny. Needs C.layoutPricing ({key:{rate,method,byStyle}})
+// and C.sizePricing ({styleKey:{sizeLabel:{basePrice,widthFt,lengthFt}}}) — both are
+// present only when the tenant's show_pricing is on (else {} → returns no rows).
+const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "loft", "ramp"];
+function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
+function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v < 0 ? "−" + s : s; }
+// Building / Paint Colors / Roof summary for the "Details" section, in the SAME order they appear
+// on the GHL estimate (Building, Paint, Roof). Prices use the same sizePricing + color rate/method
+// the estimate uses (total is null when show_pricing is off). The Roof row shows only when the
+// tenant offers roof colors (some color flagged shingle/metal).
+function computeSelectionRows(sel, paintColors, C) {
+  const styleKey = sel && sel.style;
+  const showP = !!(C && C.showPricing);
+  const colors = Array.isArray(C && C.colors) ? C.colors : [];
+  const szMap = (C && C.sizePricing && styleKey) ? C.sizePricing[styleKey] : null;
+  let szRow = null;
+  if (szMap && sel && sel.size) {
+    szRow = szMap[sel.size];
+    if (!szRow) { const want = normSizeLabel(sel.size); for (const k in szMap) { if (normSizeLabel(k) === want) { szRow = szMap[k]; break; } } }
+  }
+  const bW = (szRow && szRow.widthFt != null) ? Number(szRow.widthFt) : 0;
+  const bL = (szRow && szRow.lengthFt != null) ? Number(szRow.lengthFt) : 0;
+  const buildingArea = bW * bL, buildingPerimeter = 2 * (bW + bL);
+  const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
+  const charge = (c) => {
+    if (!c) return 0;
+    const rate = Number(c.rate) || 0;
+    if (rate <= 0) return 0;
+    switch (c.pricingMethod || "each") {
+      case "sqft_building": return rate * buildingArea;
+      case "perimeter_building": return rate * buildingPerimeter;
+      case "pct_building_price": return (rate / 100) * buildingPrice;
+      case "pct_estimate_total": return 0;
+      default: return rate;
+    }
+  };
+  const pick = (label, pred) => {
+    const v = String(label || "").trim(); if (!v) return null;
+    const list = colors.filter(pred);
+    return list.find((c) => c.label === v) || list.find((c) => c.allowCustom) || null;
+  };
+  const styleLabel = (((C && C.buildingStyles) || []).find((s) => s.value === styleKey) || {}).label || styleKey || "";
+  const rows = [];
+  rows.push({ key: "building", label: "Building", detail: [styleLabel, sel && sel.size].filter(Boolean).join(" ") || "—", total: showP ? buildingPrice : null });
+  const painted = sel && sel.paint === "Painted";
+  let pDetail = "Unpainted", pTotal = 0;
+  if (painted) {
+    const body = pick(paintColors && paintColors.body, (c) => c.siding);
+    const trim = pick(paintColors && paintColors.trim, (c) => c.trim);
+    const seen = {};
+    [body, trim].forEach((c) => { if (c && c.id && !seen[c.id]) { seen[c.id] = 1; pTotal += charge(c); } });
+    pDetail = `Body: ${(paintColors && paintColors.body) || "TBD"}, Trim: ${(paintColors && paintColors.trim) || "TBD"}`;
+  }
+  rows.push({ key: "paint", label: "Paint Colors", detail: pDetail, total: showP ? pTotal : null });
+  const offersRoof = colors.some((c) => c.shingle || c.metal);
+  if (offersRoof) {
+    const rt = (sel && sel.roofType) || "";
+    let rDetail = "No roof selected", rTotal = 0;
+    if (rt) {
+      const rc = pick(sel && sel.roofColor, (c) => (rt === "Metal" ? c.metal : c.shingle));
+      rTotal = charge(rc);
+      rDetail = (sel && sel.roofColor) ? `${rt} — ${sel.roofColor}` : `${rt} — (color TBD)`;
+    }
+    rows.push({ key: "roof", label: "Roof", detail: rDetail, total: showP ? rTotal : null });
+  }
+  return rows;
+}
+function computeLayoutPricingRows(items, sel, customOptions, C) {
+  if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
+  const pricing = C.layoutPricing;
+  const styleKey = sel && sel.style;
+  // Resolve rate + method for an item_key: a per-style override wins over the default,
+  // matching submit-estimate's layoutRates precedence.
+  const resolve = (key) => {
+    const lp = pricing[key];
+    if (!lp) return null;
+    const ov = (lp.byStyle && styleKey) ? lp.byStyle[styleKey] : null;
+    return {
+      rate: Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0,
+      method: (ov && ov.method) || lp.method || "each",
+    };
+  };
+  // Building geometry + base price for the building-dependent methods, from the selected
+  // size (0 when the size isn't priced/matched — same $0 the estimate would show).
+  const szMap = (C.sizePricing && styleKey) ? C.sizePricing[styleKey] : null;
+  let szRow = null;
+  if (szMap && sel && sel.size) {
+    szRow = szMap[sel.size];
+    if (!szRow) { const want = normSizeLabel(sel.size); for (const k in szMap) { if (normSizeLabel(k) === want) { szRow = szMap[k]; break; } } }
+  }
+  const bW = (szRow && szRow.widthFt != null) ? Number(szRow.widthFt) : 0;
+  const bL = (szRow && szRow.lengthFt != null) ? Number(szRow.lengthFt) : 0;
+  const buildingArea = bW * bL;
+  const buildingPerimeter = 2 * (bW + bL);
+  const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
+
+  // Roll placed items into counts + per-measure quantities (ramp is boolean in the
+  // estimate — one line regardless of how many are placed).
+  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0, rampPresent = false;
+  const workbenchFt = [];
+  for (const it of items) {
+    if (it.type === "singleDoor") singleDoors++;
+    else if (it.type === "doubleDoor") doubleDoors++;
+    else if (it.type === "window") windows++;
+    else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
+    else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
+    else if (it.type === "ramp") rampPresent = true;
+  }
+  loftSqft = Math.round(loftSqft);
+  const totalWorkbenchFt = workbenchFt.reduce((s, f) => s + f, 0);
+  const measures = {
+    singleDoor: { count: singleDoors },
+    doubleDoor: { count: doubleDoors },
+    window:     { count: windows },
+    workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
+    loft:       { count: lofts, optionSqft: loftSqft },
+    ramp:       { count: rampPresent ? 1 : 0 },
+  };
+
+  const lineFor = (rate, method, m) => {
+    const count = m.count || 0;
+    switch (method) {
+      case "lineal_ft":          return { qty: m.lengthFt != null ? m.lengthFt : count, total: rate * (m.lengthFt != null ? m.lengthFt : count), unit: fmtMoney2(rate) + " / ft" };
+      case "sqft_option":        return { qty: m.optionSqft != null ? m.optionSqft : count, total: rate * (m.optionSqft != null ? m.optionSqft : count), unit: fmtMoney2(rate) + " / sq ft" };
+      case "sqft_building":      return { qty: count, total: rate * buildingArea * count, unit: fmtMoney2(rate) + " / sq ft of building" };
+      case "perimeter_building": return { qty: count, total: rate * buildingPerimeter * count, unit: fmtMoney2(rate) + " / ft of perimeter" };
+      case "pct_building_price": return { qty: count, total: (rate / 100) * buildingPrice * count, unit: rate + "% of building price" };
+      case "pct_estimate_total": return { qty: count, total: null, pct: rate, unit: rate + "% of subtotal" };
+      case "each":
+      default:                   return { qty: count, total: rate * count, unit: fmtMoney2(rate) + " each" };
+    }
+  };
+
+  // Included quantities for this style+size (part of the base price → not re-charged; only the
+  // amount placed BEYOND the inclusion is charged, matching submit-estimate's pushItem).
+  const incForRows = (() => {
+    const st = (C.buildingStyles || []).find((s) => s.value === styleKey);
+    if (!st || !sel || !sel.size) return {};
+    const pick = (map) => { if (!map || typeof map !== "object") return null; if (map[sel.size] != null) return map[sel.size]; const want = normSizeLabel(sel.size); for (const k in map) { if (normSizeLabel(k) === want) return map[k]; } return null; };
+    const q = pick(st.sizeInclusionQty);
+    if (q && typeof q === "object" && !Array.isArray(q)) { const o = {}; for (const k in q) o[k] = Math.max(1, Number(q[k]) || 1); return o; }
+    const arr = pick(st.sizeInclusions); const o = {}; if (Array.isArray(arr)) for (const k of arr) o[k] = 1; return o;
+  })();
+
+  const rows = [];
+  const deferred = [];
+  let nonPctSubtotal = 0;
+  for (const key of LAYOUT_PRICE_ORDER) {
+    const m = measures[key];
+    if (!m || !m.count) continue;
+    const rp = resolve(key);
+    if (!rp) continue;
+    const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || key;
+    // Net out the included quantity for this item (loft = sq ft, others = count).
+    const inc = incForRows[key] || 0;
+    const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
+    const chargeable = Math.max(0, placedMeasure - inc);
+    if (inc > 0 && chargeable <= 0) {
+      rows.push({ key, label: label + " (included)", qty: placedMeasure, unit: "included", total: 0 });
+      continue;
+    }
+    let mNet = m;
+    if (inc > 0) mNet = rp.method === "lineal_ft" ? { ...m, lengthFt: chargeable } : rp.method === "sqft_option" ? { ...m, optionSqft: chargeable } : { ...m, count: chargeable };
+    const ln = lineFor(rp.rate, rp.method, mNet);
+    const row = { key, label, qty: ln.qty, unit: ln.unit, total: ln.total };
+    rows.push(row);
+    if (ln.total == null) deferred.push({ row, pct: ln.pct });
+    else nonPctSubtotal += ln.total;
+  }
+
+  // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
+  // building price + all non-% add-ons + rough openings + custom options (delivery and
+  // the declined-item discount are excluded, matching submit-estimate).
+  if (deferred.length) {
+    const roRate = (resolve("roughOpening") || { rate: 0 }).rate;
+    const roCount = items.filter((i) => i.type === "roughOpening").length;
+    const customTotal = (customOptions || []).reduce((s, co) => {
+      if (!co || !co.name || !String(co.name).trim()) return s;
+      const amt = parseFloat(co.amount) || 0;
+      const q = co.qty ? (parseInt(co.qty, 10) || 1) : 1;
+      return s + amt * q;
+    }, 0);
+    const base = buildingPrice + nonPctSubtotal + roRate * roCount + customTotal;
+    for (const d of deferred) d.row.total = (d.pct / 100) * base;
+  }
+
+  // Declined included items — mirror submit-estimate's credit: the size's included
+  // quantity (sizeInclusionQty; loft = sq ft, doors = count) × the per-unit value for
+  // the item's pricing method, rounded to cents like the estimate. Appended AFTER the
+  // % resolution because the estimate applies the credit as an invoice-level discount,
+  // outside the % base. Only keys still included with the CURRENT style+size produce a
+  // row — submitQuote filters stale declines the same way, so preview and estimate agree.
+  const declinedKeys = (sel && Array.isArray(sel.declinedItems)) ? sel.declinedItems : [];
+  if (declinedKeys.length && sel && sel.size) {
+    const stEntry = (C.buildingStyles || []).find((s) => s.value === styleKey);
+    // Size labels can drift between "12x16" and "12×16" — normalized fallback, like sizePricing.
+    const pick = (map) => {
+      if (!map || typeof map !== "object") return null;
+      if (map[sel.size] != null) return map[sel.size];
+      const want = normSizeLabel(sel.size);
+      for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
+      return null;
+    };
+    const rawQ = stEntry ? pick(stEntry.sizeInclusionQty) : null;
+    const qmap = (rawQ && typeof rawQ === "object" && !Array.isArray(rawQ)) ? rawQ : null;
+    const legacyArr = !qmap && stEntry ? pick(stEntry.sizeInclusions) : null;
+    let includedNow = {};
+    if (qmap) includedNow = qmap;
+    else if (Array.isArray(legacyArr)) { for (const k of legacyArr) includedNow[k] = 1; }
+    for (const k of declinedKeys) {
+      if (includedNow[k] == null) continue;   // stale decline from another style/size
+      if (items.some((i) => i.type === k)) continue;   // placed = kept, charged above, not credited
+      const rp = resolve(k);
+      if (!rp || !(rp.rate > 0)) continue;
+      const q = rp.method === "pct_estimate_total" ? 1 : Math.max(1, Number(includedNow[k]) || 1);
+      let unitValue = rp.rate, unitLabel = "";
+      switch (rp.method) {
+        case "sqft_option":        unitLabel = " sq ft"; break;
+        case "lineal_ft":          unitLabel = " ft"; break;
+        case "sqft_building":      unitValue = rp.rate * buildingArea; break;
+        case "perimeter_building": unitValue = rp.rate * buildingPerimeter; break;
+        case "pct_building_price": unitValue = (rp.rate / 100) * buildingPrice; break;
+        default:                   break; // each / pct_estimate_total: rate as-is (matches submit-estimate)
+      }
+      unitValue = Math.round(unitValue * 100) / 100;
+      const credit = Math.round(unitValue * q * 100) / 100;
+      if (credit <= 0) continue;
+      const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+      rows.push({ key: `declined-${k}`, label: `${label} — declined`, qty: q,
+        unit: q > 1 ? `${q}${unitLabel} × ${fmtMoney2(unitValue)} credit` : `${fmtMoney2(unitValue)} credit`,
+        total: -credit });
+    }
+  }
+
+  return { rows };
 }
 
 let idCounter = 1;
@@ -1288,10 +1588,48 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
 }
 
 // ─── MAIN COMPONENT ───
+// Custom color dropdown: a native <select> can't render a color swatch per option, so this
+// shows a color chip + name in the closed button and in each list row (matching the palette).
+function ColorSelect({ value, colors, onPick }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    document.addEventListener("touchstart", h);
+    return () => { document.removeEventListener("mousedown", h); document.removeEventListener("touchstart", h); };
+  }, [open]);
+  const sel = colors.find((c) => c.label === value);
+  const chip = (hex) => <span style={{ width: 14, height: 14, borderRadius: 3, background: hex || "transparent", border: "1px solid rgba(0,0,0,0.25)", flexShrink: 0, display: "inline-block" }} />;
+  return (
+    <div ref={ref} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        style={{ width: "100%", display: "flex", alignItems: "center", gap: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, background: "#FFF", cursor: "pointer", color: sel ? "#334155" : "#94A3B8" }}>
+        {sel && chip(sel.hex)}
+        <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel ? sel.label : "Select…"}</span>
+        <span style={{ fontSize: 10, color: "#94A3B8" }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 30, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,0.15)", maxHeight: 220, overflowY: "auto" }}>
+          {colors.map((c) => (
+            <div key={c.id || c.label} onClick={() => { onPick(c.label); setOpen(false); }}
+              style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12, background: c.label === value ? "#F1F5F9" : "#FFF", color: "#334155" }}>
+              {chip(c.hex)}<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StructureStudioInner({ config }) {
   const C = config;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
   const accent = C.branding.accentColor || "#D97706";
+  // White-label initials for the logo placeholder shown when no logo is set.
+  const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
   // Admin gate: ?admin=1 surfaces the GHL credentials panel. The credentials never
   // round-trip through the browser — admin types them in, the Edge Function stores
   // them in Supabase, and customers' browsers never see them.
@@ -1301,7 +1639,7 @@ function StructureStudioInner({ config }) {
   }, []);
 
   const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "" };
+    const init = { style: "", size: "", roofType: "", roofColor: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
@@ -1312,6 +1650,15 @@ function StructureStudioInner({ config }) {
     () => C.options.filter((o) => isOptionApplicable(o, sel.style)),
     [C.options, sel.style]
   );
+
+  // Roof colors come from the same palette (shingle/metal flags). A roof type is only offered
+  // when the tenant has >=1 active color in it; roof pricing is the chosen color's rate
+  // (server-side), exactly like paint. Empty until the owner adds roof colors in the portal.
+  const roofColorsFor = (type) => {
+    const list = Array.isArray(C.colors) ? C.colors : [];
+    return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
+  };
+  const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
 
   // When the building style changes, snap any now-inapplicable option back to
   // its default so a stale "Painted" (etc.) selection can't be silently sent
@@ -1332,14 +1679,49 @@ function StructureStudioInner({ config }) {
   // Phase 4a: which placeable items are INCLUDED (free) with the selected
   // style+size — from get_config's per-style sizeInclusions map. Everything else
   // is an "additional" (chargeable) option. Empty until a style+size is chosen.
-  const includedItemKeys = useMemo(() => {
-    if (!sel.style || !sel.size) return [];
+  // includedItemQty maps item key -> included quantity (loft = sq ft, doors = count)
+  // from the parallel sizeInclusionQty map; configs predating migration 039 fall
+  // back to quantity 1 per included key.
+  const includedItemQty = useMemo(() => {
+    if (!sel.style || !sel.size) return {};
     const st = C.buildingStyles.find((s) => s.value === sel.style);
-    return st && st.sizeInclusions && Array.isArray(st.sizeInclusions[sel.size]) ? st.sizeInclusions[sel.size] : [];
+    if (!st) return {};
+    // Size labels can drift between "12x16" and "12×16" (CSV rewrite vs. saved design),
+    // so fall back to a normalized-label match like the sizePricing lookup does.
+    const pick = (map) => {
+      if (!map || typeof map !== "object") return null;
+      if (map[sel.size] != null) return map[sel.size];
+      const want = normSizeLabel(sel.size);
+      for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
+      return null;
+    };
+    const qmap = pick(st.sizeInclusionQty);
+    if (qmap && typeof qmap === "object" && !Array.isArray(qmap)) {
+      const out = {};
+      for (const k in qmap) out[k] = Math.max(1, Number(qmap[k]) || 1);
+      return out;
+    }
+    const arr = pick(st.sizeInclusions);
+    const out = {};
+    if (Array.isArray(arr)) for (const k of arr) out[k] = 1;
+    return out;
   }, [sel.style, sel.size, C.buildingStyles]);
+  const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
-  const [paintColors, setPaintColors] = useState({ body: "", trim: "" });
+  // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
+  // design overrides this from design.paint_colors on load.
+  const [paintColors, setPaintColors] = useState(() => {
+    const list = Array.isArray(C.colors) ? C.colors : [];
+    const dflt = (k) => { const d = list.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault); return d ? d.label : ""; };
+    return { body: dflt("body"), trim: dflt("trim") };
+  });
+  // Tracks when the shopper picked an "allow custom" color and is typing an exact value
+  // (so the custom text box stays open even while paintColors.body/trim is momentarily "").
+  const [paintCustom, setPaintCustom] = useState({ body: false, trim: false });
+  // Roof: type (Shingle/Metal) + color live in `sel` (saved with the design); this tracks the
+  // transient "typing a custom roof color" state, same as paintCustom.
+  const [roofCustom, setRoofCustom] = useState(false);
   const [customOptions, setCustomOptions] = useState([]);
   const [roDimensions, setRoDimensions] = useState({});
   const [bldgW, setShedW] = useState(10);
@@ -1351,12 +1733,22 @@ function StructureStudioInner({ config }) {
   const [resizing, setResizing] = useState(null);
   const [showExport, setShowExport] = useState(false);
   const [exportUrl, setExportUrl] = useState(null);
-  const [configOpen, setConfigOpen] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   // After a successful save, holds { code, viewUrl, imageUrl } for the success screen
   const [savedDesign, setSavedDesign] = useState(null);
+  // Current design's short code (set when a design is loaded or saved). Drives the
+  // "all designs on this estimate" version list shown in the editor + success screen.
+  const [designCode, setDesignCode] = useState(null);
+  // All versions of the current design (this estimate), newest first.
+  const [estimateVersions, setEstimateVersions] = useState([]);
+  // Which version is currently loaded in the editor (null = the latest). Marks "Viewing".
+  const [viewingVersion, setViewingVersion] = useState(null);
+  // Whether the "all designs on this estimate" dropdown is expanded (collapsed by default).
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
+  const [additionalOpen, setAdditionalOpen] = useState(false);
   const [toast, setToast] = useState(null);
   // ─── 3D view state ───
   const [show3D, setShow3D] = useState(false);
@@ -1519,23 +1911,82 @@ function StructureStudioInner({ config }) {
       const data = Array.isArray(rows) ? rows[0] : rows;
       if (cancelled || error || !data) return;
       currentDesignIdRef.current = data.short_code;
+      setDesignCode(data.short_code);
       // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
       ghlContactIdRef.current = data.ghl_contact_id || null;
       ghlEstimateIdRef.current = data.ghl_estimate_id || null;
       ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
       setHasExistingEstimate(!!data.ghl_estimate_id);
+
+      // Optionally open a specific saved version (?v=N) for review/resubmit. The design
+      // DATA comes from that version's snapshot; the GHL refs above stay from the current
+      // row so a resubmit updates the same one estimate rather than creating a new one.
+      let design = data;
+      const vParam = parseInt(params.get("v") || "", 10);
+      if (Number.isFinite(vParam) && vParam > 0) {
+        const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
+        const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+        if (!cancelled && vrow) design = vrow;
+      }
+      if (cancelled) return;
+      setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
+
       setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
-      setSel(data.selections || {});
-      setPaintColors(data.paint_colors || { body: "", trim: "" });
-      setCustomOptions(data.custom_options || []);
-      setRoDimensions(data.ro_dimensions || {});
+      setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
+      setPaintColors(design.paint_colors || { body: "", trim: "" });
+      setPaintCustom({ body: false, trim: false });
+      setCustomOptions(design.custom_options || []);
+      setRoDimensions(design.ro_dimensions || {});
       // Items must be set after sel.size has propagated; the prevSizeRef guard
       // above keeps the size effect from wiping them.
-      setItems(Array.isArray(data.items) ? data.items : []);
+      const loadedItems = Array.isArray(design.items) ? design.items : [];
+      setItems(loadedItems);
+      // Keep the global id counter ahead of any restored ids so the next placement can't
+      // reuse an existing id (which collided in select/drag/delete/resize).
+      idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
+
+  // On the submit-success screen, load every version of this design (this estimate) so the
+  // customer/rep can see and reopen all designs on the estimate. Capability read by code.
+  useEffect(() => {
+    if (!supabase || !designCode) { setEstimateVersions([]); return; }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.rpc("list_design_versions", { p_code: designCode });
+      if (cancelled || error) return;
+      setEstimateVersions(Array.isArray(data) ? data : []);
+    })();
+    return () => { cancelled = true; };
+  }, [supabase, designCode, submitted]);
+
+  // Switch to another saved version in place (no page reload). Loads that version's design
+  // data and keeps the current GHL refs (same estimate), marking it as the one being viewed.
+  const openVersion = useCallback(async (version) => {
+    if (!supabase || !designCode) return;
+    const { data: vrows, error } = await supabase.rpc("load_design_version", { p_code: designCode, p_version: version });
+    const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+    if (error || !vrow) return;
+    const vsel = vrow.selections || {};
+    // Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
+    // user size-change and wipe the items we're loading (same guard the initial load uses).
+    prevSizeRef.current = vsel.size || prevSizeRef.current;
+    setSel((prev) => ({ ...prev, ...vsel }));
+    setPaintColors(vrow.paint_colors || { body: "", trim: "" });
+    setPaintCustom({ body: false, trim: false });
+    setCustomOptions(vrow.custom_options || []);
+    setRoDimensions(vrow.ro_dimensions || {});
+    const loadedItems = Array.isArray(vrow.items) ? vrow.items : [];
+    setItems(loadedItems);
+    setSelectedId(null);
+    idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
+    setViewingVersion(version);
+    const p = new URLSearchParams(window.location.search);
+    p.set("v", String(version));
+    window.history.replaceState({}, "", `?${p.toString()}`);
+  }, [supabase, designCode]);
 
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
   // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
@@ -2293,7 +2744,8 @@ function StructureStudioInner({ config }) {
     if (sel.paint === "Painted") {
       const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
       bullets.push(`Painted — Body: ${body}, Trim: ${trim}`);
-    } else { bullets.push("No Paint"); }
+    } else { bullets.push("Unpainted"); }
+    if (sel.roofType) bullets.push(`Roof — ${sel.roofType}${sel.roofColor ? `: ${sel.roofColor}` : ""}`);
     const sdCount = items.filter((i) => i.type === "singleDoor").length;
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
@@ -2475,6 +2927,14 @@ function StructureStudioInner({ config }) {
       setSubmitError("Please select a Building Style and Size.");
       return;
     }
+    // Every included item must be placed on the layout, or explicitly declined.
+    const declinedKeys = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
+    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k));
+    if (unplacedIncluded.length > 0) {
+      const names = unplacedIncluded.map((k) => (ITEMS[k] && ITEMS[k].label) || k).join(", ");
+      setSubmitError(`Please place all included items on your layout, or decline the ones you don't want: ${names}.`);
+      return;
+    }
     if (!supabase) {
       setSubmitError("Storage isn't configured. Contact support.");
       return;
@@ -2492,9 +2952,10 @@ function StructureStudioInner({ config }) {
 
       // 2. Reuse the existing short_code if we loaded one; otherwise mint a fresh one
       const shortCode = currentDesignIdRef.current || genShortCode();
-      // Store the PDF under a per-tenant prefix ({client_id}/<code>.pdf) so every
-      // file is tagged to its tenant; the cutover storage policy enforces this shape.
-      const filePath = `${C.clientId}/${shortCode}.pdf`;
+      // Store the PDF under a per-tenant prefix ({client_id}/<code>-<ts>.pdf). The
+      // timestamp suffix keeps each submitted version's PDF instead of overwriting the
+      // previous one (design_versions history); the storage policy allows the -<digits>.
+      const filePath = `${C.clientId}/${shortCode}-${Date.now()}.pdf`;
 
       // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
@@ -2538,6 +2999,8 @@ function StructureStudioInner({ config }) {
       const viewUrl = `${window.location.origin}${window.location.pathname}?${shareParams.toString()}`;
       window.history.replaceState({}, "", `?${shareParams.toString()}`);
       currentDesignIdRef.current = shortCode;
+      setDesignCode(shortCode);
+      setViewingVersion(null);
 
       const payload = {
         // New fields — n8n can use these for GHL linking + image embed
@@ -2546,6 +3009,11 @@ function StructureStudioInner({ config }) {
         viewUrl,
         source: "StructureStudio",
         clientId: C.clientId,
+        deliveryFee: Number(sel.deliveryFee) || 0,
+        // Included items the customer declined → the estimate adds a deduction line per item.
+        declinedItems: (Array.isArray(sel.declinedItems) ? sel.declinedItems : [])
+          .filter((k) => includedItemKeys.includes(k))
+          .map((k) => ({ key: k, label: (ITEMS[k] && ITEMS[k].label) || k })),
         contact: {
           name: contact.name,
           email: contact.email,
@@ -2564,6 +3032,9 @@ function StructureStudioInner({ config }) {
           // Customer's 3D wall-height pick (feet). Additive — absent when the
           // customer never touched it; pricing hookup is a catalog follow-up.
           ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
+          // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
+          // unselected, so the estimate always shows the Roof line in order.
+          ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "" } : {}),
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
@@ -2595,6 +3066,7 @@ function StructureStudioInner({ config }) {
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
           }),
           lofts: items.filter((i) => i.type === "loft").length,
+          loftSqft: Math.round(items.filter((i) => i.type === "loft").reduce((s, i) => s + (i.widthFt || 0) * (i.heightFt || 0), 0)),
           ramp: items.filter((i) => i.type === "ramp").length > 0 ? "yes" : "no",
           lines: items.filter((i) => i.type === "line").length,
           notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
@@ -2608,7 +3080,6 @@ function StructureStudioInner({ config }) {
           name: `RO-${idx + 1}`,
           dimensions: (roDimensions[ro.id] || "").trim(),
           qty: 1,
-          amount: 100,
         })),
         submittedAt: new Date().toISOString(),
       };
@@ -2659,6 +3130,7 @@ function StructureStudioInner({ config }) {
     } catch (err) {
       setSubmitError(err.message || "Something went wrong submitting your quote. Please try again.");
       console.error("Submit error:", err);
+      if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "submit failed", null, { phase: "submitQuote", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null });
     } finally {
       setSubmitting(false);
     }
@@ -2804,8 +3276,64 @@ function StructureStudioInner({ config }) {
     }
     if (opt.type === "counter") {
       const isPaint = opt.id === "paint";
-      const isPainted = isPaint && sel[opt.id] === "Painted";
       const hasImage = !!opt.img;
+      // Paint palette from config (the owner's Colors tab). Body = colors flagged siding,
+      // trim = colors flagged trim. If no palette is configured, fall back to free-text.
+      const palette = isPaint && Array.isArray(C.colors) ? C.colors : [];
+      // flex-basis 170px (not flex:1) so on a phone each color field wraps onto its own
+      // full-width row instead of being crushed beside the pills — the pills are
+      // flexShrink:0, so a one-line squeeze used to overflow the page horizontally.
+      const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
+      const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+      // Paint has no No-Paint/Painted pills: the Body + Trim color selects are always shown.
+      // "Unpainted" is just the tenant's default palette color (owner-priced in the Colors tab,
+      // usually free) — it is NOT synthesized here. sel.paint ("No Paint"/"Painted") stays the
+      // save/load/estimate contract and is derived from the picks: the build is "Painted" once a
+      // chosen Body/Trim color differs from that side's default color (or is a custom color).
+      const defaultLabel = (k) => {
+        const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
+        return d ? d.label : "";
+      };
+      const sidePainted = (k, v, custom) => custom || (!!v && v !== defaultLabel(k));
+      const paintField = (kind) => {
+        const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
+        const val = paintColors[kind] || "";
+        const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
+        const labelTxt = kind === "body" ? "Body:" : "Trim:";
+        const other = kind === "body" ? "trim" : "body";
+        // No palette configured for this side → free-text. Any text on either side = painted.
+        if (colors.length === 0) {
+          return (
+            <label style={PAINT_LBL}>{labelTxt}
+              <input type="text" value={val}
+                onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
+                placeholder="Enter color or leave blank" style={PAINT_INPUT} />
+            </label>
+          );
+        }
+        const match = colors.find((c) => c.label === val && !c.allowCustom);
+        const customColor = colors.find((c) => c.allowCustom);
+        const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
+        const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
+        const onSel = (label) => {
+          const c = colors.find((x) => x.label === label);
+          const custom = !!(c && c.allowCustom);
+          if (custom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
+          else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
+          // Recompute the build's paint state from both sides (a custom pick counts as painted).
+          const painted = sidePainted(kind, custom ? "" : label, custom) || sidePainted(other, paintColors[other], paintCustom[other]);
+          setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
+        };
+        return (
+          <div style={{ ...PAINT_LBL, gap: 4 }}>
+            <span>{labelTxt}</span>
+            <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
+            {isCustom && (
+              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
+            )}
+          </div>
+        );
+      };
       return (
         <div key={opt.id} style={{ marginBottom: 14 }}>
           <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
@@ -2815,25 +3343,18 @@ function StructureStudioInner({ config }) {
                 <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
               </div>
             )}
-            <div style={{ display: "flex", gap: 6, flexWrap: hasImage ? "wrap" : "nowrap", flex: 1, alignItems: "center", maxWidth: hasImage ? "calc(100% - 110px)" : undefined }}>
-              {opt.options.map((o) => (
-                <div key={o} onClick={() => { setSel((p) => ({ ...p, [opt.id]: o })); if (isPaint && o === "No Paint") setPaintColors({ body: "", trim: "" }); }} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
-              ))}
-              {isPainted && (
+            {/* Always wrap: on a phone the two color selects drop onto their own full-width
+                rows instead of overflowing the page horizontally. */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
+              {isPaint ? (
                 <>
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
-                    Body:
-                    <input type="text" value={paintColors.body} onChange={(e) => setPaintColors((p) => ({ ...p, body: e.target.value }))}
-                      placeholder="Enter color or TBD"
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                  </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 }}>
-                    Trim:
-                    <input type="text" value={paintColors.trim} onChange={(e) => setPaintColors((p) => ({ ...p, trim: e.target.value }))}
-                      placeholder="Enter color or TBD"
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                  </label>
+                  {paintField("body")}
+                  {paintField("trim")}
                 </>
+              ) : (
+                opt.options.map((o) => (
+                  <div key={o} onClick={() => setSel((p) => ({ ...p, [opt.id]: o }))} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+                ))
               )}
             </div>
           </div>
@@ -2850,14 +3371,14 @@ function StructureStudioInner({ config }) {
       <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
         {C.branding.logo
           ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
-          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>SS</div>}
+          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>StructureStudio</div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.companyName} — {C.branding.tagline || "Design & Quote"}</div>
+          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
         </div>
-        <button onClick={() => setConfigOpen(!configOpen)} style={{ ...S.btn(configOpen ? "#FFF" : "rgba(255,255,255,0.15)", configOpen ? "#1E293B" : "#FFF"), border: "1px solid rgba(255,255,255,0.25)" }}>
-          {configOpen ? "▴ Hide" : "▾ Show"} Options
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
+        </div>
       </div>
 
       {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
@@ -2872,9 +3393,9 @@ function StructureStudioInner({ config }) {
             Set the GHL Location ID and Private Integration Token for this client. Once saved, credentials live in Supabase and are only read server-side — they never reach customer browsers.
           </p>
           <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
-            <input type="password" value={adminPwd} onChange={(e) => setAdminPwd(e.target.value)} placeholder="Admin password" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+            <PasswordInput value={adminPwd} onChange={(e) => setAdminPwd(e.target.value)} placeholder="Admin password" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
             <input type="text" value={adminLocId} onChange={(e) => setAdminLocId(e.target.value)} placeholder="GHL Location ID" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-            <input type="password" value={adminApiKey} onChange={(e) => setAdminApiKey(e.target.value)} placeholder="GHL API Key (pit-…)" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+            <PasswordInput value={adminApiKey} onChange={(e) => setAdminApiKey(e.target.value)} placeholder="GHL API Key (pit-…)" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
             <button onClick={saveAdminSettings} disabled={adminBusy} style={{ ...S.btn(adminBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 18px", fontSize: 13, cursor: adminBusy ? "wait" : "pointer" }}>
@@ -2997,7 +3518,7 @@ function StructureStudioInner({ config }) {
       )}
 
       {/* Configuration Panel */}
-      {configOpen && (
+      {(
         <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
           {/* Building Styles */}
           <div style={{ marginBottom: 14 }}>
@@ -3019,67 +3540,66 @@ function StructureStudioInner({ config }) {
             </div>
           </div>
 
-          {/* Building Size */}
-          {sizeOpts.length > 0 && (
-            <div style={{ marginBottom: 14 }}>
-              <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {sizeOpts.map((s) => <div key={s} onClick={() => setSel((p) => ({ ...p, size: s }))} style={S.pill(sel.size === s)}>{s}</div>)}
-              </div>
+          {/* Building Size + Roof Options — one row; roof sits to the right of size, above Paint. */}
+          {(sizeOpts.length > 0 || roofTypes.length > 0) && (
+            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
+              {sizeOpts.length > 0 && (
+                <div>
+                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
+                  <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
+                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    <option value="" disabled>Select a size…</option>
+                    {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              )}
+              {roofTypes.length > 0 && (() => {
+                // Roof color list depends on the chosen type. Custom-color handling mirrors paint.
+                const roofList = roofColorsFor(sel.roofType);
+                const rMatch = roofList.find((c) => c.label === sel.roofColor && !c.allowCustom);
+                const rCustomColor = roofList.find((c) => c.allowCustom);
+                const rIsCustom = roofCustom || (!rMatch && !!sel.roofColor && !!rCustomColor);
+                const rSelectVal = rIsCustom && rCustomColor ? rCustomColor.label : (rMatch ? rMatch.label : "");
+                const onRoofType = (type) => {
+                  const dflt = roofColorsFor(type).find((c) => c.isDefault);
+                  setRoofCustom(false);
+                  setSel((p) => ({ ...p, roofType: type, roofColor: dflt ? dflt.label : "" }));
+                };
+                const onRoofColor = (label) => {
+                  const c = roofList.find((x) => x.label === label);
+                  if (c && c.allowCustom) { setRoofCustom(true); setSel((p) => ({ ...p, roofColor: "" })); }
+                  else { setRoofCustom(false); setSel((p) => ({ ...p, roofColor: label })); }
+                };
+                return (
+                  <div style={{ flex: 1, minWidth: 240 }}>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Options</span>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569" }}>Type:
+                        <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
+                          style={{ minWidth: 130, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                          <option value="">Select…</option>
+                          {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </label>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569", flex: "1 1 200px", minWidth: 0 }}>
+                        <span>Color:</span>
+                        {sel.roofType
+                          ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
+                          : <span style={{ flex: 1, fontSize: 12, color: "#94A3B8", fontStyle: "italic", fontWeight: 500 }}>pick a roof type first</span>}
+                        {rIsCustom && sel.roofType && (
+                          <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
+                            style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
           {/* Dynamic Options (filtered by selected building style — see isOptionApplicable) */}
           {visibleOptions.map((opt) => renderOption(opt))}
-
-          {/* Custom/Additional Options */}
-          <div style={{ marginTop: 6 }}>
-            <div style={{ ...S.lbl, marginBottom: 8 }}>Additional Options</div>
-            {customOptions.map((row, idx) => {
-              const invalid = !row.name || !row.name.trim();
-              return (
-                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
-                  <input type="text" value={row.name} placeholder="Item name (required)"
-                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
-                    style={{ flex: "1 1 55%", minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
-                  <input type="number" value={row.qty} placeholder="Qty"
-                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: e.target.value } : r))}
-                    style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
-                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
-                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
-                    <input type="number" value={row.amount} placeholder="0.00"
-                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
-                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                  </div>
-                  <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
-                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
-                </div>
-              );
-            })}
-            <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
-              style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-              + Add Custom Option
-            </button>
-          </div>
-
-          {items.filter((i) => i.type === "roughOpening").length > 0 && (
-            <div style={{ marginTop: 14 }}>
-              <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings ($100 each)</div>
-              {items.filter((i) => i.type === "roughOpening").map((ro, idx) => {
-                const dim = roDimensions[ro.id] || "";
-                const invalid = !dim.trim();
-                return (
-                  <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
-                    <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
-                      onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
-                      style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
-                    <span style={{ fontSize: 12, color: "#64748B", fontWeight: 600 }}>$100</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
       )}
 
@@ -3101,23 +3621,57 @@ function StructureStudioInner({ config }) {
                 color: activeTool === key ? "#FFF" : "#334155",
                 border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
               }}>
-              <span style={{ fontSize: 14 }}>{cfg.icon}</span>{cfg.label}
+              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
           const entries = Object.entries(ITEMS);
           const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
           const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
+          // Decline control for an included item: X it off (a deduction line is added on the
+          // estimate). Declined items don't have to be placed on the layout.
+          const declined = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
+          const toggleDecline = (key) => setSel((p) => {
+            const cur = Array.isArray(p.declinedItems) ? p.declinedItems : [];
+            return { ...p, declinedItems: cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key] };
+          });
+          // Included chips show the included quantity when it's more than a single unit
+          // (loft quantities are square footage; everything else is a count).
+          const withQty = (key, cfg) => {
+            const q = includedItemQty[key] || 1;
+            if (q <= 1) return cfg;
+            return { ...cfg, label: key === "loft" ? `${cfg.label} (${q} sq ft)` : `${cfg.label} ×${q}` };
+          };
+          const inclBtn = ([key, rawCfg]) => { const cfg = withQty(key, rawCfg); return declined.includes(key)
+            ? (
+              <span key={key} title="You declined this included item — it'll show as a deduction on your estimate"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, background: "#F1F5F9", color: "#94A3B8", border: "2px dashed #CBD5E1" }}>
+                <span style={{ textDecoration: "line-through" }}>{cfg.label}</span>
+                <button onClick={() => toggleDecline(key)} title="Add it back" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 11 }}>Undo</button>
+              </span>
+            )
+            : (
+              <span key={key} style={{ display: "inline-flex", alignItems: "center" }}>
+                {btn([key, cfg])}
+                <button onClick={() => toggleDecline(key)} title={`Decline ${cfg.label} (deduction)`}
+                  style={{ marginLeft: 2, background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>✕</button>
+              </span>
+            ); };
           if (incl.length === 0) {
             return (<>
               <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
               {addl.map(btn)}
             </>);
           }
+          // Included items on their own row, a full-width horizontal rule, then the additional
+          // options below (width:100% children force line breaks inside the wrapping flex row).
           return (<>
-            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place these:</span>
-            {incl.map(btn)}
-            <span style={{ ...S.lbl, marginLeft: 10, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
+              <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
+              {incl.map(inclBtn)}
+            </div>
+            <div style={{ width: "100%", borderTop: "1px solid #CBD5E1", margin: "2px 0" }} />
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
             {addl.map(btn)}
           </>);
         })()}
@@ -3486,6 +4040,126 @@ function StructureStudioInner({ config }) {
         </div>
       )}
 
+      {/* Additional options (layout pricing, rough openings, custom options, delivery
+          fee) — collapsible; relocated below the address, just above the submit bar. */}
+      {!submitted && (
+        <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
+          <div onClick={() => setAdditionalOpen((o) => !o)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", userSelect: "none" }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Details</span>
+            <span style={{ fontSize: 11, color: "#CBD5E1" }}>{additionalOpen ? "▾" : "▸"}</span>
+          </div>
+          {additionalOpen && (
+          <div style={{ marginTop: 8 }}>
+          {(() => {
+            // Building, Paint Colors, Roof — same order as the estimate; price shown when enabled.
+            const selRows = computeSelectionRows(sel, paintColors, C);
+            return (
+              <div style={{ marginBottom: 4 }}>
+                {selRows.map((r) => (
+                  <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                      <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.detail}</div>
+                    </div>
+                    {r.total != null && (
+                      <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>{fmtMoney2(r.total)}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          {C.showPricing && (() => {
+            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C).rows;
+            if (!priceRows.length) return null;
+            return (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ ...S.lbl, marginBottom: 8 }}>Options on your plan</div>
+                {priceRows.map((r) => (
+                  <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                      <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.unit}</div>
+                    </div>
+                    <div style={{ width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" }}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
+                    <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>{fmtMoney2(r.total)}</div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          {items.filter((i) => i.type === "roughOpening").length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings</div>
+              {items.filter((i) => i.type === "roughOpening").map((ro, idx) => {
+                const dim = roDimensions[ro.id] || "";
+                const invalid = !dim.trim();
+                return (
+                  <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
+                    <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
+                      onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
+                      style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
+                    {C.showPricing && (<>
+                      <div style={{ width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" }}>1</div>
+                      <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>${Number((C.layoutPrices && C.layoutPrices.roughOpening) || 0).toFixed(2)}</div>
+                    </>)}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+            {customOptions.map((row, idx) => {
+              const invalid = !row.name || !row.name.trim();
+              return (
+                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
+                  <input type="text" value={row.name} placeholder="Item name (required)"
+                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
+                    style={{ flex: "1 1 55%", minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
+                  <input type="number" value={row.qty} placeholder="Qty"
+                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: e.target.value } : r))}
+                    style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
+                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
+                    <input type="number" value={row.amount} placeholder="0.00"
+                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
+                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                  </div>
+                  <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
+                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
+                </div>
+              );
+            })}
+
+            <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
+              style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>
+              + Add Custom Option
+            </button>
+            <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
+              Tip: enter a <b>negative</b> amount for a credit — it shows as its own line and comes off the estimate as a discount.
+            </div>
+
+          {/* Delivery fee — last thing in this section (moved up from the submit bar); the
+              optional Rough Openings block sits above it. */}
+          <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ ...S.lbl, fontSize: 11 }}>Delivery fee (optional)</span>
+            <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+              <span style={{ position: "absolute", left: 8, color: "#94A3B8", fontSize: 13, pointerEvents: "none" }}>$</span>
+              <input type="text" inputMode="decimal" value={sel.deliveryFee || ""}
+                onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                placeholder="0.00"
+                style={{ width: 110, border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 8px 8px 18px", fontSize: 13, fontWeight: 600, color: "#1E293B", boxSizing: "border-box" }} />
+            </div>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
+          </div>
+          </div>
+          )}
+        </div>
+      )}
+
       {/* Submit Bar */}
       {!submitted && (
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "16px 20px" }}>
@@ -3513,6 +4187,44 @@ function StructureStudioInner({ config }) {
               {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
             </button>
           </div>
+          {estimateVersions.length > 0 && (() => {
+            const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
+            const others = estimateVersions.filter((v) => v.version !== cur.version);
+            const csel = cur.selections || {};
+            return (
+              <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
+                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (viewing)</span>
+                    {others.length > 0 && (
+                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
+                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                    <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
+                    {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                  </div>
+                </div>
+                {versionsOpen && others.map((v) => {
+                  const vsel = v.selections || {};
+                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                  return (
+                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
+                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
+                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                        <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
+                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -3540,45 +4252,75 @@ function StructureStudioInner({ config }) {
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>EST-{savedDesign.estimateNumber}</span>
                 </div>
               )}
-              <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>View / edit:</span>
-                <input readOnly value={savedDesign.viewUrl}
-                  style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
-                  onClick={(e) => e.target.select()} />
-                <button onClick={() => { navigator.clipboard.writeText(savedDesign.viewUrl).catch(() => {}); }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
-              </div>
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "#64748B", flex: "0 0 auto", minWidth: 70 }}>Floor plan PDF:</span>
-                <input readOnly value={savedDesign.imageUrl}
-                  style={{ flex: 1, fontSize: 11, padding: "5px 8px", border: "1px solid #E2E8F0", borderRadius: 5, background: "#F8FAFC", fontFamily: "monospace", outline: "none" }}
-                  onClick={(e) => e.target.select()} />
-                <button onClick={() => { navigator.clipboard.writeText(savedDesign.imageUrl).catch(() => {}); }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", fontSize: 11 }}>📋</button>
-              </div>
             </div>
           )}
-          <button
-            onClick={() => {
-              setSubmitted(false);
-              setSavedDesign(null);
-              setItems([]);
-              setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-              setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
-              setPaintColors({ body: "", trim: "" });
-              setCustomOptions([]);
-              setRoDimensions({});
-              currentDesignIdRef.current = null;
-              ghlContactIdRef.current = null;
-              ghlEstimateIdRef.current = null;
-              ghlEstimateNumberRef.current = null;
-              setHasExistingEstimate(false);
-              window.history.replaceState({}, "", window.location.pathname);
-            }}
-            style={{ ...S.btn("#166534", "#FFF"), marginTop: 20, padding: "10px 24px", fontSize: 14 }}
-          >
-            Start New Quote
-          </button>
+          {estimateVersions.length > 0 && (() => {
+            const cur = estimateVersions[0];
+            const others = estimateVersions.slice(1);
+            const csel = cur.selections || {};
+            return (
+              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
+                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (current)</span>
+                    {others.length > 0 && (
+                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
+                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
+                      </button>
+                    )}
+                  </div>
+                  {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
+                </div>
+                {versionsOpen && others.map((v) => {
+                  const vsel = v.selections || {};
+                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
+                  return (
+                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
+                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
+                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                        <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
+                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
+            <button
+              onClick={() => { setSubmitted(false); }}
+              style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "10px 24px", fontSize: 14 }}
+            >
+              Resubmit for an Updated Estimate
+            </button>
+            <button
+              onClick={() => {
+                setSubmitted(false);
+                setSavedDesign(null);
+                setItems([]);
+                setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
+                setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+                setPaintColors({ body: "", trim: "" });
+                setCustomOptions([]);
+                setRoDimensions({});
+                currentDesignIdRef.current = null;
+                ghlContactIdRef.current = null;
+                ghlEstimateIdRef.current = null;
+                ghlEstimateNumberRef.current = null;
+                setHasExistingEstimate(false);
+                setDesignCode(null);
+                setEstimateVersions([]);
+                setViewingVersion(null);
+                window.history.replaceState({}, "", window.location.pathname);
+              }}
+              style={{ ...S.btn(accent, "#FFF"), padding: "10px 24px", fontSize: 14 }}
+            >
+              Start New Quote
+            </button>
+          </div>
         </div>
       )}
       {toast && (
@@ -3637,7 +4379,7 @@ function StructureStudioInner({ config }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
           <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>StructureStudio Export</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} Export</h3>
               <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
             </div>
             {exportUrl && (
@@ -3688,7 +4430,7 @@ const REQUIRED_CONFIG_KEYS = ["branding", "contactFields", "buildingStyles", "de
 class DesignerErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { err: null }; }
   static getDerivedStateFromError(err) { return { err }; }
-  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); }
+  componentDidCatch(err) { console.error("[StructureStudio] designer render error:", err); if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "render error", err && err.name, { phase: "render", stack: err && err.stack ? String(err.stack).slice(0, 2000) : null }); }
   render() {
     if (this.state.err) {
       return (
@@ -3712,6 +4454,13 @@ export default function StructureStudio({ config: configProp = null }) {
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
   ));
+
+  // White-label the browser tab: show the tenant's business name once config loads.
+  useEffect(() => {
+    if (state.status === "ready" && typeof document !== "undefined") {
+      document.title = (state.config.branding && state.config.branding.companyName) || "Design Studio";
+    }
+  }, [state]);
 
   useEffect(() => {
     if (state.status !== "loading") return;
@@ -3794,13 +4543,21 @@ export default function StructureStudio({ config: configProp = null }) {
   }
   if (state.status === "error") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
-        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
-        <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
-        <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
-      </div>
+      <>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
+          <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
+          <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
+        </div>
+        <FeedbackWidget />
+      </>
     );
   }
-  return <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>;
+  return (
+    <>
+      <DesignerErrorBoundary><StructureStudioInner config={state.config} /></DesignerErrorBoundary>
+      <FeedbackWidget />
+    </>
+  );
 }
