@@ -740,20 +740,28 @@ function d3MakeTexture(THREE, kind) {
 // SmartBuild-style scene dressing, all procedural canvases — no image assets.
 // Grass: mottled two-green field tile. Sky: vertical gradient with soft cloud
 // blobs, mapped onto a dome. Labels: flat text planes lying on the grass.
+// The grass canvas is generated ONCE per session (module singleton): live-drag
+// rebuilds create a fresh CanvasTexture per build (so dispose stays safe) from
+// the SAME pixels — otherwise the noise re-rolls every rebuilt frame and the
+// whole lawn shimmers while dragging an item.
+let _d3GrassCanvas = null;
 function d3MakeGrassTexture(THREE) {
   if (typeof document === "undefined") return null;
-  const N = 256, cv = document.createElement("canvas"); cv.width = cv.height = N;
-  const g = cv.getContext("2d");
-  g.fillStyle = "#7FA05B"; g.fillRect(0, 0, N, N);
-  for (let i = 0; i < 240; i++) {            // mottled patches
-    g.fillStyle = Math.random() < 0.5 ? "rgba(104,136,66,0.25)" : "rgba(150,178,100,0.22)";
-    g.beginPath(); g.arc(Math.random() * N, Math.random() * N, 4 + Math.random() * 14, 0, Math.PI * 2); g.fill();
+  if (!_d3GrassCanvas) {
+    const N = 256, cv = document.createElement("canvas"); cv.width = cv.height = N;
+    const g = cv.getContext("2d");
+    g.fillStyle = "#7FA05B"; g.fillRect(0, 0, N, N);
+    for (let i = 0; i < 240; i++) {            // mottled patches
+      g.fillStyle = Math.random() < 0.5 ? "rgba(104,136,66,0.25)" : "rgba(150,178,100,0.22)";
+      g.beginPath(); g.arc(Math.random() * N, Math.random() * N, 4 + Math.random() * 14, 0, Math.PI * 2); g.fill();
+    }
+    for (let i = 0; i < 900; i++) {            // fine blade speckle
+      g.fillStyle = Math.random() < 0.5 ? "rgba(70,96,44,0.35)" : "rgba(172,198,122,0.30)";
+      g.fillRect(Math.random() * N, Math.random() * N, 1.3, 2.2);
+    }
+    _d3GrassCanvas = cv;
   }
-  for (let i = 0; i < 900; i++) {            // fine blade speckle
-    g.fillStyle = Math.random() < 0.5 ? "rgba(70,96,44,0.35)" : "rgba(172,198,122,0.30)";
-    g.fillRect(Math.random() * N, Math.random() * N, 1.3, 2.2);
-  }
-  const tex = new THREE.CanvasTexture(cv);
+  const tex = new THREE.CanvasTexture(_d3GrassCanvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
@@ -1249,8 +1257,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       sun.shadow.camera.top = shR; sun.shadow.camera.bottom = -shR;
       sun.shadow.camera.near = 0.5; sun.shadow.camera.far = dist * 4;
       sun.shadow.bias = -0.0005;
+      // Ortho shadow cameras bake their projection at construction — without
+      // this the bounds above are ignored and shadows clip to a ~10ft box.
+      sun.shadow.camera.updateProjectionMatrix();
       scene.add(sun);
-      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, dist * 8);
+      // far covers the sky dome even at controls.maxDistance (2.5d + 6.5d < 10d).
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, dist * 10);
       camera.position.set(camX, dist * 0.5, camZ);
       // Sky dome: gradient + soft clouds on the inside of a hemisphere, slightly
       // past the horizon so no gap shows between grass edge and sky. Hidden by
@@ -1263,13 +1275,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       if (sky) { sky.position.y = -0.5; scene.add(sky); }
       // SmartBuild-style camera presets (3×3 grid), azimuth relative to the
       // FRONT wall so "F" always faces the side the 2D labels call FRONT.
-      const FRONT_AZ = { south: 0, north: Math.PI, east: Math.PI / 2, west: -Math.PI / 2 }[fw] || 0;
       const setViewPreset = (relDeg, polDeg) => {
         const e = engineRef.current;
         if (!e) return;
         const t = e.controls.target;
         const r = e.camera.position.distanceTo(t) || dist;
-        const az = FRONT_AZ + (relDeg * Math.PI) / 180;
+        // Front azimuth resolved at CALL time — dragging the only door to a
+        // different wall re-homes the front (roof + labels already follow).
+        const liveFw = getFrontWall(liveItems) || fw;
+        const az = ({ south: 0, north: Math.PI, east: Math.PI / 2, west: -Math.PI / 2 }[liveFw] || 0) + (relDeg * Math.PI) / 180;
         const phi = ((90 - polDeg) * Math.PI) / 180;   // measured from straight up
         e.camera.position.set(
           t.x + r * Math.sin(phi) * Math.sin(az),
@@ -1310,6 +1324,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         e.model.roofGroup.visible = !e.interior && e.roofOn !== false;
         if (e.model.envGroup) e.model.envGroup.visible = e.envOn !== false;
         if (e.sky) e.sky.visible = e.envOn !== false;
+        // Ghosted walls must stop casting shadows too — 14%-opacity walls
+        // throwing full-dark shadows reads as a rendering bug.
+        e.model.wallsGroup.traverse((o) => { if (o.isMesh) o.castShadow = !e.interior; });
         e.model.wallMat.transparent = !!e.interior;
         e.model.wallMat.opacity = e.interior ? 0.14 : 1;
         e.model.wallMat.depthWrite = !e.interior;
@@ -1656,7 +1673,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
       if (ro && wrapRef.current) ro.observe(wrapRef.current);
       window.addEventListener("resize", resize);
-      engineRef.current = { renderer, scene, camera, controls, model, sky, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, interior: false, roofOn: true, envOn: true };
       resize();
       setPhase("ready");
     }).catch((err) => {
@@ -1674,6 +1691,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       e.disposeInteraction();
       disposeShed3DModel(e.model);
       if (e.sky) { e.sky.geometry.dispose(); if (e.sky.material.map) e.sky.material.map.dispose(); e.sky.material.dispose(); }
+      if (e.sun && e.sun.shadow && e.sun.shadow.map) e.sun.shadow.map.dispose(); // renderer.dispose() won't free the shadow target
       e.renderer.dispose();
     };
   // The modal mounts fresh on every open and the 2D designer can't change
