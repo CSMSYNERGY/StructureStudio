@@ -736,6 +736,65 @@ function d3MakeTexture(THREE, kind) {
   return tex;
 }
 
+// ─── Environment (competitor-parity presentation: grass, sky, labels) ───
+// SmartBuild-style scene dressing, all procedural canvases — no image assets.
+// Grass: mottled two-green field tile. Sky: vertical gradient with soft cloud
+// blobs, mapped onto a dome. Labels: flat text planes lying on the grass.
+function d3MakeGrassTexture(THREE) {
+  if (typeof document === "undefined") return null;
+  const N = 256, cv = document.createElement("canvas"); cv.width = cv.height = N;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#7FA05B"; g.fillRect(0, 0, N, N);
+  for (let i = 0; i < 240; i++) {            // mottled patches
+    g.fillStyle = Math.random() < 0.5 ? "rgba(104,136,66,0.25)" : "rgba(150,178,100,0.22)";
+    g.beginPath(); g.arc(Math.random() * N, Math.random() * N, 4 + Math.random() * 14, 0, Math.PI * 2); g.fill();
+  }
+  for (let i = 0; i < 900; i++) {            // fine blade speckle
+    g.fillStyle = Math.random() < 0.5 ? "rgba(70,96,44,0.35)" : "rgba(172,198,122,0.30)";
+    g.fillRect(Math.random() * N, Math.random() * N, 1.3, 2.2);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+function d3MakeSkyTexture(THREE) {
+  if (typeof document === "undefined") return null;
+  const W = 512, H = 512, cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+  const g = cv.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#7EB3E0"); grad.addColorStop(0.55, "#BAD4EA");
+  grad.addColorStop(0.82, "#E8F0F6"); grad.addColorStop(1, "#F2F5F3");
+  g.fillStyle = grad; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 24; i++) {             // soft clouds in the upper band
+    const x = Math.random() * W, y = H * (0.10 + Math.random() * 0.42), r = 20 + Math.random() * 40;
+    const cg = g.createRadialGradient(x, y, 0, x, y, r);
+    cg.addColorStop(0, "rgba(255,255,255,0.55)"); cg.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = cg;
+    g.beginPath(); g.ellipse(x, y, r * 1.9, r * 0.6, 0, 0, Math.PI * 2); g.fill();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = THREE.RepeatWrapping; tex.repeat.set(2, 1); // tile twice around the dome
+  return tex;
+}
+// Flat text plane for on-ground dimension labels ("FRONT - 30'") and the N compass.
+function d3MakeGroundLabel(THREE, text, hFt) {
+  if (typeof document === "undefined") return null;
+  const probe = document.createElement("canvas").getContext("2d");
+  probe.font = "700 44px Arial";
+  const cv = document.createElement("canvas");
+  cv.width = Math.ceil(probe.measureText(text).width) + 24; cv.height = 64;
+  const g = cv.getContext("2d");
+  g.font = "700 44px Arial"; g.fillStyle = "rgba(62,48,36,0.85)";
+  g.textBaseline = "middle"; g.fillText(text, 12, 34);
+  const tex = new THREE.CanvasTexture(cv);
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(hFt * (cv.width / cv.height), hFt),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
+  );
+  m.rotation.x = -Math.PI / 2;               // lie flat on the grass
+  return m;
+}
+
 // Build the whole parametric building as one Group. World units are FEET; the
 // footprint is centered on the origin with the floor top at y=0; +x = east and
 // +z = south, matching the 2D plan (page-down = south). Returns { root, wallMat,
@@ -762,11 +821,41 @@ function buildShed3DModel(THREE, p) {
   const ftX = (px) => (px - mgX) / scale - bldgW / 2;
   const ftZ = (py) => (py - mgY) / scale - bldgH / 2;
 
-  // Ground + floor slab
-  const ground = new THREE.Mesh(new THREE.CircleGeometry(Math.max(bldgW, bldgH) * 2.4, 48), mat(D3_COLORS.ground));
+  // Environment: grass field to the horizon + on-ground dimension labels
+  // (SmartBuild-style landscape; the "Landscape" toggle hides this group).
+  const envGroup = new THREE.Group();
+  const R2 = Math.max(bldgW, bldgH);
+  const groundR = Math.max(60, R2 * 7);      // stays inside the viewer's sky dome
+  const grassTex = d3MakeGrassTexture(THREE);
+  if (grassTex) grassTex.repeat.set(groundR / 5, groundR / 5);
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(groundR, 64),
+    new THREE.MeshLambertMaterial({ color: "#9DBE77", ...(grassTex ? { map: grassTex } : {}) }));
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -D3.FLOOR_T;
-  root.add(ground);
+  envGroup.add(ground);
+  // Dimension labels on the grass for the FRONT and LEFT edges (same display
+  // mapping the 2D labels use), plus a small N compass off the NW corner.
+  const fwLbl = frontWall || "south";
+  const lblH = Math.max(1.3, Math.min(3.2, R2 * 0.055));
+  ["FRONT", "LEFT"].forEach((want) => {
+    const pos = ["north", "south", "east", "west"].find((w) => getDisplayLabel(w, fwLbl) === want);
+    if (!pos) return;
+    const len = (pos === "north" || pos === "south") ? bldgW : bldgH;
+    const lbl = d3MakeGroundLabel(THREE, `${want} - ${Math.round(len)}'`, lblH);
+    if (!lbl) return;
+    const off = 2 + lblH;
+    const holder = new THREE.Group();
+    if (pos === "north") { holder.position.set(0, 0, -bldgH / 2 - off); holder.rotation.y = Math.PI; }
+    else if (pos === "south") { holder.position.set(0, 0, bldgH / 2 + off); }
+    else if (pos === "west") { holder.position.set(-bldgW / 2 - off, 0, 0); holder.rotation.y = Math.PI / 2; }
+    else { holder.position.set(bldgW / 2 + off, 0, 0); holder.rotation.y = -Math.PI / 2; }
+    lbl.position.y = -D3.FLOOR_T + 0.04;
+    holder.add(lbl);
+    envGroup.add(holder);
+  });
+  const nLbl = d3MakeGroundLabel(THREE, "N", Math.max(1.6, lblH * 1.2));
+  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -D3.FLOOR_T + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
+  root.add(envGroup);
   const floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
   floor.position.y = -D3.FLOOR_T / 2;
   root.add(floor);
@@ -1046,7 +1135,13 @@ function buildShed3DModel(THREE, p) {
   root.add(openingsGroup);
   root.add(roofGroup);
   root.add(interiorGroup);
-  return { root, wallMat, trimMat, roofGroup, openingsGroup, wallsGroup, interiorGroup };
+  // Sun shadows (SmartBuild's "Show Shadows"): solid building meshes cast,
+  // the grass receives. Transparent fills (glass) don't cast; labels neither.
+  root.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.material && o.material.transparent); o.receiveShadow = false; } });
+  envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
+  ground.receiveShadow = true;
+  floor.receiveShadow = true;
+  return { root, envGroup, wallMat, trimMat, roofGroup, openingsGroup, wallsGroup, interiorGroup };
 }
 
 // Free every geometry/material a buildShed3DModel() group holds — Three.js
@@ -1057,7 +1152,7 @@ function disposeShed3DModel(model) {
     if (o.geometry) o.geometry.dispose();
     if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
   });
-  mats.forEach((m) => m.dispose());
+  mats.forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
 }
 
 // Full-screen orbitable 3D view of the current design. Mounted only while open:
@@ -1073,6 +1168,11 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const capturedRef = useRef(false);
   const [phase, setPhase] = useState("loading"); // loading | ready | error
   const [interior, setInterior] = useState(false);
+  // SmartBuild-style view options: roof on/off, landscape (grass/sky/labels)
+  // on/off, and the 3×3 camera-preset popover.
+  const [roofOn, setRoofOn] = useState(true);
+  const [envOn, setEnvOn] = useState(true);
+  const [viewsOpen, setViewsOpen] = useState(false);
   const [shotTaken, setShotTaken] = useState(false);
   // Armed palette tool for placing new wall items in 3D (§10.4). Mirrored into
   // a ref so the native pointer handlers read the current value.
@@ -1114,6 +1214,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       if (disposed || !canvasRef.current) return;
       const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, preserveDrawingBuffer: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.shadowMap.enabled = true;                 // SmartBuild-style sun shadows
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       const scene = new THREE.Scene();
       scene.background = new THREE.Color("#E7EEF5");
       // Per-style appearance (roof profile/pitch/overhang, siding relief,
@@ -1139,9 +1241,45 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
       const sun = new THREE.DirectionalLight(0xFFFFFF, 2.2);
       sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
+      // Shadow camera sized to the building footprint (grass receives the shadow).
+      sun.castShadow = true;
+      sun.shadow.mapSize.width = sun.shadow.mapSize.height = 2048;
+      const shR = Math.max(bldgW, bldgH) * 1.6 + 8;
+      sun.shadow.camera.left = -shR; sun.shadow.camera.right = shR;
+      sun.shadow.camera.top = shR; sun.shadow.camera.bottom = -shR;
+      sun.shadow.camera.near = 0.5; sun.shadow.camera.far = dist * 4;
+      sun.shadow.bias = -0.0005;
       scene.add(sun);
       const camera = new THREE.PerspectiveCamera(45, 1, 0.1, dist * 8);
       camera.position.set(camX, dist * 0.5, camZ);
+      // Sky dome: gradient + soft clouds on the inside of a hemisphere, slightly
+      // past the horizon so no gap shows between grass edge and sky. Hidden by
+      // the Landscape toggle along with the model's envGroup.
+      const skyTex = d3MakeSkyTexture(THREE);
+      const sky = skyTex ? new THREE.Mesh(
+        new THREE.SphereGeometry(dist * 6.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2 + 0.14),
+        new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false })
+      ) : null;
+      if (sky) { sky.position.y = -0.5; scene.add(sky); }
+      // SmartBuild-style camera presets (3×3 grid), azimuth relative to the
+      // FRONT wall so "F" always faces the side the 2D labels call FRONT.
+      const FRONT_AZ = { south: 0, north: Math.PI, east: Math.PI / 2, west: -Math.PI / 2 }[fw] || 0;
+      const setViewPreset = (relDeg, polDeg) => {
+        const e = engineRef.current;
+        if (!e) return;
+        const t = e.controls.target;
+        const r = e.camera.position.distanceTo(t) || dist;
+        const az = FRONT_AZ + (relDeg * Math.PI) / 180;
+        const phi = ((90 - polDeg) * Math.PI) / 180;   // measured from straight up
+        e.camera.position.set(
+          t.x + r * Math.sin(phi) * Math.sin(az),
+          t.y + r * Math.cos(phi),
+          t.z + r * Math.sin(phi) * Math.cos(az)
+        );
+        e.camera.lookAt(t);
+        e.controls.update();
+        e.render();
+      };
 
       // ── Drag-to-move wall items (first slice of Phase 6, plan §10.5) ──
       // Doors/windows/rough openings drag along the walls exactly like the 2D
@@ -1169,7 +1307,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       highlight.visible = false;
       scene.add(highlight);
       const applyShellMode = (e) => {
-        e.model.roofGroup.visible = !e.interior;
+        e.model.roofGroup.visible = !e.interior && e.roofOn !== false;
+        if (e.model.envGroup) e.model.envGroup.visible = e.envOn !== false;
+        if (e.sky) e.sky.visible = e.envOn !== false;
         e.model.wallMat.transparent = !!e.interior;
         e.model.wallMat.opacity = e.interior ? 0.14 : 1;
         e.model.wallMat.depthWrite = !e.interior;
@@ -1516,7 +1656,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
       if (ro && wrapRef.current) ro.observe(wrapRef.current);
       window.addEventListener("resize", resize);
-      engineRef.current = { renderer, scene, camera, controls, model, render, resize, ro, applyShellMode, disposeInteraction, setLiveColors, setWallHeight, interior: false };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, interior: false, roofOn: true, envOn: true };
       resize();
       setPhase("ready");
     }).catch((err) => {
@@ -1533,6 +1673,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       e.controls.dispose();
       e.disposeInteraction();
       disposeShed3DModel(e.model);
+      if (e.sky) { e.sky.geometry.dispose(); if (e.sky.material.map) e.sky.material.map.dispose(); e.sky.material.dispose(); }
       e.renderer.dispose();
     };
   // The modal mounts fresh on every open and the 2D designer can't change
@@ -1541,14 +1682,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   }, []);
 
   // "Look inside": hide the roof, ghost the walls; door/window frames, floor
-  // and interior items stay solid so lofts/workbenches read clearly.
+  // and interior items stay solid so lofts/workbenches read clearly. Roof and
+  // Landscape toggles ride the same path so they survive live rebuilds too.
   useEffect(() => {
     const e = engineRef.current;
     if (!e) return;
     e.interior = interior;             // survives live rebuilds during drags
+    e.roofOn = roofOn;
+    e.envOn = envOn;
     e.applyShellMode(e);
     e.render();
-  }, [interior, phase]);
+  }, [interior, roofOn, envOn, phase]);
 
   const capture = () => {
     const e = engineRef.current;
@@ -1634,6 +1778,30 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+          {/* SmartBuild-style view options: camera presets + Roof/Landscape layer toggles */}
+          <div style={{ position: "relative" }}>
+            {viewsOpen && (
+              <div style={{ position: "absolute", bottom: "115%", left: "50%", transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 10, padding: 7, display: "grid", gridTemplateColumns: "repeat(3, 52px)", gap: 5, zIndex: 5 }}>
+                {[
+                  { l: "↖ FL", a: -45, p: 26 }, { l: "F", a: 0, p: 22 }, { l: "FR ↗", a: 45, p: 26 },
+                  { l: "← L", a: -90, p: 20 }, { l: "⬒ Top", a: 0, p: 86 }, { l: "R →", a: 90, p: 20 },
+                  { l: "↙ BL", a: -135, p: 26 }, { l: "B", a: 180, p: 22 }, { l: "BR ↘", a: 135, p: 26 },
+                ].map((v) => (
+                  <button key={v.l} onClick={() => { const e = engineRef.current; if (e && e.setViewPreset) e.setViewPreset(v.a, v.p); setViewsOpen(false); }}
+                    style={{ background: "#1E293B", color: "#CBD5E1", border: "1px solid #334155", borderRadius: 6, padding: "7px 2px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{v.l}</button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setViewsOpen((v) => !v)} disabled={phase !== "ready"} style={{ background: viewsOpen ? accent : "#1E293B", color: viewsOpen ? "#FFF" : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              🎥 Views {viewsOpen ? "▾" : "▴"}
+            </button>
+          </div>
+          <button onClick={() => setRoofOn((v) => !v)} disabled={phase !== "ready"} title="Show/hide the roof" style={{ background: roofOn ? "#1E293B" : "#475569", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+            ⛺ Roof {roofOn ? "" : "off"}
+          </button>
+          <button onClick={() => setEnvOn((v) => !v)} disabled={phase !== "ready"} title="Show/hide grass, sky and labels" style={{ background: envOn ? "#1E293B" : "#475569", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+            🌿 Landscape {envOn ? "" : "off"}
+          </button>
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
