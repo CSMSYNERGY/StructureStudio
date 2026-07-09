@@ -541,9 +541,14 @@ Deno.serve(async (req: Request) => {
   if (Array.isArray(customOptions)) {
     customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
       const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
-      const rawQty = co.qty ? Math.abs(Number(co.qty)) || 1 : 1;
+      const rawQty = co.qty ? Number(co.qty) || 1 : 1;
+      // Sign is derived from the intended LINE TOTAL (qty × amount), so a credit entered in
+      // EITHER field is handled and the sign can never accidentally flip positive. GHL needs
+      // amount >= 0, so amount is the absolute per-unit price and the credit's sign rides on qty.
+      const signedTotal = rawQty * rawAmt;
       const amount = Math.abs(rawAmt);
-      const qty = rawAmt < 0 ? -rawQty : rawQty;   // sign of the credit rides on qty
+      const qtyMag = Math.abs(rawQty) || 1;
+      const qty = signedTotal < 0 ? -qtyMag : qtyMag;
       targetItems.push({
         name: String(co.name).trim(),
         qty,
