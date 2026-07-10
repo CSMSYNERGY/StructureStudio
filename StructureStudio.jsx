@@ -224,6 +224,20 @@ function getDisplayLabel(positionalWall, frontWall) {
 const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "loft", "ramp"];
 function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
 function fmtMoney2(n) { return "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Origin allowlist for the postMessage prefill/config listeners — same-origin,
+// the structurestudio.app family, and localhost (dev). Without it, a malicious
+// page that frames or window.opens the designer can inject selections/contact or
+// remount the app with an attacker-controlled config. If a tenant ever embeds the
+// designer from its own domain via postMessage, add that origin here. (audit #5)
+function ssAllowedOrigin(origin) {
+  try {
+    if (!origin || origin === "null") return false;
+    if (origin === window.location.origin) return true;
+    const h = new URL(origin).hostname;
+    return h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
+  } catch { return false; }
+}
+
 function computeLayoutPricingRows(items, sel, customOptions, C) {
   if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
   const pricing = C.layoutPricing;
@@ -521,6 +535,7 @@ function StructureStudioInner({ config }) {
   // PostMessage listener
   useEffect(() => {
     const handler = (e) => {
+      if (!ssAllowedOrigin(e.origin)) return;
       if (e.data && e.data.type === "structureConfig") {
         const d = e.data;
         setSel((p) => { const n = { ...p }; Object.keys(d).forEach((k) => { if (k !== "type" && k in n) n[k] = d[k]; }); return n; });
@@ -1631,7 +1646,7 @@ function StructureStudioInner({ config }) {
       const blob = buildPdfFromJpegBytes(jpegBytes, canvas.width, canvas.height);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
-        .upload(filePath, blob, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
+        .upload(filePath, blob, { upsert: false, contentType: "application/pdf", cacheControl: "0" }); // plain insert (unique names) needs no storage SELECT policy — lets the listable policy be dropped (audit #1)
       if (upErr) throw new Error(`PDF upload failed: ${upErr.message}`);
 
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
