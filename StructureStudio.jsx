@@ -3217,7 +3217,13 @@ function StructureStudioInner({ config }) {
       // previous one (design_versions history); the storage policy allows the -<digits>.
       const filePath = `${C.clientId}/${shortCode}-${Date.now()}.pdf`;
 
-      // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
+      // 3. Upload the PDF to the floor-plans bucket. The filename is unique per
+      //    submit (short_code + timestamp) so there is never a conflict — use a
+      //    plain insert (upsert:false), NOT an upsert. This matters for security:
+      //    a storage upsert's RETURNING requires a public SELECT policy, and that
+      //    same SELECT policy is what lets anyone list() a tenant prefix and
+      //    enumerate every design short_code. A plain insert needs no SELECT
+      //    policy, so the listable policy can be dropped (see 042_floor_plans_no_list).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
       const pdfPages = [{ bytes: dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.92)), w: canvas.width, h: canvas.height }];
       const shot3d = render3DSnapshotRef.current;
@@ -3225,7 +3231,7 @@ function StructureStudioInner({ config }) {
       const blob = buildPdfFromJpegPages(pdfPages);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
-        .upload(filePath, blob, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
+        .upload(filePath, blob, { upsert: false, contentType: "application/pdf", cacheControl: "0" });
       if (upErr) throw new Error(`PDF upload failed: ${upErr.message}`);
 
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
