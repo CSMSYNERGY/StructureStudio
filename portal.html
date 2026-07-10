@@ -1143,6 +1143,35 @@ const COLOR_LIBRARY = [
   { name: "Quaker Gray", hex: "#9AA0A0" }, { name: "Black", hex: "#1C1C1C" },
 ];
 
+// Roof-color quick-add sets are supplier-specific, NOT the generic paint palette above.
+// Shingle = the 12 STANDARD Owens Corning TruDefinition Duration colors (NOT the Duration
+// Designer line) — the exact set Carolyn specified in the 2026-07-08 meeting ("these 12").
+// Metal = Central States Panel-Loc Plus (Built Rite Buildings' supplier). Hexes are close
+// on-screen approximations of the swatches — owners can set the exact code per row after adding.
+const SHINGLE_LIBRARY = [
+  { name: "Shasta White", hex: "#D9D9D2" }, { name: "Desert Rose", hex: "#A6836C" },
+  { name: "Driftwood", hex: "#8A8073" }, { name: "Teak", hex: "#6B4A30" },
+  { name: "Brownwood", hex: "#584434" }, { name: "Chateau Green", hex: "#47564A" },
+  { name: "Estate Gray", hex: "#6C7072" }, { name: "Sierra Gray", hex: "#6E6862" },
+  { name: "Quarry Gray", hex: "#7A7B7D" }, { name: "Slatestone Gray", hex: "#5C6468" },
+  { name: "Williamsburg Gray", hex: "#5E5D5A" }, { name: "Onyx Black", hex: "#262626" },
+];
+const METAL_LIBRARY = [
+  { name: "Brilliant White", hex: "#F5F3EE" }, { name: "Alamo White", hex: "#EBE9DF" },
+  { name: "Ivory", hex: "#EEDFB4" }, { name: "Light Stone", hex: "#CDC3AE" },
+  { name: "Tan", hex: "#B99167" }, { name: "Taupe", hex: "#9E9880" },
+  { name: "Desert Sand", hex: "#9F966E" }, { name: "Hickory Moss", hex: "#A89F90" },
+  { name: "Gray", hex: "#D8D4C6" }, { name: "Pewter Gray", hex: "#B2AFA4" },
+  { name: "Lunar Gray", hex: "#909696" }, { name: "Charcoal", hex: "#6E6960" },
+  { name: "Brown", hex: "#493421" }, { name: "Burnished Slate", hex: "#3C3D2D" },
+  { name: "Copper Metallic", hex: "#8B5321" }, { name: "Galvalume", hex: "#BFC1BF" },
+  { name: "Black", hex: "#171717" }, { name: "Matte Black", hex: "#1C1C1C" },
+  { name: "Rustic Red", hex: "#842424" }, { name: "Crimson", hex: "#A82A21" },
+  { name: "Burgundy", hex: "#3A1C22" }, { name: "Colony Green", hex: "#6A7A54" },
+  { name: "Hunter Green", hex: "#365637" }, { name: "Forest Green", hex: "#193E20" },
+  { name: "Gallery Blue", hex: "#0E3A52" }, { name: "Ocean Blue", hex: "#3D6678" },
+];
+
 function ColorsView() {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
@@ -1210,6 +1239,8 @@ function ColorsView() {
   const renderSection = (ckey, title, desc, showST) => {
     const entries = rows.map((r, gi) => ({ r, gi })).filter(({ r }) =>
       ckey === "paint" ? (!r.shingle && !r.metal) : ckey === "shingle" ? r.shingle : r.metal);
+    // Each section quick-adds from its own supplier palette, not the shared paint set.
+    const lib = ckey === "metal" ? METAL_LIBRARY : ckey === "shingle" ? SHINGLE_LIBRARY : COLOR_LIBRARY;
     return (
       <div style={S.card}>
         <div style={S.h2}>{title}</div>
@@ -1284,7 +1315,7 @@ function ColorsView() {
           <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {COLOR_LIBRARY.map((c) => (
+              {lib.map((c) => (
                 <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
                   style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
                   <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
