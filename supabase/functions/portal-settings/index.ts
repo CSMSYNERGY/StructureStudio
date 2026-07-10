@@ -35,7 +35,10 @@ function maskId(v: string | null): string | null {
 }
 
 // Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
-// [{ style, width, length, price, active, inclusions: { item_key: yes/no } }].
+// [{ style, width, length, price, active, inclusions: { item_key: qty } }].
+// Inclusion cells are QUANTITIES (2026-07-07): loft = included sq ft (e.g. 50),
+// doors = count (e.g. 1); 0/blank/"no" = not included. Legacy yes-style tokens
+// still import as quantity 1 so previously downloaded sheets keep working.
 // clientId is the JWT-resolved tenant — never trusted from the request body.
 // CREATES the size if a (style, width, length) doesn't exist yet, otherwise UPDATES
 // it — keyed on dimensions, so re-uploading the same sheet updates prices without
@@ -56,7 +59,24 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const cur = maxSort.get(z.style_id) ?? -1;
     if ((z.sort_order ?? 0) > cur) maxSort.set(z.style_id, z.sort_order ?? 0);
   }
-  const truthy = (v: unknown) => v === true || ["yes", "y", "1", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Inclusion cell -> included quantity. 0 = not included (delete the row).
+  // Numbers win ("50" -> 50 sq ft, "2" -> 2); legacy yes-tokens mean quantity 1;
+  // anything else (blank, "no", garbage) is 0 — same delete behavior as before.
+  const parseInclusionQty = (v: unknown): number => {
+    if (v === true) return 1;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "") return 0;
+    if (["yes", "y", "true", "x", "included"].includes(s)) return 1;
+    const n = Number(s.replace(/[$,\s]/g, ""));
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  };
+  const isLegacyYes = (v: unknown) => v === true || ["yes", "y", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
+  // Existing inclusion quantities: a legacy "yes" cell (old saved sheet) PRESERVES a
+  // configured qty (e.g. loft 50 sq ft) instead of silently downgrading it to 1.
+  const existingQty = new Map<string, number>();   // `${size_id}|${item_key}` -> qty
+  const exq = await sb.from("building_size_inclusions").select("size_id, item_key, qty").eq("client_id", clientId);
+  if (exq.error) throw exq.error;
+  for (const r of exq.data ?? []) existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
   const inactiveWord = (v: unknown) => ["no", "n", "0", "false", "inactive"].includes(String(v ?? "").trim().toLowerCase());
   const num = (v: unknown) => { const blank = v === "" || v == null; if (blank) return { blank: true, n: NaN }; return { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) }; };
   const fmt = (n: number) => String(n);
@@ -95,8 +115,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
       if (!itemKey) continue;
-      const incRes = truthy(val)
-        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true }, { onConflict: "size_id,item_key" })
+      let qty = parseInclusionQty(val);
+      if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
+      const incRes = qty > 0
+        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true, qty }, { onConflict: "size_id,item_key" })
         : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
       if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
     }
@@ -137,6 +159,15 @@ Deno.serve(async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = payload?.action || "status";
+
+  // Authorization: any linked account may READ (status/catalog), but only the
+  // tenant owner/admin may MUTATE. The portal UI hides the settings/pricing/colors
+  // tabs for role "user", but that is a client-only control — a direct POST would
+  // bypass it — so the gate must also live here (server-side).
+  const READ_ACTIONS = new Set(["status", "catalog"]);
+  if (!READ_ACTIONS.has(action) && mapping.role !== "owner" && mapping.role !== "admin") {
+    return json({ error: "Your account can view designs and leads but not change settings. Ask an owner or admin." }, 403);
+  }
 
   if (action === "status") {
     const { data, error } = await admin
@@ -284,11 +315,11 @@ Deno.serve(async (req: Request) => {
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
-      admin.from("building_size_inclusions").select("size_id, item_key, included").eq("client_id", clientId),
+      admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
-      // Paint palette for the Colors tab.
-      admin.from("colors").select("id, label, siding, trim, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
+      admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
@@ -613,6 +644,10 @@ Deno.serve(async (req: Request) => {
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
+      // Roof categories (shingle/metal). Only written when the caller sends them, so an older
+      // client that doesn't know about these keys can't clear a color's roof categorization.
+      if (Object.prototype.hasOwnProperty.call(row, "shingle")) rec.shingle = row.shingle === true;
+      if (Object.prototype.hasOwnProperty.call(row, "metal")) rec.metal = row.metal === true;
       if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
         rec.image_url = String(row.imageUrl ?? "").trim() || null;
       }

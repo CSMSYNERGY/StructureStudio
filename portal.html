@@ -745,18 +745,20 @@ function PricingCsv() {
     if (!cat) return;
     const its = items();
     const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
-    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
+    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
+    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
     const rows = [];
     activeStyles().forEach((s) => {
       const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
       if (sizes.length === 0) {
         // No sizes yet → one starter row: fill width/length/price and copy the line down.
-        rows.push([s.label, "", "", "", ...its.map(() => "no"), "yes"]);
+        rows.push([s.label, "", "", "", ...its.map(() => "0"), "yes"]);
       } else {
         sizes.forEach((z) => {
           const inc = incBySize[z.id] || {};
           rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
-            ...its.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+            ...its.map((it) => String(inc[it.key] || 0)), z.active ? "yes" : "no"]);
         });
       }
     });
@@ -897,8 +899,10 @@ function PricingCsv() {
         <div style={S.h2}>Pricing &amp; included options (CSV)</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Download the template (one row per building style), then add a row for every size you offer: type the
-          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The yes/no columns mean “is this option
-          <b> included in the price?</b>” — leave them <b>no</b> to charge for it. Re-upload anytime to update prices
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
+          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
+          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
+          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
@@ -1139,12 +1143,43 @@ const COLOR_LIBRARY = [
   { name: "Quaker Gray", hex: "#9AA0A0" }, { name: "Black", hex: "#1C1C1C" },
 ];
 
+// Roof-color quick-add sets are supplier-specific, NOT the generic paint palette above.
+// Shingle = the 12 STANDARD Owens Corning TruDefinition Duration colors (NOT the Duration
+// Designer line) — the exact set Carolyn specified in the 2026-07-08 meeting ("these 12").
+// Metal = Central States Panel-Loc Plus (Built Rite Buildings' supplier). Hexes are close
+// on-screen approximations of the swatches — owners can set the exact code per row after adding.
+const SHINGLE_LIBRARY = [
+  { name: "Shasta White", hex: "#D9D9D2" }, { name: "Desert Rose", hex: "#A6836C" },
+  { name: "Driftwood", hex: "#8A8073" }, { name: "Teak", hex: "#6B4A30" },
+  { name: "Brownwood", hex: "#584434" }, { name: "Chateau Green", hex: "#47564A" },
+  { name: "Estate Gray", hex: "#6C7072" }, { name: "Sierra Gray", hex: "#6E6862" },
+  { name: "Quarry Gray", hex: "#7A7B7D" }, { name: "Slatestone Gray", hex: "#5C6468" },
+  { name: "Williamsburg Gray", hex: "#5E5D5A" }, { name: "Onyx Black", hex: "#262626" },
+];
+const METAL_LIBRARY = [
+  { name: "Brilliant White", hex: "#F5F3EE" }, { name: "Alamo White", hex: "#EBE9DF" },
+  { name: "Ivory", hex: "#EEDFB4" }, { name: "Light Stone", hex: "#CDC3AE" },
+  { name: "Tan", hex: "#B99167" }, { name: "Taupe", hex: "#9E9880" },
+  { name: "Desert Sand", hex: "#9F966E" }, { name: "Hickory Moss", hex: "#A89F90" },
+  { name: "Gray", hex: "#D8D4C6" }, { name: "Pewter Gray", hex: "#B2AFA4" },
+  { name: "Lunar Gray", hex: "#909696" }, { name: "Charcoal", hex: "#6E6960" },
+  { name: "Brown", hex: "#493421" }, { name: "Burnished Slate", hex: "#3C3D2D" },
+  { name: "Copper Metallic", hex: "#8B5321" }, { name: "Galvalume", hex: "#BFC1BF" },
+  { name: "Black", hex: "#171717" }, { name: "Matte Black", hex: "#1C1C1C" },
+  { name: "Rustic Red", hex: "#842424" }, { name: "Crimson", hex: "#A82A21" },
+  { name: "Burgundy", hex: "#3A1C22" }, { name: "Colony Green", hex: "#6A7A54" },
+  { name: "Hunter Green", hex: "#365637" }, { name: "Forest Green", hex: "#193E20" },
+  { name: "Gallery Blue", hex: "#0E3A52" }, { name: "Ocean Blue", hex: "#3D6678" },
+];
+
 function ColorsView() {
   const [cat, setCat] = useState(null);
-  const [rows, setRows] = useState([]);      // [{ id, label, siding, trim, allow_custom, is_default, active, hex, pricing_method, rate }]
+  // One flat list across all categories; a row's category is set by its flags:
+  // paint = siding/trim (and not shingle/metal), shingle = shingle, metal = metal.
+  const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [libOpen, setLibOpen] = useState(false);
+  const [libOpen, setLibOpen] = useState(null);   // which section's library is open
 
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -1152,29 +1187,34 @@ function ColorsView() {
     setCat(data);
     setRows((data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
+      shingle: !!c.shingle, metal: !!c.metal,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
       hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
     })));
   };
   useEffect(() => { load(); }, []);
 
-  const setRow = (idx, field, val) => setRows((rs) => rs.map((r, i) => i === idx ? { ...r, [field]: val } : r));
-  const addRow = (preset) => setRows((rs) => [...rs, {
-    id: null, label: preset ? preset.name : "", siding: true, trim: true,
+  const setRow = (gi, field, val) => setRows((rs) => rs.map((r, i) => i === gi ? { ...r, [field]: val } : r));
+  // New rows are tagged for the section they're added from.
+  const addRow = (preset, category) => setRows((rs) => [...rs, {
+    id: null, label: preset ? preset.name : "",
+    siding: category === "paint", trim: category === "paint",
+    shingle: category === "shingle", metal: category === "metal",
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
     pricing_method: "each", rate: "0",
   }]);
-  const removeRow = (idx) => setRows((rs) => rs.filter((_, i) => i !== idx));
-  const move = (idx, dir) => setRows((rs) => {
-    const j = idx + dir; if (j < 0 || j >= rs.length) return rs;
-    const next = rs.slice(); [next[idx], next[j]] = [next[j], next[idx]]; return next;
-  });
+  const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
+  // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
+  const swap = (gi, gj) => setRows((rs) => { if (gj < 0 || gj >= rs.length) return rs; const next = rs.slice(); [next[gi], next[gj]] = [next[gj], next[gi]]; return next; });
 
+  // One save persists every section at once — the whole list is always sent, so the
+  // server's "delete anything not in the payload" stays safe across categories.
   const save = async () => {
     setBusy(true); setMsg(null);
     try {
       const colors = rows.map((r, i) => ({
-        id: r.id || undefined, label: r.label, siding: !!r.siding, trim: !!r.trim,
+        id: r.id || undefined, label: r.label,
+        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
       }));
@@ -1192,104 +1232,138 @@ function ColorsView() {
   const ctr = { ...S.td, padding: "8px 5px", textAlign: "center" };
   const tdc = { ...S.td, padding: "8px 5px" };
   const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
-  const chk = (idx, field) => <input type="checkbox" checked={!!rows[idx][field]} onChange={(e) => setRow(idx, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+  const chk = (gi, field) => <input type="checkbox" checked={!!rows[gi][field]} onChange={(e) => setRow(gi, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
+
+  // Render one category card. `ckey` selects which rows show; `showST` adds the paint-only
+  // Siding/Trim columns. Defined as a plain function (not a <Component/>) so inputs keep focus.
+  const renderSection = (ckey, title, desc, showST) => {
+    const entries = rows.map((r, gi) => ({ r, gi })).filter(({ r }) =>
+      ckey === "paint" ? (!r.shingle && !r.metal) : ckey === "shingle" ? r.shingle : r.metal);
+    // Each section quick-adds from its own supplier palette, not the shared paint set.
+    const lib = ckey === "metal" ? METAL_LIBRARY : ckey === "shingle" ? SHINGLE_LIBRARY : COLOR_LIBRARY;
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>{title}</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>{desc}</p>
+        {entries.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
+        ) : (
+          <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
+            <colgroup>
+              {showST ? (
+                <>
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
+                </>
+              ) : (
+                <>
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "29%" }} />
+                  <col style={{ width: "22%" }} /><col style={{ width: "13%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+                </>
+              )}
+            </colgroup>
+            <thead><tr>
+              <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+              {showST && <th style={thc}>Siding</th>}
+              {showST && <th style={thc}>Trim</th>}
+              <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+              <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+            </tr></thead>
+            <tbody>
+              {entries.map(({ r, gi }, pos) => (
+                <tr key={r.id || `new-${gi}`}>
+                  <td style={ctr}>
+                    <button onClick={() => { if (pos > 0) swap(gi, entries[pos - 1].gi); }} disabled={pos === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                    <button onClick={() => { if (pos < entries.length - 1) swap(gi, entries[pos + 1].gi); }} disabled={pos === entries.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                  </td>
+                  <td style={ctr}>
+                    <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(gi, "hex", e.target.value)} title={r.hex || "Pick this color"}
+                      style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                  </td>
+                  <td style={tdc}>
+                    <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(gi, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
+                  {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
+                  <td style={tdc}>
+                    <select value={r.pricing_method || "each"} onChange={(e) => setRow(gi, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
+                      {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </td>
+                  <td style={ctr}>
+                    <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(gi, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  <td style={ctr}>{chk(gi, "is_default")}</td>
+                  <td style={ctr}>{chk(gi, "active")}</td>
+                  <td style={ctr}>
+                    <button onClick={() => removeRow(gi)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+          <button onClick={() => addRow(undefined, ckey)} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+          <button onClick={() => setLibOpen((o) => o === ckey ? null : ckey)} style={S.btn("#F1F5F9", "#334155")}>{libOpen === ckey ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
+          <div style={{ flex: 1 }} />
+          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+        </div>
+        {libOpen === ckey && (
+          <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {lib.map((c) => (
+                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                  style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
+                  <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                  {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const paintDesc = (<>
+    These are the colors your customers pick from for <b>paint</b> in the designer.
+    Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
+    (leave the rate at <b>0</b> for colors included in the base price). <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
+    <br />Need color ideas? See <b>hayleypaint.com</b> or use the quick-add library below.
+  </>);
+  const shingleDesc = (<>
+    Shingle roof colors your customers pick from when they choose a <b>Shingle</b> roof in the designer.
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge (leave <b>0</b> if included). <b>Default</b> pre-selects one; <b>Active</b> shows/hides it. Drag order with ▲▼.
+  </>);
+  const metalDesc = (<>
+    Metal roof colors your customers pick from when they choose a <b>Metal</b> roof in the designer.
+    Set <b>How it’s priced</b> + a <b>Rate</b> to charge (leave <b>0</b> if included). <b>Default</b> pre-selects one; <b>Active</b> shows/hides it. Drag order with ▲▼.
+  </>);
 
   return (
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      <div style={S.card}>
-        <div style={S.h2}>Paint colors</div>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          These are the colors your customers pick from when they choose <b>Painted</b> in the designer.
-          Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
-          Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
-          (same methods as Layout Pricing; leave the rate at <b>0</b> for colors included in the base price). If the same color is
-          chosen for both siding and trim it’s only charged once.
-          <b> Default</b> pre-selects a color; <b>Active</b> shows/hides it without deleting. Drag order with ▲▼.
-          <br />Need color ideas? See <b>hayleypaint.com</b> (color gallery) or <b>classicbuildingssales.com</b>, or use the quick-add library below.
-        </p>
-        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
-          <>
-            {rows.length === 0 ? (
-              <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No colors yet — add one below or pick from the library.</div>
-            ) : (
-              <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
-                <colgroup>
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
-                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
-                </colgroup>
-                <thead><tr>
-                    <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
-                    <th style={thc}>Siding</th><th style={thc}>Trim</th><th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
-                    <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
-                  </tr></thead>
-                  <tbody>
-                    {rows.map((r, idx) => (
-                      <tr key={r.id || `new-${idx}`}>
-                        <td style={ctr}>
-                          <button onClick={() => move(idx, -1)} disabled={idx === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
-                          <button onClick={() => move(idx, 1)} disabled={idx === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
-                        </td>
-                        <td style={ctr}>
-                          <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(idx, "hex", e.target.value)} title={r.hex || "Pick this color"}
-                            style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
-                        </td>
-                        <td style={tdc}>
-                          <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(idx, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
-                        </td>
-                        <td style={ctr}>{chk(idx, "siding")}</td>
-                        <td style={ctr}>{chk(idx, "trim")}</td>
-                        <td style={tdc}>
-                          <select value={r.pricing_method || "each"} onChange={(e) => setRow(idx, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
-                            {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-                          </select>
-                        </td>
-                        <td style={ctr}>
-                          <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(idx, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
-                        </td>
-                        <td style={ctr}>{chk(idx, "is_default")}</td>
-                        <td style={ctr}>{chk(idx, "active")}</td>
-                        <td style={ctr}>
-                          <button onClick={() => removeRow(idx)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-            )}
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
-              <button onClick={() => addRow()} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
-              <button onClick={() => setLibOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{libOpen ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
-              <div style={{ flex: 1 }} />
-              <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+      {!cat ? <div style={S.card}><div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div></div> : (
+        <>
+          {renderSection("paint", "Paint colors", paintDesc, true)}
+          {renderSection("shingle", "Shingle colors", shingleDesc, false)}
+          {renderSection("metal", "Metal colors", metalDesc, false)}
+          {msg && msg.skipped && msg.skipped.length > 0 && (
+            <div style={{ ...S.card, marginTop: 0, fontSize: 13 }}>
+              <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
+              <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+                {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+              </ul>
             </div>
-            {libOpen && (
-              <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
-                <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to your list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {COLOR_LIBRARY.map((c) => (
-                    <button key={c.name} onClick={() => { addRow(c); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
-                      style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
-                      <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
-                      {c.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {msg && msg.skipped && msg.skipped.length > 0 && (
-              <div style={{ marginTop: 12, fontSize: 13 }}>
-                <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
-                <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
-                  {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
-                </ul>
-              </div>
-            )}
-          </>
-        )}
-      </div>
+          )}
+        </>
+      )}
     </>
   );
 }
@@ -1301,7 +1375,11 @@ function Dashboard({ session }) {
 
   useEffect(() => {
     (async () => {
-      const { data: mapping, error } = await sb.from("client_users").select("client_id, role").maybeSingle();
+      // limit(1)+array instead of maybeSingle(): maybeSingle() ERRORS when >1 row
+      // matches (a duplicate/multi-tenant client_users row), which would lock the
+      // user out of their own dashboard; take the first mapping instead. (audit #F6)
+      const { data: cuRows, error } = await sb.from("client_users").select("client_id, role").limit(1);
+      const mapping = cuRows && cuRows[0];
       if (error || !mapping) { setTenant("none"); return; }
       let businessName = mapping.client_id;
       // client_configs is now column-structured (no monolithic `config` blob);

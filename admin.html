@@ -421,17 +421,19 @@ function AdminApp() {
   const downloadTemplate = () => {
     const items = csvItems();
     const headers = ["style", "width", "length", "price", ...items.map((it) => it.label), "active"];
-    const incBySize = {}; ((cat && cat.inclusions) || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = true; });
+    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
+    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
+    const incBySize = {}; ((cat && cat.inclusions) || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
     const rows = [];
     ((cat && cat.buildingStyles) || []).filter((s) => s.active).forEach((s) => {
       const sizes = ((cat && cat.buildingSizes) || []).filter((z) => z.style_id === s.id);
       if (sizes.length === 0) {
-        rows.push([s.label, "", "", "", ...items.map(() => "no"), "yes"]);
+        rows.push([s.label, "", "", "", ...items.map(() => "0"), "yes"]);
       } else {
         sizes.forEach((z) => {
           const inc = incBySize[z.id] || {};
           rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
-            ...items.map((it) => inc[it.key] ? "yes" : "no"), z.active ? "yes" : "no"]);
+            ...items.map((it) => String(inc[it.key] || 0)), z.active ? "yes" : "no"]);
         });
       }
     });
@@ -723,8 +725,10 @@ function AdminApp() {
             <div style={S.h2}>CSV pricing &amp; inclusions for <span style={{ color: ACCENT }}>{sel}</span></div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
               Download the template (one row per style, pre-filled with any existing sizes), then add a row for every
-              size: type <b>width</b> and <b>length</b> (feet) and the <b>price</b>. The yes/no columns mean “is this option
-              <b> included in the price?</b>”. Sizes are created/updated on upload, matched by style + width + length (no duplicates).
+              size: type <b>width</b> and <b>length</b> (feet) and the <b>price</b>. The option columns hold the
+              <b> quantity included in the price</b> — loft = included <b>sq ft</b> (e.g. 50), doors/windows = <b>count</b>
+              (e.g. 1); <b>0</b> = not included (charged). Declined included items credit quantity × rate on the estimate.
+              Sizes are created/updated on upload, matched by style + width + length (no duplicates).
               <b> Styles must exist first</b> (Building Styles tab). A blank price — or <b>active = no</b> — hides that size.
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
