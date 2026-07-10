@@ -160,6 +160,15 @@ Deno.serve(async (req: Request) => {
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = payload?.action || "status";
 
+  // Authorization: any linked account may READ (status/catalog), but only the
+  // tenant owner/admin may MUTATE. The portal UI hides the settings/pricing/colors
+  // tabs for role "user", but that is a client-only control — a direct POST would
+  // bypass it — so the gate must also live here (server-side).
+  const READ_ACTIONS = new Set(["status", "catalog"]);
+  if (!READ_ACTIONS.has(action) && mapping.role !== "owner" && mapping.role !== "admin") {
+    return json({ error: "Your account can view designs and leads but not change settings. Ask an owner or admin." }, 403);
+  }
+
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")

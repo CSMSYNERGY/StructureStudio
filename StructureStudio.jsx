@@ -243,6 +243,20 @@ function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).to
 // on the GHL estimate (Building, Paint, Roof). Prices use the same sizePricing + color rate/method
 // the estimate uses (total is null when show_pricing is off). The Roof row shows only when the
 // tenant offers roof colors (some color flagged shingle/metal).
+// Origin allowlist for the postMessage prefill/config listeners — same-origin,
+// the structurestudio.app family, and localhost (dev). Without it, a malicious
+// page that frames or window.opens the designer can inject selections/contact or
+// remount the app with an attacker-controlled config. If a tenant ever embeds the
+// designer from its own domain via postMessage, add that origin here.
+function ssAllowedOrigin(origin) {
+  try {
+    if (!origin || origin === "null") return false;
+    if (origin === window.location.origin) return true;
+    const h = new URL(origin).hostname;
+    return h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
+  } catch { return false; }
+}
+
 function computeSelectionRows(sel, paintColors, C) {
   const styleKey = sel && sel.style;
   const showP = !!(C && C.showPricing);
@@ -300,7 +314,7 @@ function computeSelectionRows(sel, paintColors, C) {
   }
   return rows;
 }
-function computeLayoutPricingRows(items, sel, customOptions, C) {
+function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
   const pricing = C.layoutPricing;
   const styleKey = sel && sel.style;
@@ -413,9 +427,17 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
       if (!co || !co.name || !String(co.name).trim()) return s;
       const amt = parseFloat(co.amount) || 0;
       const q = co.qty ? (parseInt(co.qty, 10) || 1) : 1;
-      return s + amt * q;
+      // Only POSITIVE custom options are line items in the % base; negatives are
+      // credits applied outside it, matching submit-estimate.
+      return s + Math.max(0, amt) * q;
     }, 0);
-    const base = buildingPrice + nonPctSubtotal + roRate * roCount + customTotal;
+    // Paint + roof color charges are line items too, so the % base must include
+    // them exactly as submit-estimate does — otherwise the previewed % line is
+    // lower than the emailed estimate.
+    const selectionTaxable = computeSelectionRows(sel, paintColors, C)
+      .filter((r) => r.key === "paint" || r.key === "roof")
+      .reduce((s, r) => s + (Number(r.total) || 0), 0);
+    const base = buildingPrice + selectionTaxable + nonPctSubtotal + roRate * roCount + customTotal;
     for (const d of deferred) d.row.total = (d.pct / 100) * base;
   }
 
@@ -2003,6 +2025,7 @@ function StructureStudioInner({ config }) {
   // PostMessage listener
   useEffect(() => {
     const handler = (e) => {
+      if (!ssAllowedOrigin(e.origin)) return;
       if (e.data && e.data.type === "structureConfig") {
         const d = e.data;
         setSel((p) => { const n = { ...p }; Object.keys(d).forEach((k) => { if (k !== "type" && k in n) n[k] = d[k]; }); return n; });
@@ -4308,7 +4331,7 @@ function StructureStudioInner({ config }) {
             );
           })()}
           {C.showPricing && (() => {
-            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C).rows;
+            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows;
             if (!priceRows.length) return null;
             return (
               <div style={{ marginTop: 14 }}>
@@ -4376,7 +4399,7 @@ function StructureStudioInner({ config }) {
               + Add Custom Option
             </button>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-              Tip: enter a <b>negative</b> amount for a credit — it shows as its own line and comes off the estimate as a discount.
+              Tip: enter a <b>negative</b> amount for a credit — it's itemized in the building line's details and reduces the building total (so it lowers tax too).
             </div>
 
           {/* Delivery fee — last thing in this section (moved up from the submit bar); the
