@@ -169,7 +169,7 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
 
 function parseSize(s) {
   if (!s) return null;
-  const m = s.match(/(\d+)\s*x\s*(\d+)/i);
+  const m = s.match(/(\d+)\s*[x×✕]\s*(\d+)/i); // accept Unicode ×/✕ size labels too, not just ASCII x — else the building silently stays at the default size (audit #F2)
   return m ? { w: parseInt(m[1]), h: parseInt(m[2]) } : null;
 }
 
@@ -228,6 +228,20 @@ function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).to
 // on the GHL estimate (Building, Paint, Roof). Prices use the same sizePricing + color rate/method
 // the estimate uses (total is null when show_pricing is off). The Roof row shows only when the
 // tenant offers roof colors (some color flagged shingle/metal).
+// Origin allowlist for the postMessage prefill/config listeners — same-origin,
+// the structurestudio.app family, and localhost (dev). Without it, a malicious
+// page that frames or window.opens the designer can inject selections/contact or
+// remount the app with an attacker-controlled config. If a tenant ever embeds the
+// designer from its own domain via postMessage, add that origin here.
+function ssAllowedOrigin(origin) {
+  try {
+    if (!origin || origin === "null") return false;
+    if (origin === window.location.origin) return true;
+    const h = new URL(origin).hostname;
+    return h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
+  } catch { return false; }
+}
+
 function computeSelectionRows(sel, paintColors, C) {
   const styleKey = sel && sel.style;
   const showP = !!(C && C.showPricing);
@@ -285,7 +299,20 @@ function computeSelectionRows(sel, paintColors, C) {
   }
   return rows;
 }
-function computeLayoutPricingRows(items, sel, customOptions, C) {
+// Only allow a design's image_url to be used as a clickable href when it is an
+// https Supabase-storage (or same-origin) URL. image_url is stored verbatim by the
+// anon-granted save_design RPC, so a hostile caller could stash a javascript: or
+// off-site phishing URL; gate it before it reaches an <a href>. Returns null if unsafe. (audit #F8)
+function ssSafeUrl(u) {
+  try {
+    const url = new URL(u, window.location.origin);
+    if (url.protocol !== "https:") return null;
+    const h = url.hostname;
+    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+  } catch { return null; }
+}
+
+function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
   const pricing = C.layoutPricing;
   const styleKey = sel && sel.style;
@@ -398,10 +425,18 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
       if (!co || !co.name || !String(co.name).trim()) return s;
       const amt = parseFloat(co.amount) || 0;
       const q = co.qty ? (parseInt(co.qty, 10) || 1) : 1;
-      return s + amt * q;
+      // Only POSITIVE custom options are line items in the % base; negatives are
+      // credits applied outside it, matching submit-estimate.
+      return s + Math.max(0, amt) * q;
     }, 0);
-    const base = buildingPrice + nonPctSubtotal + roRate * roCount + customTotal;
-    for (const d of deferred) d.row.total = (d.pct / 100) * base;
+    // Paint + roof color charges are line items too, so the % base must include
+    // them exactly as submit-estimate does — otherwise the previewed % line is
+    // lower than the emailed estimate.
+    const selectionTaxable = computeSelectionRows(sel, paintColors, C)
+      .filter((r) => r.key === "paint" || r.key === "roof")
+      .reduce((s, r) => s + (Number(r.total) || 0), 0);
+    const base = buildingPrice + selectionTaxable + nonPctSubtotal + roRate * roCount + customTotal;
+    for (const d of deferred) d.row.total = (d.pct / 100) * base * (d.row.qty || 1); // ×count: the server bills GHL line = qty×amount, so the preview must scale by count too or it under-shows (audit #F1)
   }
 
   // Declined included items — mirror submit-estimate's credit: the size's included
@@ -692,6 +727,7 @@ function StructureStudioInner({ config }) {
   // PostMessage listener
   useEffect(() => {
     const handler = (e) => {
+      if (!ssAllowedOrigin(e.origin)) return;
       if (e.data && e.data.type === "structureConfig") {
         const d = e.data;
         setSel((p) => { const n = { ...p }; Object.keys(d).forEach((k) => { if (k !== "type" && k in n) n[k] = d[k]; }); return n; });
@@ -1000,7 +1036,7 @@ function StructureStudioInner({ config }) {
         const iwFt = it.widthFt || c.width;
         const ihFt = it.heightFt || c.height;
         const iw = iwFt * scale, ih = ihFt * scale;
-        const rot = it.rotation === 90; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2;
+        const rot = it.rotation === 90 || it.rotation === 270; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2; // 270° swaps the visual bbox just like 90° (audit #F5)
         return Math.abs(pt.x - it.x) < hw + 5 && Math.abs(pt.y - it.y) < hh + 5;
       });
       setSelectedId(hit ? hit.id : null); return;
@@ -1341,7 +1377,20 @@ function StructureStudioInner({ config }) {
       // and doesn't get stuck off-wall.
       const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
       const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
-      setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
+      // A ramp snapped to this door must follow it (position + wall); otherwise it
+      // detaches and the stale geometry is rasterized into the exported PDF. (audit #F4)
+      const rampDepthPx = RAMP_SPACE_FT * scale;
+      const relocRamp = (rmp) => {
+        if (sn.wall === "north") return { ...rmp, x: sn.x, y: mgY - rampDepthPx / 2, rotation: 0, wall: "north" };
+        if (sn.wall === "south") return { ...rmp, x: sn.x, y: mgY + pH + rampDepthPx / 2, rotation: 0, wall: "south" };
+        if (sn.wall === "west")  return { ...rmp, x: mgX - rampDepthPx / 2, y: sn.y, rotation: 90, wall: "west" };
+        if (sn.wall === "east")  return { ...rmp, x: mgX + pW + rampDepthPx / 2, y: sn.y, rotation: 90, wall: "east" };
+        return rmp;
+      };
+      setItems((p) => p.map((i) =>
+        i.id === dragging.id ? { ...i, ...sn }
+        : (i.type === "ramp" && i.snapDoorId === dragging.id ? relocRamp(i) : i)
+      ));
     } else if (cfg.wallSnap) {
       const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
       const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
@@ -1794,7 +1843,13 @@ function StructureStudioInner({ config }) {
       // previous one (design_versions history); the storage policy allows the -<digits>.
       const filePath = `${C.clientId}/${shortCode}-${Date.now()}.pdf`;
 
-      // 3. Upload the PDF to the floor-plans bucket (overwrites if it already exists).
+      // 3. Upload the PDF to the floor-plans bucket. The filename is unique per
+      //    submit (short_code + timestamp) so there is never a conflict — use a
+      //    plain insert (upsert:false), NOT an upsert. This matters for security:
+      //    a storage upsert's RETURNING requires a public SELECT policy, and that
+      //    same SELECT policy is what lets anyone list() a tenant prefix and
+      //    enumerate every design short_code. A plain insert needs no SELECT
+      //    policy, so the listable policy can be dropped (see 042_floor_plans_no_list).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
       const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
       const jpegBin = atob(jpegDataUrl.split(",")[1]);
@@ -1803,7 +1858,7 @@ function StructureStudioInner({ config }) {
       const blob = buildPdfFromJpegBytes(jpegBytes, canvas.width, canvas.height);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
-        .upload(filePath, blob, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
+        .upload(filePath, blob, { upsert: false, contentType: "application/pdf", cacheControl: "0" });
       if (upErr) throw new Error(`PDF upload failed: ${upErr.message}`);
 
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
@@ -2686,7 +2741,7 @@ function StructureStudioInner({ config }) {
           )}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
-            if (!ri || ri.type === "line") return null; // line shows its own length label inline
+            if (!ri || ri.type === "line" || !Number.isFinite(ri.widthFt)) return null; // line shows its own length inline; notes have no widthFt → skip the 'ft' badge (audit #F3)
             return (
               <g transform={`translate(${ri.x},${ri.y - 28})`}>
                 <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
@@ -2792,7 +2847,7 @@ function StructureStudioInner({ config }) {
             );
           })()}
           {C.showPricing && (() => {
-            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C).rows;
+            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows;
             if (!priceRows.length) return null;
             return (
               <div style={{ marginTop: 14 }}>
@@ -2927,7 +2982,7 @@ function StructureStudioInner({ config }) {
                   </div>
                   <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                     <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
-                    {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                    {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                   </div>
                 </div>
                 {versionsOpen && others.map((v) => {
@@ -2938,7 +2993,7 @@ function StructureStudioInner({ config }) {
                       <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
                       <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                         <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                       </div>
                     </div>
                   );
@@ -2992,7 +3047,7 @@ function StructureStudioInner({ config }) {
                       </button>
                     )}
                   </div>
-                  {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
+                  {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
                 </div>
                 {versionsOpen && others.map((v) => {
                   const vsel = v.selections || {};
@@ -3002,7 +3057,7 @@ function StructureStudioInner({ config }) {
                       <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
                       <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                         <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                       </div>
                     </div>
                   );
