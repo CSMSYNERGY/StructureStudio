@@ -458,9 +458,14 @@ Deno.serve(async (req: Request) => {
           .eq("client_id", clientId).eq("active", true);
         const palette = (colRes.data || []) as any[];
         const customRow = palette.find((c) => c.allow_custom);
+        // We only reach here when paintStatus === "Paint" (a non-default color was chosen). A
+        // named color matches by label; a blank/"TBD" value means the customer picked the Custom
+        // option but hasn't typed the exact color yet — that's still a committed charge at the
+        // tenant's allow-custom rate (this matches the designer's Details preview, which resolves
+        // "TBD" to the Custom color). Only an explicit "No Paint" yields no color.
         const resolve = (val: unknown) => {
           const v = String(val ?? "").trim();
-          if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
+          if (norm(v) === norm("No Paint")) return null;
           return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
         };
         const seen = new Set<string>();
