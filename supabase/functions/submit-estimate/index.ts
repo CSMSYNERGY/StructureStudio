@@ -290,7 +290,15 @@ Deno.serve(async (req: Request) => {
   // Building is line 1. Paint + roof used to ride in this name/description; they are now their
   // own line items (2 = Paint Colors, 3 = Roof) pushed immediately below, so any charge on them
   // shows as a real line rather than buried text.
-  targetItems.push({
+  // Credits (declined items + negative custom options) are baked into THIS line's amount so the
+  // taxable base drops by the FULL credit. A fixed invoice discount would instead prorate onto the
+  // non-taxable delivery and under-reduce tax. We keep a reference and finalize amount + description
+  // after every credit is tallied (below). The item NAME stays the plain building name; the
+  // original price + itemized credits go in the DESCRIPTION.
+  let bakedCredit = 0;               // total credit to subtract from the building line
+  const creditNotes: string[] = [];  // per-credit notes appended to the building description
+  let creditOverflow = 0;            // credit beyond the building price → falls back to a discount
+  const buildingLine: any = {
     name: `${styleLabel} (${size})`,
     qty: 1,
     amount: buildingPrice,
@@ -300,7 +308,8 @@ Deno.serve(async (req: Request) => {
     currency: "USD",
     type: "one_time",
     description: `Size: ${size}`,
-  });
+  };
+  targetItems.push(buildingLine);
 
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
   // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
@@ -534,13 +543,9 @@ Deno.serve(async (req: Request) => {
   }
 
   // Custom options — name doubles as the line title; leaving description blank keeps GHL
-  // from rendering it as a duplicate subtitle.
-  // Credits: GHL rejects BOTH a negative line amount ("amount must not be less than 0") AND a
-  // negative/zero qty ("qty must not be less than 0.1") — so a true negative-total line is
-  // impossible via the API. A custom option whose intended total (qty × amount) is negative is
-  // therefore emitted as a $0 line that NAMES the credit, and its value is added to the
-  // invoice-level discount below (same mechanism as declined items) so the estimate total drops.
-  let customOptionCredit = 0;
+  // from rendering it as a duplicate subtitle. A custom option whose intended total (qty × amount)
+  // is NEGATIVE is a credit: GHL can't render a negative line (amount >= 0 AND qty >= 0.1), so the
+  // credit is folded into the building line (bakedCredit) and itemized in the building description.
   if (Array.isArray(customOptions)) {
     customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
       const name = String(co.name).trim();
@@ -549,13 +554,8 @@ Deno.serve(async (req: Request) => {
       const signedTotal = rawQty * rawAmt;   // intended line total; negative = a credit
       if (signedTotal < 0) {
         const credit = Math.round(Math.abs(signedTotal) * 100) / 100;
-        customOptionCredit += credit;
-        targetItems.push({
-          name: `${name} (−$${credit.toFixed(2)} credit)`,
-          qty: 1, amount: 0, priceId: "", productId: "", attachments: [],
-          currency: "USD", type: "one_time",
-          description: "Credit — applied via the estimate discount",
-        });
+        bakedCredit += credit;
+        creditNotes.push(`${name} −$${credit.toFixed(2)}`);
       } else {
         targetItems.push({
           name, qty: Math.abs(rawQty) || 1, amount: Math.abs(rawAmt),
@@ -569,12 +569,9 @@ Deno.serve(async (req: Request) => {
   // Declined included items — the customer opted out of an item the building normally includes,
   // so credit its catalog value: the size's included QUANTITY (building_size_inclusions.qty,
   // populated by the pricing CSV's quantity cells — loft = sq ft, doors = count) times the
-  // owner's layout_item_pricing rate, resolved per pricing_method exactly like pushItem. GHL
-  // rejects negative line amounts, so we instead (a) keep a $0 line per declined item as the
-  // on-estimate RECORD of what was credited (the discount object has no description of its
-  // own), and (b) sum the credits and apply them as a fixed invoice-level discount below.
-  // Items with no rate (0) are skipped (nothing to credit).
-  let declinedCredit = 0;
+  // owner's layout_item_pricing rate, resolved per pricing_method exactly like pushItem. The
+  // credit is folded into the building line (bakedCredit) and itemized in the building
+  // description — same as negative custom options. Items with no rate (0) are skipped.
   if (Array.isArray(declinedItems) && declinedItems.length) {
     // A placed item is KEPT (charged/netted above), so it is never also credited — this guards
     // the stray place+decline of the same item (which would otherwise go uncharged AND credited).
@@ -612,22 +609,20 @@ Deno.serve(async (req: Request) => {
       unitValue = Math.round(unitValue * 100) / 100;
       const credit = Math.round(unitValue * qty * 100) / 100;
       if (credit <= 0) continue;
-      declinedCredit += credit;
+      bakedCredit += credit;
       const mathNote = qty > 1 ? `${qty}${unitLabel} × $${unitValue.toFixed(2)} = ` : "";
-      targetItems.push({
-        name: `${d?.label || key} — declined (${mathNote}−$${credit.toFixed(2)} credit)`,
-        qty: 1,
-        amount: 0,
-        priceId: "",
-        productId: "",
-        attachments: [],
-        currency: "USD",
-        type: "one_time",
-        description: qty > 1
-          ? `Included item declined (${qty}${unitLabel || " included"}) — credited via the estimate discount`
-          : "Included item declined — credited via the estimate discount",
-      });
+      creditNotes.push(`${d?.label || key} declined (${mathNote}−$${credit.toFixed(2)})`);
     }
+  }
+
+  // Finalize the building line: subtract the tallied credits from its amount (so the taxable base
+  // drops by the full credit) and itemize them in the DESCRIPTION with the original price. If the
+  // credits exceed the building price (rare), zero the line and send the leftover as a discount.
+  if (bakedCredit > 0) {
+    const applied = Math.min(bakedCredit, buildingPrice);
+    creditOverflow = Math.round((bakedCredit - applied) * 100) / 100;
+    buildingLine.amount = Math.round((buildingPrice - applied) * 100) / 100;
+    buildingLine.description = `Size: ${size} · Original building price: $${buildingPrice.toFixed(2)} — credits: ${creditNotes.join(", ")}`;
   }
 
 
@@ -674,9 +669,9 @@ Deno.serve(async (req: Request) => {
   // update it back to status "open". Failures here are non-fatal — the estimate still
   // goes out.
   const oppName = `${styleLabel} ${size}`.trim();
-  // Line items minus the declined-item discount (credits live at the invoice level, not as
-  // negative lines), so the opportunity's pipeline value matches the estimate's actual total.
-  const oppValue = Math.max(0, targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0) - declinedCredit);
+  // Credits are already baked into the building line amount, so summing the line items reflects
+  // them; subtract only the rare overflow discount so the opportunity value matches the total.
+  const oppValue = Math.max(0, targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0) - creditOverflow);
   let opportunityId: string | null = existingDesign.ghl_opportunity_id || null;
   if (contactId) {
     try {
@@ -832,11 +827,10 @@ Deno.serve(async (req: Request) => {
       ...(estimateAddress ? { address: estimateAddress } : {}),
       ...(contactId ? { id: String(contactId) } : {}),
     },
-    // Credits are applied here as a fixed dollar discount (GHL won't take a negative line amount
-    // OR a negative qty). Covers declined included items AND negative custom options; the matching
-    // "— declined" / "(−$… credit)" $0 line items above are the on-estimate record of each.
-    discount: (declinedCredit + customOptionCredit) > 0
-      ? { value: Math.round((declinedCredit + customOptionCredit) * 100) / 100, type: "fixed" }
+    // Credits are baked into the building line (see above) so the full credit reduces the taxable
+    // base. The discount is used ONLY for the rare overflow when credits exceed the building price.
+    discount: creditOverflow > 0
+      ? { value: creditOverflow, type: "fixed" }
       : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
