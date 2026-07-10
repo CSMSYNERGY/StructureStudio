@@ -169,7 +169,7 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
 
 function parseSize(s) {
   if (!s) return null;
-  const m = s.match(/(\d+)\s*x\s*(\d+)/i);
+  const m = s.match(/(\d+)\s*[x×✕]\s*(\d+)/i); // accept Unicode ×/✕ size labels too, not just ASCII x — else the building silently stays at the default size (audit #F2)
   return m ? { w: parseInt(m[1]), h: parseInt(m[2]) } : null;
 }
 
@@ -236,6 +236,19 @@ function ssAllowedOrigin(origin) {
     const h = new URL(origin).hostname;
     return h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
   } catch { return false; }
+}
+
+// Only allow a design's image_url to be used as a clickable href when it is an
+// https Supabase-storage (or same-origin) URL. image_url is stored verbatim by the
+// anon-granted save_design RPC, so a hostile caller could stash a javascript: or
+// off-site phishing URL; gate it before it reaches an <a href>. Returns null if unsafe. (audit #F8)
+function ssSafeUrl(u) {
+  try {
+    const url = new URL(u, window.location.origin);
+    if (url.protocol !== "https:") return null;
+    const h = url.hostname;
+    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+  } catch { return null; }
 }
 
 function computeLayoutPricingRows(items, sel, customOptions, C) {
@@ -333,7 +346,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C) {
       return s + amt * q;
     }, 0);
     const base = buildingPrice + nonPctSubtotal + roRate * roCount + customTotal;
-    for (const d of deferred) d.row.total = (d.pct / 100) * base;
+    for (const d of deferred) d.row.total = (d.pct / 100) * base * (d.row.qty || 1); // ×count: the server bills GHL line = qty×amount, so the preview must scale by count too or it under-shows (audit #F1)
   }
 
   return { rows };
@@ -844,7 +857,7 @@ function StructureStudioInner({ config }) {
         const iwFt = it.widthFt || c.width;
         const ihFt = it.heightFt || c.height;
         const iw = iwFt * scale, ih = ihFt * scale;
-        const rot = it.rotation === 90; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2;
+        const rot = it.rotation === 90 || it.rotation === 270; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2; // 270° swaps the visual bbox just like 90° (audit #F5)
         return Math.abs(pt.x - it.x) < hw + 5 && Math.abs(pt.y - it.y) < hh + 5;
       });
       setSelectedId(hit ? hit.id : null); return;
@@ -1185,7 +1198,20 @@ function StructureStudioInner({ config }) {
       // and doesn't get stuck off-wall.
       const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
       const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
-      setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
+      // A ramp snapped to this door must follow it (position + wall); otherwise it
+      // detaches and the stale geometry is rasterized into the exported PDF. (audit #F4)
+      const rampDepthPx = RAMP_SPACE_FT * scale;
+      const relocRamp = (rmp) => {
+        if (sn.wall === "north") return { ...rmp, x: sn.x, y: mgY - rampDepthPx / 2, rotation: 0, wall: "north" };
+        if (sn.wall === "south") return { ...rmp, x: sn.x, y: mgY + pH + rampDepthPx / 2, rotation: 0, wall: "south" };
+        if (sn.wall === "west")  return { ...rmp, x: mgX - rampDepthPx / 2, y: sn.y, rotation: 90, wall: "west" };
+        if (sn.wall === "east")  return { ...rmp, x: mgX + pW + rampDepthPx / 2, y: sn.y, rotation: 90, wall: "east" };
+        return rmp;
+      };
+      setItems((p) => p.map((i) =>
+        i.id === dragging.id ? { ...i, ...sn }
+        : (i.type === "ramp" && i.snapDoorId === dragging.id ? relocRamp(i) : i)
+      ));
     } else if (cfg.wallSnap) {
       const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
       const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
@@ -2461,7 +2487,7 @@ function StructureStudioInner({ config }) {
           )}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
-            if (!ri || ri.type === "line") return null; // line shows its own length label inline
+            if (!ri || ri.type === "line" || !Number.isFinite(ri.widthFt)) return null; // line shows its own length inline; notes have no widthFt → skip the 'ft' badge (audit #F3)
             return (
               <g transform={`translate(${ri.x},${ri.y - 28})`}>
                 <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
@@ -2680,7 +2706,7 @@ function StructureStudioInner({ config }) {
                   </div>
                   <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                     <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
-                    {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                    {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                   </div>
                 </div>
                 {versionsOpen && others.map((v) => {
@@ -2691,7 +2717,7 @@ function StructureStudioInner({ config }) {
                       <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
                       <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                         <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                       </div>
                     </div>
                   );
@@ -2745,7 +2771,7 @@ function StructureStudioInner({ config }) {
                       </button>
                     )}
                   </div>
-                  {cur.image_url && <a href={cur.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
+                  {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
                 </div>
                 {versionsOpen && others.map((v) => {
                   const vsel = v.selections || {};
@@ -2755,7 +2781,7 @@ function StructureStudioInner({ config }) {
                       <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
                       <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                         <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
                       </div>
                     </div>
                   );

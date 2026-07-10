@@ -1301,7 +1301,11 @@ function Dashboard({ session }) {
 
   useEffect(() => {
     (async () => {
-      const { data: mapping, error } = await sb.from("client_users").select("client_id, role").maybeSingle();
+      // limit(1)+array instead of maybeSingle(): maybeSingle() ERRORS when >1 row
+      // matches (a duplicate/multi-tenant client_users row), which would lock the
+      // user out of their own dashboard; take the first mapping instead. (audit #F6)
+      const { data: cuRows, error } = await sb.from("client_users").select("client_id, role").limit(1);
+      const mapping = cuRows && cuRows[0];
       if (error || !mapping) { setTenant("none"); return; }
       let businessName = mapping.client_id;
       // client_configs is now column-structured (no monolithic `config` blob);
