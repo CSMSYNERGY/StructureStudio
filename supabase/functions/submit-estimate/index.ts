@@ -669,9 +669,15 @@ Deno.serve(async (req: Request) => {
   // update it back to status "open". Failures here are non-fatal — the estimate still
   // goes out.
   const oppName = `${styleLabel} ${size}`.trim();
+  // Clamp the overflow discount to the positive line subtotal. A credit larger than the whole
+  // order (cheap building + a big included-item credit) would otherwise drive the net total
+  // negative, and GHL rejects the estimate ("amount must not be less than 0") — failing an
+  // otherwise-valid submission. Clamping here also protects the invoice discount below.
+  const lineSubtotal = targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0);
+  if (creditOverflow > lineSubtotal) creditOverflow = Math.round(lineSubtotal * 100) / 100;
   // Credits are already baked into the building line amount, so summing the line items reflects
   // them; subtract only the rare overflow discount so the opportunity value matches the total.
-  const oppValue = Math.max(0, targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0) - creditOverflow);
+  const oppValue = Math.max(0, lineSubtotal - creditOverflow);
   let opportunityId: string | null = existingDesign.ghl_opportunity_id || null;
   if (contactId) {
     try {
