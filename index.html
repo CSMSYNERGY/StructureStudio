@@ -1974,6 +1974,10 @@ function StructureStudioInner({ config }) {
           qty: co.qty ? parseInt(co.qty) || 0 : 0,
           amount: co.amount ? parseFloat(co.amount) || 0 : 0,
         })),
+        // Discounts → GHL invoice discount total (each shows as a $0 "Discount — <desc>" line).
+        discounts: (Array.isArray(sel.discounts) ? sel.discounts : [])
+          .map((d) => ({ description: String(d.description || "").trim(), amount: Math.abs(parseFloat(d.amount) || 0) }))
+          .filter((d) => d.amount > 0),
         roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro, idx) => ({
           name: `RO-${idx + 1}`,
           dimensions: (roDimensions[ro.id] || "").trim(),
@@ -2908,8 +2912,8 @@ function StructureStudioInner({ config }) {
                     style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
                   <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
                     <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
-                    <input type="number" value={row.amount} placeholder="0.00"
-                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value } : r))}
+                    <input type="number" min="0" value={row.amount} placeholder="0.00"
+                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value.replace(/[^0-9.]/g, "") } : r))}
                       style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
                   </div>
                   <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
@@ -2923,7 +2927,33 @@ function StructureStudioInner({ config }) {
               + Add Custom Option
             </button>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-              Tip: enter a <b>negative</b> amount for a credit — it's itemized in the building line's details and reduces the building total (so it lowers tax too).
+              Custom options are added charges. For a reduction, use <b>+ Add Discount</b> below.
+            </div>
+
+            {/* Discounts — reduce the estimate total; each is applied as a discount in the quote. */}
+            <div style={{ marginTop: 16 }}>
+              {(sel.discounts || []).map((row, idx) => (
+                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
+                  <input type="text" value={row.description || ""} placeholder="Discount description"
+                    onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
+                    style={{ flex: "1 1 55%", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
+                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 110 }}>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>−$</span>
+                    <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
+                      onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
+                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                  </div>
+                  <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))}
+                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
+                </div>
+              ))}
+              <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))}
+                style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                + Add Discount
+              </button>
+              <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
+                Applied as a discount on the estimate total (reduces tax proportionally).
+              </div>
             </div>
 
           {/* Delivery fee — last thing in this section (moved up from the submit bar); the
