@@ -398,6 +398,18 @@ Deno.serve(async (req: Request) => {
         currency: "USD", type: "one_time",
         description: description || "Included with this size",
       });
+      // Under-placement credit: an AREA item placed SMALLER than its included quantity (e.g. a
+      // 32 sq ft loft when 48 is included) credits the shortfall, baked into the building line like
+      // a declined item. Scoped to sqft_option to stay in lock-step with the designer (lineal_ft /
+      // "each" are NOT under-credited). A placed loft keeps placedKeys.has("loft") true, so the
+      // declined loop never double-credits.
+      if (placed > 0 && placed < includedQty && method === "sqft_option") {
+        const credit = Math.round(rate * (includedQty - placed) * 100) / 100;
+        if (credit > 0) {
+          bakedCredit += credit;
+          creditNotes.push(`${searches[0]} smaller than included: ${includedQty - placed} sq ft credited (−$${credit.toFixed(2)})`);
+        }
+      }
       return;
     }
 

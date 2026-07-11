@@ -242,7 +242,7 @@ function ssAllowedOrigin(origin) {
   } catch { return false; }
 }
 
-function computeSelectionRows(sel, paintColors, C) {
+function computeSelectionRows(sel, paintColors, C, items) {
   const styleKey = sel && sel.style;
   const showP = !!(C && C.showPricing);
   const colors = Array.isArray(C && C.colors) ? C.colors : [];
@@ -307,6 +307,29 @@ function computeSelectionRows(sel, paintColors, C) {
       const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
       declinedLines.push(`${label} declined (−${fmtMoney2(credit)})`);
       declinedTotal += credit;
+    }
+  }
+  // Under-placed included area items (loft, and any sqft_option inclusion): a smaller placed
+  // area than the included amount credits the shortfall (mirrors submit-estimate's pushItem,
+  // which credits sqft_option under-placement). Only when actually placed and not declined — a
+  // fully-absent include is handled by the decline flow, not auto-credited. Kept method-scoped
+  // to sqft_option so it stays in lock-step with the edge (lineal_ft is NOT under-credited).
+  if (sel && sel.size && Array.isArray(items)) {
+    for (const k in includedNow) {
+      if (declinedKeys.includes(k)) continue;
+      const rpk = resolveLp(k);
+      if (!rpk || rpk.method !== "sqft_option" || !(rpk.rate > 0)) continue;
+      const incQ = Number(includedNow[k]) || 0;
+      if (incQ <= 0) continue;
+      const placedSqft = Math.round(items.filter((i) => i.type === k).reduce((s, i) => s + (Number(i.widthFt) || 0) * (Number(i.heightFt) || 0), 0));
+      if (placedSqft > 0 && placedSqft < incQ) {
+        const credit = Math.round(rpk.rate * (incQ - placedSqft) * 100) / 100;
+        if (credit > 0) {
+          const lbl = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+          declinedLines.push(`${lbl} smaller than included: ${incQ - placedSqft} sq ft credited (−${fmtMoney2(credit)})`);
+          declinedTotal += credit;
+        }
+      }
     }
   }
   declinedTotal = Math.round(declinedTotal * 100) / 100;
@@ -446,7 +469,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     let mNet = m;
     if (inc > 0) mNet = rp.method === "lineal_ft" ? { ...m, lengthFt: chargeable } : rp.method === "sqft_option" ? { ...m, optionSqft: chargeable } : { ...m, count: chargeable };
     const ln = lineFor(rp.rate, rp.method, mNet);
-    const row = { key, label, qty: ln.qty, unit: ln.unit, total: ln.total, method: rp.method };
+    // Measured inclusions (loft = sq ft, workbench = ft): show the TOTAL placed measure as the
+    // row quantity so it reads accurately, but keep charging only the excess beyond the included
+    // amount. "each" items (doors/windows) keep the netted count.
+    const measured = rp.method === "lineal_ft" || rp.method === "sqft_option";
+    const dispQty = (measured && inc > 0) ? placedMeasure : ln.qty;
+    const incNote = (measured && inc > 0) ? ` · ${inc} ${rp.method === "sqft_option" ? "sq ft" : "ft"} included` : "";
+    const row = { key, label, qty: dispQty, unit: ln.unit + incNote, total: ln.total, method: rp.method };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
@@ -470,7 +499,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // Paint + roof color charges are line items too, so the % base must include
     // them exactly as submit-estimate does — otherwise the previewed % line is
     // lower than the emailed estimate.
-    const selRowsForBase = computeSelectionRows(sel, paintColors, C);
+    const selRowsForBase = computeSelectionRows(sel, paintColors, C, items);
     const selectionTaxable = selRowsForBase
       .filter((r) => r.key === "paint" || r.key === "roof")
       .reduce((s, r) => s + (Number(r.total) || 0), 0);
@@ -2925,7 +2954,7 @@ function StructureStudioInner({ config }) {
             // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
             // no action get a 28px spacer; rows with no qty just omit that cell.
-            const selRows = computeSelectionRows(sel, paintColors, C);
+            const selRows = computeSelectionRows(sel, paintColors, C, items);
             const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
             const roList = items.filter((i) => i.type === "roughOpening");
             // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
@@ -3059,27 +3088,7 @@ function StructureStudioInner({ config }) {
               </div>
             )}
 
-            {/* Delivery fee — rendered as an invoice row once "+ Add Delivery Fee" is
-                clicked (or a fee is already set); × clears and hides it again. */}
-            {showDelivery && (
-              <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
-                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>Non-taxable line on the estimate</div>
-                </div>
-                <div style={amtInputWrap}>
-                  <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
-                  <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
-                    onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                    style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                </div>
-                <button title="Remove the delivery fee"
-                  onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
-                  style={delBtn}>×</button>
-              </div>
-            )}
-
-            {/* Discounts — last rows before the subtotal so the reduction reads clearly. */}
+            {/* Discounts — reduce the estimate total. */}
             {(sel.discounts || []).length > 0 && (
               <div style={{ marginTop: 14 }}>
                 {(sel.discounts || []).map((row, idx) => (
@@ -3096,6 +3105,26 @@ function StructureStudioInner({ config }) {
                     <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Delivery fee — last line before the subtotal (below the discounts); rendered once
+                "+ Add Delivery Fee" is clicked or a fee is already set; × clears and hides it. */}
+            {showDelivery && (
+              <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
+                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>Non-taxable line on the estimate</div>
+                </div>
+                <div style={amtInputWrap}>
+                  <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
+                  <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
+                    onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                    style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                </div>
+                <button title="Remove the delivery fee"
+                  onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
+                  style={delBtn}>×</button>
               </div>
             )}
 
