@@ -3100,7 +3100,7 @@ function StructureStudioInner({ config }) {
               onClick={() => { setSubmitted(false); }}
               style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "10px 24px", fontSize: 14 }}
             >
-              Resubmit for an Updated Estimate
+              Review to make additional changes
             </button>
             <button
               onClick={() => {
