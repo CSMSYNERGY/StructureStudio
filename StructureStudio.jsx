@@ -440,28 +440,29 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
     const chargeable = Math.max(0, placedMeasure - inc);
     if (inc > 0 && chargeable <= 0) {
-      rows.push({ key, label: label + " (included)", qty: placedMeasure, unit: "included", total: 0 });
+      rows.push({ key, label: label + " (included)", qty: placedMeasure, unit: "included", total: 0, method: rp.method });
       continue;
     }
     let mNet = m;
     if (inc > 0) mNet = rp.method === "lineal_ft" ? { ...m, lengthFt: chargeable } : rp.method === "sqft_option" ? { ...m, optionSqft: chargeable } : { ...m, count: chargeable };
     const ln = lineFor(rp.rate, rp.method, mNet);
-    const row = { key, label, qty: ln.qty, unit: ln.unit, total: ln.total };
+    const row = { key, label, qty: ln.qty, unit: ln.unit, total: ln.total, method: rp.method };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
   }
 
   // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
-  // building price + all non-% add-ons + rough openings + custom options (delivery and
-  // the declined-item discount are excluded, matching submit-estimate).
+  // building (NET of declined-item credits — submit-estimate bakes them into the
+  // building line BEFORE the % pass) + paint/roof + all non-% add-ons + rough
+  // openings + custom options (delivery excluded, matching submit-estimate).
   if (deferred.length) {
     const roRate = (resolve("roughOpening") || { rate: 0 }).rate;
     const roCount = items.filter((i) => i.type === "roughOpening").length;
     const customTotal = (customOptions || []).reduce((s, co) => {
       if (!co || !co.name || !String(co.name).trim()) return s;
       const amt = parseFloat(co.amount) || 0;
-      const q = co.qty ? (parseInt(co.qty, 10) || 1) : 1;
+      const q = co.qty ? Math.abs(parseInt(co.qty, 10)) || 1 : 1; // abs: the edge bills |qty|
       // Only POSITIVE custom options are line items in the % base; negatives are
       // credits applied outside it, matching submit-estimate.
       return s + Math.max(0, amt) * q;
@@ -469,10 +470,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // Paint + roof color charges are line items too, so the % base must include
     // them exactly as submit-estimate does — otherwise the previewed % line is
     // lower than the emailed estimate.
-    const selectionTaxable = computeSelectionRows(sel, paintColors, C)
+    const selRowsForBase = computeSelectionRows(sel, paintColors, C);
+    const selectionTaxable = selRowsForBase
       .filter((r) => r.key === "paint" || r.key === "roof")
       .reduce((s, r) => s + (Number(r.total) || 0), 0);
-    const base = buildingPrice + selectionTaxable + nonPctSubtotal + roRate * roCount + customTotal;
+    const buildingRow = selRowsForBase.find((r) => r.key === "building");
+    const netBuilding = buildingRow && buildingRow.total != null ? Number(buildingRow.total) : buildingPrice;
+    const base = netBuilding + selectionTaxable + nonPctSubtotal + roRate * roCount + customTotal;
     for (const d of deferred) d.row.total = (d.pct / 100) * base * (d.row.qty || 1); // ×count: the server bills GHL line = qty×amount, so the preview must scale by count too or it under-shows (audit #F1)
   }
 
@@ -688,6 +692,34 @@ function StructureStudioInner({ config }) {
   const [activeTool, setActiveTool] = useState(null);
   const [items, setItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  // Pick-one-to-remove mode ({ type }): entered from a Details row's × when several
+  // "each"-priced items of that type are placed — the plan highlights them and the
+  // rest of the page is blocked until the user clicks one (or cancels).
+  const [pendingRemoval, setPendingRemoval] = useState(null);
+  // "+ Add Delivery Fee" clicked — shows the delivery row before a value is typed.
+  const [deliveryOpen, setDeliveryOpen] = useState(false);
+  useEffect(() => {
+    // Reopened designs restore sel.deliveryFee without deliveryOpen; latch the row
+    // open so clearing the amount mid-edit doesn't unmount the input underneath the
+    // user (only the row's × closes it).
+    if (!deliveryOpen && String(sel.deliveryFee || "") !== "") setDeliveryOpen(true);
+  }, [deliveryOpen, sel.deliveryFee]);
+  useEffect(() => {
+    if (!pendingRemoval) return;
+    // ESC cancels. Every other key is swallowed in the capture phase: the scrim only
+    // blocks POINTERS, so without this Tab+Enter could still fire buttons underneath
+    // it (another row's ×, even Get Quote) while the page looks blocked.
+    const onKey = (e) => {
+      if (e.key === "Escape") { setPendingRemoval(null); return; }
+      e.preventDefault(); e.stopPropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [pendingRemoval]);
+  useEffect(() => {
+    // Auto-exit pick mode if the last item of the target type disappears.
+    if (pendingRemoval && !items.some((i) => i.type === pendingRemoval.type)) setPendingRemoval(null);
+  }, [items, pendingRemoval]);
   const [dragging, setDragging] = useState(null);
   const [resizing, setResizing] = useState(null);
   const [showExport, setShowExport] = useState(false);
@@ -1003,6 +1035,9 @@ function StructureStudioInner({ config }) {
       justGesturedRef.current = false;
       return;
     }
+    // Pick-one-to-remove mode: the pulsing overlays are the only click targets
+    // (they handle their own clicks); every other canvas action is disabled.
+    if (pendingRemoval) return;
     const pt = getSvgPt(e);
     if (!activeTool) {
       const hit = [...items].reverse().find((it) => {
@@ -1166,10 +1201,12 @@ function StructureStudioInner({ config }) {
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval]);
 
   const onPtrDown = useCallback((e, item) => {
-    e.stopPropagation(); if (activeTool) return;
+    e.stopPropagation();
+    if (pendingRemoval) return; // pick mode: overlays handle the pick; no select/drag
+    if (activeTool) return;
     setSelectedId(item.id);
     const cfg = ITEMS[item.type];
     if (resizing || (cfg && cfg.doorSnap)) return; // don't drag ramps or while resizing
@@ -1186,7 +1223,7 @@ function StructureStudioInner({ config }) {
       return;
     }
     setDragging({ id: item.id, ox: pt.x - item.x, oy: pt.y - item.y, startX: item.x, startY: item.y });
-  }, [activeTool, getSvgPt, resizing, ITEMS]);
+  }, [activeTool, getSvgPt, resizing, ITEMS, pendingRemoval]);
 
   const startResize = useCallback((e, item, handle) => {
     e.preventDefault();
@@ -2408,8 +2445,12 @@ function StructureStudioInner({ config }) {
             const declining = !cur.includes(key);
             if (declining) {
               // Declining removes it from the layout (like Delete) — a declined item can't be placed,
-              // so any already-placed instances are cleared and the tool is deselected if active.
-              setItems((its) => its.filter((it) => it.type !== key));
+              // so any already-placed instances are cleared (cascading a door's snapped ramp, like
+              // delSel) and the tool is deselected if active.
+              setItems((its) => {
+                const removedIds = new Set(its.filter((it) => it.type === key).map((it) => it.id));
+                return its.filter((it) => it.type !== key && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
+              });
               setActiveTool((t) => (t === key ? null : t));
               setSelectedId(null);
             }
@@ -2494,10 +2535,28 @@ function StructureStudioInner({ config }) {
         );
       })()}
 
+      {/* Pick-one-to-remove mode: dim + block the whole page except the plan (the svg
+          elevates above the scrim), pulse-highlight the candidates, and ask the user
+          to click the one to remove. Cancel (or ESC) exits without removing. */}
+      {pendingRemoval && (() => {
+        const prCfg = ITEMS[pendingRemoval.type];
+        const prLbl = (prCfg && prCfg.label) || pendingRemoval.type;
+        return (
+          <>
+            <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 900 }} />
+            <div style={{ position: "fixed", top: 14, left: "50%", transform: "translateX(-50%)", zIndex: 902, background: "#1E293B", color: "#FFF", borderRadius: 10, padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 30px rgba(0,0,0,0.35)", maxWidth: "92vw", boxSizing: "border-box" }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>Removing one {prLbl} — click a highlighted item on the plan.</span>
+              <button onClick={() => setPendingRemoval(null)}
+                style={{ background: "rgba(255,255,255,0.12)", color: "#FFF", border: "1px solid rgba(255,255,255,0.35)", borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Cancel</button>
+            </div>
+          </>
+        );
+      })()}
+
       {/* SVG Canvas */}
       <div style={{ display: "flex", justifyContent: "center", padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         <svg ref={svgRef} viewBox={`0 0 ${cW} ${TEXT_BAND_TOP}`}
-          style={{ width: "100%", maxWidth: cW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none" }}
+          style={{ width: "100%", maxWidth: cW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
           {/* Visible page background — only the area above the auto info band */}
           <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill="#FFF" />
@@ -2755,6 +2814,23 @@ function StructureStudioInner({ config }) {
               </g>
             );
           })()}
+          {/* Pick-one-to-remove overlays: pulsing ring over every candidate; clicking one removes it.
+              Rendered last so the rings (and their click targets) sit above everything else. */}
+          {pendingRemoval && items.filter((i) => i.type === pendingRemoval.type).map((it) => {
+            const c = ITEMS[it.type]; if (!c) return null;
+            const iwFt = it.widthFt || c.width, ihFt = it.heightFt || c.height;
+            const iw = iwFt * scale, ih = ihFt * scale;
+            const rot = it.rotation === 90 || it.rotation === 270;
+            const hw = (rot ? ih : iw) / 2, hh = (rot ? iw : ih) / 2;
+            return (
+              <rect key={`pr-${it.id}`} x={it.x - hw - 5} y={it.y - hh - 5} width={hw * 2 + 10} height={hh * 2 + 10} rx={5}
+                fill="rgba(220,38,38,0.10)" stroke="#DC2626" strokeWidth={2.5} style={{ cursor: "pointer" }}
+                onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); setItems((p) => p.filter((x) => x.id !== it.id && !(x.type === "ramp" && x.snapDoorId === it.id))); setPendingRemoval(null); setSelectedId(null); }}>
+                <animate attributeName="stroke-opacity" values="1;0.25;1" dur="1.1s" repeatCount="indefinite" />
+              </rect>
+            );
+          })}
         </svg>
       </div>
 
@@ -2844,31 +2920,62 @@ function StructureStudioInner({ config }) {
             <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Details</span>
             <span style={{ fontSize: 11, color: "#CBD5E1" }}>{additionalOpen ? "▾" : "▸"}</span>
           </div>
-          {additionalOpen && (
-          <div style={{ marginTop: 8 }}>
-          {(() => {
-            // Building, Paint Colors, Roof — same order as the estimate; price shown when enabled.
+          {additionalOpen && (() => {
+            // ── Invoice-style detail rows ─────────────────────────────────────────
+            // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
+            // [action 28px], gap 6 — so every amount lines up in one column. Rows with
+            // no action get a 28px spacer; rows with no qty just omit that cell.
             const selRows = computeSelectionRows(sel, paintColors, C);
+            const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+            const roList = items.filter((i) => i.type === "roughOpening");
+            // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
+            // byStyle override wins) — the old C.layoutPrices read was a stale key that
+            // showed $0.00 while the estimate charged the real rate.
+            const roRate = (() => {
+              const lp = C.layoutPricing && C.layoutPricing.roughOpening;
+              if (!lp) return 0;
+              const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
+              return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
+            })();
+            const customTotal = customOptions.reduce((s, r) => {
+              if (!r || !r.name || !String(r.name).trim()) return s;
+              const amt = Math.max(0, parseFloat(r.amount) || 0);
+              const q = r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1; // abs: the edge bills |qty|
+              return s + amt * q;
+            }, 0);
+            const discountTotal = (sel.discounts || []).reduce((s, r) => s + Math.max(0, parseFloat(r && r.amount) || 0), 0);
+            const deliveryAmt = parseFloat(sel.deliveryFee) || 0;
+            const showDelivery = deliveryOpen || String(sel.deliveryFee || "") !== "";
+            // Mirrors the estimate's pre-tax total: all line items + delivery − discounts.
+            const subtotal = Math.max(0,
+              selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+              + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+              + (C.showPricing ? roList.length * roRate : 0)
+              + customTotal + deliveryAmt - discountTotal);
+            const qtyCell = { width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" };
+            const amtCell = { width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" };
+            const amtInputWrap = { display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85, flex: "0 0 auto", boxSizing: "border-box" };
+            const actSpacer = { width: 28, flex: "0 0 auto" };
+            const delBtn = { background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 };
+            const dashBtn = { background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
             return (
-              <div style={{ marginBottom: 4 }}>
-                {selRows.map((r) => (
-                  <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
-                      <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail}</div>
-                    </div>
-                    {r.total != null && (
-                      <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>{fmtMoney2(r.total)}</div>
-                    )}
+          <div style={{ marginTop: 8 }}>
+            {/* Building, Paint Colors, Roof — same order as the estimate; price shown when enabled. */}
+            <div style={{ marginBottom: 4 }}>
+              {selRows.map((r) => (
+                <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                    <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail}</div>
                   </div>
-                ))}
-              </div>
-            );
-          })()}
-          {C.showPricing && (() => {
-            const priceRows = computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows;
-            if (!priceRows.length) return null;
-            return (
+                  {r.total != null && (<>
+                    <div style={amtCell}>{fmtMoney2(r.total)}</div>
+                    <div style={actSpacer} />
+                  </>)}
+                </div>
+              ))}
+            </div>
+            {priceRows.length > 0 && (
               <div style={{ marginTop: 14 }}>
                 <div style={{ ...S.lbl, marginBottom: 8 }}>Options on your plan</div>
                 {priceRows.map((r) => (
@@ -2877,107 +2984,146 @@ function StructureStudioInner({ config }) {
                       <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
                       <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.unit}</div>
                     </div>
-                    <div style={{ width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" }}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
-                    <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>{fmtMoney2(r.total)}</div>
+                    <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
+                    <div style={amtCell}>{fmtMoney2(r.total)}</div>
+                    <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
+                      onClick={() => {
+                        // "each"-priced items step down one at a time (when several are
+                        // placed, the plan asks which one); everything else clears the line
+                        // and removes all of that type from the layout. Ramp is billed as a
+                        // single flat line regardless of count, so its × clears all ramps.
+                        const placed = items.filter((i) => i.type === r.key);
+                        if (r.method === "each" && r.key !== "ramp" && placed.length > 1) {
+                          setPendingRemoval({ type: r.key });
+                          setSelectedId(null); setActiveTool(null);
+                          setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }, 0);
+                        } else {
+                          // Cascade like delSel: removing a door also removes its snapped ramp.
+                          const removedIds = new Set(placed.map((i) => i.id));
+                          setItems((p) => p.filter((i) => i.type !== r.key && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
+                          setSelectedId(null);
+                        }
+                      }}
+                      style={delBtn}>×</button>
                   </div>
                 ))}
               </div>
+            )}
+
+            {roList.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings</div>
+                {roList.map((ro, idx) => {
+                  const dim = roDimensions[ro.id] || "";
+                  const invalid = !dim.trim();
+                  return (
+                    <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                      <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
+                      <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
+                        onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
+                        style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
+                      {C.showPricing && (<>
+                        <div style={qtyCell}>1</div>
+                        <div style={amtCell}>{fmtMoney2(roRate)}</div>
+                      </>)}
+                      <button title="Remove this rough opening from the plan"
+                        onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}
+                        style={delBtn}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Custom options — added charges, one invoice row each. */}
+            {customOptions.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                {customOptions.map((row, idx) => {
+                  const invalid = !row.name || !row.name.trim();
+                  return (
+                    <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                      <input type="text" value={row.name} placeholder="Item name (required)"
+                        onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
+                        style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
+                      <input type="number" min="0" value={row.qty} placeholder="Qty"
+                        onChange={(e) => { const v = e.target.value.replace(/[^0-9]/g, ""); setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: v } : r)); }}
+                        style={{ width: 50, flex: "0 0 auto", border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 4px", fontSize: 12, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                      <div style={amtInputWrap}>
+                        <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
+                        <input type="number" min="0" value={row.amount} placeholder="0.00"
+                          onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value.replace(/[^0-9.]/g, "") } : r))}
+                          style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                      </div>
+                      <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))} style={delBtn}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Delivery fee — rendered as an invoice row once "+ Add Delivery Fee" is
+                clicked (or a fee is already set); × clears and hides it again. */}
+            {showDelivery && (
+              <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
+                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>Non-taxable line on the estimate</div>
+                </div>
+                <div style={amtInputWrap}>
+                  <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
+                  <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
+                    onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                    style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                </div>
+                <button title="Remove the delivery fee"
+                  onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
+                  style={delBtn}>×</button>
+              </div>
+            )}
+
+            {/* Discounts — last rows before the subtotal so the reduction reads clearly. */}
+            {(sel.discounts || []).length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                {(sel.discounts || []).map((row, idx) => (
+                  <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <input type="text" value={row.description || ""} placeholder="Discount description"
+                      onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
+                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
+                    <div style={amtInputWrap}>
+                      <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
+                      <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
+                        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
+                        style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                    </div>
+                    <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Subtotal — pre-tax; tax is address-based and applied on the estimate. */}
+            {C.showPricing && (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", borderTop: "2px solid #E2E8F0", marginTop: 12, paddingTop: 8 }}>
+                <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 800, color: "#1E293B" }}>
+                  Subtotal <span style={{ fontWeight: 600, color: "#94A3B8", fontSize: 10.5 }}>(before tax)</span>
+                </div>
+                <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 13, fontWeight: 800, color: "#1E293B", padding: "6px 8px", boxSizing: "border-box" }}>{fmtMoney2(subtotal)}</div>
+                <div style={actSpacer} />
+              </div>
+            )}
+
+            {/* Add buttons — below the subtotal, invoice-footer style. */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+              <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])} style={dashBtn}>+ Add Custom Option</button>
+              <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>
+              {!showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
+            </div>
+            <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
+              Custom options add charges · discounts reduce the estimate total · delivery is added as a non-taxable line.
+            </div>
+          </div>
             );
           })()}
-
-          {items.filter((i) => i.type === "roughOpening").length > 0 && (
-            <div style={{ marginTop: 14 }}>
-              <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings</div>
-              {items.filter((i) => i.type === "roughOpening").map((ro, idx) => {
-                const dim = roDimensions[ro.id] || "";
-                const invalid = !dim.trim();
-                return (
-                  <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
-                    <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
-                      onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
-                      style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
-                    {C.showPricing && (<>
-                      <div style={{ width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" }}>1</div>
-                      <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" }}>${Number((C.layoutPrices && C.layoutPrices.roughOpening) || 0).toFixed(2)}</div>
-                    </>)}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-            {customOptions.map((row, idx) => {
-              const invalid = !row.name || !row.name.trim();
-              return (
-                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
-                  <input type="text" value={row.name} placeholder="Item name (required)"
-                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
-                    style={{ flex: "1 1 55%", minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
-                  <input type="number" value={row.qty} placeholder="Qty"
-                    onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: e.target.value } : r))}
-                    style={{ width: 50, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 6px", fontSize: 12, outline: "none", textAlign: "center" }} />
-                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85 }}>
-                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>$</span>
-                    <input type="number" min="0" value={row.amount} placeholder="0.00"
-                      onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value.replace(/[^0-9.]/g, "") } : r))}
-                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                  </div>
-                  <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}
-                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
-                </div>
-              );
-            })}
-
-            <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])}
-              style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>
-              + Add Custom Option
-            </button>
-            <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-              Custom options are added charges. For a reduction, use <b>+ Add Discount</b> below.
-            </div>
-
-            {/* Discounts — reduce the estimate total; each is applied as a discount in the quote. */}
-            <div style={{ marginTop: 16 }}>
-              {(sel.discounts || []).map((row, idx) => (
-                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
-                  <input type="text" value={row.description || ""} placeholder="Discount description"
-                    onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
-                    style={{ flex: "1 1 55%", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
-                  <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 110 }}>
-                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
-                    <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
-                      onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
-                      style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                  </div>
-                  <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))}
-                    style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
-                </div>
-              ))}
-              <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))}
-                style={{ background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                + Add Discount
-              </button>
-              <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-                Applied as a discount on the estimate total (reduces tax proportionally).
-              </div>
-            </div>
-
-          {/* Delivery fee — last thing in this section (moved up from the submit bar); the
-              optional Rough Openings block sits above it. */}
-          <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ ...S.lbl, fontSize: 11 }}>Delivery fee (optional)</span>
-            <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
-              <span style={{ position: "absolute", left: 8, color: "#94A3B8", fontSize: 13, pointerEvents: "none" }}>$</span>
-              <input type="text" inputMode="decimal" value={sel.deliveryFee || ""}
-                onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                placeholder="0.00"
-                style={{ width: 110, border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 8px 8px 18px", fontSize: 13, fontWeight: 600, color: "#1E293B", boxSizing: "border-box" }} />
-            </div>
-            <span style={{ fontSize: 11, color: "#94A3B8" }}>Added as a non-taxable line on the estimate.</span>
-          </div>
-          </div>
-          )}
         </div>
       )}
 
