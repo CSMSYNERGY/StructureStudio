@@ -526,7 +526,17 @@ Deno.serve(async (req: Request) => {
     // uses the loft count, per-area (sqft_option) uses total loft sqft.
     pushItem(["Loft", "Loft Kit", "Loft Storage"], "loft", "", { count: summary.lofts, optionSqft: Number(summary.loftSqft) || 0 });
   }
-  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem("Ramp", "ramp", "", { count: 1 });
+  // Ramp is priced "each" — bill per ramp (one per door). Accept a numeric count from the
+  // current frontend, or the legacy "yes"/"no" string from an older cached build.
+  const rampCount = (() => {
+    const v = summary.ramp;
+    if (typeof v === "number") return v > 0 ? v : 0;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "yes") return 1;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
+  if (rampCount > 0) pushItem("Ramp", "ramp", "", { count: rampCount });
 
   // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
   // owner can charge their own price; no hardcoded amount). One line per placed RO at that
@@ -581,7 +591,7 @@ Deno.serve(async (req: Request) => {
     if (summary.windows > 0) placedKeys.add("window");
     if (summary.lofts > 0) placedKeys.add("loft");
     if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) placedKeys.add("workbench");
-    if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") placedKeys.add("ramp");
+    if (rampCount > 0) placedKeys.add("ramp");
     if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();

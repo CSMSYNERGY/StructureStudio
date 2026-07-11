@@ -378,9 +378,9 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const buildingPerimeter = 2 * (bW + bL);
   const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
 
-  // Roll placed items into counts + per-measure quantities (ramp is boolean in the
-  // estimate — one line regardless of how many are placed).
-  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0, rampPresent = false;
+  // Roll placed items into counts + per-measure quantities. Ramp is priced "each" like
+  // doors/windows — its qty is the number of ramps placed (one per door).
+  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0, ramps = 0;
   const workbenchFt = [];
   for (const it of items) {
     if (it.type === "singleDoor") singleDoors++;
@@ -388,7 +388,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     else if (it.type === "window") windows++;
     else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
     else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
-    else if (it.type === "ramp") rampPresent = true;
+    else if (it.type === "ramp") ramps++;
   }
   loftSqft = Math.round(loftSqft);
   const totalWorkbenchFt = workbenchFt.reduce((s, f) => s + f, 0);
@@ -398,7 +398,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     window:     { count: windows },
     workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
     loft:       { count: lofts, optionSqft: loftSqft },
-    ramp:       { count: rampPresent ? 1 : 0 },
+    ramp:       { count: ramps },
   };
 
   const lineFor = (rate, method, m) => {
@@ -1985,7 +1985,7 @@ function StructureStudioInner({ config }) {
           }),
           lofts: items.filter((i) => i.type === "loft").length,
           loftSqft: Math.round(items.filter((i) => i.type === "loft").reduce((s, i) => s + (i.widthFt || 0) * (i.heightFt || 0), 0)),
-          ramp: items.filter((i) => i.type === "ramp").length > 0 ? "yes" : "no",
+          ramp: items.filter((i) => i.type === "ramp").length,   // count — ramp is priced "each" (one per door)
           lines: items.filter((i) => i.type === "line").length,
           notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
         },
@@ -2990,10 +2990,9 @@ function StructureStudioInner({ config }) {
                       onClick={() => {
                         // "each"-priced items step down one at a time (when several are
                         // placed, the plan asks which one); everything else clears the line
-                        // and removes all of that type from the layout. Ramp is billed as a
-                        // single flat line regardless of count, so its × clears all ramps.
+                        // and removes all of that type from the layout.
                         const placed = items.filter((i) => i.type === r.key);
-                        if (r.method === "each" && r.key !== "ramp" && placed.length > 1) {
+                        if (r.method === "each" && placed.length > 1) {
                           setPendingRemoval({ type: r.key });
                           setSelectedId(null); setActiveTool(null);
                           setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }, 0);
@@ -3012,14 +3011,13 @@ function StructureStudioInner({ config }) {
 
             {roList.length > 0 && (
               <div style={{ marginTop: 14 }}>
-                <div style={{ ...S.lbl, marginBottom: 8 }}>Rough Openings</div>
                 {roList.map((ro, idx) => {
                   const dim = roDimensions[ro.id] || "";
                   const invalid = !dim.trim();
                   return (
                     <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                       <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
-                      <input type="text" value={dim} placeholder='e.g. 3 x 6 or 29⅞ × 34½"'
+                      <input type="text" value={dim} placeholder='Enter Rough Opening size: e.g. 3 x 6 or 29⅞ × 34½"'
                         onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
                         style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
                       {C.showPricing && (<>
