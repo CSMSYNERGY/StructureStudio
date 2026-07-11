@@ -623,7 +623,12 @@ Deno.serve(async (req: Request) => {
     const applied = Math.min(bakedCredit, buildingPrice);
     creditOverflow = Math.round((bakedCredit - applied) * 100) / 100;
     buildingLine.amount = Math.round((buildingPrice - applied) * 100) / 100;
-    buildingLine.description = [`Original building price: $${buildingPrice.toFixed(2)}`, ...creditNotes].join("\n");
+    // GHL renders the line description as HTML and collapses plain-text "\n" into one paragraph
+    // (same as termsNotes below), so escape each line and join with <br> to keep the requested
+    // one-per-line layout: original price first, then one line per declined item.
+    const escLine = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    buildingLine.description = [`Original building price: $${buildingPrice.toFixed(2)}`, ...creditNotes]
+      .map(escLine).join("<br>");
   }
 
   // "+ Add Discount" rows — a reduction with a reason. Each shows as a $0 line naming it (so the
