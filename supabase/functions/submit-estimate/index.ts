@@ -429,12 +429,18 @@ Deno.serve(async (req: Request) => {
     // Measured item (loft = sq ft, workbench = ft) charged only on the amount BEYOND its inclusion:
     // the GHL qty cell shows the BILLABLE measure (chargeable), so spell out the full calc in the
     // description — total placed, included in the base price, and billable — matching the designer's
-    // "N sq ft included" note. Appended if the caller already passed a description.
+    // "N sq ft included" note. GHL renders the description as HTML and collapses plain-text wraps, so
+    // join each part with <br> (like the building line) to force one fact per line. Appended if the
+    // caller already passed a description.
     let desc = description;
     if (includedQty > 0 && (method === "sqft_option" || method === "lineal_ft")) {
       const u = method === "sqft_option" ? "sq ft" : "ft";
-      const breakdown = `${placed} ${u} placed · ${includedQty} ${u} included in base price · ${chargeable} ${u} billable @ $${(Number(rate) || 0).toFixed(2)}/${u}`;
-      desc = desc ? `${desc} — ${breakdown}` : breakdown;
+      const breakdown = [
+        `${placed} ${u} placed`,
+        `${includedQty} ${u} included in base price`,
+        `${chargeable} ${u} billable @ $${(Number(rate) || 0).toFixed(2)}/${u}`,
+      ].join("<br>");
+      desc = desc ? `${desc}<br>${breakdown}` : breakdown;
     }
 
     const item = {
