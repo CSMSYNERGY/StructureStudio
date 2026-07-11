@@ -2932,10 +2932,10 @@ function StructureStudioInner({ config }) {
                     onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
                     style={{ flex: "1 1 55%", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
                   <div style={{ display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 110 }}>
-                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2 }}>−$</span>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
                     <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
                       onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
-                      style={{ width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                      style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
                   </div>
                   <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))}
                     style={{ background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 }}>×</button>
