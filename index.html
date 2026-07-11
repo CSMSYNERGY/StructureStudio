@@ -2794,6 +2794,19 @@ function StructureStudioInner({ config }) {
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <span style={{ ...S.lbl, fontSize: 10, whiteSpace: "nowrap" }}>Search for address</span>
               <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "stretch", boxSizing: "border-box" }} />
+              {(() => {
+                // Open Google Maps directly to the address typed in the fields below. Built from the
+                // customer's own street/city/state/zip; disabled until at least one is filled.
+                const addr = [contact.street, contact.city, contact.state, contact.zip].map((s) => (s || "").trim()).filter(Boolean).join(", ");
+                return (
+                  <button type="button" disabled={!addr}
+                    onClick={() => { if (addr) window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`, "_blank", "noopener,noreferrer"); }}
+                    title={addr ? "Open this address in Google Maps" : "Enter an address below first"}
+                    style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE", flexShrink: 0, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4, opacity: addr ? 1 : 0.5, cursor: addr ? "pointer" : "not-allowed" }}>
+                    📍 View Property
+                  </button>
+                );
+              })()}
             </div>
           )}
           {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
