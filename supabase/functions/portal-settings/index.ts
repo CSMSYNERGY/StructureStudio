@@ -172,7 +172,7 @@ Deno.serve(async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);
@@ -191,6 +191,7 @@ Deno.serve(async (req: Request) => {
       hasApiKey: Boolean(data?.ghl_api_key),
       ghlPipelineId: data?.ghl_pipeline_id ?? null,
       ghlStageSendQuoteId: data?.ghl_stage_send_quote_id ?? null,
+      ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
       businessWebsite: data?.business_website ?? null,
@@ -222,6 +223,7 @@ Deno.serve(async (req: Request) => {
     if ("ghlLocationId" in payload) updates.ghl_location_id = trimOrNull(payload.ghlLocationId);
     if ("ghlPipelineId" in payload) updates.ghl_pipeline_id = trimOrNull(payload.ghlPipelineId);
     if ("ghlStageSendQuoteId" in payload) updates.ghl_stage_send_quote_id = trimOrNull(payload.ghlStageSendQuoteId);
+    if ("ghlStageDeliveredId" in payload) updates.ghl_stage_delivered_id = trimOrNull(payload.ghlStageDeliveredId);
     if ("businessName" in payload) updates.business_name = trimOrNull(payload.businessName);
     if ("businessPhone" in payload) updates.business_phone = trimOrNull(payload.businessPhone);
     if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite);
@@ -440,6 +442,7 @@ Deno.serve(async (req: Request) => {
     };
     if ("ghlPipelineId" in payload) updates.ghl_pipeline_id = trim(payload.ghlPipelineId) || null;
     if ("ghlStageSendQuoteId" in payload) updates.ghl_stage_send_quote_id = trim(payload.ghlStageSendQuoteId) || null;
+    if ("ghlStageDeliveredId" in payload) updates.ghl_stage_delivered_id = trim(payload.ghlStageDeliveredId) || null;
     const { error: upErr } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
     if (upErr) return json({ error: `Verified, but the save failed: ${upErr.message}` }, 500);
 

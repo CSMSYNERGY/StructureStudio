@@ -226,6 +226,15 @@ function ShareLinkCard({ clientId }) {
 }
 
 // ─── Designs table ───
+// Fulfillment status (read-only badge). Value is a GHL-derived projection cached on
+// designs.status and refreshed by the sync-design-status edge function on load.
+const STATUS_LABELS = { sent: "Sent", accepted: "Accepted", invoiced: "Invoiced", delivered: "Delivered" };
+const STATUS_COLORS = {
+  sent:      { bg: "#EEF2FF", fg: "#3D3672" },
+  accepted:  { bg: "#F0FDF4", fg: "#15803D" },
+  invoiced:  { bg: "#FFFBEB", fg: "#B45309" },
+  delivered: { bg: "#ECFEFF", fg: "#0E7490" },
+};
 function DesignsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
@@ -240,7 +249,17 @@ function DesignsTable({ clientId }) {
       .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
-    setRows(data || []);
+    const list = data || [];
+    setRows(list); // show cached statuses immediately
+    // Refresh fulfillment status from GHL (read-only projection). Non-fatal: if the sync
+    // errors or GHL isn't configured, the cached designs.status values above stay shown.
+    if (list.length > 0) {
+      try {
+        const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
+        const statuses = sync && sync.statuses;
+        if (statuses) setRows((rs) => (rs || []).map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r));
+      } catch (_e) { /* keep cached statuses */ }
+    }
     // Version history (newest first), grouped by design. Owner-scoped by RLS.
     const { data: vdata } = await sb
       .from("design_versions")
@@ -270,7 +289,7 @@ function DesignsTable({ clientId }) {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
               <th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Contact</th>
-              <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Actions</th>
+              <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
               {rows.map((r) => {
@@ -299,6 +318,7 @@ function DesignsTable({ clientId }) {
                       )}
                     </td>
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
+                    <td style={S.td}>{(() => { const st = STATUS_LABELS[r.status] ? r.status : "sent"; const c = STATUS_COLORS[st]; return <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>; })()}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
                       {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
@@ -312,6 +332,7 @@ function DesignsTable({ clientId }) {
                         <td style={S.td}></td>
                         <td style={S.td}></td>
                         <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>↳ v{v.version} · {[titleCase(vsel.style), vsel.size].filter(Boolean).join(" ") || "—"}</td>
+                        <td style={S.td}></td>
                         <td style={S.td}></td>
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                           <a href={verUrl(v.version)} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
@@ -345,7 +366,7 @@ function SettingsView() {
   const [ghlBusy, setGhlBusy] = useState(false);
   const [ghlMsg, setGhlMsg] = useState(null);   // { ok } | { err }
   const [form, setForm] = useState({
-    ghlPipelineId: "", ghlStageSendQuoteId: "",
+    ghlPipelineId: "", ghlStageSendQuoteId: "", ghlStageDeliveredId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
@@ -412,6 +433,7 @@ function SettingsView() {
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
+        ghlStageDeliveredId: data.ghlStageDeliveredId || "",
         businessName: data.businessName || "",
         businessPhone: data.businessPhone || "",
         businessWebsite: data.businessWebsite || "",
@@ -460,6 +482,7 @@ function SettingsView() {
       action: "verify_save_ghl",
       ghlPipelineId: form.ghlPipelineId,
       ghlStageSendQuoteId: form.ghlStageSendQuoteId,
+      ghlStageDeliveredId: form.ghlStageDeliveredId,
     };
     if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
     if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
@@ -497,6 +520,8 @@ function SettingsView() {
             <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
           <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
             <input style={S.input} name="ss-ghl-stage-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
+          <div><span style={S.lbl}>"Delivered" Stage ID (optional)</span>
+            <input style={S.input} name="ss-ghl-stage-delivered-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} placeholder="drives the Delivered status badge" /></div>
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
         <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against GoHighLevel and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
