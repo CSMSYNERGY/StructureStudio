@@ -853,7 +853,7 @@ Deno.serve(async (req: Request) => {
     // only this tenant's own validated storage URL is embedded (never a caller-supplied link). GHL
     // renders the description as HTML; if it keeps the <a> the link is clickable, otherwise the URL
     // is at least visible/copyable.
-    const pdfLink = `<a href="${imageUrl}">View floor plan (PDF)</a>`;
+    const pdfLink = `<a href="${imageUrl}" target="_blank" rel="noopener noreferrer">View floor plan (PDF)</a>`;
     buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
