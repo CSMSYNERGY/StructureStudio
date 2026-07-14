@@ -1533,11 +1533,16 @@ function Dashboard({ session }) {
             <div style={{ fontWeight: 800, fontSize: 17, color: "#FFF" }}>{tenant.businessName}</div>
             <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal · {session.user.email}</div>
           </div>
-          <button onClick={signOut} style={{ ...S.btn("rgba(255,255,255,0.1)", "#E2E8F0"), border: "1px solid rgba(255,255,255,0.2)" }}>Sign Out</button>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            <button onClick={signOut} style={{ ...S.btn("rgba(255,255,255,0.1)", "#E2E8F0"), border: "1px solid rgba(255,255,255,0.2)" }}>Sign Out</button>
+            <span onClick={() => setTab("releases")}
+              style={{ fontSize: 12, color: "#94A3B8", cursor: "pointer", textDecoration: "underline", whiteSpace: "nowrap" }}>
+              New features / Bug fixes
+            </span>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 4 }}>
           {tabBtn("designs", "Designs & Leads")}
-          {tabBtn("releases", "What's New")}
           {isAdmin && tabBtn("pricing", "Pricing")}
           {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
           {isAdmin && tabBtn("colors", "Colors")}
