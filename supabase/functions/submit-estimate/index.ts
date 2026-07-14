@@ -848,6 +848,13 @@ Deno.serve(async (req: Request) => {
       type: "application/pdf",
       size: 15000,
     });
+    // Also surface the floor-plan PDF as the FIRST line of the building description — a clickable
+    // link right on the line item, not just an attachment. Reuses the tenant-prefix guard above, so
+    // only this tenant's own validated storage URL is embedded (never a caller-supplied link). GHL
+    // renders the description as HTML; if it keeps the <a> the link is clickable, otherwise the URL
+    // is at least visible/copyable.
+    const pdfLink = `<a href="${imageUrl}">View floor plan (PDF)</a>`;
+    buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
   const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
