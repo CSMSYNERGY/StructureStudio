@@ -1393,6 +1393,82 @@ function ColorsView() {
   );
 }
 
+// ─── What's New: global product changelog (read-only; team-populated) ───
+function ReleasesView() {
+  const [rows, setRows] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error: err } = await sb
+        .from("release_notes")
+        .select("id, released_at, version, kind, title, detail, status, sort_order")
+        .order("released_at", { ascending: false })
+        .order("sort_order", { ascending: false });
+      if (err) { setError(err.message); setRows([]); return; }
+      setRows(data || []);
+    })();
+  }, []);
+
+  const fmtDT = (iso) => {
+    if (!iso) return "";
+    try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch { return iso; }
+  };
+
+  if (error) return <div style={S.err}>Couldn't load updates: {error}</div>;
+  if (rows === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>;
+
+  const features = rows.filter((r) => r.kind === "feature");
+  const fixes = rows.filter((r) => r.kind === "fix");
+  const requested = rows.filter((r) => r.kind === "requested");
+
+  const statusBadge = (status) => {
+    const map = {
+      roadmap:   { bg: "#EEF2FF", fg: "#4F46E5", label: "On the roadmap" },
+      planned:   { bg: "#EEF2FF", fg: "#4F46E5", label: "Planned" },
+      requested: { bg: "#FEF3C7", fg: "#B45309", label: "Requested" },
+    };
+    const m = map[status]; if (!m) return null;
+    return <span style={{ background: m.bg, color: m.fg, fontSize: 10, fontWeight: 800, borderRadius: 999, padding: "2px 8px", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>{m.label}</span>;
+  };
+
+  const entry = (r) => (
+    <div key={r.id} style={{ padding: "12px 0", borderBottom: "1px solid #F1F5F9" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{r.title}</span>
+        {statusBadge(r.status)}
+        <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", whiteSpace: "nowrap" }}>{fmtDT(r.released_at)}</span>
+      </div>
+      {r.detail && <div style={{ fontSize: 13, color: "#475569", marginTop: 4, lineHeight: 1.5 }}>{r.detail}</div>}
+    </div>
+  );
+
+  const section = (label, dot, list) => list.length === 0 ? null : (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <span style={{ width: 10, height: 10, borderRadius: 3, background: dot, flexShrink: 0 }} />
+        <span style={{ ...S.h2, marginBottom: 0 }}>{label}</span>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>({list.length})</span>
+      </div>
+      {list.map(entry)}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ ...S.card, background: "linear-gradient(135deg,#3D3672 0%,#1B7895 100%)", color: "#FFF", border: "none" }}>
+        <div style={{ fontSize: 18, fontWeight: 800 }}>What's New</div>
+        <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Updates as they ship to your portal — try them out and send us feedback.</div>
+      </div>
+      {rows.length === 0 && <div style={{ ...S.card, color: "#64748B" }}>No updates yet — check back soon.</div>}
+      {section("New Features", "#10B981", features)}
+      {section("Bug Fixes", "#F59E0B", fixes)}
+      {section("Requested / Roadmap", "#6366F1", requested)}
+    </div>
+  );
+}
+
 // ─── Dashboard shell ───
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
@@ -1438,7 +1514,8 @@ function Dashboard({ session }) {
   // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
   // can't reach the other views even by forcing the tab state).
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
-  const activeTab = (!isAdmin && tab !== "designs") ? "designs" : tab;
+  // Non-admins are confined to the designs list, plus the read-only "What's New" tab (product news).
+  const activeTab = (!isAdmin && tab !== "designs" && tab !== "releases") ? "designs" : tab;
 
   const tabBtn = (id, label) => (
     <button onClick={() => setTab(id)} style={{
@@ -1460,6 +1537,7 @@ function Dashboard({ session }) {
         </div>
         <div style={{ display: "flex", gap: 4 }}>
           {tabBtn("designs", "Designs & Leads")}
+          {tabBtn("releases", "What's New")}
           {isAdmin && tabBtn("pricing", "Pricing")}
           {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
           {isAdmin && tabBtn("colors", "Colors")}
@@ -1468,6 +1546,7 @@ function Dashboard({ session }) {
       </div>
       <div style={{ padding: "20px 24px" }}>
         {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
+        {activeTab === "releases" && <ReleasesView />}
         {activeTab === "pricing" && isAdmin && <PricingCsv />}
         {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
         {activeTab === "colors" && isAdmin && <ColorsView />}
