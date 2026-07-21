@@ -365,6 +365,12 @@ function SettingsView() {
   const [ghlApiKey, setGhlApiKey] = useState("");
   const [ghlBusy, setGhlBusy] = useState(false);
   const [ghlMsg, setGhlMsg] = useState(null);   // { ok } | { err }
+  // Synergy/GHL pipelines + stages for the (post-connect) dropdowns. Fetched via
+  // the edge fn using the stored key — the browser never holds it.
+  const [pipelines, setPipelines] = useState([]);   // [{id,name,stages:[{id,name}]}]
+  const [pipesBusy, setPipesBusy] = useState(false);   // loading pipelines
+  const [pipesSaving, setPipesSaving] = useState(false);
+  const [pipesMsg, setPipesMsg] = useState(null);   // { ok } | { err }
   const [form, setForm] = useState({
     ghlPipelineId: "", ghlStageSendQuoteId: "", ghlStageDeliveredId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
@@ -427,6 +433,7 @@ function SettingsView() {
       if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
       if (!data) { setError("Couldn't load settings (empty response). Please refresh."); return; }
       setStatus(data);
+      if (data.configured) loadPipelines();   // connected → populate the pipeline/stage dropdowns
       const a = data.businessAddress || {};
       const b = data.branding || {};
       setCurrentLogo(b.logoUrl || null);
@@ -478,12 +485,9 @@ function SettingsView() {
   // fail) or no products (line items unpriced).
   const saveGhl = async () => {
     setGhlMsg(null); setGhlBusy(true);
-    const body = {
-      action: "verify_save_ghl",
-      ghlPipelineId: form.ghlPipelineId,
-      ghlStageSendQuoteId: form.ghlStageSendQuoteId,
-      ghlStageDeliveredId: form.ghlStageDeliveredId,
-    };
+    // Connection step handles credentials only; pipeline + stages are configured
+    // in the "Pipeline & Stages" card that appears once connected.
+    const body = { action: "verify_save_ghl" };
     if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
     if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
@@ -493,6 +497,51 @@ function SettingsView() {
     setGhlApiKey(""); setGhlLocationId("");
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
+    loadPipelines();   // now connected → load pipelines/stages for the dropdowns
+  };
+
+  // Fetch this tenant's Synergy/GHL pipelines + stages (server-side, using the
+  // stored key) to populate the dropdowns. Re-run by the "Refresh" button.
+  const loadPipelines = async () => {
+    setPipesBusy(true); setPipesMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "list_ghl_pipelines" } });
+    setPipesBusy(false);
+    if (err || (data && data.error)) { setPipesMsg({ err: (data && data.error) || (err && err.message) || "Couldn't load pipelines." }); return; }
+    setPipelines(Array.isArray(data.pipelines) ? data.pipelines : []);
+  };
+
+  // Save just the pipeline + stage selection (no re-verify of credentials).
+  const savePipelines = async () => {
+    setPipesSaving(true); setPipesMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "save",
+        ghlPipelineId: form.ghlPipelineId,
+        ghlStageSendQuoteId: form.ghlStageSendQuoteId,
+        ghlStageDeliveredId: form.ghlStageDeliveredId,
+      },
+    });
+    setPipesSaving(false);
+    if (err || (data && data.error)) { setPipesMsg({ err: (data && data.error) || (err && err.message) || "Save failed." }); return; }
+    setPipesMsg({ ok: "Pipeline & stages saved." });
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // Selected pipeline + its stages drive the stage dropdowns. Changing pipeline
+  // clears any stage selection that doesn't belong to the newly chosen pipeline.
+  const selectedPipeline = pipelines.find((p) => p.id === form.ghlPipelineId) || null;
+  const stageOptions = selectedPipeline ? selectedPipeline.stages : [];
+  const onPipelineChange = (e) => {
+    const pid = e.target.value;
+    const p = pipelines.find((x) => x.id === pid);
+    const ids = new Set((p ? p.stages : []).map((s) => s.id));
+    setForm((prev) => ({
+      ...prev,
+      ghlPipelineId: pid,
+      ghlStageSendQuoteId: ids.has(prev.ghlStageSendQuoteId) ? prev.ghlStageSendQuoteId : "",
+      ghlStageDeliveredId: ids.has(prev.ghlStageDeliveredId) ? prev.ghlStageDeliveredId : "",
+    }));
   };
 
   if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
@@ -516,16 +565,59 @@ function SettingsView() {
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
           <div><span style={S.lbl}>Synergy/GHL API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
-          <div><span style={S.lbl}>Pipeline ID (optional)</span>
-            <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
-          <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
-            <input style={S.input} name="ss-ghl-stage-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
-          <div><span style={S.lbl}>"Delivered" Stage ID (optional)</span>
-            <input style={S.input} name="ss-ghl-stage-delivered-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} placeholder="drives the Delivered status badge" /></div>
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against Synergy/GHL and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against Synergy/GHL and saves only if they work. Once connected, choose your pipeline &amp; stages below.</div>
       </div>
+
+      {status && status.configured && (
+        <div style={S.card}>
+          <div style={S.h2}>Pipeline &amp; Stages</div>
+          <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+            Choose where StructureStudio places each deal in your Synergy/GHL pipeline. When an estimate is
+            sent, the opportunity moves to your <b>"Send Quote"</b> stage; when a build is delivered it moves to
+            your <b>"Delivered"</b> stage (which drives the <b>Delivered</b> badge in your Designs &amp; Leads list).
+            All optional — leave any blank to skip that automation.
+          </p>
+          {pipesMsg && pipesMsg.err && <div style={S.err}>{pipesMsg.err}</div>}
+          {pipesMsg && pipesMsg.ok && <div style={S.okMsg}>{pipesMsg.ok}</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            <button type="button" onClick={loadPipelines} disabled={pipesBusy} style={{ ...S.btn("#FFFFFF", ACCENT), border: `1px solid ${ACCENT}`, opacity: pipesBusy ? 0.6 : 1 }}>
+              {pipesBusy ? "Refreshing…" : "↻ Refresh from Synergy/GHL"}
+            </button>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>Pulls the latest pipelines &amp; stages from your connected account.</span>
+          </div>
+          {!pipesBusy && pipelines.length === 0 && !(pipesMsg && pipesMsg.err) && (
+            <p style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>No pipelines loaded yet — click Refresh (or this location has none).</p>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+            <div><span style={S.lbl}>Pipeline</span>
+              <select style={S.input} value={form.ghlPipelineId} onChange={onPipelineChange}>
+                <option value="">— None (skip pipeline automation) —</option>
+                {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                {form.ghlPipelineId && !pipelines.some((p) => p.id === form.ghlPipelineId) &&
+                  <option value={form.ghlPipelineId}>saved: {form.ghlPipelineId} (refresh to update)</option>}
+              </select></div>
+            <div><span style={S.lbl}>"Send Quote" stage</span>
+              <select style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} disabled={!form.ghlPipelineId}>
+                <option value="">— None —</option>
+                {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {form.ghlStageSendQuoteId && !stageOptions.some((s) => s.id === form.ghlStageSendQuoteId) &&
+                  <option value={form.ghlStageSendQuoteId}>saved: {form.ghlStageSendQuoteId}</option>}
+              </select></div>
+            <div><span style={S.lbl}>"Delivered" stage</span>
+              <select style={S.input} value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} disabled={!form.ghlPipelineId}>
+                <option value="">— None —</option>
+                {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {form.ghlStageDeliveredId && !stageOptions.some((s) => s.id === form.ghlStageDeliveredId) &&
+                  <option value={form.ghlStageDeliveredId}>saved: {form.ghlStageDeliveredId}</option>}
+              </select></div>
+          </div>
+          <button type="button" onClick={savePipelines} disabled={pipesSaving} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: pipesSaving ? 0.6 : 1 }}>
+            {pipesSaving ? "Saving…" : "Save Pipeline & Stages"}
+          </button>
+        </div>
+      )}
 
       <div style={S.card}>
         <div style={S.h2}>Designer Branding (your customer link)</div>

@@ -455,6 +455,49 @@ Deno.serve(async (req: Request) => {
     return json({ ok: true, verified: true, ghlLocationIdMasked: maskId(locationId), hasUsers, hasProducts, warning });
   }
 
+  // List this tenant's GoHighLevel pipelines + their stages, for the portal's
+  // pipeline/stage dropdowns. Uses the STORED creds (the browser never holds the
+  // API key), so it only works once the connection is saved. Owner/admin only
+  // (settings config) — deliberately NOT in READ_ACTIONS. Never returns the key.
+  if (action === "list_ghl_pipelines") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings")
+      .select("ghl_location_id, ghl_api_key")
+      .eq("client_id", clientId)
+      .maybeSingle();
+    if (curErr) return json({ error: curErr.message }, 500);
+    const locationId = cur?.ghl_location_id ?? "";
+    const apiKey = cur?.ghl_api_key ?? "";
+    if (!locationId || !apiKey) {
+      return json({ error: "Connect Synergy/GHL first (save a Location ID + API key), then load pipelines." }, 400);
+    }
+    const ghlHeaders = {
+      "Version": "2021-07-28",
+      "Authorization": `Bearer ${apiKey}`,
+      "Accept": "application/json",
+    };
+    let r: Response;
+    try {
+      r = await fetch(`https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
+    } catch (e) {
+      return json({ error: `Couldn't reach GoHighLevel: ${(e as Error).message}` }, 502);
+    }
+    if (!r.ok) {
+      const body = (await r.text()).slice(0, 300);
+      const hint = (r.status === 401 || r.status === 403)
+        ? "The saved API key may be wrong or expired — re-verify the connection above."
+        : body;
+      return json({ error: `Couldn't load pipelines (HTTP ${r.status}). ${hint}` }, 400);
+    }
+    const data = await r.json().catch(() => ({}));
+    const pipelines = (Array.isArray(data?.pipelines) ? data.pipelines : []).map((p: any) => ({
+      id: p.id,
+      name: p.name ?? p.id,
+      stages: (Array.isArray(p.stages) ? p.stages : []).map((s: any) => ({ id: s.id, name: s.name ?? s.id })),
+    }));
+    return json({ ok: true, pipelines });
+  }
+
   // Create a building style for THIS tenant (clientId is JWT-resolved, never from the
   // body) so owners can self-serve styles before pricing. An optional base64 image is
   // uploaded to the public 'branding' bucket. Key allocation mirrors admin-catalog's
