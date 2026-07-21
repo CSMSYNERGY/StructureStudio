@@ -1,0 +1,45 @@
+# .github/workflows/merge-beta-to-main.yml
+#
+# Automatically merges the beta branch into main every Monday.
+# Runs on GitHub's servers - no computer or app needs to be open.
+#
+# Timing note: GitHub Actions cron is UTC-only and cannot use a timezone,
+# so the local run time shifts by an hour across daylight-saving changes.
+# 13:00 UTC = 9:00 AM US Eastern (summer) / 8:00 AM (winter).
+# Adjust the cron below to whatever suits you (https://crontab.guru helps).
+
+name: Weekly merge beta into main
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"   # 13:00 UTC every Monday
+  workflow_dispatch: {}      # also lets you run it on demand from the Actions tab
+
+# Avoid two runs overlapping if one is slow.
+concurrency:
+  group: merge-beta-into-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  merge-beta-into-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge beta into main
+        run: |
+          git fetch origin beta:beta
+          git merge --no-ff beta -m "chore: weekly auto-merge of beta into main"
+          git push origin main
