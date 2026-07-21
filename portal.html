@@ -503,18 +503,18 @@ function SettingsView() {
       {saved && <div style={S.okMsg}>Settings saved.</div>}
 
       <div style={S.card}>
-        <div style={S.h2}>GoHighLevel Connection</div>
+        <div style={S.h2}>Synergy/GHL Connection</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected yet. Estimates can't be sent until a GHL Location ID and API key are saved.</>}
+            : <>Not connected yet. Estimates can't be sent until a Synergy/GHL Location ID and API key are saved.</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-          <div><span style={S.lbl}>GHL Location ID</span>
+          <div><span style={S.lbl}>Synergy/GHL Location ID</span>
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
-          <div><span style={S.lbl}>GHL API Key</span>
+          <div><span style={S.lbl}>Synergy/GHL API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
           <div><span style={S.lbl}>Pipeline ID (optional)</span>
             <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
@@ -524,7 +524,7 @@ function SettingsView() {
             <input style={S.input} name="ss-ghl-stage-delivered-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} placeholder="drives the Delivered status badge" /></div>
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against GoHighLevel and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against Synergy/GHL and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
       </div>
 
       <div style={S.card}>
@@ -897,7 +897,7 @@ function PricingCsv() {
                       ? <img src={s.image_url} alt="" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
-                    <label title="Attach this style's photo to the GHL estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                    <label title="Attach this style's photo to the Synergy/GHL estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
                     </label>
@@ -1082,7 +1082,7 @@ function LayoutPricing() {
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
           <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
           <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
-          These rates are used on estimates when you don’t price through GoHighLevel products. Building sizes are priced on the <b>Pricing</b> tab.
+          These rates are used on estimates when you don’t price through Synergy/GHL products. Building sizes are priced on the <b>Pricing</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
