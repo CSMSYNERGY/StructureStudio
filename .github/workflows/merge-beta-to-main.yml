@@ -1,21 +1,25 @@
 # .github/workflows/merge-beta-to-main.yml
 #
-# Automatically merges the beta branch into main every Monday.
-# Runs on GitHub's servers - no computer or app needs to be open.
+# Every Monday: merge beta into main. The merge ALWAYS completes.
+# On conflict, beta's version wins and the conflicted files are listed
+# in the monday.com report so nothing is silently overwritten.
+# Runs on GitHub's servers - nothing needs to be open on your computer.
 #
-# Timing note: GitHub Actions cron is UTC-only and cannot use a timezone,
-# so the local run time shifts by an hour across daylight-saving changes.
-# 13:00 UTC = 9:00 AM US Eastern (summer) / 8:00 AM (winter).
-# Adjust the cron below to whatever suits you (https://crontab.guru helps).
+# Cron is UTC-only (no timezone). 13:00 UTC = 9am US Eastern (summer)
+# / 8am (winter). Edit the cron to taste (https://crontab.guru).
+#
+# Reporting: posts an update to the "StructureStudio" item on the
+# monday.com "Projects (Repos)" board after every run. Requires a repo
+# secret named MONDAY_API_TOKEN (a monday personal API token). If that
+# secret is missing, the merge still runs and only the report is skipped.
 
 name: Weekly merge beta into main
 
 on:
   schedule:
     - cron: "0 13 * * 1"   # 13:00 UTC every Monday
-  workflow_dispatch: {}      # also lets you run it on demand from the Actions tab
+  workflow_dispatch: {}      # also runnable on demand from the Actions tab
 
-# Avoid two runs overlapping if one is slow.
 concurrency:
   group: merge-beta-into-main
   cancel-in-progress: false
@@ -23,9 +27,14 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  MONDAY_ITEM_ID: "12385631316"   # StructureStudio row on "Projects (Repos)"
+
 jobs:
   merge-beta-into-main:
     runs-on: ubuntu-latest
+    env:
+      MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
@@ -38,8 +47,84 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge beta into main
+      - name: Merge beta into main (auto-resolve, beta wins)
+        id: merge
         run: |
+          set -euo pipefail
           git fetch origin beta:beta
-          git merge --no-ff beta -m "chore: weekly auto-merge of beta into main"
+
+          COMMITS="$(git log --oneline --no-decorate main..beta | head -50)"
+          if [ -z "$COMMITS" ]; then
+            COMMITS="(nothing new on beta this week)"
+          fi
+
+          RESULT="clean"
+          CONFLICTS=""
+
+          if git merge --no-ff beta -m "chore: weekly auto-merge of beta into main"; then
+            RESULT="clean"
+          else
+            CONFLICTS="$(git diff --name-only --diff-filter=U | sort -u)"
+            git merge --abort
+            if git merge --no-ff -X theirs beta -m "chore: weekly auto-merge of beta into main (conflicts auto-resolved, beta won)"; then
+              RESULT="conflicts-resolved"
+            else
+              git checkout --theirs -- . 2>/dev/null || true
+              git add -A
+              git commit -m "chore: weekly auto-merge of beta into main (conflicts force-resolved, beta won)"
+              RESULT="conflicts-force-resolved"
+            fi
+          fi
+
           git push origin main
+          MERGED_SHA="$(git rev-parse HEAD)"
+
+          {
+            echo "result=$RESULT"
+            echo "merged_sha=$MERGED_SHA"
+            echo "commits<<__EOF__"
+            echo "$COMMITS"
+            echo "__EOF__"
+            echo "conflicts<<__EOF__"
+            echo "$CONFLICTS"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Report to monday.com
+        if: ${{ always() && env.MONDAY_API_TOKEN != '' }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RESULT: ${{ steps.merge.outputs.result }}
+          MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
+          COMMITS: ${{ steps.merge.outputs.commits }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          if [ "$JOB_STATUS" != "success" ]; then
+            HEADER="[FAILED] Beta-&gt;Main merge did not complete"
+          elif [ "$RESULT" = "clean" ]; then
+            HEADER="[OK] Beta-&gt;Main merged cleanly"
+          else
+            HEADER="[CONFLICTS RESOLVED] Beta-&gt;Main merged (beta won)"
+          fi
+
+          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+          BODY="<b>${HEADER}</b><br>${DATE}<br>Repo: ${REPO}<br>Result: ${RESULT:-n/a}<br>Merge commit: ${MERGED_SHA:-n/a}<br><br><b>Commits promoted from beta:</b><br>"
+          BODY="${BODY}$(printf '%s\n' "$COMMITS" | esc | sed 's/$/<br>/')"
+          if [ -n "${CONFLICTS:-}" ]; then
+            BODY="${BODY}<br><b>Files that conflicted (auto-resolved in beta's favor - please review):</b><br>"
+            BODY="${BODY}$(printf '%s\n' "$CONFLICTS" | esc | sed 's/$/<br>/')"
+          fi
+          BODY="${BODY}<br><a href=\"${RUN_URL}\">View the workflow run</a>"
+
+          QUERY='mutation ($item: ID!, $body: String!) { create_update (item_id: $item, body: $body) { id } }'
+          PAYLOAD="$(jq -n --arg q "$QUERY" --arg item "$MONDAY_ITEM_ID" --arg body "$BODY" '{query:$q, variables:{item:$item, body:$body}}')"
+
+          RESP="$(curl -sS https://api.monday.com/v2 -H "Authorization: $MONDAY_API_TOKEN" -H "Content-Type: application/json" -d "$PAYLOAD")"
+          echo "$RESP"
+          echo "$RESP" | jq -e '.data.create_update.id' >/dev/null || { echo "monday.com update failed"; exit 1; }
