@@ -624,6 +624,52 @@ function ColorSelect({ value, colors, onPick }) {
   );
 }
 
+// Lead-capture gate shown BEFORE the designer (the customer link is a lead-gen tool).
+// Collects name + phone and fires a best-effort GHL lead capture (capture-lead edge fn) the
+// moment they continue. Rendered by StructureStudioInner via an early return (not an overlay)
+// when !gatePassed && !isAdmin, so the designer stays out of the DOM until the gate is passed.
+// NOTE: a phone-as-login "find my saved designs" flow was intentionally deferred — it needs
+// SMS/OTP verification, else a low-entropy phone could expose a customer's saved address.
+function LeadGate({ config, supabase, accent, onPass }) {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [busy, setBusy] = useState(false);
+  const digits = phone.replace(/\D/g, "");
+  const valid = name.trim().length > 0 && digits.length === 10;
+  const brand = (config && config.branding) || {};
+  const acc = accent || "#3D3672";
+
+  const start = () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    // Best-effort lead capture to the tenant's GHL — never block entry on it.
+    try { supabase.functions.invoke("capture-lead", { body: { clientId: config.clientId, name: name.trim(), phone } }); } catch (_e) {}
+    onPass({ name: name.trim(), phone });
+  };
+  const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CBD5E1", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 12px" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+        {brand.logo
+          ? <img src={brand.logo} alt={brand.companyName || "logo"} style={{ height: 40, objectFit: "contain", marginBottom: 12 }} />
+          : <div style={{ fontWeight: 800, fontSize: 18, color: acc, marginBottom: 12 }}>{brand.companyName || "Design Studio"}</div>}
+        <div style={{ fontSize: 20, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>Let's design your building</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 18 }}>Enter your name and phone to get started.</div>
+        <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Name</label>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" style={inp} autoFocus />
+        <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Phone</label>
+        <input type="tel" inputMode="tel" value={formatPhoneDisplay(phone)} onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
+          onKeyDown={(e) => e.key === "Enter" && start()} placeholder="(555) 555-5555" style={{ ...inp, margin: "4px 0 16px" }} />
+        <button onClick={start} disabled={!valid || busy}
+          style={{ width: "100%", background: valid && !busy ? acc : "#94A3B8", color: "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: valid && !busy ? "pointer" : "default" }}>
+          {busy ? "Starting…" : "Start Designing →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function StructureStudioInner({ config }) {
   const C = config;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
@@ -709,6 +755,18 @@ function StructureStudioInner({ config }) {
   const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+  // Lead-capture gate: shoppers give name + phone before designing (the customer link is a
+  // lead-gen tool). Bypassed for a returning shopper arriving via a saved-design link (?id=,
+  // which loads their contact), the operator preview (?admin=1), and once remembered in this
+  // browser. See <LeadGate/> rendered at the top of the return.
+  const [gatePassed, setGatePassed] = useState(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      if (params.get("id") || params.get("admin") === "1") return true;
+      if (localStorage.getItem("ss_gate_" + (C.clientId || ""))) return true;
+    } catch (_e) {}
+    return false;
+  });
   // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
   // design overrides this from design.paint_colors on load.
   const [paintColors, setPaintColors] = useState(() => {
@@ -793,6 +851,7 @@ function StructureStudioInner({ config }) {
         setSel((p) => { const n = { ...p }; Object.keys(d).forEach((k) => { if (k !== "type" && k in n) n[k] = d[k]; }); return n; });
         if (d.name || d.phone || d.email) {
           setContact((p) => ({ ...p, name: d.name || p.name, phone: d.phone || p.phone, email: d.email || p.email, street: d.street || p.street, city: d.city || p.city, state: d.state || p.state, zip: d.zip || p.zip }));
+          if (d.name && d.phone) setGatePassed(true);   // host pre-satisfied the lead gate
         }
       }
     };
@@ -2307,6 +2366,20 @@ function StructureStudioInner({ config }) {
   };
 
   // ─── RENDER ───
+  // Hard lead-capture gate: render ONLY the gate until it's passed, so the designer stays
+  // entirely out of the DOM (nothing to Tab/scroll to behind an overlay). Bypassed for the
+  // operator preview (isAdmin), the ?id= reopen flow, and remembered browsers — see the
+  // gatePassed initializer above.
+  if (!gatePassed && !isAdmin) {
+    return (
+      <LeadGate config={C} supabase={supabase} accent={accent}
+        onPass={(info) => {
+          if (info && (info.name || info.phone)) setContact((p) => ({ ...p, name: info.name || p.name, phone: info.phone || p.phone }));
+          try { localStorage.setItem("ss_gate_" + (C.clientId || ""), "1"); } catch (_e) {}
+          setGatePassed(true);
+        }} />
+    );
+  }
   return (
     <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: "100vh" }}>
       {/* Header */}
