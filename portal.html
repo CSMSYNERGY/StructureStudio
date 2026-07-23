@@ -241,10 +241,10 @@ const STATUS_COLORS = {
 function activityInfo(lastActivity) {
   const t = lastActivity ? Date.parse(lastActivity) : NaN;
   if (!t || isNaN(t)) return { color: "#94A3B8", label: "No activity yet" };
-  const days = (Date.now() - t) / 86400000;
-  if (days <= 2)  return { color: "#16A34A", label: "Active recently (within 2 days)" };   // green
-  if (days <= 30) return { color: "#F59E0B", label: "Used within the last 30 days" };       // orange
-  return { color: "#EF4444", label: "Idle for over a month" };                              // red
+  const hours = (Date.now() - t) / 3600000;
+  if (hours <= 10)  return { color: "#16A34A", label: "Active recently (within 10 hours)" }; // green
+  if (hours <= 720) return { color: "#F59E0B", label: "Used within the last 30 days" };      // orange (720h = 30d)
+  return { color: "#EF4444", label: "Idle for over a month" };                               // red
 }
 function DesignsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
