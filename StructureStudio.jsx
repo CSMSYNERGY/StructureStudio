@@ -642,6 +642,7 @@ function LeadGate({ config, supabase, accent, onPass }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <a href="/portal.html" style={{ position: "absolute", top: 14, right: 16, fontSize: 12, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.16)", border: "1px solid rgba(255,255,255,0.32)", borderRadius: 8, padding: "6px 12px", textDecoration: "none" }}>Business Login</a>
       <div style={{ background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
         {brand.logo
           ? <img src={brand.logo} alt={brand.companyName || "logo"} style={{ height: 40, objectFit: "contain", marginBottom: 12 }} />
@@ -2384,6 +2385,7 @@ function StructureStudioInner({ config }) {
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          <a href="/portal.html" style={{ fontSize: 12, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "6px 12px", textDecoration: "none", whiteSpace: "nowrap" }}>Business Login</a>
           <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
         </div>
       </div>

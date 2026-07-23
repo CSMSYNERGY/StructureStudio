@@ -235,6 +235,17 @@ const STATUS_COLORS = {
   invoiced:  { bg: "#FFFBEB", fg: "#B45309" },
   delivered: { bg: "#ECFEFF", fg: "#0E7490" },
 };
+// Lead activity indicator (traffic light) based on the most-recent activity — i.e. the
+// newest design update for that lead. Anon shed-shoppers have no live login/session, so
+// "active" is recency-based, not real-time presence. Thresholds are easy to tune here.
+function activityInfo(lastActivity) {
+  const t = lastActivity ? Date.parse(lastActivity) : NaN;
+  if (!t || isNaN(t)) return { color: "#94A3B8", label: "No activity yet" };
+  const days = (Date.now() - t) / 86400000;
+  if (days <= 2)  return { color: "#16A34A", label: "Active recently (within 2 days)" };   // green
+  if (days <= 30) return { color: "#F59E0B", label: "Used within the last 30 days" };       // orange
+  return { color: "#EF4444", label: "Idle for over a month" };                              // red
+}
 function DesignsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
@@ -409,7 +420,13 @@ function LeadsTable({ clientId }) {
         <div style={{ ...S.h2, marginBottom: 0 }}>Leads {rows ? `(${rows.length})` : ""}</div>
         <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
-      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.</div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.
+        <span style={{ marginLeft: 6, whiteSpace: "nowrap" }}>
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#16A34A", margin: "0 4px 0 6px", verticalAlign: "middle" }} />active
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#F59E0B", margin: "0 4px 0 10px", verticalAlign: "middle" }} />recent
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#EF4444", margin: "0 4px 0 10px", verticalAlign: "middle" }} />idle
+        </span>
+      </div>
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
@@ -428,7 +445,10 @@ function LeadsTable({ clientId }) {
                 const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
                 return (
                   <tr key={g.key}>
-                    <td style={{ ...S.td, fontWeight: 700 }}>{g.name || "—"}</td>
+                    <td style={{ ...S.td, fontWeight: 700 }}>
+                      {(() => { const a = activityInfo(g.lastActivity); return <span title={a.label} style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: a.color, marginRight: 8, verticalAlign: "middle" }} />; })()}
+                      {g.name || "—"}
+                    </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{g.phone || ""}</div>
