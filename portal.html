@@ -471,7 +471,7 @@ function SettingsView() {
   const [pipesSaving, setPipesSaving] = useState(false);
   const [pipesMsg, setPipesMsg] = useState(null);   // { ok } | { err }
   const [form, setForm] = useState({
-    ghlPipelineId: "", ghlStageSendQuoteId: "", ghlStageDeliveredId: "",
+    ghlPipelineId: "", ghlStageSendQuoteId: "", ghlStageDeliveredId: "", ghlPipelineDeliveredId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
@@ -627,20 +627,32 @@ function SettingsView() {
     if (st && !st.error) setStatus(st);
   };
 
-  // Selected pipeline + its stages drive the stage dropdowns. Changing pipeline
-  // clears any stage selection that doesn't belong to the newly chosen pipeline.
+  // "Send Quote" and "Delivered" each get their OWN pipeline, so a tenant can map
+  // them to different pipelines (e.g. Send Quote in "Building", Delivered in
+  // "Invoiced"). The send-quote pipeline is what StructureStudio places the deal
+  // into on submit (persisted as ghl_pipeline_id); the delivered stage is matched
+  // by its (globally-unique) stage id, so only ghl_stage_delivered_id is persisted
+  // — the delivered pipeline is derived here purely to scope its stage dropdown.
   const selectedPipeline = pipelines.find((p) => p.id === form.ghlPipelineId) || null;
   const stageOptions = selectedPipeline ? selectedPipeline.stages : [];
+  // Delivered pipeline: explicit UI choice, else the pipeline that owns the saved
+  // delivered stage, else fall back to the send-quote pipeline (legacy single-pipeline configs).
+  const deliveredPipelineId = form.ghlPipelineDeliveredId
+    || (pipelines.find((p) => (p.stages || []).some((s) => s.id === form.ghlStageDeliveredId)) || {}).id
+    || form.ghlPipelineId;
+  const deliveredPipeline = pipelines.find((p) => p.id === deliveredPipelineId) || null;
+  const deliveredStageOptions = deliveredPipeline ? deliveredPipeline.stages : [];
   const onPipelineChange = (e) => {
     const pid = e.target.value;
-    const p = pipelines.find((x) => x.id === pid);
-    const ids = new Set((p ? p.stages : []).map((s) => s.id));
-    setForm((prev) => ({
-      ...prev,
-      ghlPipelineId: pid,
-      ghlStageSendQuoteId: ids.has(prev.ghlStageSendQuoteId) ? prev.ghlStageSendQuoteId : "",
-      ghlStageDeliveredId: ids.has(prev.ghlStageDeliveredId) ? prev.ghlStageDeliveredId : "",
-    }));
+    const ids = new Set(((pipelines.find((x) => x.id === pid) || {}).stages || []).map((s) => s.id));
+    setForm((prev) => ({ ...prev, ghlPipelineId: pid,
+      ghlStageSendQuoteId: ids.has(prev.ghlStageSendQuoteId) ? prev.ghlStageSendQuoteId : "" }));
+  };
+  const onDeliveredPipelineChange = (e) => {
+    const pid = e.target.value;
+    const ids = new Set(((pipelines.find((x) => x.id === pid) || {}).stages || []).map((s) => s.id));
+    setForm((prev) => ({ ...prev, ghlPipelineDeliveredId: pid,
+      ghlStageDeliveredId: ids.has(prev.ghlStageDeliveredId) ? prev.ghlStageDeliveredId : "" }));
   };
 
   if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
@@ -673,10 +685,11 @@ function SettingsView() {
         <div style={S.card}>
           <div style={S.h2}>Pipeline &amp; Stages</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
-            Choose where StructureStudio places each deal in your Synergy/GHL pipeline. When an estimate is
+            Choose where StructureStudio places each deal in your Synergy/GHL pipelines. When an estimate is
             sent, the opportunity moves to your <b>"Send Quote"</b> stage; when a build is delivered it moves to
-            your <b>"Delivered"</b> stage (which drives the <b>Delivered</b> badge in your Designs &amp; Leads list).
-            All optional — leave any blank to skip that automation.
+            your <b>"Delivered"</b> stage (which drives the <b>Delivered</b> badge in your Leads list). Each can
+            live in a <b>different pipeline</b> — e.g. Send Quote in "Building", Delivered in "Invoiced". All
+            optional — leave any blank to skip that automation.
           </p>
           {pipesMsg && pipesMsg.err && <div style={S.err}>{pipesMsg.err}</div>}
           {pipesMsg && pipesMsg.ok && <div style={S.okMsg}>{pipesMsg.ok}</div>}
@@ -689,28 +702,45 @@ function SettingsView() {
           {!pipesBusy && pipelines.length === 0 && !(pipesMsg && pipesMsg.err) && (
             <p style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>No pipelines loaded yet — click Refresh (or this location has none).</p>
           )}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <div><span style={S.lbl}>Pipeline</span>
-              <select style={S.input} value={form.ghlPipelineId} onChange={onPipelineChange}>
-                <option value="">— None (skip pipeline automation) —</option>
-                {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                {form.ghlPipelineId && !pipelines.some((p) => p.id === form.ghlPipelineId) &&
-                  <option value={form.ghlPipelineId}>saved: {form.ghlPipelineId} (refresh to update)</option>}
-              </select></div>
-            <div><span style={S.lbl}>"Send Quote" stage</span>
-              <select style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} disabled={!form.ghlPipelineId}>
-                <option value="">— None —</option>
-                {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                {form.ghlStageSendQuoteId && !stageOptions.some((s) => s.id === form.ghlStageSendQuoteId) &&
-                  <option value={form.ghlStageSendQuoteId}>saved: {form.ghlStageSendQuoteId}</option>}
-              </select></div>
-            <div><span style={S.lbl}>"Delivered" stage</span>
-              <select style={S.input} value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} disabled={!form.ghlPipelineId}>
-                <option value="">— None —</option>
-                {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                {form.ghlStageDeliveredId && !stageOptions.some((s) => s.id === form.ghlStageDeliveredId) &&
-                  <option value={form.ghlStageDeliveredId}>saved: {form.ghlStageDeliveredId}</option>}
-              </select></div>
+          {/* Send Quote — its own pipeline + stage (where new estimates land; persisted as ghl_pipeline_id + ghl_stage_send_quote_id) */}
+          <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12, marginBottom: 10 }}>
+            <div style={{ ...S.lbl, marginBottom: 8 }}>Send Quote — where new estimates land</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <div><span style={S.lbl}>Pipeline</span>
+                <select style={S.input} value={form.ghlPipelineId} onChange={onPipelineChange}>
+                  <option value="">— None (skip pipeline automation) —</option>
+                  {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {form.ghlPipelineId && !pipelines.some((p) => p.id === form.ghlPipelineId) &&
+                    <option value={form.ghlPipelineId}>saved: {form.ghlPipelineId} (refresh to update)</option>}
+                </select></div>
+              <div><span style={S.lbl}>Stage</span>
+                <select style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} disabled={!form.ghlPipelineId}>
+                  <option value="">— None —</option>
+                  {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {form.ghlStageSendQuoteId && !stageOptions.some((s) => s.id === form.ghlStageSendQuoteId) &&
+                    <option value={form.ghlStageSendQuoteId}>saved: {form.ghlStageSendQuoteId}</option>}
+                </select></div>
+            </div>
+          </div>
+          {/* Delivered — its own pipeline + stage (drives the Delivered badge; only the stage id is persisted, matched pipeline-agnostically) */}
+          <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
+            <div style={{ ...S.lbl, marginBottom: 8 }}>Delivered — marks the Delivered badge</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <div><span style={S.lbl}>Pipeline</span>
+                <select style={S.input} value={deliveredPipelineId} onChange={onDeliveredPipelineChange}>
+                  <option value="">— None —</option>
+                  {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {deliveredPipelineId && !pipelines.some((p) => p.id === deliveredPipelineId) &&
+                    <option value={deliveredPipelineId}>saved: {deliveredPipelineId} (refresh to update)</option>}
+                </select></div>
+              <div><span style={S.lbl}>Stage</span>
+                <select style={S.input} value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} disabled={!deliveredPipelineId}>
+                  <option value="">— None —</option>
+                  {deliveredStageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {form.ghlStageDeliveredId && !deliveredStageOptions.some((s) => s.id === form.ghlStageDeliveredId) &&
+                    <option value={form.ghlStageDeliveredId}>saved: {form.ghlStageDeliveredId}</option>}
+                </select></div>
+            </div>
           </div>
           <button type="button" onClick={savePipelines} disabled={pipesSaving} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: pipesSaving ? 0.6 : 1 }}>
             {pipesSaving ? "Saving…" : "Save Pipeline & Stages"}
