@@ -205,6 +205,39 @@ Deno.serve(async (req: Request) => {
         if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
         return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
       }
+      case "get_client_portal": {
+        // Read-only operator "impersonation": view a tenant's Designs & Leads without
+        // their login. RLS confines authenticated owners to their own client_id, so the
+        // ONLY correct cross-tenant path is this service-role read gated by ADMIN_PASSWORD
+        // (verified above) — never a faked session or a weakened designs RLS policy.
+        // Returns the SAME columns/shape the portal DesignsTable uses. Every view is
+        // audit-logged (impersonation exposes cross-tenant customer PII).
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const [designs, versions, cfg] = await Promise.all([
+          sb.from("designs")
+            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+            .eq("client_id", clientId).order("created_at", { ascending: false }),
+          sb.from("design_versions")
+            .select("short_code, version, created_at, selections, image_url")
+            .eq("client_id", clientId).order("version", { ascending: false }),
+          sb.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+        ]);
+        if (designs.error) throw designs.error;
+        if (versions.error) throw versions.error;
+        try {
+          await sb.from("admin_audit").insert({
+            action: "get_client_portal",
+            target_client_id: clientId,
+            row_count: (designs.data || []).length,
+            note: typeof p.note === "string" ? p.note.slice(0, 500) : null,
+          });
+        } catch (_) { /* audit is best-effort — never block the view on a log failure */ }
+        return json({
+          ok: true, clientId,
+          companyName: (cfg.data && cfg.data.company_name) || clientId,
+          designs: designs.data || [], versions: versions.data || [],
+        });
+      }
 
       // ── layout-item assignment ──────────────────────────────────────────
       case "toggle_item":
