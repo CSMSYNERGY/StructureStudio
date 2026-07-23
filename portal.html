@@ -276,7 +276,7 @@ function DesignsTable({ clientId }) {
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Designs &amp; Leads {rows ? `(${rows.length})` : ""}</div>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Designs {rows ? `(${rows.length})` : ""}</div>
         <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
       {error && <div style={S.err}>{error}</div>}
@@ -342,6 +342,105 @@ function DesignsTable({ clientId }) {
                     );
                   })}
                   </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Leads table (contact-grouped view of designs) ───
+// Same RLS-scoped designs read as DesignsTable, but grouped by the person
+// (normalized phone → email → name) so a repeat shopper collapses into ONE lead
+// with a design count + activity dates. Read-only. "Last activity" = the newest
+// design's updated_at (portal logins aren't client-readable); status = the
+// highest fulfillment stage across that lead's designs.
+function LeadsTable({ clientId }) {
+  const [rows, setRows] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data, error: err } = await sb
+      .from("designs")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false });
+    if (err) { setError(err.message); setRows([]); return; }
+    let list = data || [];
+    // Freshen fulfillment status from GHL (read-only projection); non-fatal.
+    if (list.length > 0) {
+      try {
+        const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
+        const statuses = sync && sync.statuses;
+        if (statuses) list = list.map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r);
+      } catch (_e) { /* keep cached statuses */ }
+    }
+    // Group by person: normalized phone, else email, else name (fallback: short_code).
+    const normPhone = (p) => String(p || "").replace(/\D/g, "");
+    const RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+    const groups = new Map();
+    list.forEach((r) => { // list is newest-first
+      const c = r.contact || {};
+      const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
+      let g = groups.get(key);
+      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent" }; groups.set(key, g); }
+      g.count += 1;
+      if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
+      if (!g.email && c.email) g.email = c.email;
+      if (!g.phone && c.phone) g.phone = c.phone;
+      const act = r.updated_at || r.created_at;
+      if (act > g.lastActivity) g.lastActivity = act;
+      if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
+      const st = STATUS_LABELS[r.status] ? r.status : "sent";
+      if (RANK[st] > RANK[g.topStatus]) g.topStatus = st;
+    });
+    setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Leads {rows ? `(${rows.length})` : ""}</div>
+        <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.</div>
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No leads yet. Share your customer link — everyone who submits a design shows up here.</p>
+      )}
+      {rows && rows.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={S.th}>Customer</th><th style={S.th}>Contact</th><th style={S.th}>Designs</th>
+              <th style={S.th}>First seen</th><th style={S.th}>Last activity</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((g) => {
+                const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
+                const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
+                return (
+                  <tr key={g.key}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{g.name || "—"}</td>
+                    <td style={S.td}>
+                      <div>{g.email || ""}</div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{g.phone || ""}</div>
+                    </td>
+                    <td style={S.td}>{g.count}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
+                    <td style={S.td}><span style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[g.topStatus]}</span></td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>
+                    </td>
+                  </tr>
                 );
               })}
             </tbody>
@@ -1606,8 +1705,8 @@ function Dashboard({ session }) {
   // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
   // can't reach the other views even by forcing the tab state).
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
-  // Non-admins are confined to the designs list, plus the read-only "What's New" tab (product news).
-  const activeTab = (!isAdmin && tab !== "designs" && tab !== "releases") ? "designs" : tab;
+  // Non-admins are confined to the Designs + Leads lists, plus the read-only "What's New" tab (product news).
+  const activeTab = (!isAdmin && tab !== "designs" && tab !== "leads" && tab !== "releases") ? "designs" : tab;
 
   const tabBtn = (id, label) => (
     <button onClick={() => setTab(id)} style={{
@@ -1634,7 +1733,8 @@ function Dashboard({ session }) {
           </div>
         </div>
         <div style={{ display: "flex", gap: 4 }}>
-          {tabBtn("designs", "Designs & Leads")}
+          {tabBtn("designs", "Designs")}
+          {tabBtn("leads", "Leads")}
           {isAdmin && tabBtn("pricing", "Pricing")}
           {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
           {isAdmin && tabBtn("colors", "Colors")}
@@ -1643,6 +1743,7 @@ function Dashboard({ session }) {
       </div>
       <div style={{ padding: "20px 24px" }}>
         {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
+        {activeTab === "leads" && <LeadsTable clientId={tenant.clientId} />}
         {activeTab === "releases" && <ReleasesView />}
         {activeTab === "pricing" && isAdmin && <PricingCsv />}
         {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
