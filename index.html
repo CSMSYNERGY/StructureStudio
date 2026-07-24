@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>Loading…</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:680px;margin:0 auto}</style>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
 </head><body><div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -198,6 +198,21 @@ function checkLoftAttached(l, r, t, b, bldgW, bldgH, otherLoftEdges) {
   if (topOk && bottomOk) return true;
 
   return false;
+}
+
+// Point on a note box's border in the direction of a target — where the note's
+// leader (pointer) line starts, so the dashed line begins at the pill's edge
+// instead of its center. If the target is inside the box, returns the target
+// itself (degenerate line; callers skip drawing when start ≈ end).
+function noteEdgePoint(cx, cy, w, h, tx, ty) {
+  const dx = tx - cx, dy = ty - cy;
+  if (!dx && !dy) return { x: cx, y: cy };
+  const t = Math.min(
+    dx ? (w / 2) / Math.abs(dx) : Infinity,
+    dy ? (h / 2) / Math.abs(dy) : Infinity,
+    1
+  );
+  return { x: cx + dx * t, y: cy + dy * t };
 }
 
 // Determine which positional wall (north/south/east/west) is the FRONT
@@ -789,6 +804,7 @@ function StructureStudioInner({ config }) {
   const [activeTool, setActiveTool] = useState(null);
   const [items, setItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [editingNoteId, setEditingNoteId] = useState(null); // note being typed in-place on the canvas
   // Pick-one-to-remove mode ({ type }): entered from a Details row's × when several
   // "each"-priced items of that type are placed — the plan highlights them and the
   // rest of the page is blocked until the user clicks one (or cancels).
@@ -843,6 +859,12 @@ function StructureStudioInner({ config }) {
   // would otherwise re-run the hit test and deselect the item if the cursor
   // ended outside its bounds. This ref signals "ignore the click that follows".
   const justGesturedRef = useRef(false);
+  // Gesture-movement tracking: a press only counts as a drag/resize (and thus
+  // swallows its trailing click) if the pointer actually moved past a jitter
+  // threshold. A stationary click must SURVIVE so clicking a selected note can
+  // enter in-place edit — an unconditional swallow made notes uneditable.
+  const movedRef = useRef(false);
+  const gestureStartRef = useRef(null); // {x,y} in client px at pointer-down
 
   // PostMessage listener
   useEffect(() => {
@@ -1094,6 +1116,48 @@ function StructureStudioInner({ config }) {
   const cW = PAGE_W, cH = PAGE_H;
   const TEXT_BAND_TOP = PAGE_H - TEXT_AREA_H;
 
+  // ─── Display frame: zoom-to-fit crop of the sheet (DISPLAY-ONLY) ───
+  // Everything above (scale, mgX, mgY) is shared with the print/export path and
+  // is untouched. The frame only decides which part of the sheet the on-screen
+  // SVG shows (its viewBox) and how large it renders — the plan plus a wide
+  // margin band for notes/lines, expanded to include any annotation already
+  // placed outside it (saved designs), clamped to the sheet. Because the
+  // element's aspect ratio always matches the frame's, on-screen px-per-page-px
+  // stays uniform on both axes and getSvgPt's single-ratio math stays exact.
+  const NOTE_MARGIN = 170; // page px kept beside the plan for notes (~20% of sheet width per side)
+  const frame = (() => {
+    let x0 = Math.max(0, mgX - NOTE_MARGIN);
+    let x1 = Math.min(PAGE_W, mgX + pW + NOTE_MARGIN);
+    let y0 = 0;
+    let y1 = Math.min(TEXT_BAND_TOP, mgY + pH + RAMP_SPACE_FT * scale + BOT_LABEL_PAD + 40);
+    items.forEach((it) => {
+      if (it.type === "textNote") {
+        const w = it.widthPx || 160, h = it.heightPx || 40;
+        // Left pad is wider (28) so the docked leader handle (cx -w/2-18, r7)
+        // is never clipped out of the frame for notes near the sheet's edge.
+        x0 = Math.min(x0, it.x - w / 2 - 28); x1 = Math.max(x1, it.x + w / 2 + 12);
+        y0 = Math.min(y0, it.y - h / 2 - 12); y1 = Math.max(y1, it.y + h / 2 + 12);
+        if (it.leader) {
+          x0 = Math.min(x0, it.leader.x - 12); x1 = Math.max(x1, it.leader.x + 12);
+          y0 = Math.min(y0, it.leader.y - 12); y1 = Math.max(y1, it.leader.y + 12);
+        }
+      } else if (it.type === "line") {
+        x0 = Math.min(x0, Math.min(it.x1, it.x2) - 12); x1 = Math.max(x1, Math.max(it.x1, it.x2) + 12);
+        y0 = Math.min(y0, Math.min(it.y1, it.y2) - 12); y1 = Math.max(y1, Math.max(it.y1, it.y2) + 12);
+      }
+    });
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+    x1 = Math.min(PAGE_W, x1); y1 = Math.min(TEXT_BAND_TOP, y1);
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  })();
+  // On-screen size: full container width up to a height cap. maxWidth is derived
+  // from the cap so the element's aspect always equals the frame's (no letterbox).
+  const DISP_MAX_H = 760;
+  const dispMaxW = Math.round(Math.min(1010, (frame.w * DISP_MAX_H) / frame.h));
+  // Ref so pointer-math reads the CURRENT frame even from stale-closured handlers.
+  const frameRef = useRef(frame);
+  frameRef.current = frame;
+
   // Get sizes for selected style
   const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
@@ -1118,12 +1182,14 @@ function StructureStudioInner({ config }) {
     const r = svg.getBoundingClientRect();
     const cx = e.touches ? e.touches[0].clientX : e.clientX;
     const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    // The SVG preserves aspect ratio, so the same scale factor applies to both
-    // axes. Use the X ratio for both — using cH on Y was wrong because the
-    // viewBox is cropped to TEXT_BAND_TOP, not the full page height.
-    const sx = cW / r.width;
-    return { x: (cx - r.left) * sx, y: (cy - r.top) * sx };
-  }, [cW]);
+    // The viewBox is the zoom-to-fit display frame — a crop of the sheet whose
+    // aspect ratio always matches the element's, so ONE ratio maps both axes.
+    // Read the frame through the ref so this stays exact even when a handler
+    // closed over an older render (the frame moves as items/sizes change).
+    const f = frameRef.current;
+    const sx = f.w / r.width;
+    return { x: f.x + (cx - r.left) * sx, y: f.y + (cy - r.top) * sx };
+  }, []);
 
   const handleClick = useCallback((e) => {
     if (dragging) return;
@@ -1163,6 +1229,11 @@ function StructureStudioInner({ config }) {
         const rot = it.rotation === 90 || it.rotation === 270; const hw = (rot ? ih : iw) / 2; const hh = (rot ? iw : ih) / 2; // 270° swaps the visual bbox just like 90° (audit #F5)
         return Math.abs(pt.x - it.x) < hw + 5 && Math.abs(pt.y - it.y) < hh + 5;
       });
+      // Clicking an ALREADY-selected note starts typing in place (works for
+      // double-click and tap-tap alike; the justGestured guard above keeps a
+      // drag's trailing click from triggering it).
+      if (hit && hit.id === selectedId && ITEMS[hit.type] && ITEMS[hit.type].noteType) { setEditingNoteId(hit.id); return; }
+      if (!hit || hit.id !== editingNoteId) setEditingNoteId(null);
       setSelectedId(hit ? hit.id : null); return;
     }
     const cfg = ITEMS[activeTool]; if (!cfg) return;
@@ -1184,7 +1255,8 @@ function StructureStudioInner({ config }) {
         text: "Note",
       };
       setItems((p) => [...p, ni]);
-      setSelectedId(ni.id);   // auto-select so the editor banner appears
+      setSelectedId(ni.id);
+      setEditingNoteId(ni.id);  // start typing in the note immediately (text pre-selected)
       setActiveTool(null);
       setToast(null);
       return;
@@ -1299,12 +1371,14 @@ function StructureStudioInner({ config }) {
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId]);
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
     if (pendingRemoval) return; // pick mode: overlays handle the pick; no select/drag
     if (activeTool) return;
+    movedRef.current = false;
+    gestureStartRef.current = { x: e.touches ? e.touches[0].clientX : e.clientX, y: e.touches ? e.touches[0].clientY : e.clientY };
     setSelectedId(item.id);
     const cfg = ITEMS[item.type];
     if (resizing || (cfg && cfg.doorSnap)) return; // don't drag ramps or while resizing
@@ -1325,6 +1399,8 @@ function StructureStudioInner({ config }) {
 
   const startResize = useCallback((e, item, handle) => {
     e.preventDefault();
+    movedRef.current = false;
+    gestureStartRef.current = { x: e.touches ? e.touches[0].clientX : e.clientX, y: e.touches ? e.touches[0].clientY : e.clientY };
     const pt = getSvgPt(e);
     setResizing({
       id: item.id, handle, startPt: pt,
@@ -1360,10 +1436,28 @@ function StructureStudioInner({ config }) {
   }, [items, ITEMS, bldgW, bldgH, mgX, mgY, scale]);
 
   const onPtrMove = useCallback((e) => {
+    // Mark the gesture as a real drag/resize once the pointer travels past a
+    // small jitter threshold — onPtrUp uses this to decide whether the
+    // trailing click should be swallowed (see movedRef declaration).
+    if (gestureStartRef.current && !movedRef.current) {
+      const gx = e.touches ? e.touches[0].clientX : e.clientX;
+      const gy = e.touches ? e.touches[0].clientY : e.clientY;
+      if (Math.abs(gx - gestureStartRef.current.x) > 4 || Math.abs(gy - gestureStartRef.current.y) > 4) movedRef.current = true;
+    }
     if (resizing) {
       const pt = getSvgPt(e);
       const it = items.find((i) => i.id === resizing.id);
       if (!it) return;
+
+      // Note leader (pointer) drag: the target dot follows the cursor anywhere
+      // on the visible sheet. Dropping it back onto the note removes the
+      // pointer (handled in onPtrUp so the handle doesn't snap away mid-drag).
+      if (it.type === "textNote" && resizing.handle === "leader") {
+        const nx = Math.max(0, Math.min(pt.x, PAGE_W));
+        const ny = Math.max(0, Math.min(pt.y, TEXT_BAND_TOP));
+        setItems((p) => p.map((i) => i.id === resizing.id ? { ...i, leader: { x: nx, y: ny } } : i));
+        return;
+      }
 
       // Text-note resize: drag the bottom-right corner. The top-left stays
       // pinned, so the box grows toward the cursor and the text reflows live.
@@ -1615,11 +1709,26 @@ function StructureStudioInner({ config }) {
   }, [dragging, resizing, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, getResizeBounds]);
 
   const onPtrUp = useCallback(() => {
+    // Dropping a note's leader handle back onto the note removes the pointer
+    // ("drag it home to delete it") — checked on release, not mid-drag, so the
+    // handle doesn't vanish under the cursor while crossing the note.
+    if (resizing && resizing.handle === "leader") {
+      setItems((p) => p.map((i) => {
+        if (i.id !== resizing.id || !i.leader) return i;
+        const w = i.widthPx || 160, h = i.heightPx || 40;
+        const inside = Math.abs(i.leader.x - i.x) < w / 2 + 6 && Math.abs(i.leader.y - i.y) < h / 2 + 6;
+        return inside ? { ...i, leader: undefined } : i;
+      }));
+    }
     setDragging(null);
     setResizing(null);
-    // Mark this gesture so the trailing click doesn't deselect the item.
-    justGesturedRef.current = true;
-  }, []);
+    // Swallow the trailing click ONLY if the gesture actually moved — a
+    // stationary press must remain a click so clicking a selected note can
+    // enter in-place edit (an unconditional swallow made notes uneditable).
+    justGesturedRef.current = movedRef.current;
+    movedRef.current = false;
+    gestureStartRef.current = null;
+  }, [resizing]);
 
   useEffect(() => {
     if (dragging || resizing) {
@@ -1629,9 +1738,9 @@ function StructureStudioInner({ config }) {
     }
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
-  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); } };
+  const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); setEditingNoteId(null); } };
   const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
-  const clearAll = () => { setItems([]); setSelectedId(null); };
+  const clearAll = () => { setItems([]); setSelectedId(null); setEditingNoteId(null); };
 
   // ─── EXPORT RENDERING (shared by Export modal, PDF, and submit) ───
   // The on-screen SVG already uses page coordinates (cW × cH = 850 × 1100),
@@ -1673,6 +1782,21 @@ function StructureStudioInner({ config }) {
         const w = item.widthPx || 160;
         const h = item.heightPx || 40;
         const padX = 8;
+        // Leader (pointer) line: dashed from the pill's edge to the target dot.
+        // Drawn first (absolute page coords) so the pill sits on top of it.
+        if (item.leader) {
+          const ep = noteEdgePoint(item.x, item.y, w, h, item.leader.x, item.leader.y);
+          const ldx = item.leader.x - ep.x, ldy = item.leader.y - ep.y;
+          if (Math.sqrt(ldx * ldx + ldy * ldy) > 10) {
+            ctx.save();
+            ctx.strokeStyle = cfg.color; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+            ctx.beginPath(); ctx.moveTo(ep.x, ep.y); ctx.lineTo(item.leader.x, item.leader.y); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = cfg.color;
+            ctx.beginPath(); ctx.arc(item.leader.x, item.leader.y, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+          }
+        }
         ctx.save();
         ctx.translate(item.x, item.y);
         ctx.fillStyle = "#FFFBEB"; ctx.strokeStyle = cfg.color; ctx.lineWidth = 1.25;
@@ -2634,28 +2758,9 @@ function StructureStudioInner({ config }) {
         </div>
       </div>
 
-      {/* Inline editor — appears when a Text Note is selected */}
-      {(() => {
-        const sel = selectedId ? items.find((i) => i.id === selectedId) : null;
-        if (!sel || sel.type !== "textNote") return null;
-        return (
-          <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FDE68A", padding: "10px 20px", display: "flex", gap: 10, alignItems: "center" }}>
-            <span style={{ ...S.lbl, fontSize: 11 }}>Note text:</span>
-            <input
-              type="text"
-              autoFocus
-              value={sel.text || ""}
-              placeholder="Type your note..."
-              onChange={(e) => {
-                const v = e.target.value;
-                setItems((p) => p.map((i) => i.id === sel.id ? { ...i, text: v } : i));
-              }}
-              style={{ flex: 1, border: "1px solid #FCD34D", borderRadius: 6, padding: "7px 10px", fontSize: 13, outline: "none", background: "#FFF" }}
-            />
-            <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
-          </div>
-        );
-      })()}
+      {/* (The old "Note text:" banner is gone — notes are edited by typing
+          directly in the note on the canvas: click a selected note, or place a
+          new one, and the caret appears in the pill itself.) */}
 
       {/* Pick-one-to-remove mode: dim + block the whole page except the plan (the svg
           elevates above the scrim), pulse-highlight the candidates, and ask the user
@@ -2677,8 +2782,8 @@ function StructureStudioInner({ config }) {
 
       {/* SVG Canvas */}
       <div style={{ display: "flex", justifyContent: "center", padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
-        <svg ref={svgRef} viewBox={`0 0 ${cW} ${TEXT_BAND_TOP}`}
-          style={{ width: "100%", maxWidth: cW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
+        <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
+          style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
           {/* Visible page background — only the area above the auto info band */}
           <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill="#FFF" />
@@ -2733,44 +2838,141 @@ function StructureStudioInner({ config }) {
               );
             }
 
-            // ─── Text Note: resizable box with text that flows inside ───
+            // ─── Text Note: resizable box; text is edited IN PLACE on the canvas ───
             if (cfg.noteType) {
               const w = item.widthPx || 160;
               const h = item.heightPx || 40;
+              const isEditing = editingNoteId === item.id;
+              // Leader target in coords relative to this g's translate.
+              const lt = item.leader ? { x: item.leader.x - item.x, y: item.leader.y - item.y } : null;
               return (
                 <g key={item.id} transform={`translate(${item.x},${item.y})`}
-                  onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)}
-                  style={{ cursor: activeTool ? "crosshair" : "grab" }}>
+                  onMouseDown={(e) => { if (isEditing) return; onPtrDown(e, item); }}
+                  onTouchStart={(e) => { if (isEditing) return; onPtrDown(e, item); }}
+                  style={{ cursor: isEditing ? "text" : activeTool ? "crosshair" : "grab" }}>
+                  {/* Leader (pointer) line: dashed, from the pill edge to the target dot.
+                      Rendered under the pill; hidden while the target sits on the note. */}
+                  {lt && (() => {
+                    const ep = noteEdgePoint(0, 0, w, h, lt.x, lt.y);
+                    const dx = lt.x - ep.x, dy = lt.y - ep.y;
+                    if (Math.sqrt(dx * dx + dy * dy) <= 10) return null;
+                    return (
+                      <g pointerEvents="none">
+                        <line x1={ep.x} y1={ep.y} x2={lt.x} y2={lt.y} stroke={cfg.color} strokeWidth={1.5} strokeDasharray="5 4" />
+                        <circle cx={lt.x} cy={lt.y} r={3.5} fill={cfg.color} />
+                      </g>
+                    );
+                  })()}
                   {isSel && <rect x={-w / 2 - 4} y={-h / 2 - 4} width={w + 8} height={h + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={6} />}
                   {/* Background pill */}
                   <rect x={-w / 2} y={-h / 2} width={w} height={h} fill="#FFFBEB" stroke={cfg.color} strokeWidth={1.25} rx={4} />
-                  {/* HTML inside SVG — gives us native word-wrap */}
+                  {/* HTML inside SVG — native word-wrap; contentEditable when editing.
+                      The editable div is UNCONTROLLED (text set once via ref, state
+                      synced onInput/onBlur) so React never rewrites it mid-keystroke
+                      and the caret stays put. display:block while editing avoids
+                      Chrome's flex-contentEditable caret quirks. */}
                   <foreignObject x={-w / 2} y={-h / 2} width={w} height={h}>
-                    <div xmlns="http://www.w3.org/1999/xhtml" style={{
-                      width: "100%", height: "100%",
-                      padding: "4px 8px",
-                      boxSizing: "border-box",
-                      font: "600 12px sans-serif",
-                      color: cfg.color,
-                      lineHeight: 1.3,
-                      textAlign: "center",
-                      wordWrap: "break-word",
-                      overflowWrap: "break-word",
-                      overflow: "hidden",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}>{item.text || "Note"}</div>
+                    {isEditing ? (
+                      <div xmlns="http://www.w3.org/1999/xhtml" key={"edit" + item.id}
+                        contentEditable suppressContentEditableWarning
+                        ref={(el) => {
+                          if (el && el.dataset.init !== "1") {
+                            el.dataset.init = "1";
+                            el.textContent = item.text || "";
+                            setTimeout(() => {
+                              el.focus();
+                              // Select-all so typing replaces the "Note" placeholder.
+                              try { const s = window.getSelection(); const rg = document.createRange(); rg.selectNodeContents(el); s.removeAllRanges(); s.addRange(rg); } catch (_e) { /* selection APIs unavailable */ }
+                            }, 0);
+                          }
+                        }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onTouchStart={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                        onPaste={(e) => {
+                          // Paste as PLAIN text: rich-HTML pastes would render their own
+                          // markup mid-edit, and textContent drops element boundaries so
+                          // multi-line pastes would silently concatenate without spaces.
+                          e.preventDefault();
+                          const t = ((e.clipboardData && e.clipboardData.getData("text/plain")) || "").replace(/\s+/g, " ");
+                          document.execCommand("insertText", false, t);
+                        }}
+                        onInput={(e) => { const v = e.currentTarget.textContent; setItems((p) => p.map((i) => i.id === item.id ? { ...i, text: v } : i)); }}
+                        onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); e.currentTarget.blur(); } }}
+                        onBlur={(e) => { const v = (e.currentTarget.textContent || "").trim(); setItems((p) => p.map((i) => i.id === item.id ? { ...i, text: v } : i)); setEditingNoteId(null); }}
+                        style={{
+                          width: "100%", height: "100%",
+                          padding: "4px 8px",
+                          boxSizing: "border-box",
+                          font: "600 12px sans-serif",
+                          color: cfg.color,
+                          lineHeight: 1.3,
+                          textAlign: "center",
+                          wordWrap: "break-word",
+                          overflowWrap: "break-word",
+                          overflow: "hidden",
+                          whiteSpace: "pre-wrap",
+                          outline: "none", cursor: "text",
+                          userSelect: "text", WebkitUserSelect: "text",
+                        }} />
+                    ) : (
+                      <div xmlns="http://www.w3.org/1999/xhtml" key={"view" + item.id} style={{
+                        width: "100%", height: "100%",
+                        padding: "4px 8px",
+                        boxSizing: "border-box",
+                        font: "600 12px sans-serif",
+                        color: cfg.color,
+                        lineHeight: 1.3,
+                        textAlign: "center",
+                        wordWrap: "break-word",
+                        overflowWrap: "break-word",
+                        overflow: "hidden",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>{item.text || "Note"}</div>
+                    )}
                   </foreignObject>
-                  {/* Bottom-right corner resize handle (shown when selected) */}
+                  {/* Selected chrome: resize handle (BR), delete ✕ (TR), leader handle */}
                   {isSel && (
                     <>
-                      {/* Larger transparent click zone for forgiving grab */}
+                      {/* Larger transparent click zone for forgiving grab. Also stop the
+                          trailing CLICK: with the movement-aware gesture guard, a
+                          no-move press on this handle would otherwise bubble a live
+                          click to the svg and pop the note into edit mode. */}
                       <rect x={w / 2 - 14} y={h / 2 - 14} width={28} height={28}
                         fill="transparent" style={{ cursor: "nwse-resize" }}
+                        onClick={(e) => e.stopPropagation()}
                         onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "br"); }}
                         onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "br"); }} />
                       {/* Visible handle */}
                       <rect x={w / 2 - 7} y={h / 2 - 7} width={14} height={14}
                         fill="#3B82F6" stroke="#FFF" strokeWidth={1.5} rx={2} pointerEvents="none" />
+                      {/* Delete ✕ at the note's top-right corner */}
+                      <g transform={`translate(${w / 2 + 2},${-h / 2 - 2})`} style={{ cursor: "pointer" }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onTouchStart={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); delSel(); }}>
+                        <circle r={9} fill="#DC2626" stroke="#FFF" strokeWidth={1.5} />
+                        <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke="#FFF" strokeWidth={1.8} strokeLinecap="round" />
+                        <line x1={-3.5} y1={3.5} x2={3.5} y2={-3.5} stroke="#FFF" strokeWidth={1.8} strokeLinecap="round" />
+                      </g>
+                      {/* Leader handle: at the target when set, docked beside the note
+                          when not. Drag it onto the plan to point the note at something;
+                          drop it back on the note to remove the pointer. */}
+                      {!isEditing && (() => {
+                        const hx = lt ? lt.x : -w / 2 - 18, hy = lt ? lt.y : 0;
+                        return (
+                          <g>
+                            {!lt && <line x1={-w / 2} y1={0} x2={hx + 7} y2={hy} stroke="#94A3B8" strokeWidth={1} strokeDasharray="2 3" pointerEvents="none" />}
+                            <circle cx={hx} cy={hy} r={7} fill="#FFF" stroke="#3B82F6" strokeWidth={2}
+                              style={{ cursor: "move" }}
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "leader"); }}
+                              onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "leader"); }}>
+                              <title>Drag to point this note at something · drop back on the note to remove</title>
+                            </circle>
+                          </g>
+                        );
+                      })()}
                     </>
                   )}
                 </g>
