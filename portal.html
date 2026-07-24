@@ -306,11 +306,46 @@ function activityInfo(lastActivity) {
   if (hours <= 720) return { color: "#F59E0B", label: "Used within the last 30 days" };      // orange (720h = 30d)
   return { color: "#EF4444", label: "Idle for over a month" };                               // red
 }
+// Case-insensitive "search all fields": deep-collects every value in a row
+// (including nested contact/selections), plus any derived display text passed as
+// `extra`, then requires every whitespace-separated query token to appear
+// somewhere. Empty query matches everything.
+function rowMatchesQuery(row, query, extra) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const vals = [];
+  const walk = (v) => {
+    if (v == null) return;
+    if (typeof v === "object") { for (const k in v) walk(v[k]); }
+    else vals.push(String(v));
+  };
+  walk(row);
+  if (extra) vals.push(String(extra));
+  const hay = vals.join(" ").toLowerCase();
+  return q.split(/\s+/).every((t) => hay.includes(t));
+}
+
+// Search box used by the Designs and Leads tables. Controlled; shows a clear (×) button.
+function SearchInput({ value, onChange, placeholder }) {
+  return (
+    <div style={{ position: "relative", margin: "0 0 12px" }}>
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#94A3B8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={placeholder}
+        style={{ ...S.input, paddingLeft: 32, paddingRight: 30 }} />
+      {value && (
+        <button onClick={() => onChange("")} title="Clear search" aria-label="Clear search"
+          style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", cursor: "pointer", color: "#64748B", fontSize: 18, lineHeight: 1, padding: "2px 6px" }}>×</button>
+      )}
+    </div>
+  );
+}
+
 function DesignsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
   const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
+  const [query, setQuery] = useState("");        // free-text search across all fields
 
   const load = useCallback(async () => {
     setError(null);
@@ -344,18 +379,29 @@ function DesignsTable({ clientId }) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Client-side "search all fields" over the already-loaded rows.
+  const filtered = (rows || []).filter((r) => {
+    const st = STATUS_LABELS[r.status] ? r.status : "sent";
+    const extra = [r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : "", STATUS_LABELS[st], fmtDate(r.created_at), titleCase((r.selections || {}).style)].join(" ");
+    return rowMatchesQuery(r, query, extra);
+  });
+
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Designs {rows ? `(${rows.length})` : ""}</div>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Designs {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
         <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
+      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && filtered.length === 0 && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs match “{query}”.</p>
+      )}
+      {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -363,7 +409,7 @@ function DesignsTable({ clientId }) {
               <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {rows.map((r) => {
+              {filtered.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
                 const vs = vmap[r.short_code] || [];       // newest first
@@ -432,6 +478,7 @@ function DesignsTable({ clientId }) {
 function LeadsTable({ clientId }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");  // free-text search across all fields
 
   const load = useCallback(async () => {
     setError(null);
@@ -458,8 +505,12 @@ function LeadsTable({ clientId }) {
       const c = r.contact || {};
       const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
       let g = groups.get(key);
-      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent" }; groups.set(key, g); }
+      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent", search: "" }; groups.set(key, g); }
       g.count += 1;
+      // Accumulate design-level searchable text (building + estimate #) so a lead is
+      // findable by those too — they aren't columns here but the requirement is all-fields.
+      const gsel = r.selections || {};
+      g.search += " " + [titleCase(gsel.style), gsel.size, r.ghl_estimate_number, r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : ""].filter(Boolean).join(" ");
       if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
       if (!g.email && c.email) g.email = c.email;
       if (!g.phone && c.phone) g.phone = c.phone;
@@ -474,10 +525,16 @@ function LeadsTable({ clientId }) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Client-side "search all fields" over the already-grouped leads.
+  const filtered = (rows || []).filter((g) => {
+    const extra = [STATUS_LABELS[g.topStatus], fmtDate(g.firstSeen), fmtDate(g.lastActivity)].join(" ");
+    return rowMatchesQuery(g, query, extra);
+  });
+
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Leads {rows ? `(${rows.length})` : ""}</div>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Leads {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
         <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
       <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.
@@ -487,12 +544,16 @@ function LeadsTable({ clientId }) {
           <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#EF4444", margin: "0 4px 0 10px", verticalAlign: "middle" }} />idle
         </span>
       </div>
+      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search leads — name, email, phone, status…" />}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No leads yet. Share your customer link — everyone who submits a design shows up here.</p>
       )}
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && filtered.length === 0 && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No leads match “{query}”.</p>
+      )}
+      {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -500,7 +561,7 @@ function LeadsTable({ clientId }) {
               <th style={S.th}>First seen</th><th style={S.th}>Last activity</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {rows.map((g) => {
+              {filtered.map((g) => {
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
                 const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
                 return (
@@ -1863,7 +1924,7 @@ function Dashboard({ session }) {
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
-  const NONADMIN_TABS = ["designs", "leads", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units"];
+  const NONADMIN_TABS = ["designs", "leads", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions"];
   const activeTab = (!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab;
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -1891,6 +1952,7 @@ function Dashboard({ session }) {
     "delivery-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
     "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
     "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
+    "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
   };
   const TAB_META = {
     designs: ["Designs", "Customer designs and submitted quotes"],
@@ -1903,8 +1965,9 @@ function Dashboard({ session }) {
     "on-demand-pricing": ["On Demand Pricing", "Live building costs from your lumber prices — coming soon"],
     "build-schedule": ["Build Schedule", "Track buildings from order to done — coming soon"],
     "delivery-schedule": ["Delivery Schedule", "Plan and manage deliveries — coming soon"],
-    "rent-to-own-contracts": ["Rent to Own Contracts", "Generate and manage RTO agreements — coming soon"],
-    "self-serve-display-units": ["Self Serve Display Units", "In-unit kiosk to design, estimate, and get live help — coming soon"],
+    "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
+    "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
+    "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
   };
   // Real <button>s (not href-less anchors) so the nav stays keyboard- and
   // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
@@ -1956,8 +2019,9 @@ function Dashboard({ session }) {
           {soonItem("on-demand-pricing", "On Demand Pricing")}
           {soonItem("build-schedule", "Build Schedule")}
           {soonItem("delivery-schedule", "Delivery Schedule")}
-          {soonItem("rent-to-own-contracts", "Rent to Own Contracts")}
-          {soonItem("self-serve-display-units", "Self Serve Display Units")}
+          {soonItem("rent-to-own-contracts", "Rent to Own")}
+          {soonItem("self-serve-display-units", "Self Serve Displays")}
+          {soonItem("commissions", "Commissions")}
         </nav>
 
         <div className="ss-spacer"></div>
@@ -2036,7 +2100,7 @@ function Dashboard({ session }) {
             )}
             {activeTab === "rent-to-own-contracts" && (
               <ComingSoon
-                title="Rent to Own Contracts"
+                title="Rent to Own"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>}
                 blurb="Offer rent-to-own without the paperwork headache. Turn any quote into a rent-to-own agreement, set the term, down payment, and monthly schedule, and keep every signed contract organized in one place."
                 bullets={[
@@ -2048,13 +2112,25 @@ function Dashboard({ session }) {
             )}
             {activeTab === "self-serve-display-units" && (
               <ComingSoon
-                title="Self Serve Display Units"
+                title="Self Serve Displays"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>}
                 blurb="Put a kiosk right inside a display unit on your lot. Customers walk in, design and estimate their own shed on the spot, and — at the push of a button — reach a live person who can help them through it."
                 bullets={[
                   "A walk-in kiosk built into a display unit",
                   "Customers design and estimate their own shed on site",
                   "One-touch access to a live person for help",
+                ]}
+              />
+            )}
+            {activeTab === "commissions" && (
+              <ComingSoon
+                title="Commissions"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>}
+                blurb="Commissions are calculated automatically on every sale, so each sales rep can see exactly what they've earned and what their next payout will be — no spreadsheets, no guesswork."
+                bullets={[
+                  "Commissions calculated automatically on every sale",
+                  "Each rep sees their own earnings and payouts",
+                  "Clear running totals, ready at pay period",
                 ]}
               />
             )}
