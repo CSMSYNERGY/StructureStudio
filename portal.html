@@ -202,7 +202,7 @@ function LoginView({ onRecoverySent }) {
     <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
       <div style={S.card}>
         <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Business Login</div>
-        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your leads, designs, and settings.</p>
+        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your contacts, designs, and settings.</p>
         {error && <div style={S.err}>{error}</div>}
         {info && <div style={S.okMsg}>{info}</div>}
         <form onSubmit={signIn}>
@@ -295,6 +295,57 @@ const STATUS_COLORS = {
   invoiced:  { bg: "#FFFBEB", fg: "#B45309" },
   delivered: { bg: "#ECFEFF", fg: "#0E7490" },
 };
+// Fulfillment workflow order — used so a Status-column sort follows the pipeline
+// (sent → accepted → invoiced → delivered) rather than sorting alphabetically.
+const STATUS_RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+
+// ─── Column sorting (shared by the Designs + Leads tables) ───
+// Clickable header cell. Clicking cycles the direction on the active column and
+// selects a new column (starting ascending). A faded ▲ hints unsorted columns
+// are clickable; the active column shows a solid ▲/▼ in the brand accent.
+function SortTh({ label, col, sortKey, sortDir, onSort, style }) {
+  const active = sortKey === col;
+  return (
+    <th
+      onClick={() => onSort(col)}
+      title={`Sort by ${label}`}
+      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none" }}
+    >
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 9, verticalAlign: "middle", color: active ? ACCENT : "#CBD5E1" }}>
+        {active ? (sortDir === "asc" ? "▲" : "▼") : "▲"}
+      </span>
+    </th>
+  );
+}
+// Stable-ish sort of `rows` by a per-row comparable value. Blanks (null/""/undefined)
+// always sort last regardless of direction; numbers compare numerically and strings
+// case-insensitively (with numeric-aware collation so "2" < "10"). ISO date strings
+// sort chronologically as plain strings, so no special-casing is needed for dates.
+function sortRows(rows, valueOf, dir) {
+  const arr = [...rows];
+  arr.sort((ra, rb) => {
+    const a = valueOf(ra), b = valueOf(rb);
+    const ae = a === null || a === undefined || a === "";
+    const be = b === null || b === undefined || b === "";
+    if (ae && be) return 0;
+    if (ae) return 1;   // blanks last, both directions
+    if (be) return -1;
+    let c;
+    if (typeof a === "number" && typeof b === "number") c = a - b;
+    else c = String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+    return dir === "asc" ? c : -c;
+  });
+  return arr;
+}
+// Toggle helper for a [sortKey,sortDir] pair: same column flips direction, a new
+// column starts ascending.
+function makeOnSort(sortKey, setSortKey, sortDir, setSortDir) {
+  return (col) => {
+    if (col === sortKey) { setSortDir((d) => (d === "asc" ? "desc" : "asc")); }
+    else { setSortKey(col); setSortDir("asc"); }
+  };
+}
 // Lead activity indicator (traffic light) based on the most-recent activity — i.e. the
 // newest design update for that lead. Anon shed-shoppers have no live login/session, so
 // "active" is recency-based, not real-time presence. Thresholds are easy to tune here.
@@ -386,6 +437,24 @@ function DesignsTable({ clientId }) {
     return rowMatchesQuery(r, query, extra);
   });
 
+  // Column sort. Default = newest first (matches the created_at DESC load order).
+  const [sortKey, setSortKey] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+  const sortVal = (r) => {
+    const c = r.contact || {}, sel = r.selections || {};
+    switch (sortKey) {
+      case "date":     return r.created_at;
+      case "customer": return c.name;
+      case "contact":  return c.email || c.phone;
+      case "building": return [titleCase(sel.style), sel.size].filter(Boolean).join(" ");
+      case "estimate": return r.ghl_estimate_number != null ? Number(r.ghl_estimate_number) : null;
+      case "status":   return STATUS_RANK[STATUS_LABELS[r.status] ? r.status : "sent"];
+      default:         return r.created_at;
+    }
+  };
+  const sorted = sortRows(filtered, sortVal, sortDir);
+
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
@@ -405,11 +474,16 @@ function DesignsTable({ clientId }) {
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              <th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Contact</th>
-              <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
+              <SortTh label="Date" col="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Customer" col="customer" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Contact" col="contact" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Building" col="building" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Estimate #" col="estimate" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {filtered.map((r) => {
+              {sorted.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
                 const vs = vmap[r.short_code] || [];       // newest first
@@ -531,10 +605,27 @@ function LeadsTable({ clientId }) {
     return rowMatchesQuery(g, query, extra);
   });
 
+  // Column sort. Default = most-recent activity first (matches the load-time sort).
+  const [sortKey, setSortKey] = useState("lastActivity");
+  const [sortDir, setSortDir] = useState("desc");
+  const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+  const sortVal = (g) => {
+    switch (sortKey) {
+      case "customer":     return g.name;
+      case "contact":      return g.email || g.phone;
+      case "designs":      return g.count;
+      case "firstSeen":    return g.firstSeen;
+      case "lastActivity": return g.lastActivity;
+      case "status":       return STATUS_RANK[g.topStatus];
+      default:             return g.lastActivity;
+    }
+  };
+  const sorted = sortRows(filtered, sortVal, sortDir);
+
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Leads {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Contacts {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
         <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
       <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.
@@ -544,24 +635,29 @@ function LeadsTable({ clientId }) {
           <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#EF4444", margin: "0 4px 0 10px", verticalAlign: "middle" }} />idle
         </span>
       </div>
-      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search leads — name, email, phone, status…" />}
+      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
-        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No leads yet. Share your customer link — everyone who submits a design shows up here.</p>
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts yet. Share your customer link — everyone who submits a design shows up here.</p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
-        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No leads match “{query}”.</p>
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts match “{query}”.</p>
       )}
       {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              <th style={S.th}>Customer</th><th style={S.th}>Contact</th><th style={S.th}>Designs</th>
-              <th style={S.th}>First seen</th><th style={S.th}>Last activity</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
+              <SortTh label="Customer" col="customer" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Contact" col="contact" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Designs" col="designs" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="First seen" col="firstSeen" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Last activity" col="lastActivity" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {filtered.map((g) => {
+              {sorted.map((g) => {
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
                 const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
                 return (
@@ -850,7 +946,7 @@ function SettingsView() {
           <div style={S.h2}>Pipeline &amp; Stages</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
             Map each fulfillment stage to a Synergy/GHL pipeline stage. StructureStudio places a new deal at your
-            <b> "Send Quote"</b> stage; then the badge in your Leads list advances <b>Quote Accepted → Invoiced →
+            <b> "Send Quote"</b> stage; then the badge in your Contacts list advances <b>Quote Accepted → Invoiced →
             Delivered</b> as you move that opportunity into the matching stage in Synergy/GHL. Each stage can live
             in a <b>different pipeline</b> (e.g. Send Quote in "Building", Invoiced/Delivered in "Invoiced"). All
             optional — leave any blank to skip that stage.
@@ -1924,7 +2020,7 @@ function Dashboard({ session }) {
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
-  const NONADMIN_TABS = ["designs", "leads", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions"];
+  const NONADMIN_TABS = ["designs", "leads", "orders", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
   const activeTab = (!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab;
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -1943,6 +2039,7 @@ function Dashboard({ session }) {
     designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
     designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
     leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+    orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
     pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41 11 3.83V3H4v7l9.59 9.59a2 2 0 0 0 2.82 0l4.18-4.18a2 2 0 0 0 0-2.82z"/><circle cx="7.5" cy="6.5" r="1.2"/></svg>,
     "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
     colors: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9.5" r="1.3"/><circle cx="15.5" cy="9.5" r="1.3"/><circle cx="16.5" cy="14" r="1.3"/><path d="M12 21a3 3 0 0 1 0-6 2 2 0 0 0 0-4"/></svg>,
@@ -1953,10 +2050,12 @@ function Dashboard({ session }) {
     "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
     "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
     "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+    "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
   };
   const TAB_META = {
     designs: ["Designs", "Customer designs and submitted quotes"],
-    leads: ["Leads", "Everyone who has submitted a design"],
+    leads: ["Contacts", "Everyone who has submitted a design"],
+    orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
     releases: ["What's New", "Latest features and fixes"],
     pricing: ["Pricing", "Building styles, sizes, and base prices"],
     "layout-pricing": ["Layout Pricing", "Add-on items and rates"],
@@ -1968,6 +2067,7 @@ function Dashboard({ session }) {
     "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
     "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
     "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
+    "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
   };
   // Real <button>s (not href-less anchors) so the nav stays keyboard- and
   // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
@@ -2007,7 +2107,8 @@ function Dashboard({ session }) {
             <svg className="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>
           </a>
           {navItem("designs", "Designs")}
-          {navItem("leads", "Leads")}
+          {navItem("leads", "Contacts")}
+          {soonItem("orders", "Orders")}
           {isAdmin && navItem("pricing", "Pricing")}
           {isAdmin && navItem("layout-pricing", "Layout Pricing")}
           {isAdmin && navItem("colors", "Colors")}
@@ -2019,6 +2120,7 @@ function Dashboard({ session }) {
           {soonItem("on-demand-pricing", "On Demand Pricing")}
           {soonItem("rent-to-own-contracts", "Rent to Own")}
           {soonItem("commissions", "Commissions")}
+          {soonItem("reports", "Reports")}
           {soonItem("build-schedule", "Build Schedule")}
           {soonItem("delivery-schedule", "Delivery Schedule")}
           {soonItem("self-serve-display-units", "Self Serve Displays")}
@@ -2057,6 +2159,19 @@ function Dashboard({ session }) {
           <div className="ss-inner">
             {activeTab === "designs" && <DesignsTable clientId={tenant.clientId} />}
             {activeTab === "leads" && <LeadsTable clientId={tenant.clientId} />}
+            {activeTab === "orders" && (
+              <ComingSoon
+                title="Orders"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>}
+                blurb="When a customer accepts a quote it becomes an order you can track in one place — from the sale, through the build, to the day it's delivered. No more chasing status across spreadsheets and texts."
+                bullets={[
+                  "Every accepted quote turns into a tracked order",
+                  "See each order's stage — sold, building, delivered",
+                  "Linked to the customer's contact and design",
+                  "Know what's due and what's paid at a glance",
+                ]}
+              />
+            )}
             {activeTab === "releases" && <ReleasesView />}
             {activeTab === "pricing" && isAdmin && <PricingCsv />}
             {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
@@ -2131,6 +2246,20 @@ function Dashboard({ session }) {
                   "Commissions calculated automatically on every sale",
                   "Each rep sees their own earnings and payouts",
                   "Clear running totals, ready at pay period",
+                ]}
+              />
+            )}
+            {activeTab === "reports" && (
+              <ComingSoon
+                title="Reports"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>}
+                blurb="Pull any report you want on your business — sales, leads, customers, revenue, builds delivered, and more. Filter by date range, rep, or building type and export it whenever you need it."
+                bullets={[
+                  "Sales and revenue over any date range",
+                  "Leads and customer activity at a glance",
+                  "Builds delivered and pipeline throughput",
+                  "Break down by rep, building type, or status",
+                  "Export to share or drop into your books",
                 ]}
               />
             )}
