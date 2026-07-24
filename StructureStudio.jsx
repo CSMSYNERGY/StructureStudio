@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 import FeedbackWidget from "./FeedbackWidget.jsx";
 
@@ -641,7 +642,7 @@ function LeadGate({ config, supabase, accent, onPass }) {
   const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CBD5E1", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 12px" };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.42)", backdropFilter: "blur(2.5px)", WebkitBackdropFilter: "blur(2.5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <a href="/portal.html" style={{ position: "absolute", top: 14, right: 16, fontSize: 12, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.16)", border: "1px solid rgba(255,255,255,0.32)", borderRadius: 8, padding: "6px 12px", textDecoration: "none" }}>Business Login</a>
       <div style={{ background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
         {brand.logo
@@ -2359,22 +2360,31 @@ function StructureStudioInner({ config }) {
   };
 
   // ─── RENDER ───
-  // Hard lead-capture gate: render ONLY the gate until it's passed, so the designer stays
-  // entirely out of the DOM (nothing to Tab/scroll to behind an overlay). Bypassed for the
-  // operator preview (isAdmin), the ?id= reopen flow, and remembered browsers — see the
-  // gatePassed initializer above.
-  if (!gatePassed && !isAdmin) {
-    return (
-      <LeadGate config={C} supabase={supabase} accent={accent}
-        onPass={(info) => {
-          if (info && (info.name || info.phone)) setContact((p) => ({ ...p, name: info.name || p.name, phone: info.phone || p.phone }));
-          try { localStorage.setItem("ss_gate_" + (C.clientId || ""), "1"); } catch (_e) {}
-          setGatePassed(true);
-        }} />
-    );
-  }
+  // Lead-capture gate: the designer renders BEHIND a dimmed/blurred overlay so shoppers can see
+  // what they're signing into, but can't touch it until they pass the gate (name + phone). While
+  // gated, the designer subtree is marked `inert` (no pointer/keyboard/focus) and page scroll is
+  // locked; the gate is portaled to <body> so it stays interactive outside that inert subtree.
+  // Bypassed for the operator preview (isAdmin), the ?id= reopen flow, and remembered browsers —
+  // see the gatePassed initializer above.
+  const showGate = !gatePassed && !isAdmin;
+  const gateBgRef = useRef(null);
+  useEffect(() => {
+    const el = gateBgRef.current;
+    if (el) { if (showGate) el.setAttribute("inert", ""); else el.removeAttribute("inert"); }
+    document.body.style.overflow = showGate ? "hidden" : "";
+    return () => { document.body.style.overflow = ""; };
+  }, [showGate]);
+  const gateEl = showGate ? (
+    <LeadGate config={C} supabase={supabase} accent={accent}
+      onPass={(info) => {
+        if (info && (info.name || info.phone)) setContact((p) => ({ ...p, name: info.name || p.name, phone: info.phone || p.phone }));
+        try { localStorage.setItem("ss_gate_" + (C.clientId || ""), "1"); } catch (_e) {}
+        setGatePassed(true);
+      }} />
+  ) : null;
   return (
-    <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: "100vh" }}>
+    <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: "100vh" }}>
+      {gateEl && createPortal(gateEl, document.body)}
       {/* Header */}
       <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
         {C.branding.logo

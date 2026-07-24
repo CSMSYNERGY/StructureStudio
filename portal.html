@@ -1925,13 +1925,13 @@ function Dashboard({ session }) {
         </div>
         <div className="ss-body">
           <div className="ss-inner">
-            {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
+            {activeTab === "designs" && <DesignsTable clientId={tenant.clientId} />}
             {activeTab === "leads" && <LeadsTable clientId={tenant.clientId} />}
             {activeTab === "releases" && <ReleasesView />}
             {activeTab === "pricing" && isAdmin && <PricingCsv />}
             {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
             {activeTab === "colors" && isAdmin && <ColorsView />}
-            {activeTab === "settings" && isAdmin && <SettingsView />}
+            {activeTab === "settings" && isAdmin && (<><ShareLinkCard clientId={tenant.clientId} /><SettingsView /></>)}
           </div>
         </div>
       </section>
