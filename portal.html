@@ -43,6 +43,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-tname{font-size:15.5px;font-weight:800;color:#1E293B;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .ss-body{flex:1;padding:20px 24px}
 .ss-inner{max-width:1240px}
+.ss-stage-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:2px}
+@media (max-width:680px){.ss-stage-grid{grid-template-columns:1fr}}
 @media (max-width:900px){
   .ss-side{width:68px;flex-basis:68px;padding:18px 10px;align-items:center}
   .ss-brand{justify-content:center;padding:4px 0 16px}
@@ -895,7 +897,7 @@ function SettingsView() {
       setForm((prev) => ({ ...prev, [transientPipeKey]: np, [stageKey]: ids.has(prev[stageKey]) ? prev[stageKey] : "" }));
     };
     return (
-      <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12, marginBottom: 10 }}>
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
         <div style={{ ...S.lbl, marginBottom: 8 }}>{title}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
           <div><span style={S.lbl}>Pipeline</span>
@@ -962,8 +964,9 @@ function SettingsView() {
           {!pipesBusy && pipelines.length === 0 && !(pipesMsg && pipesMsg.err) && (
             <p style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>No pipelines loaded yet — click Refresh (or this location has none).</p>
           )}
+          <div className="ss-stage-grid">
           {/* Send Quote — its own pipeline + stage (where new estimates land; persisted as ghl_pipeline_id + ghl_stage_send_quote_id) */}
-          <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12, marginBottom: 10 }}>
+          <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
             <div style={{ ...S.lbl, marginBottom: 8 }}>Send Quote — where new estimates land</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
               <div><span style={S.lbl}>Pipeline</span>
@@ -985,6 +988,7 @@ function SettingsView() {
           {derivedRow("Quote Accepted — customer accepted the estimate", "ghlPipelineAcceptedId", "ghlStageAcceptedId")}
           {derivedRow("Invoiced — an invoice was sent", "ghlPipelineInvoicedId", "ghlStageInvoicedId")}
           {derivedRow("Delivered — marks the Delivered badge", "ghlPipelineDeliveredId", "ghlStageDeliveredId")}
+          </div>
           <button type="button" onClick={savePipelines} disabled={pipesSaving} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: pipesSaving ? 0.6 : 1 }}>
             {pipesSaving ? "Saving…" : "Save Pipeline & Stages"}
           </button>
