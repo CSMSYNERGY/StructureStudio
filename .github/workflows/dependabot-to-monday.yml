@@ -62,13 +62,13 @@ jobs:
 
             body="**Dependabot security alert ${marker}**
 
-- Package: \`$package\` ($ecosystem)
-- Manifest: \`$manifest\`
-- Severity: **$severity**
-- Advisory: $ghsa
-- Alert: $alert_url
+          - Package: \`$package\` ($ecosystem)
+          - Manifest: \`$manifest\`
+          - Severity: **$severity**
+          - Advisory: $ghsa
+          - Alert: $alert_url
 
-Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR."
+          Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR."
 
             echo "Creating issue for alert #$number ($ghsa)..."
             gh issue create --repo "$REPO" \
