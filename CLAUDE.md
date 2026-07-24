@@ -7,17 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 StructureStudio is a multi-tenant SaaS floor-plan designer + quote builder for custom shed/barn businesses. The designer is a single-file React component delivered as two parallel artifacts, plus a standalone owner portal:
 
 - `StructureStudio.jsx` — ES-module React source (`import { useState, ... } from "react"`; default export `StructureStudio`, the config-loader wrapper around the internal `StructureStudioInner`). Consumed by hosts that have their own build.
-- `index.html` — self-contained, zero-build drop-in: loads React 18 UMD + ReactDOM + **Babel-standalone** from CDN and inlines the whole component in `<script type="text/babel">`. Opens directly in a browser; no bundler, no package.json, no tests, no lint config. This is also the file the static host (Cloudflare Pages, production `structurestudio.app`) serves at the site root.
-- `portal.html` — standalone owner login + dashboard (designs/leads list, settings). Same CDN stack, **HTML-only — it has no .jsx sibling and is exempt from the mirror rule** (it is only ever served by the static host, never embedded by other sites).
+- `structure-studio.component.js` — **the ONE shared browser module** (babel/global-destructure dialect): the full component body, self-contained (own React/supabase destructures + Supabase constants), ending with `window.StructureStudio = StructureStudio`. Loaded by BOTH `index.html` and `portal.html` via `<script src="structure-studio.component.js?v=…" type="text/babel">`.
+- `index.html` — a **thin mount page**: CDN tags + the shared-module `<script src>` + a small mount block (single named `root`, the `structureConfig` postMessage remount, and the designer-sourced `ssLogError` wiring). It is NOT self-contained anymore — it hard-requires its sibling `structure-studio.component.js` on the same origin. **`file://` double-click no longer works** (Babel must *fetch* the src sibling; that XHR is CORS-blocked from disk). Cloudflare Pages serves both files together at the site root.
+- `portal.html` — standalone owner login + dashboard (designs/contacts lists, settings, billing) with an in-portal **Designer** tab that mounts the shared module (`<StructureStudio clientId=… embedded/>`). **HTML-only — it has no .jsx sibling and is exempt from the mirror rule.**
 
-**`StructureStudio.jsx` and `index.html` contain the same component body.** The only structural differences:
-1. HTML top: `const {useState,useRef,useCallback,useEffect,useMemo}=React;` instead of `import ... from "react";`
-2. `export default function StructureStudio` (the config-loader) in the .jsx is a plain `function` declaration in the HTML.
-3. HTML bottom: `ReactDOM.createRoot(...).render(<StructureStudio/>)` + a `window.addEventListener("message", ...)` re-render hook.
+**The hand-mirrored pair is `StructureStudio.jsx` ↔ `structure-studio.component.js`.** The only structural differences:
+1. Module top: `const {useState,useRef,useCallback,useEffect,useMemo,Component}=React;` etc. instead of `import ... from "react";`, and `FeedbackWidget` is inlined (the .jsx imports it).
+2. `export default function StructureStudio` (the config-loader) in the .jsx is a plain `function` declaration in the module.
+3. Module bottom: `window.StructureStudio` / `window.ssAllowedOrigin` publishes (no `createRoot` — mounting belongs to the host pages).
 
-Any non-trivial edit must be mirrored in both files or the HTML deliverable will drift from the JSX source. There is no generator — they are hand-maintained siblings.
+Any non-trivial edit must be mirrored in both files or the browser deliverable will drift from the JSX source. There is no generator — they are hand-maintained siblings. `index.html` itself now carries no component code — an editor expecting the body inline there is looking at the wrong file.
 
-There is no build/run/test command. To sanity-check a change, serve the folder (`python -m http.server 8123`) and open `index.html` / `portal.html` — `.claude/launch.json` has a `static` server config for the preview tools.
+**CDN version lock:** `index.html`, `portal.html`, and `admin.html` must keep byte-identical React 18.2.0 / ReactDOM 18.2.0 / supabase-js@2 / babel-standalone 7.23.9 CDN script URLs — the same source text is compiled by whichever Babel each page loads, so upgrading one page in isolation silently changes behavior. Bump the shared module's `?v=` cache-buster (same value in index.html + portal.html) whenever the module changes.
+
+There is no build/run/test command. To sanity-check a change, serve the folder (`python -m http.server 8123`) and open `index.html` / `portal.html` over http — never from `file://` — `.claude/launch.json` has a `static` server config for the preview tools.
 
 ## Multi-tenancy model
 
@@ -97,7 +100,7 @@ Adding a new item type usually means adding an entry to `layoutItems` + any new 
 
 ## Submit flow
 
-`submitQuote()`: validates contact/selections → renders the canvas → wraps the JPEG into a single-page PDF client-side → uploads to the `floor-plans` storage bucket as `{clientId}/{shortCode}.pdf` (per-tenant prefix; the cutover storage policy enforces this shape) → saves the design via the `save_design` RPC → updates the URL to `?client=<id>&id=<code>` → invokes the `submit-estimate` edge function. Payload shape is consumed downstream, so treat it as a contract:
+`submitQuote()`: validates contact/selections → renders the canvas → wraps the JPEG into a single-page PDF client-side → uploads to the `floor-plans` storage bucket as `{clientId}/{shortCode}-{timestamp}.pdf` (per-tenant prefix with a `Date.now()` suffix — always read `imageUrl` from the payload/design row, never reconstruct the path) → saves the design via the `save_design` RPC → updates the URL to `?client=<id>&id=<code>` (skipped when `embedded` — the in-portal mount never rewrites the portal's URL; its `viewUrl` is built from the config's tenant + the public root) → invokes the `submit-estimate` edge function. Payload shape is consumed downstream, so treat it as a contract:
 
 - `designId` — short code (e.g. `SS-NR4DV8XK2P`) that keys the design in Supabase
 - `imageUrl` — public Storage URL of the rendered PDF

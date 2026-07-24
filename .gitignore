@@ -19,3 +19,4 @@ _archive/
 
 # Supabase CLI local cache (linked project, pooler URL, versions)
 supabase/.temp/
+.wrangler/

@@ -17,7 +17,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-nav{display:flex;flex-direction:column;gap:2px}
 .ss-nav a,.ss-nav button{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:9px;font-size:13.5px;font-weight:600;color:#CBD5E6;text-decoration:none;cursor:pointer;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
 .ss-nav a svg,.ss-nav button svg{width:17px;height:17px;flex-shrink:0}
-.ss-nav a svg.ext{width:14px;height:14px;margin-left:auto;opacity:.55}
 .ss-nav a:hover,.ss-nav button:hover{background:rgba(255,255,255,0.08);color:#FFF}
 .ss-nav a.active,.ss-nav button.active{background:#75E6DA;color:#22345B;font-weight:700}
 .ss-nav .soon{margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#22345B;background:#75E6DA;border-radius:6px;padding:2px 6px;flex-shrink:0}
@@ -43,12 +42,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-tname{font-size:15.5px;font-weight:800;color:#1E293B;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .ss-body{flex:1;padding:20px 24px}
 .ss-inner{max-width:1240px}
+/* Designer tab: fixed-height shell, the embedded designer scrolls inside its host
+   (body scroll would double-scroll under the sticky topbar). */
+.ss-main.ss-designer-active{height:100vh;height:100dvh}
+.ss-main.ss-designer-active .ss-body{padding:0;overflow:hidden;min-height:0;display:flex;flex-direction:column}
+.ss-designer-host{flex:1;min-height:0;width:100%;overflow:auto;background:#F8FAFC}
 .ss-stage-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:2px}
 @media (max-width:680px){.ss-stage-grid{grid-template-columns:1fr}}
 @media (max-width:900px){
   .ss-side{width:68px;flex-basis:68px;padding:18px 10px;align-items:center}
   .ss-brand{justify-content:center;padding:4px 0 16px}
-  .ss-brand .btext,.ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav svg.ext,.ss-newlink span,.ss-user .utext,.ss-signout .sotext{display:none}
+  .ss-brand .btext,.ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-newlink span,.ss-user .utext,.ss-signout .sotext{display:none}
   .ss-nav{width:100%}
   .ss-nav a,.ss-nav button{justify-content:center;gap:0;padding:10px 0}
   .ss-newlink{justify-content:center;padding:0}
@@ -68,6 +72,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<!-- The ONE shared designer module (also loaded by index.html). Publishes
+     window.StructureStudio for the in-portal Designer tab; must load before the
+     main block below. Keep the ?v= cache-buster in lockstep with index.html. -->
+<script src="structure-studio.component.js?v=20260724a" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback } = React;
 const { createClient } = window.supabase;
@@ -393,7 +401,7 @@ function SearchInput({ value, onChange, placeholder }) {
   );
 }
 
-function DesignsTable({ clientId }) {
+function DesignsTable({ clientId, refreshKey = 0 }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
@@ -430,7 +438,9 @@ function DesignsTable({ clientId }) {
     setVmap(map);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
+  // so the list refetches without a manual Refresh click.
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   // Client-side "search all fields" over the already-loaded rows.
   const filtered = (rows || []).filter((r) => {
@@ -2158,10 +2168,38 @@ function ComingSoon({ icon, title, blurb, bullets }) {
   );
 }
 
+// ─── In-portal Designer tab ───
+// Mounts the shared designer module (structure-studio.component.js, loaded before this
+// block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
+// — the loader then skips URL parsing entirely and can never hit its bare-root
+// /portal.html redirect (which would loop the portal).
+function DesignerTab({ clientId, onSaved }) {
+  const SS = window.StructureStudio;
+  if (!SS) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
+  }
+  return (
+    <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
+      <SS clientId={clientId} embedded onSaved={onSaved} />
+    </div>
+  );
+}
+
 // ─── Dashboard shell ───
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   const [tab, setTab] = useState("designs");
+  // Designer tab: lazy-mount on first open, then KEEP mounted (display toggle below).
+  // A conditional {activeTab==="designer" && …} unmount would discard the user's
+  // in-progress design and re-fetch config on every tab switch.
+  const [designerOpened, setDesignerOpened] = useState(false);
+  // MUST live up here with the other hooks — Dashboard has conditional early returns
+  // below (tenant loading/none), and a hook after them changes the hook count between
+  // renders (React error #310, blank screen). Keyed on raw `tab`, not the derived
+  // activeTab: "designer" is in NONADMIN_TABS so the clamp never rewrites it.
+  useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
+  // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
+  const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -2205,13 +2243,10 @@ function Dashboard({ session }) {
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
-  const NONADMIN_TABS = ["designs", "leads", "orders", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+  const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
   const activeTab = (!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab;
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
-  // The public designer for this tenant — same link ShareLinkCard shares; opens in
-  // a new tab so the portal stays open.
-  const designerLink = `${window.location.origin}/?client=${encodeURIComponent(tenant.clientId)}`;
   // Signed-in user identity for the sidebar footer. Auth users are email+password
   // (no profile name field), so prefer any metadata name and fall back to the
   // email's local part.
@@ -2239,6 +2274,7 @@ function Dashboard({ session }) {
     "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
   };
   const TAB_META = {
+    designer: ["Designer", "Design a building and build a quote"],
     designs: ["Designs", "Customer designs and submitted quotes"],
     leads: ["Contacts", "Everyone who has submitted a design"],
     orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
@@ -2288,11 +2324,7 @@ function Dashboard({ session }) {
 
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
-          <a href={designerLink} target="_blank" rel="noopener" title="Designer">
-            {ICONS.designer}
-            <span className="lbl">Designer</span>
-            <svg className="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>
-          </a>
+          {navItem("designer", "Designer")}
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
           {soonItem("orders", "Orders")}
@@ -2335,7 +2367,7 @@ function Dashboard({ session }) {
         </div>
       </aside>
 
-      <section className="ss-main">
+      <section className={"ss-main" + (activeTab === "designer" ? " ss-designer-active" : "")}>
         <div className="ss-topbar">
           <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
           <div className="tenant" title={tenant.businessName}>
@@ -2344,8 +2376,15 @@ function Dashboard({ session }) {
           </div>
         </div>
         <div className="ss-body">
+          {/* Keep-mounted designer host — full-bleed sibling of .ss-inner (its 1240px
+              max-width would box the designer in); hidden, never unmounted, off-tab. */}
+          {designerOpened && (
+            <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
+              <DesignerTab clientId={tenant.clientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)} />
+            </div>
+          )}
           <div className="ss-inner">
-            {activeTab === "designs" && <DesignsTable clientId={tenant.clientId} />}
+            {activeTab === "designs" && <DesignsTable clientId={tenant.clientId} refreshKey={designsRefreshKey} />}
             {activeTab === "leads" && <LeadsTable clientId={tenant.clientId} />}
             {activeTab === "orders" && (
               <ComingSoon
