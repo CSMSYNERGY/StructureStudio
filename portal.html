@@ -401,7 +401,7 @@ function SearchInput({ value, onChange, placeholder }) {
   );
 }
 
-function DesignsTable({ clientId, refreshKey = 0 }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
@@ -410,6 +410,19 @@ function DesignsTable({ clientId, refreshKey = 0 }) {
 
   const load = useCallback(async () => {
     setError(null);
+    // Operator view-as: rows come from operator-portal (service-role, audit-logged).
+    // The live status sync is SKIPPED — sync-design-status is owner-JWT-bound and
+    // would refresh the operator's own tenant, not the viewed one. Cached statuses show.
+    if (fetchDesigns) {
+      try {
+        const { designs, versions } = await fetchDesigns();
+        setRows(designs || []);
+        const map = {};
+        (versions || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+        setVmap(map);
+      } catch (e) { setError(e.message || String(e)); setRows([]); }
+      return;
+    }
     const { data, error: err } = await sb
       .from("designs")
       .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
@@ -436,7 +449,7 @@ function DesignsTable({ clientId, refreshKey = 0 }) {
     const map = {};
     (vdata || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
     setVmap(map);
-  }, []);
+  }, [fetchDesigns]);
 
   // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
   // so the list refetches without a manual Refresh click.
@@ -561,20 +574,27 @@ function DesignsTable({ clientId, refreshKey = 0 }) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId }) {
+function LeadsTable({ clientId, fetchDesigns = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
 
   const load = useCallback(async () => {
     setError(null);
+    let list;
+    if (fetchDesigns) {
+      // Operator view-as: rows from operator-portal (service-role, audit-logged);
+      // live status sync skipped (owner-JWT-bound) — cached statuses show.
+      try { list = (await fetchDesigns()).designs || []; }
+      catch (e) { setError(e.message || String(e)); setRows([]); return; }
+    } else {
     const { data, error: err } = await sb
       .from("designs")
       .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number")
       .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
-    let list = data || [];
+    list = data || [];
     // Freshen fulfillment status from GHL (read-only projection); non-fatal.
     if (list.length > 0) {
       try {
@@ -582,6 +602,7 @@ function LeadsTable({ clientId }) {
         const statuses = sync && sync.statuses;
         if (statuses) list = list.map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r);
       } catch (_e) { /* keep cached statuses */ }
+    }
     }
     // Group by person: normalized phone, else email, else name (fallback: short_code).
     const normPhone = (p) => String(p || "").replace(/\D/g, "");
@@ -607,7 +628,7 @@ function LeadsTable({ clientId }) {
       if (RANK[st] > RANK[g.topStatus]) g.topStatus = st;
     });
     setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
-  }, []);
+  }, [fetchDesigns]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -2185,6 +2206,63 @@ function DesignerTab({ clientId, onSaved }) {
   );
 }
 
+// ─── Operator Accounts tab ───
+// Lists every tenant (operator-portal:list_clients, server-side app_operators gate)
+// and opens one read-only, GHL-subaccounts style. Every list/view is audit-logged.
+function AccountsTab({ viewing, onOpen }) {
+  const [clients, setClients] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_clients" } });
+      if (cancelled) return;
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setError(msg || "Could not load accounts."); setClients([]); return;
+      }
+      setClients(data.clients || []);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const filtered = (clients || []).filter((c) => !q || c.clientId.toLowerCase().includes(q) || (c.companyName || "").toLowerCase().includes(q));
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <div style={{ ...S.h2, marginBottom: 0, flex: 1 }}>Client accounts</div>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
+          style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 220 }} />
+      </div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px" }}>
+        Open any client's portal read-only (Designs + Contacts). Views are audit-logged. Status badges show cached values.
+      </p>
+      {error && <div style={{ color: "#B91C1C", fontSize: 13, marginBottom: 10 }}>{error}</div>}
+      {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
+      {clients !== null && !error && filtered.length === 0 && <div style={{ color: "#64748B", fontSize: 13 }}>No accounts match.</div>}
+      {filtered.map((c) => (
+        <div key={c.clientId} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: "1px solid #F1F5F9" }}>
+          <div style={{ width: 34, height: 34, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
+            {(c.companyName || c.clientId).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{c.companyName}</div>
+            <div style={{ fontSize: 12, color: "#94A3B8" }}>{c.clientId}</div>
+          </div>
+          {viewing && viewing.clientId === c.clientId
+            ? <span style={{ fontSize: 12, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 7, padding: "5px 10px" }}>Viewing</span>
+            : <button type="button" onClick={() => onOpen({ clientId: c.clientId, companyName: c.companyName })} style={S.btn("#1E293B", "#FFF")}>Open portal →</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Dashboard shell ───
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
@@ -2200,6 +2278,29 @@ function Dashboard({ session }) {
   useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
+  // ── Operator account switcher (GHL-subaccounts style) ──
+  // isOperator only decides whether the Accounts tab SHOWS; every cross-tenant read
+  // is re-authorized server-side by the operator-portal edge fn (app_operators check).
+  const [isOperator, setIsOperator] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("is_operator").then(({ data }) => { if (!cancelled) setIsOperator(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [session]);
+  // viewing = { clientId, companyName } while an operator has another tenant's portal
+  // open. Designs/Contacts then read through operator-portal:get_portal (service-role,
+  // audit-logged); statuses shown are the CACHED values (sync-design-status is
+  // owner-JWT-bound and must not run against the operator's own tenant).
+  const [viewing, setViewing] = useState(null);
+  const viewingFetch = useCallback(async () => {
+    const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
+    if (error) {
+      let msg = error.message;
+      try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+      throw new Error(msg || "Could not load this account.");
+    }
+    return { designs: data.designs || [], versions: data.versions || [] };
+  }, [viewing && viewing.clientId]);
 
   useEffect(() => {
     (async () => {
@@ -2244,7 +2345,11 @@ function Dashboard({ session }) {
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
   const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
-  const activeTab = (!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab;
+  // "accounts" is operator-gated (independent of tenant role); everything else keeps
+  // the existing role clamp. Content renders are ALSO gated (server re-checks anyway).
+  const activeTab = tab === "accounts"
+    ? (isOperator ? "accounts" : "designs")
+    : ((!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab);
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
   // Signed-in user identity for the sidebar footer. Auth users are email+password
@@ -2257,6 +2362,7 @@ function Dashboard({ session }) {
 
   const ICONS = {
     designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
+    accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
     designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
     leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
     orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
@@ -2275,6 +2381,7 @@ function Dashboard({ session }) {
   };
   const TAB_META = {
     designer: ["Designer", "Design a building and build a quote"],
+    accounts: ["Accounts", "Open any client's portal — operators only"],
     designs: ["Designs", "Customer designs and submitted quotes"],
     leads: ["Contacts", "Everyone who has submitted a design"],
     orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
@@ -2324,17 +2431,18 @@ function Dashboard({ session }) {
 
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
-          {navItem("designer", "Designer")}
+          {!viewing && navItem("designer", "Designer")}
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
-          {soonItem("orders", "Orders")}
-          {isAdmin && navItem("pricing", "Structures")}
-          {isAdmin && navItem("layout-pricing", "Options")}
-          {isAdmin && navItem("colors", "Colors")}
-          {isAdmin && navItem("settings", "Settings")}
-          {isAdmin && navItem("billing", "Billing")}
+          {!viewing && soonItem("orders", "Orders")}
+          {!viewing && isAdmin && navItem("pricing", "Structures")}
+          {!viewing && isAdmin && navItem("layout-pricing", "Options")}
+          {!viewing && isAdmin && navItem("colors", "Colors")}
+          {!viewing && isAdmin && navItem("settings", "Settings")}
+          {!viewing && isAdmin && navItem("billing", "Billing")}
         </nav>
 
+        {!viewing && (<>
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "On Demand Pricing")}
@@ -2345,6 +2453,14 @@ function Dashboard({ session }) {
           {soonItem("delivery-schedule", "Delivery Schedule")}
           {soonItem("self-serve-display-units", "Self Serve Displays")}
         </nav>
+        </>)}
+
+        {isOperator && (<>
+        <div className="ss-navlabel">Operator</div>
+        <nav className="ss-nav">
+          {navItem("accounts", "Accounts")}
+        </nav>
+        </>)}
 
         <div className="ss-spacer"></div>
 
@@ -2370,6 +2486,16 @@ function Dashboard({ session }) {
       <section className={"ss-main" + (activeTab === "designer" ? " ss-designer-active" : "")}>
         <div className="ss-topbar">
           <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
+          {viewing && (
+            <div title="Read-only operator view. Status badges show the last cached value — the live GHL status refresh only runs for the tenant's own login."
+              style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#92400E", whiteSpace: "nowrap" }}>
+              <span>Viewing {viewing.companyName}</span>
+              <button type="button" onClick={() => { setViewing(null); setTab("accounts"); }}
+                style={{ background: "#92400E", color: "#FFF", border: "none", borderRadius: 7, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                Exit
+              </button>
+            </div>
+          )}
           <div className="tenant" title={tenant.businessName}>
             <div className="ss-clogo" aria-label={`${tenant.businessName} logo`}>{tenantInitials}</div>
             <span className="ss-tname">{tenant.businessName}</span>
@@ -2384,8 +2510,15 @@ function Dashboard({ session }) {
             </div>
           )}
           <div className="ss-inner">
-            {activeTab === "designs" && <DesignsTable clientId={tenant.clientId} refreshKey={designsRefreshKey} />}
-            {activeTab === "leads" && <LeadsTable clientId={tenant.clientId} />}
+            {activeTab === "designs" && (viewing
+              ? <DesignsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
+              : <DesignsTable clientId={tenant.clientId} refreshKey={designsRefreshKey} />)}
+            {activeTab === "leads" && (viewing
+              ? <LeadsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
+              : <LeadsTable clientId={tenant.clientId} />)}
+            {activeTab === "accounts" && isOperator && (
+              <AccountsTab viewing={viewing} onOpen={(c) => { setViewing(c); setTab("designs"); }} />
+            )}
             {activeTab === "orders" && (
               <ComingSoon
                 title="Orders"
