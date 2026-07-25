@@ -1,5 +1,14 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio — Business Portal</title>
+<!-- PWA: the portal is the installable "StructureStudio" app (one branded app,
+     tenants log in). The customer-facing designer stays a plain web link — it
+     deliberately has NO manifest, so visitors never see an install prompt. -->
+<link rel="manifest" href="/manifest.json"/>
+<meta name="theme-color" content="#3D3672"/>
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="StructureStudio"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}
@@ -1137,16 +1146,20 @@ function downloadFile(name, text) {
   a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
 }
 
-// ─── Billing (platform subscription via portal-billing; Deposyt/NMI gateway) ───
-// The tenant's StructureStudio subscription with CSM Synergy. Card entry happens in
-// Collect.js's hosted lightbox (loaded from the gateway with the PUBLIC tokenization
-// key) — card data never touches the portal or Supabase; we only pass the resulting
-// one-time token to the portal-billing edge function.
+// ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
+// Each feature (Simple Layout, On Demand Pricing, …) is its own recurring
+// subscription, chosen monthly or yearly independently. Simple Layout is the
+// required base; features not yet launched render with a COMING SOON overlay and
+// can't be selected. Card entry happens in Collect.js's hosted lightbox (loaded
+// from the gateway with the PUBLIC tokenization key) — card data never touches the
+// portal or Supabase; a returning tenant's card on file (gateway vault) is reused
+// so the lightbox only shows the first time.
 function BillingView() {
   const [data, setData] = useState(null);   // status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
   const [msg, setMsg] = useState(null);      // { ok } | { err }
+  const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
 
   const load = useCallback(async () => {
     setError(null);
@@ -1157,11 +1170,35 @@ function BillingView() {
   useEffect(() => { load(); }, [load]);
 
   const plans = (data && data.plans) || [];
-  const sub = data && data.subscription;
-  const live = sub && sub.status !== "cancelled" ? sub : null;
+  const subs = (data && data.subscriptions) || [];
   const planById = {}; plans.forEach((p) => { planById[p.id] = p; });
-  const price = (p) => p.price_cents == null ? null :
-    `$${(p.price_cents / 100).toLocaleString("en-US", { minimumFractionDigits: p.price_cents % 100 ? 2 : 0 })}/${p.billing_interval === "annual" ? "yr" : "mo"}`;
+  // Group the plan rows into features (monthly + annual pair per feature).
+  const features = []; const byFeature = {};
+  plans.forEach((p) => {
+    if (!byFeature[p.feature]) { byFeature[p.feature] = { feature: p.feature, name: p.name, availability: p.availability, required: p.required, setup: p.setup_fee_cents, plans: {} }; features.push(byFeature[p.feature]); }
+    byFeature[p.feature].plans[p.billing_interval] = p;
+  });
+  const liveSubs = subs.filter((s) => s.status !== "cancelled");
+  const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
+  const baseLive = !!liveFeatures["simple_layout"];
+
+  // Simple Layout is required: preselect it (monthly) until it's subscribed.
+  useEffect(() => {
+    if (data && data.configured && !baseLive && byFeature["simple_layout"] && !sel["simple_layout"]) {
+      setSel((p) => ({ ...p, simple_layout: "monthly" }));
+    }
+  }, [data]);
+
+  const fmt$ = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
+  const priceLabel = (p) => p ? `${fmt$(p.price_cents)}${p.billing_interval === "annual" ? "/yr" : "/mo"}` : "—";
+
+  // Cart totals (mixed intervals allowed — each feature bills on its own cycle).
+  const cart = Object.entries(sel).filter(([f]) => byFeature[f] && !liveFeatures[f]);
+  const cartPlans = cart.map(([f, iv]) => byFeature[f].plans[iv]).filter(Boolean);
+  const moTotal = cartPlans.filter((p) => p.billing_interval === "monthly").reduce((s, p) => s + (p.price_cents || 0), 0);
+  const yrTotal = cartPlans.filter((p) => p.billing_interval === "annual").reduce((s, p) => s + (p.price_cents || 0), 0);
+  const setupTotal = cart.reduce((s, [f]) => s + (byFeature[f].setup || 0), 0);
+  const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
   // open its hosted card lightbox; the callback hands us a one-time payment token.
@@ -1186,26 +1223,44 @@ function BillingView() {
     document.head.appendChild(s);
   });
 
-  const subscribe = async (planId) => {
+  const toggleFeature = (f) => {
+    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    if (f.required && !baseLive) return;   // Simple Layout stays in the cart
+    setSel((p) => { const n = { ...p }; if (n[f.feature]) delete n[f.feature]; else n[f.feature] = "monthly"; return n; });
+  };
+  const setInterval_ = (f, iv) => {
+    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    setSel((p) => ({ ...p, [f.feature]: iv }));
+  };
+
+  const subscribe = async () => {
+    const planIds = cartPlans.map((p) => p.id);
+    if (planIds.length === 0) { setMsg({ err: "Select at least one feature." }); return; }
     setMsg(null); setBusy(true);
     try {
-      const token = await getPaymentToken();
-      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "subscribe", planId, paymentToken: token } });
+      const body = { action: "subscribe", planIds };
+      if (!data.hasCard) body.paymentToken = await getPaymentToken();
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
-      setMsg({ ok: "You're subscribed — thank you!" });
+      if (r.failed && r.failed.length > 0) {
+        setMsg({ err: `Some features could not be started: ${r.failed.map((x) => x.planId).join(", ")}. Contact CSM Synergy.` });
+      } else {
+        setMsg({ ok: "You're subscribed — thank you!" });
+      }
+      setSel({});
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
 
-  const cancel = async () => {
-    if (!live) return;
-    if (!window.confirm("Cancel your StructureStudio subscription? Your designer link and portal access may stop working at the end of the billing period.")) return;
+  const cancel = async (s) => {
+    const p = planById[s.plan_id] || {};
+    if (!window.confirm(`Cancel ${p.name || "this feature"}? It will stop at the end of the billing period.`)) return;
     setMsg(null); setBusy(true);
     try {
-      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: live.id } });
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: s.id } });
       if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
-      setMsg({ ok: "Subscription cancelled." });
+      setMsg({ ok: `${p.name || "Feature"} cancelled.` });
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
@@ -1235,53 +1290,99 @@ function BillingView() {
         </div>
       )}
 
-      {data && data.configured && live && (
+      {data && data.configured && liveSubs.length > 0 && (
         <div style={S.card}>
-          <div style={S.h2}>Your subscription</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-            <span style={{ fontSize: 15, fontWeight: 800, color: "#1E293B" }}>{(planById[live.plan_id] || {}).name || live.plan_id || "StructureStudio"}</span>
-            {(() => { const b = SUB_BADGE[live.status] || SUB_BADGE.active; return <span style={{ background: b.bg, color: b.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700 }}>{b.label}</span>; })()}
-          </div>
-          <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.7 }}>
-            {planById[live.plan_id] && price(planById[live.plan_id]) && <div>Price: <b>{price(planById[live.plan_id])}</b></div>}
-            <div>Started: <b>{fmtDate(live.current_period_start)}</b></div>
-            <div>Next renewal: <b>{live.current_period_end ? fmtDate(live.current_period_end) : "—"}</b></div>
-          </div>
-          <button type="button" onClick={cancel} disabled={busy}
-            style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", marginTop: 14, opacity: busy ? 0.6 : 1 }}>
-            {busy ? "Working…" : "Cancel subscription"}
-          </button>
+          <div style={S.h2}>Your features</div>
+          {liveSubs.map((s) => {
+            const p = planById[s.plan_id] || {};
+            const b = SUB_BADGE[s.status] || SUB_BADGE.active;
+            return (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", padding: "10px 0", borderBottom: "1px solid #F1F5F9" }}>
+                <div>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginRight: 10 }}>{p.name || s.plan_id}</span>
+                  <span style={{ background: b.bg, color: b.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{b.label}</span>
+                  <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
+                    {s.price_cents != null && <>{fmt$(s.price_cents)}{p.billing_interval === "annual" ? "/yr" : "/mo"} · </>}
+                    started {fmtDate(s.current_period_start)}{s.current_period_end ? ` · renews ${fmtDate(s.current_period_end)}` : ""}
+                  </div>
+                </div>
+                <button type="button" onClick={() => cancel(s)} disabled={busy}
+                  style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12, opacity: busy ? 0.6 : 1 }}>
+                  Cancel
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {data && data.configured && !live && (
+      {data && data.configured && (
         <div style={S.card}>
-          <div style={S.h2}>Choose your plan</div>
-          {sub && sub.status === "cancelled" && (
-            <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>
-              Your previous subscription was cancelled{sub.canceled_at ? ` on ${fmtDate(sub.canceled_at)}` : ""}. Pick a plan to restart.
-            </p>
-          )}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
-            {plans.map((p) => (
-              <div key={p.id} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
-                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{p.name}</div>
-                <div style={{ fontSize: 20, fontWeight: 800, color: ACCENT, margin: "6px 0 2px" }}>
-                  {price(p) || <span style={{ fontSize: 13, color: "#64748B", fontWeight: 600 }}>Per your agreement</span>}
+          <div style={S.h2}>{liveSubs.length > 0 ? "Add features" : "Choose your features"}</div>
+          <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+            Pick monthly or yearly for each feature — yearly is 10× monthly (2 months free). Cancel any feature anytime.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12 }}>
+            {features.filter((f) => !liveFeatures[f.feature]).map((f) => {
+              const soon = f.availability !== "available";
+              const iv = sel[f.feature];
+              const on = !!iv;
+              const shown = f.plans[iv || "monthly"];
+              const lockedBase = f.required && !baseLive;
+              return (
+                <div key={f.feature} onClick={() => toggleFeature(f)}
+                  style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: soon ? "default" : "pointer", overflow: "hidden" }}>
+                  {soon && (
+                    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2, pointerEvents: "none" }}>
+                      <span style={{ transform: "rotate(-12deg)", background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>Coming soon</span>
+                    </div>
+                  )}
+                  <div style={{ opacity: soon ? 0.45 : 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                      <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{f.name}</span>
+                      {f.required && <span style={{ background: "#75E6DA", color: "#134E4A", borderRadius: 20, padding: "2px 8px", fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5 }}>Required</span>}
+                      {!soon && !lockedBase && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
+                    </div>
+                    {!soon && (
+                      <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
+                        {["monthly", "annual"].map((k) => (
+                          <button key={k} type="button" onClick={() => setInterval_(f, k)}
+                            style={{ background: (iv || "monthly") === k ? ACCENT : "transparent", color: (iv || "monthly") === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                            {k === "annual" ? "Yearly" : "Monthly"}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 19, fontWeight: 800, color: ACCENT }}>
+                      {priceLabel(shown)}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>
+                      {f.setup == null ? "Setup fee: TBD" : f.setup === 0 ? "No setup fee" : `Setup: ${fmt$(f.setup)} one-time`}
+                    </div>
+                  </div>
                 </div>
-                <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
-                  {p.billing_interval === "annual" ? "Billed once a year" : "Billed monthly"} · cancel anytime
-                </div>
-                <button type="button" onClick={() => subscribe(p.id)} disabled={busy}
-                  style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>
-                  {busy ? "Working…" : "Subscribe"}
-                </button>
-              </div>
-            ))}
-            {plans.length === 0 && <p style={{ fontSize: 13, color: "#64748B" }}>No plans are published yet — contact CSM Synergy.</p>}
+              );
+            })}
           </div>
-          <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 12 }}>
-            Card details are entered in a secure form served by the payment gateway — they never pass through StructureStudio.
+
+          {selectable && (
+            <div style={{ marginTop: 16, borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
+              <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.8 }}>
+                <div>Selected features: <b>{cart.length}</b></div>
+                {moTotal > 0 && <div>Monthly total: <b>{fmt$(moTotal)}/mo</b></div>}
+                {yrTotal > 0 && <div>Yearly total: <b>{fmt$(yrTotal)}/yr</b></div>}
+                <div>One-time setup: <b>{fmt$(setupTotal)}</b></div>
+              </div>
+              <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
+                style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
+                {busy ? "Working…" : data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"}
+              </button>
+            </div>
+          )}
+
+          <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 14 }}>
+            StructureStudio integrates with your CRM through Synergy/GHL — CRM setup is available for an additional fee.
+            Card details are entered in a secure form served by the payment gateway; they never pass through StructureStudio.
           </p>
         </div>
       )}
@@ -2671,4 +2772,14 @@ function PortalApp() {
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<PortalApp />);
+</script>
+<script>
+// PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
+// beta still deploy instantly). Registered at root scope so the offline
+// fallback also covers designer pages opened from inside the installed app.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js").catch(function () { /* non-fatal: app works without it */ });
+  });
+}
 </script></body></html>

@@ -2,28 +2,30 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 // Platform billing endpoint for the portal's Billing tab — CSM Synergy charging
-// tenants for StructureStudio via the Deposyt/NMI gateway (the BuildBridge stack:
-// Collect.js tokenizes the card in the browser, we start/stop recurring plans that
-// are preset in the gateway; card data never touches this server).
+// tenants for StructureStudio features via the Deposyt/NMI gateway.
 //
-// Auth model mirrors portal-settings: verify_jwt only proves the caller holds *a*
-// valid JWT (the anon key passes too), so we resolve a real user via auth.getUser()
-// and map user → client through client_users (service role). client_id is NEVER
-// taken from the body. ALL billing actions — including status — require the
-// owner/admin role: plan/renewal data is the tenant's financial business.
+// v2 model (2026-07-24): per-FEATURE subscriptions. Each feature (Simple Layout,
+// On Demand Pricing, 3D View, …) is its own recurring subscription, chosen monthly
+// or annual independently. Simple Layout is the required base. Checkout flow:
+// Collect.js tokenizes the card once in the browser → we create an NMI Customer
+// Vault record (billing_customers) → charge one one-time sale for any setup fees →
+// start one recurring subscription per selected feature off the vault. The vault
+// also lets a returning tenant add features without re-entering their card.
+//
+// Grandfathering: each subscription row snapshots price_cents at subscribe time,
+// and NMI subscriptions keep their created terms — future price changes never
+// touch existing (founding) subscriptions.
+//
+// Auth mirrors portal-settings (real user via auth.getUser() → client_users);
+// owner/admin only, client_id never from the body.
 //
 // Actions:
-//   { action: "status" }    → { configured, plans[], subscription|null, checkout? }
-//     checkout = { tokenizationKey, collectJsUrl } — public Collect.js config,
-//     present only when the gateway secrets are set.
-//   { action: "subscribe", planId, paymentToken, firstName?, lastName?, email? }
-//     → starts the recurring subscription in the gateway, records it locally.
-//   { action: "cancel", subscriptionId } → cancels in the gateway, marks the row.
+//   { action: "status" } → { configured, hasCard, plans[], subscriptions[], checkout? }
+//   { action: "subscribe", planIds: string[], paymentToken? }
+//       paymentToken required unless a vault card is on file.
+//   { action: "cancel", subscriptionId }
 //
-// Secrets (Supabase edge function secrets — absent = billing not configured):
-//   NMI_SECURITY_KEY      private server-side gateway key (never sent to browser)
-//   NMI_TOKENIZATION_KEY  public Collect.js key (safe to send to browser)
-//   NMI_GATEWAY_URL       optional; defaults to https://deposyt.transactiongateway.com
+// Secrets: NMI_SECURITY_KEY, NMI_TOKENIZATION_KEY, optional NMI_GATEWAY_URL.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -42,8 +44,7 @@ const GATEWAY = (Deno.env.get("NMI_GATEWAY_URL") || "https://deposyt.transaction
 const SECURITY_KEY = Deno.env.get("NMI_SECURITY_KEY") || "";
 const TOKENIZATION_KEY = Deno.env.get("NMI_TOKENIZATION_KEY") || "";
 
-// POST to the gateway's Payment API. NMI takes form-urlencoded input and returns a
-// form-urlencoded body (response=1 approved | 2 declined | 3 error).
+// POST to the gateway's Payment API. Form-urlencoded in/out; response=1 approved.
 async function nmiPost(params: Record<string, string>) {
   const body = new URLSearchParams({ security_key: SECURITY_KEY, ...params });
   const res = await fetch(`${GATEWAY}/api/transact.php`, {
@@ -67,7 +68,6 @@ Deno.serve(async (req: Request) => {
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
   const authHeader = req.headers.get("Authorization") || "";
   const userClient = createClient(supabaseUrl, anonKey, {
     global: { headers: { Authorization: authHeader } },
@@ -76,7 +76,6 @@ Deno.serve(async (req: Request) => {
   const user = userData?.user;
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
 
-  // 2. Resolve the caller's tenant (service role; caller claims are not trusted).
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: mapping, error: mapErr } = await admin
     .from("client_users")
@@ -87,7 +86,6 @@ Deno.serve(async (req: Request) => {
   if (!mapping) return json({ error: "No business is linked to this account." }, 403);
   const clientId: string = mapping.client_id;
 
-  // 3. Billing is owner/admin only — every action, reads included.
   if (mapping.role !== "owner" && mapping.role !== "admin") {
     return json({ error: "Billing is only available to the account owner or an admin." }, 403);
   }
@@ -98,34 +96,43 @@ Deno.serve(async (req: Request) => {
   const action = payload?.action || "status";
   const configured = Boolean(SECURITY_KEY && TOKENIZATION_KEY);
 
-  // Latest subscription row for this tenant (newest first — cancelled rows stay for history).
-  async function currentSubscription() {
-    const { data, error } = await admin
-      .from("billing_subscriptions")
-      .select("id, plan_id, status, current_period_start, current_period_end, canceled_at, created_at")
-      .eq("client_id", clientId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    return data ?? null;
-  }
+  // All active plan rows — needed by every action (feature lookup for subs too).
+  const { data: planRows, error: plansErr } = await admin
+    .from("billing_plans")
+    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order")
+    .eq("active", true)
+    .order("sort_order", { ascending: false });
+  if (plansErr) return json({ error: plansErr.message }, 500);
+  const plans = planRows ?? [];
+  const planById = new Map(plans.map((p) => [p.id, p]));
+
+  // All subscription rows for this tenant, newest first (cancelled kept for history).
+  const { data: subRows, error: subsErr } = await admin
+    .from("billing_subscriptions")
+    .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false });
+  if (subsErr) return json({ error: subsErr.message }, 500);
+  const subs = subRows ?? [];
+  const liveFeatures = new Set(
+    subs.filter((s) => s.status !== "cancelled")
+      .map((s) => planById.get(s.plan_id)?.feature)
+      .filter(Boolean),
+  );
+
+  // Card on file? (NMI Customer Vault id — never sent to the browser.)
+  const { data: vaultRow } = await admin
+    .from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle();
+  const vaultId: string | null = vaultRow?.vault_id ?? null;
 
   if (action === "status") {
-    const { data: plans, error: plansErr } = await admin
-      .from("billing_plans")
-      .select("id, name, price_cents, billing_interval, active, sort_order")
-      .eq("active", true)
-      .order("sort_order", { ascending: false });
-    if (plansErr) return json({ error: plansErr.message }, 500);
-    let subscription = null;
-    try { subscription = await currentSubscription(); }
-    catch (e) { return json({ error: (e as Error).message }, 500); }
+    // gateway_plan_id stays server-side; everything else drives the UI.
+    const publicPlans = plans.map(({ gateway_plan_id: _g, ...p }) => p);
     return json({
       configured,
-      plans: plans ?? [],
-      subscription,
-      // Public checkout config for Collect.js — only meaningful when configured.
+      hasCard: Boolean(vaultId),
+      plans: publicPlans,
+      subscriptions: subs,
       checkout: configured
         ? { tokenizationKey: TOKENIZATION_KEY, collectJsUrl: `${GATEWAY}/token/Collect.js` }
         : null,
@@ -137,72 +144,111 @@ Deno.serve(async (req: Request) => {
   }
 
   if (action === "subscribe") {
-    const planId = String(payload?.planId || "").trim();
+    const planIds: string[] = Array.isArray(payload?.planIds)
+      ? payload.planIds.map((x: unknown) => String(x).trim()).filter(Boolean)
+      : [];
     const paymentToken = String(payload?.paymentToken || "").trim();
-    if (!planId) return json({ error: "planId is required." }, 400);
-    if (!paymentToken) return json({ error: "paymentToken is required." }, 400);
+    if (planIds.length === 0) return json({ error: "Select at least one feature." }, 400);
 
-    const { data: plan, error: planErr } = await admin
-      .from("billing_plans")
-      .select("id, gateway_plan_id, active")
-      .eq("id", planId)
-      .maybeSingle();
-    if (planErr) return json({ error: planErr.message }, 500);
-    if (!plan || !plan.active) return json({ error: "Unknown or inactive plan." }, 400);
-
-    // One live subscription per tenant — cancel the old one before starting another.
-    let existing = null;
-    try { existing = await currentSubscription(); }
-    catch (e) { return json({ error: (e as Error).message }, 500); }
-    if (existing && existing.status !== "cancelled") {
-      return json({ error: "This account already has a subscription. Cancel it before starting a new one." }, 409);
+    const chosen = planIds.map((id) => planById.get(id));
+    if (chosen.some((p) => !p)) return json({ error: "Unknown plan in selection." }, 400);
+    if (chosen.some((p) => p!.availability !== "available")) {
+      return json({ error: "One of the selected features isn't available yet." }, 400);
+    }
+    const features = chosen.map((p) => p!.feature);
+    if (new Set(features).size !== features.length) {
+      return json({ error: "Pick either monthly or annual for each feature, not both." }, 400);
+    }
+    for (const f of features) {
+      if (liveFeatures.has(f)) return json({ error: `You already have an active subscription for ${f}.` }, 409);
+    }
+    // Simple Layout is the required base — in the cart or already live.
+    if (!features.includes("simple_layout") && !liveFeatures.has("simple_layout")) {
+      return json({ error: "Simple Layout is the required base plan — add it to your selection." }, 400);
     }
 
-    let nmi: Record<string, string>;
-    try {
-      nmi = await nmiPost({
-        recurring: "add_subscription",
-        plan_id: plan.gateway_plan_id,
-        payment_token: paymentToken,
-        first_name: String(payload?.firstName || ""),
-        last_name: String(payload?.lastName || ""),
-        email: String(payload?.email || user.email || ""),
-        // Tie the gateway subscription back to the tenant for webhooks/reporting.
-        merchant_defined_field_1: clientId,
-        orderid: `ss_${clientId}_${planId}`,
-      });
-    } catch (e) {
-      return json({ error: `Payment gateway error: ${(e as Error).message}` }, 402);
+    // Card: reuse the vault, or create it from a fresh Collect.js token.
+    let vault = vaultId;
+    if (!vault) {
+      if (!paymentToken) return json({ error: "paymentToken is required (no card on file)." }, 400);
+      let cust: Record<string, string>;
+      try {
+        cust = await nmiPost({
+          customer_vault: "add_customer",
+          payment_token: paymentToken,
+          first_name: String(payload?.firstName || ""),
+          last_name: String(payload?.lastName || ""),
+          email: String(payload?.email || user.email || ""),
+          merchant_defined_field_1: clientId,
+        });
+      } catch (e) {
+        return json({ error: `Payment gateway error: ${(e as Error).message}` }, 402);
+      }
+      vault = cust.customer_vault_id;
+      if (!vault) return json({ error: "Gateway did not return a customer vault id." }, 502);
+      const { error: vErr } = await admin.from("billing_customers")
+        .upsert({ client_id: clientId, vault_id: vault, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+      if (vErr) return json({ error: vErr.message }, 500);
     }
 
-    const subId = nmi.subscription_id || nmi.transactionid;
-    const { data: row, error: insErr } = await admin
-      .from("billing_subscriptions")
-      .upsert({
-        id: subId,
-        client_id: clientId,
-        plan_id: planId,
-        status: "active",
-        current_period_start: new Date().toISOString(),
-      }, { onConflict: "id" })
-      .select("id, plan_id, status, current_period_start, current_period_end, canceled_at, created_at")
-      .maybeSingle();
-    if (insErr) return json({ error: insErr.message }, 500);
-    return json({ ok: true, subscription: row });
+    // One-time setup fees (NULL = TBD = not charged yet, per the founding pricing).
+    const setupTotal = chosen.reduce((s, p) => s + (p!.setup_fee_cents || 0), 0);
+    if (setupTotal > 0) {
+      try {
+        await nmiPost({
+          type: "sale",
+          amount: (setupTotal / 100).toFixed(2),
+          customer_vault_id: vault,
+          orderid: `ss_setup_${clientId}`,
+          order_description: `StructureStudio setup: ${features.join(", ")}`,
+        });
+      } catch (e) {
+        return json({ error: `Setup fee charge failed: ${(e as Error).message}` }, 402);
+      }
+    }
+
+    // One recurring subscription per feature, sequentially; report partial failures.
+    const created: any[] = [];
+    const failed: { planId: string; error: string }[] = [];
+    for (const p of chosen) {
+      try {
+        const r = await nmiPost({
+          recurring: "add_subscription",
+          plan_id: p!.gateway_plan_id,
+          customer_vault_id: vault,
+          merchant_defined_field_1: clientId,
+          orderid: `ss_${clientId}_${p!.id}`,
+        });
+        const subId = r.subscription_id || r.transactionid;
+        const { data: row, error: insErr } = await admin
+          .from("billing_subscriptions")
+          .upsert({
+            id: subId,
+            client_id: clientId,
+            plan_id: p!.id,
+            price_cents: p!.price_cents,
+            status: "active",
+            current_period_start: new Date().toISOString(),
+          }, { onConflict: "id" })
+          .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
+          .maybeSingle();
+        if (insErr) throw new Error(insErr.message);
+        created.push(row);
+      } catch (e) {
+        failed.push({ planId: p!.id, error: (e as Error).message });
+      }
+    }
+    if (created.length === 0) {
+      return json({ error: `Subscription failed: ${failed.map((f) => f.error).join("; ")}` }, 402);
+    }
+    return json({ ok: true, created, failed });
   }
 
   if (action === "cancel") {
     const subscriptionId = String(payload?.subscriptionId || "").trim();
     if (!subscriptionId) return json({ error: "subscriptionId is required." }, 400);
 
-    // Verify the subscription belongs to this tenant before touching the gateway.
-    const { data: owned, error: ownErr } = await admin
-      .from("billing_subscriptions")
-      .select("id, status")
-      .eq("id", subscriptionId)
-      .eq("client_id", clientId)
-      .maybeSingle();
-    if (ownErr) return json({ error: ownErr.message }, 500);
+    const owned = subs.find((s) => s.id === subscriptionId);
     if (!owned) return json({ error: "Subscription not found." }, 404);
     if (owned.status === "cancelled") return json({ error: "Already cancelled." }, 409);
 
@@ -216,7 +262,7 @@ Deno.serve(async (req: Request) => {
       .from("billing_subscriptions")
       .update({ status: "cancelled", canceled_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", subscriptionId)
-      .select("id, plan_id, status, current_period_start, current_period_end, canceled_at, created_at")
+      .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
       .maybeSingle();
     if (upErr) return json({ error: upErr.message }, 500);
     return json({ ok: true, subscription: row });
