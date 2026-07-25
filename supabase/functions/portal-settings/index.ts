@@ -164,7 +164,7 @@ Deno.serve(async (req: Request) => {
   // tenant owner/admin may MUTATE. The portal UI hides the settings/pricing/colors
   // tabs for role "user", but that is a client-only control — a direct POST would
   // bypass it — so the gate must also live here (server-side).
-  const READ_ACTIONS = new Set(["status", "catalog"]);
+  const READ_ACTIONS = new Set(["status", "catalog", "contact_activity"]);
   if (!READ_ACTIONS.has(action) && mapping.role !== "owner" && mapping.role !== "admin") {
     return json({ error: "Your account can view designs and leads but not change settings. Ask an owner or admin." }, 403);
   }
@@ -718,6 +718,149 @@ Deno.serve(async (req: Request) => {
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // ── Contact activity timeline (Contacts tab "Details"): everything we know about
+  // one contact's designs — version history (what they changed) + GHL estimate events
+  // (sent / viewed / accepted / invoiced). Read-only; any linked account may call it
+  // (same posture as sync-design-status: tenant-scoped reads, no settings exposure).
+  if (action === "contact_activity") {
+    const codes: string[] = Array.isArray(payload?.codes)
+      ? payload.codes.map((c: unknown) => String(c)).filter(Boolean).slice(0, 50)
+      : [];
+    if (codes.length === 0) return json({ ok: true, designs: [], versions: [], estimates: {} });
+
+    const [dRes, vRes] = await Promise.all([
+      admin.from("designs")
+        .select("short_code, created_at, updated_at, status, selections, items, ghl_estimate_number, ghl_estimate_id")
+        .eq("client_id", clientId).in("short_code", codes),
+      admin.from("design_versions")
+        .select("short_code, version, created_at, selections, image_url")
+        .eq("client_id", clientId).in("short_code", codes)
+        .order("version", { ascending: true }),
+    ]);
+    if (dRes.error) return json({ error: dRes.error.message }, 500);
+    if (vRes.error) return json({ error: vRes.error.message }, 500);
+
+    // GHL estimate events for these designs' estimates (best-effort — timeline still
+    // renders from DB data if GHL is unreachable/unconfigured).
+    const estimates: Record<string, unknown> = {};
+    const wantIds = new Set((dRes.data ?? []).map((d: any) => String(d.ghl_estimate_id || "")).filter(Boolean));
+    if (wantIds.size > 0) {
+      const { data: cur } = await admin.from("client_settings")
+        .select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
+      if (cur?.ghl_location_id && cur?.ghl_api_key) {
+        const ghlHeaders = {
+          Authorization: `Bearer ${cur.ghl_api_key}`,
+          Version: "2021-07-28",
+          Accept: "application/json",
+        };
+        try {
+          const limit = 100;
+          for (let offset = 0; offset < 2000; offset += limit) {
+            const url = `https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(cur.ghl_location_id)}&altType=location&limit=${limit}&offset=${offset}`;
+            const r = await fetch(url, { headers: ghlHeaders });
+            if (!r.ok) break;
+            const d = await r.json();
+            const arr: any[] = Array.isArray(d?.estimates) ? d.estimates : [];
+            for (const e of arr) {
+              const id = String(e?._id ?? "");
+              if (wantIds.has(id)) {
+                estimates[id] = {
+                  estimateStatus: e?.estimateStatus ?? null,
+                  estimateNumber: e?.estimateNumber ?? null,
+                  createdAt: e?.createdAt ?? null,
+                  lastVisitedAt: e?.lastVisitedAt ?? null,      // customer opened the estimate
+                  history: Array.isArray(e?.estimateActionHistory) ? e.estimateActionHistory : [],
+                };
+              }
+            }
+            if (arr.length < limit) break;
+          }
+        } catch (_e) { /* best-effort */ }
+      }
+    }
+    return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates });
+  }
+
+  // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
+  // mutation, so the role gate above already applies). Converts the design's GHL
+  // estimate to an invoice (marking the estimate invoiced) and emails it to the
+  // customer — verified live against the LeadConnector API 2026-07-25.
+  if (action === "send_invoice") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+
+    const { data: design, error: desErr } = await admin
+      .from("designs")
+      .select("short_code, status, ghl_estimate_id, contact")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (desErr) return json({ error: desErr.message }, 500);
+    if (!design) return json({ error: "Design not found." }, 404);
+    if (!design.ghl_estimate_id) return json({ error: "This design has no estimate yet." }, 400);
+
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings")
+      .select("ghl_location_id, ghl_api_key")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return json({ error: curErr.message }, 500);
+    if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
+      return json({ error: "Connect Synergy/GHL first (Settings → Connection)." }, 400);
+    }
+    const locationId = cur.ghl_location_id;
+    const ghlHeaders = {
+      Authorization: `Bearer ${cur.ghl_api_key}`,
+      Version: "2021-07-28",
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+
+    // Find the live estimate: need its CURRENT status (must be accepted, not yet
+    // invoiced) and its sentBy user (the send endpoint requires a userId).
+    let est: any = null;
+    const limit = 100;
+    for (let offset = 0; offset < 2000 && !est; offset += limit) {
+      const r = await fetch(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
+      if (!r.ok) return json({ error: `Could not read estimates from Synergy/GHL (${r.status}).` }, 502);
+      const d = await r.json();
+      const arr: any[] = Array.isArray(d?.estimates) ? d.estimates : [];
+      est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
+      if (arr.length < limit) break;
+    }
+    if (!est) return json({ error: "The estimate could not be found in Synergy/GHL." }, 404);
+    const estStatus = String(est?.estimateStatus ?? "").toLowerCase();
+    if (estStatus === "invoiced") return json({ error: "This estimate was already invoiced." }, 400);
+    if (estStatus !== "accepted") return json({ error: `The customer hasn't accepted this estimate yet (status: ${estStatus || "sent"}).` }, 400);
+
+    // 1. Convert estimate → invoice (marks the estimate invoiced in GHL).
+    const convRes = await fetch(`https://services.leadconnectorhq.com/invoices/estimate/${encodeURIComponent(String(design.ghl_estimate_id))}/invoice`, {
+      method: "POST", headers: ghlHeaders,
+      body: JSON.stringify({ altId: locationId, altType: "location", markAsInvoiced: true }),
+    });
+    const convBody = await convRes.json().catch(() => null);
+    if (!convRes.ok) return json({ error: `Creating the invoice failed: ${convBody?.message ?? convRes.status}` }, 502);
+    const invoice = convBody?.invoice ?? convBody ?? {};
+    const invoiceId = String(invoice?._id ?? invoice?.id ?? "");
+    if (!invoiceId) return json({ error: "Synergy/GHL did not return an invoice id." }, 502);
+
+    // 2. Email it to the customer. userId: the user who sent the estimate.
+    const sentBy = String(est?.sentBy ?? "");
+    const sendRes = await fetch(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
+      method: "POST", headers: ghlHeaders,
+      body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, ...(sentBy ? { userId: sentBy } : {}) }),
+    });
+    const sendBody = await sendRes.json().catch(() => null);
+    if (!sendRes.ok) {
+      // The invoice EXISTS (and the estimate is marked invoiced) — surface a precise error.
+      return json({ error: `Invoice ${invoice?.invoiceNumber ?? ""} was created but sending failed: ${sendBody?.message ?? sendRes.status}. You can send it from Synergy/GHL.`, invoiceId }, 502);
+    }
+
+    // 3. Cache the new status (the sync would derive it on next load anyway).
+    await admin.from("designs")
+      .update({ status: "invoiced", updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+
+    return json({ ok: true, invoiceId, invoiceNumber: invoice?.invoiceNumber ?? null });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);

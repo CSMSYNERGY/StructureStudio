@@ -599,13 +599,57 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
   );
 }
 
+// ─── Contact activity helpers (Contacts tab "Details" drawer) ───
+const fmtWhen = (s) => { try { return new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (_) { return s || ""; } };
+// Human diff between two version snapshots — what the customer changed.
+function diffVersionSelections(a, b) {
+  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"]];
+  const parts = [];
+  for (const [k, lbl] of KEYS) {
+    const av = String((a && a[k]) || ""), bv = String((b && b[k]) || "");
+    if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`);
+  }
+  const ap = (a && (a.paintColors || a.paint)) || null, bp = (b && (b.paintColors || b.paint)) || null;
+  if (JSON.stringify(ap) !== JSON.stringify(bp)) parts.push("paint changed");
+  return parts.join(", ");
+}
+// Merge DB history (design versions) + GHL estimate events into one newest-first timeline.
+function buildContactTimeline(act) {
+  const ev = [];
+  (act.designs || []).forEach((d) => {
+    const sel = d.selections || {};
+    const label = [titleCase(sel.style), sel.size].filter(Boolean).join(" ") || d.short_code;
+    const vers = (act.versions || []).filter((v) => v.short_code === d.short_code); // ascending
+    if (vers.length === 0) ev.push({ t: d.created_at, code: d.short_code, text: `Started ${label}` });
+    vers.forEach((v, i) => {
+      if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested a quote (v1)` }); return; }
+      const diff = diffVersionSelections(vers[i - 1].selections || {}, v.selections || {});
+      ev.push({ t: v.created_at, code: d.short_code, text: `Changed the design and resubmitted (v${v.version})${diff ? " — " + diff : ""}` });
+    });
+    const est = d.ghl_estimate_id ? (act.estimates || {})[d.ghl_estimate_id] : null;
+    if (est) {
+      const num = est.estimateNumber != null ? `EST-${est.estimateNumber}` : (d.ghl_estimate_number ? `EST-${d.ghl_estimate_number}` : "estimate");
+      if (est.createdAt) ev.push({ t: est.createdAt, code: d.short_code, text: `${num} emailed to the customer` });
+      if (est.lastVisitedAt) ev.push({ t: est.lastVisitedAt, code: d.short_code, text: `Opened ${num}` });
+      (est.history || []).forEach((h) => {
+        const st = String((h && h.estimateStatus) || "").toLowerCase();
+        if (!h || !h.updatedAt || !st) return;
+        if (st === "accepted") ev.push({ t: h.updatedAt, code: d.short_code, text: `✅ Accepted ${num}` });
+        else if (st === "invoiced") ev.push({ t: h.updatedAt, code: d.short_code, text: `💵 ${num} invoiced` });
+        else ev.push({ t: h.updatedAt, code: d.short_code, text: `${num} ${st}` });
+      });
+    }
+  });
+  return ev.filter((e) => e.t).sort((a, b) => (new Date(b.t)) - (new Date(a.t)));
+}
+
 // ─── Leads table (contact-grouped view of designs) ───
 // Same RLS-scoped designs read as DesignsTable, but grouped by the person
 // (normalized phone → email → name) so a repeat shopper collapses into ONE lead
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId, fetchDesigns = null }) {
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
@@ -643,8 +687,10 @@ function LeadsTable({ clientId, fetchDesigns = null }) {
       const c = r.contact || {};
       const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
       let g = groups.get(key);
-      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent", search: "" }; groups.set(key, g); }
+      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent", search: "", codes: [], acceptedCodes: [] }; groups.set(key, g); }
       g.count += 1;
+      g.codes.push(r.short_code);                     // newest-first (list order)
+      if ((STATUS_LABELS[r.status] ? r.status : "sent") === "accepted") g.acceptedCodes.push(r.short_code);
       // Accumulate design-level searchable text (building + estimate #) so a lead is
       // findable by those too — they aren't columns here but the requirement is all-fields.
       const gsel = r.selections || {};
@@ -686,6 +732,39 @@ function LeadsTable({ clientId, fetchDesigns = null }) {
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
 
+  // ── Details drawer (per contact): what they changed + their estimate activity ──
+  const [detailsFor, setDetailsFor] = useState(null); // group key | null
+  const [activity, setActivity] = useState(null);     // contact_activity payload
+  const [actBusy, setActBusy] = useState(false);
+  const [actErr, setActErr] = useState(null);
+  const [invBusy, setInvBusy] = useState(false);
+  const [invMsg, setInvMsg] = useState(null);         // { ok } | { err }
+
+  const fnError = async (err) => { let m = err.message; try { const c = await err.context.json(); if (c && c.error) m = c.error; } catch (_e) {} return m; };
+
+  const openDetails = async (g) => {
+    if (detailsFor === g.key) { setDetailsFor(null); return; }
+    setDetailsFor(g.key); setActivity(null); setActErr(null); setActBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "contact_activity", codes: g.codes } });
+    setActBusy(false);
+    if (err) { setActErr(await fnError(err)); return; }
+    setActivity(data);
+  };
+
+  // Sends the invoice for the contact's most recent ACCEPTED design (one click,
+  // one estimate). Owner/admin only — the edge fn enforces it server-side too.
+  const sendInvoice = async (g) => {
+    const code = g.acceptedCodes[0];
+    if (!code) return;
+    if (!window.confirm(`Email an invoice to ${g.name || "this customer"} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.`)) return;
+    setInvBusy(true); setInvMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code } });
+    setInvBusy(false);
+    if (err) { setInvMsg({ err: await fnError(err) }); return; }
+    setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — status is now Invoiced.` });
+    load();
+  };
+
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
@@ -700,6 +779,8 @@ function LeadsTable({ clientId, fetchDesigns = null }) {
         </span>
       </div>
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />}
+      {invMsg && invMsg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{invMsg.ok}</div>}
+      {invMsg && invMsg.err && <div style={{ ...S.err, marginBottom: 10 }}>{invMsg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
@@ -725,7 +806,8 @@ function LeadsTable({ clientId, fetchDesigns = null }) {
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
                 const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
                 return (
-                  <tr key={g.key}>
+                  <React.Fragment key={g.key}>
+                  <tr>
                     <td style={{ ...S.td, fontWeight: 700 }}>
                       {(() => { const a = activityInfo(g.lastActivity); return <span title={a.label} style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: a.color, marginRight: 8, verticalAlign: "middle" }} />; })()}
                       {g.name || "—"}
@@ -740,8 +822,50 @@ function LeadsTable({ clientId, fetchDesigns = null }) {
                     <td style={S.td}><span style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>
+                      {!fetchDesigns && (
+                        <button type="button" onClick={() => openDetails(g)}
+                          style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
+                          {detailsFor === g.key ? "Hide details" : "Details"}
+                        </button>
+                      )}
+                      {!fetchDesigns && isAdmin && g.topStatus === "accepted" && g.acceptedCodes.length > 0 && (
+                        <button type="button" onClick={() => sendInvoice(g)} disabled={invBusy}
+                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusy ? 0.6 : 1 }}>
+                          {invBusy ? "Sending…" : "Send invoice"}
+                        </button>
+                      )}
                     </td>
                   </tr>
+                  {detailsFor === g.key && (
+                    <tr>
+                      <td colSpan={7} style={{ ...S.td, background: "#F8FAFC" }}>
+                        {actBusy && <div style={{ fontSize: 13, color: "#64748B", padding: 8 }}>Loading activity…</div>}
+                        {actErr && <div style={{ color: "#B91C1C", fontSize: 13, padding: 8 }}>{actErr}</div>}
+                        {activity && (() => {
+                          const tl = buildContactTimeline(activity);
+                          return (
+                            <div style={{ padding: "6px 4px" }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                                Activity — {g.name || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
+                              </div>
+                              {tl.length === 0 && <div style={{ fontSize: 13, color: "#64748B" }}>No recorded activity yet.</div>}
+                              {tl.map((e, i) => (
+                                <div key={i} style={{ display: "flex", gap: 12, padding: "5px 0", fontSize: 13, borderBottom: "1px solid #EEF2F7", alignItems: "baseline" }}>
+                                  <span style={{ color: "#94A3B8", whiteSpace: "nowrap", minWidth: 130 }}>{fmtWhen(e.t)}</span>
+                                  <span style={{ color: "#94A3B8", whiteSpace: "nowrap", fontSize: 11 }}>{e.code}</span>
+                                  <span style={{ color: "#1E293B" }}>{e.text}</span>
+                                </div>
+                              ))}
+                              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8 }}>
+                                Tracks design submissions &amp; changes (version history) and estimate events from Synergy/GHL (sent · opened · accepted · invoiced). Pre-submit click tracking in the designer is on the roadmap.
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 );
               })}
             </tbody>
@@ -2749,7 +2873,7 @@ function Dashboard({ session }) {
               : <DesignsTable clientId={tenant.clientId} refreshKey={designsRefreshKey} />)}
             {activeTab === "leads" && (viewing
               ? <LeadsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
-              : <LeadsTable clientId={tenant.clientId} />)}
+              : <LeadsTable clientId={tenant.clientId} isAdmin={isAdmin} />)}
             {activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount} />
             )}
