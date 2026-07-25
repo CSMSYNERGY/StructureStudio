@@ -1281,7 +1281,12 @@ function BillingView() {
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
-      {data && data.configured === false && (
+      {data && data.configured === false && plans.length > 0 && (
+        <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+          Online checkout isn't switched on yet — browse your plans below, and contact CSM Synergy to get started.
+        </div>
+      )}
+      {data && data.configured === false && plans.length === 0 && (
         <div style={S.card}>
           <div style={S.h2}>Billing</div>
           <p style={{ fontSize: 13, color: "#64748B" }}>
@@ -1290,7 +1295,7 @@ function BillingView() {
         </div>
       )}
 
-      {data && data.configured && liveSubs.length > 0 && (
+      {data && liveSubs.length > 0 && (
         <div style={S.card}>
           <div style={S.h2}>Your features</div>
           {liveSubs.map((s) => {
@@ -1316,7 +1321,7 @@ function BillingView() {
         </div>
       )}
 
-      {data && data.configured && (
+      {data && plans.length > 0 && (
         <div style={S.card}>
           <div style={S.h2}>{liveSubs.length > 0 ? "Add features" : "Choose your features"}</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
@@ -1373,10 +1378,16 @@ function BillingView() {
                 {yrTotal > 0 && <div>Yearly total: <b>{fmt$(yrTotal)}/yr</b></div>}
                 <div>One-time setup: <b>{fmt$(setupTotal)}</b></div>
               </div>
-              <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
-                style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
-                {busy ? "Working…" : data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"}
-              </button>
+              {data.configured ? (
+                <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
+                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
+                  {busy ? "Working…" : data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"}
+                </button>
+              ) : (
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 12, fontWeight: 600 }}>
+                  Online checkout opens here soon — contact CSM Synergy to activate your features today.
+                </p>
+              )}
             </div>
           )}
 
