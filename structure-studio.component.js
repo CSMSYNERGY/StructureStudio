@@ -723,6 +723,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
+  // The paint option renders inline beside the Roof Options (same row), not in
+  // the option list below — see the Size/Roof/Paint row and renderPaintFields.
+  const paintOpt = visibleOptions.find((o) => o.type === "counter" && o.id === "paint") || null;
 
   // When the building style changes, snap any now-inapplicable option back to
   // its default so a stale "Painted" (etc.) selection can't be silently sent
@@ -2386,6 +2389,79 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     }),
   };
 
+  // ─── PAINT FIELDS (inline, beside Roof Options) ───
+  // Body/Trim color pickers backed by the tenant palette (portal Colors tab).
+  // Moved out of renderOption so the paint option can sit beside the roof
+  // colors in the Size row, while other counter options keep rendering as
+  // pill rows below. Logic is unchanged: "Unpainted" is just the tenant's
+  // default palette color (owner-priced in the Colors tab) — it is NOT
+  // synthesized here. sel.paint ("No Paint"/"Painted") stays the
+  // save/load/estimate contract and is derived from the picks: the build is
+  // "Painted" once a chosen Body/Trim color differs from that side's default
+  // color (or is a custom color).
+  const renderPaintFields = (opt) => {
+    const palette = Array.isArray(C.colors) ? C.colors : [];
+    // flex-basis 170px (not flex:1) so on a phone each color field wraps onto
+    // its own full-width row instead of overflowing the page horizontally.
+    const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
+    const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+    const defaultLabel = (k) => {
+      const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
+      return d ? d.label : "";
+    };
+    const sidePainted = (k, v, custom) => custom || (!!v && v !== defaultLabel(k));
+    const paintField = (kind) => {
+      const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
+      const val = paintColors[kind] || "";
+      const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
+      const labelTxt = kind === "body" ? "Body:" : "Trim:";
+      const other = kind === "body" ? "trim" : "body";
+      // No palette configured for this side → free-text. Any text on either side = painted.
+      if (colors.length === 0) {
+        return (
+          <label style={PAINT_LBL}>{labelTxt}
+            <input type="text" value={val}
+              onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
+              placeholder="Enter color or leave blank" style={PAINT_INPUT} />
+          </label>
+        );
+      }
+      const match = colors.find((c) => c.label === val && !c.allowCustom);
+      const customColor = colors.find((c) => c.allowCustom);
+      const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
+      const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
+      const onSel = (label) => {
+        const c = colors.find((x) => x.label === label);
+        const custom = !!(c && c.allowCustom);
+        if (custom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
+        else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
+        // Recompute the build's paint state from both sides (a custom pick counts as painted).
+        const painted = sidePainted(kind, custom ? "" : label, custom) || sidePainted(other, paintColors[other], paintCustom[other]);
+        setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
+      };
+      return (
+        <div style={{ ...PAINT_LBL, gap: 4 }}>
+          <span>{labelTxt}</span>
+          <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
+          {isCustom && (
+            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
+          )}
+        </div>
+      );
+    };
+    return (
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", minWidth: 0 }}>
+        {opt.img && (
+          <div style={{ flex: "0 0 auto", width: 100, borderRadius: 10, overflow: "hidden", border: "2px solid #E2E8F0" }}>
+            <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
+          </div>
+        )}
+        {paintField("body")}
+        {paintField("trim")}
+      </div>
+    );
+  };
+
   // ─── OPTION RENDERER ───
   const renderOption = (opt) => {
     if (opt.type === "image_cards") {
@@ -2417,65 +2493,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       );
     }
     if (opt.type === "counter") {
-      const isPaint = opt.id === "paint";
+      // Paint renders inline beside Roof Options (see the Size/Roof/Paint row
+      // and renderPaintFields); the map below filters it out — guard anyway.
+      if (opt.id === "paint") return null;
       const hasImage = !!opt.img;
-      // Paint palette from config (the owner's Colors tab). Body = colors flagged siding,
-      // trim = colors flagged trim. If no palette is configured, fall back to free-text.
-      const palette = isPaint && Array.isArray(C.colors) ? C.colors : [];
-      // flex-basis 170px (not flex:1) so on a phone each color field wraps onto its own
-      // full-width row instead of being crushed beside the pills — the pills are
-      // flexShrink:0, so a one-line squeeze used to overflow the page horizontally.
-      const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
-      const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
-      // Paint has no No-Paint/Painted pills: the Body + Trim color selects are always shown.
-      // "Unpainted" is just the tenant's default palette color (owner-priced in the Colors tab,
-      // usually free) — it is NOT synthesized here. sel.paint ("No Paint"/"Painted") stays the
-      // save/load/estimate contract and is derived from the picks: the build is "Painted" once a
-      // chosen Body/Trim color differs from that side's default color (or is a custom color).
-      const defaultLabel = (k) => {
-        const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
-        return d ? d.label : "";
-      };
-      const sidePainted = (k, v, custom) => custom || (!!v && v !== defaultLabel(k));
-      const paintField = (kind) => {
-        const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
-        const val = paintColors[kind] || "";
-        const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
-        const labelTxt = kind === "body" ? "Body:" : "Trim:";
-        const other = kind === "body" ? "trim" : "body";
-        // No palette configured for this side → free-text. Any text on either side = painted.
-        if (colors.length === 0) {
-          return (
-            <label style={PAINT_LBL}>{labelTxt}
-              <input type="text" value={val}
-                onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
-                placeholder="Enter color or leave blank" style={PAINT_INPUT} />
-            </label>
-          );
-        }
-        const match = colors.find((c) => c.label === val && !c.allowCustom);
-        const customColor = colors.find((c) => c.allowCustom);
-        const isCustom = paintCustom[kind] || (!match && !!val && !!customColor);
-        const selectVal = isCustom && customColor ? customColor.label : (match ? match.label : "");
-        const onSel = (label) => {
-          const c = colors.find((x) => x.label === label);
-          const custom = !!(c && c.allowCustom);
-          if (custom) { setPaintCustom((p) => ({ ...p, [kind]: true })); set(""); }
-          else { setPaintCustom((p) => ({ ...p, [kind]: false })); set(label); }
-          // Recompute the build's paint state from both sides (a custom pick counts as painted).
-          const painted = sidePainted(kind, custom ? "" : label, custom) || sidePainted(other, paintColors[other], paintCustom[other]);
-          setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
-        };
-        return (
-          <div style={{ ...PAINT_LBL, gap: 4 }}>
-            <span>{labelTxt}</span>
-            <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
-            {isCustom && (
-              <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
-            )}
-          </div>
-        );
-      };
       return (
         <div key={opt.id} style={{ marginBottom: 14 }}>
           <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
@@ -2485,19 +2506,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                 <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
               </div>
             )}
-            {/* Always wrap: on a phone the two color selects drop onto their own full-width
-                rows instead of overflowing the page horizontally. */}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
-              {isPaint ? (
-                <>
-                  {paintField("body")}
-                  {paintField("trim")}
-                </>
-              ) : (
-                opt.options.map((o) => (
-                  <div key={o} onClick={() => setSel((p) => ({ ...p, [opt.id]: o }))} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
-                ))
-              )}
+              {opt.options.map((o) => (
+                <div key={o} onClick={() => setSel((p) => ({ ...p, [opt.id]: o }))} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+              ))}
             </div>
           </div>
         </div>
@@ -2647,8 +2659,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
             </div>
           </div>
 
-          {/* Building Size + Roof Options — one row; roof sits to the right of size, above Paint. */}
-          {(sizeOpts.length > 0 || roofTypes.length > 0) && (
+          {/* Building Size + Roof Options + Paint — one row; paint sits beside the roof colors. */}
+          {(sizeOpts.length > 0 || roofTypes.length > 0 || paintOpt) && (
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
               {sizeOpts.length > 0 && (
                 <div>
@@ -2702,11 +2714,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                   </div>
                 );
               })()}
+              {paintOpt && (
+                <div style={{ flex: 1, minWidth: 260 }}>
+                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{paintOpt.label}</span>
+                  {renderPaintFields(paintOpt)}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Dynamic Options (filtered by selected building style — see isOptionApplicable) */}
-          {visibleOptions.map((opt) => renderOption(opt))}
+          {/* Dynamic Options (filtered by selected building style — see isOptionApplicable).
+              Paint is excluded — it renders inline beside the roof colors above. */}
+          {visibleOptions.filter((o) => o !== paintOpt).map((opt) => renderOption(opt))}
         </div>
       )}
 
