@@ -91,7 +91,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      main block below. Keep the ?v= cache-buster in lockstep with index.html. -->
 <script src="structure-studio.component.js?v=20260725a" type="text/babel"></script>
 <script type="text/babel">
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
 
 // ─── StructureStudio Business Portal ───
@@ -737,29 +737,38 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
   const [activity, setActivity] = useState(null);     // contact_activity payload
   const [actBusy, setActBusy] = useState(false);
   const [actErr, setActErr] = useState(null);
-  const [invBusy, setInvBusy] = useState(false);
+  // Which contact's Send-invoice request is in flight (null = none). Keyed per contact
+  // so one slow send can't disable every other row's button.
+  const [invBusyKey, setInvBusyKey] = useState(null);
   const [invMsg, setInvMsg] = useState(null);         // { ok } | { err }
+  // Guards against a stale contact_activity response landing under a different contact:
+  // every request stamps this ref, and only the newest one is allowed to render.
+  const actReqRef = useRef(0);
 
   const fnError = async (err) => { let m = err.message; try { const c = await err.context.json(); if (c && c.error) m = c.error; } catch (_e) {} return m; };
 
   const openDetails = async (g) => {
-    if (detailsFor === g.key) { setDetailsFor(null); return; }
+    if (detailsFor === g.key) { setDetailsFor(null); actReqRef.current += 1; return; }
+    const req = ++actReqRef.current;
     setDetailsFor(g.key); setActivity(null); setActErr(null); setActBusy(true);
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "contact_activity", codes: g.codes } });
+    if (req !== actReqRef.current) return;            // a newer contact was opened — drop this
     setActBusy(false);
     if (err) { setActErr(await fnError(err)); return; }
     setActivity(data);
   };
 
-  // Sends the invoice for the contact's most recent ACCEPTED design (one click,
-  // one estimate). Owner/admin only — the edge fn enforces it server-side too.
+  // Sends the invoice for the contact's most recent ACCEPTED design (one click, one
+  // estimate). Owner/admin only — the edge fn enforces it server-side too, and it is
+  // idempotent: a retry after a failed email re-sends the SAME invoice (migration 052).
   const sendInvoice = async (g) => {
     const code = g.acceptedCodes[0];
     if (!code) return;
-    if (!window.confirm(`Email an invoice to ${g.name || "this customer"} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.`)) return;
-    setInvBusy(true); setInvMsg(null);
+    const more = g.acceptedCodes.length > 1 ? `\n\nThis contact has ${g.acceptedCodes.length} accepted designs — this invoices the most recent one (${code}).` : "";
+    if (!window.confirm(`Email an invoice to ${g.name || "this customer"} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.${more}`)) return;
+    setInvBusyKey(g.key); setInvMsg(null);
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code } });
-    setInvBusy(false);
+    setInvBusyKey(null);
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
     setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — status is now Invoiced.` });
     load();
@@ -828,10 +837,14 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
                           {detailsFor === g.key ? "Hide details" : "Details"}
                         </button>
                       )}
-                      {!fetchDesigns && isAdmin && g.topStatus === "accepted" && g.acceptedCodes.length > 0 && (
-                        <button type="button" onClick={() => sendInvoice(g)} disabled={invBusy}
-                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusy ? 0.6 : 1 }}>
-                          {invBusy ? "Sending…" : "Send invoice"}
+                      {/* Gated on "has an accepted design", NOT on the contact's highest
+                          status — a repeat customer with one design already invoiced must
+                          still be able to invoice their other accepted design. */}
+                      {!fetchDesigns && isAdmin && g.acceptedCodes.length > 0 && (
+                        <button type="button" onClick={() => sendInvoice(g)} disabled={invBusyKey === g.key}
+                          title={g.acceptedCodes.length > 1 ? `${g.acceptedCodes.length} accepted designs — invoices the most recent` : "Create and email the invoice for their accepted estimate"}
+                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === g.key ? 0.6 : 1 }}>
+                          {invBusyKey === g.key ? "Sending…" : (g.acceptedCodes.length > 1 ? `Send invoice (${g.acceptedCodes.length})` : "Send invoice")}
                         </button>
                       )}
                     </td>
@@ -848,6 +861,13 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
                               <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
                                 Activity — {g.name || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
                               </div>
+                              {/* An invoice that exists in Synergy/GHL but was never
+                                  emailed — otherwise this design just looks Invoiced. */}
+                              {(activity.invoiceSends || []).filter((s) => s.status === "created").map((s) => (
+                                <div key={"pend" + s.short_code} style={{ background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>
+                                  ⚠ Invoice {s.invoice_number || ""} exists in Synergy/GHL for {s.short_code} but the email never went out. Click Send invoice again to retry — it will not create a second invoice.
+                                </div>
+                              ))}
                               {tl.length === 0 && <div style={{ fontSize: 13, color: "#64748B" }}>No recorded activity yet.</div>}
                               {tl.map((e, i) => (
                                 <div key={i} style={{ display: "flex", gap: 12, padding: "5px 0", fontSize: 13, borderBottom: "1px solid #EEF2F7", alignItems: "baseline" }}>
@@ -2494,7 +2514,12 @@ function AccountsTab({ viewing, onOpen }) {
         try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
         setError(msg || "Could not load accounts."); setClients([]); return;
       }
-      setClients(data.clients || []);
+      // Null-guard the body: a 200 with no/unexpected payload must show an error, not
+      // leave the tab spinning on clients === null forever.
+      if (!data || !Array.isArray(data.clients)) {
+        setError("Synergy returned no account list — reload to try again."); setClients([]); return;
+      }
+      setClients(data.clients);
     })();
     return () => { cancelled = true; };
   }, []);

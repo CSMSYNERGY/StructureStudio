@@ -780,13 +780,28 @@ Deno.serve(async (req: Request) => {
         } catch (_e) { /* best-effort */ }
       }
     }
-    return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates });
+    // Invoice-send ledger state for these designs (migration 052). Lets the drawer show
+    // "invoice created but not emailed — retry" instead of silently looking invoiced.
+    const { data: sends } = await admin
+      .from("invoice_sends")
+      .select("short_code, status, invoice_number, error, updated_at")
+      .eq("client_id", clientId).in("short_code", codes);
+
+    return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
   }
 
   // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
   // mutation, so the role gate above already applies). Converts the design's GHL
   // estimate to an invoice (marking the estimate invoiced) and emails it to the
   // customer — verified live against the LeadConnector API 2026-07-25.
+  //
+  // The convert is IRREVERSIBLE and the email is a separate call that can fail, so the
+  // whole action is serialised through the `invoice_sends` ledger (migration 052):
+  //   * the PK insert is the concurrency claim — a racing request cannot convert twice;
+  //   * a 'created' row means the invoice exists but was never emailed, so a retry
+  //     RE-SENDS the stored invoice id instead of converting again (no orphaned invoice);
+  //   * the userId the send endpoint requires is resolved BEFORE converting, so a missing
+  //     user fails fast instead of after the estimate has already been flipped.
   if (action === "send_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
@@ -815,52 +830,161 @@ Deno.serve(async (req: Request) => {
       Accept: "application/json",
     };
 
-    // Find the live estimate: need its CURRENT status (must be accepted, not yet
-    // invoiced) and its sentBy user (the send endpoint requires a userId).
-    let est: any = null;
-    const limit = 100;
-    for (let offset = 0; offset < 2000 && !est; offset += limit) {
-      const r = await fetch(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
-      if (!r.ok) return json({ error: `Could not read estimates from Synergy/GHL (${r.status}).` }, 502);
-      const d = await r.json();
-      const arr: any[] = Array.isArray(d?.estimates) ? d.estimates : [];
-      est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
-      if (arr.length < limit) break;
-    }
-    if (!est) return json({ error: "The estimate could not be found in Synergy/GHL." }, 404);
-    const estStatus = String(est?.estimateStatus ?? "").toLowerCase();
-    if (estStatus === "invoiced") return json({ error: "This estimate was already invoiced." }, 400);
-    if (estStatus !== "accepted") return json({ error: `The customer hasn't accepted this estimate yet (status: ${estStatus || "sent"}).` }, 400);
+    const nowIso = () => new Date().toISOString();
+    const setClaim = (patch: Record<string, unknown>) =>
+      admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+        .eq("client_id", clientId).eq("short_code", shortCode);
+    // Every GHL call is wrapped: an unhandled fetch rejection would otherwise surface as
+    // an opaque 500 with no CORS headers, losing the "invoice was created" warning.
+    const ghl = async (url: string, init?: RequestInit) => {
+      try {
+        const r = await fetch(url, init);
+        const body = await r.json().catch(() => null);
+        return { ok: r.ok, status: r.status, body };
+      } catch (e) {
+        return { ok: false, status: 0, body: null, netErr: (e as Error)?.message || "network error" };
+      }
+    };
+    const STALE_CLAIM_MS = 3 * 60 * 1000;
 
-    // 1. Convert estimate → invoice (marks the estimate invoiced in GHL).
-    const convRes = await fetch(`https://services.leadconnectorhq.com/invoices/estimate/${encodeURIComponent(String(design.ghl_estimate_id))}/invoice`, {
-      method: "POST", headers: ghlHeaders,
-      body: JSON.stringify({ altId: locationId, altType: "location", markAsInvoiced: true }),
+    // ── 1. Claim the send (idempotency + recovery). ──────────────────────────────
+    let resendInvoiceId: string | null = null;   // set when recovering a created-but-unsent invoice
+    let resendInvoiceNumber: string | null = null;
+    let resendSenderUserId: string | null = null;
+    const claimIns = await admin.from("invoice_sends").insert({
+      client_id: clientId, short_code: shortCode,
+      ghl_estimate_id: String(design.ghl_estimate_id), status: "claimed", attempts: 1,
     });
-    const convBody = await convRes.json().catch(() => null);
-    if (!convRes.ok) return json({ error: `Creating the invoice failed: ${convBody?.message ?? convRes.status}` }, 502);
-    const invoice = convBody?.invoice ?? convBody ?? {};
-    const invoiceId = String(invoice?._id ?? invoice?.id ?? "");
-    if (!invoiceId) return json({ error: "Synergy/GHL did not return an invoice id." }, 502);
-
-    // 2. Email it to the customer. userId: the user who sent the estimate.
-    const sentBy = String(est?.sentBy ?? "");
-    const sendRes = await fetch(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
-      method: "POST", headers: ghlHeaders,
-      body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, ...(sentBy ? { userId: sentBy } : {}) }),
-    });
-    const sendBody = await sendRes.json().catch(() => null);
-    if (!sendRes.ok) {
-      // The invoice EXISTS (and the estimate is marked invoiced) — surface a precise error.
-      return json({ error: `Invoice ${invoice?.invoiceNumber ?? ""} was created but sending failed: ${sendBody?.message ?? sendRes.status}. You can send it from Synergy/GHL.`, invoiceId }, 502);
+    if (claimIns.error) {
+      // 23505 = the row exists → inspect it instead of converting again.
+      const { data: prior } = await admin.from("invoice_sends")
+        .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+      if (!prior) return json({ error: claimIns.error.message }, 500);
+      const st = String(prior.status || "");
+      if (st === "sent") {
+        return json({ error: `Invoice ${prior.invoice_number ?? ""} was already sent for this design.` }, 400);
+      }
+      if (st === "created") {
+        // The invoice EXISTS in GHL but was never emailed → re-send it, do not convert.
+        resendInvoiceId = prior.invoice_id ? String(prior.invoice_id) : null;
+        resendInvoiceNumber = prior.invoice_number ? String(prior.invoice_number) : null;
+        resendSenderUserId = prior.sender_user_id ? String(prior.sender_user_id) : null;
+        if (!resendInvoiceId) return json({ error: "An invoice was created in Synergy/GHL for this design but its id wasn't recorded — send it from Synergy/GHL." }, 409);
+      } else if (st === "claimed") {
+        const age = Date.now() - new Date(String(prior.updated_at)).getTime();
+        if (age < STALE_CLAIM_MS) {
+          return json({ error: "An invoice for this design is already being sent — give it a moment." }, 409);
+        }
+      }
+      await setClaim({ status: "claimed", error: null, attempts: (Number(prior.attempts) || 1) + 1 });
     }
 
-    // 3. Cache the new status (the sync would derive it on next load anyway).
+    let invoiceId = resendInvoiceId;
+    let invoiceNumber: string | null = resendInvoiceNumber;
+
+    if (!invoiceId) {
+      // ── 2. Read the live estimate: must be accepted (and not already invoiced). ──
+      let est: any = null;
+      const limit = 100;
+      for (let offset = 0; offset < 2000 && !est; offset += limit) {
+        const r = await ghl(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
+        if (!r.ok) {
+          await setClaim({ status: "failed", error: `estimate list ${r.status}` });
+          return json({ error: `Could not read estimates from Synergy/GHL (${r.status || r.netErr}).` }, 502);
+        }
+        const arr: any[] = Array.isArray(r.body?.estimates) ? r.body.estimates : [];
+        est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
+        if (arr.length < limit) break;
+      }
+      if (!est) {
+        await setClaim({ status: "failed", error: "estimate not found" });
+        return json({ error: "The estimate could not be found in Synergy/GHL." }, 404);
+      }
+      const estStatus = String(est?.estimateStatus ?? "").toLowerCase();
+      if (estStatus === "invoiced") {
+        await setClaim({ status: "failed", error: "already invoiced in GHL" });
+        return json({ error: "This estimate was already invoiced in Synergy/GHL — send that invoice from there." }, 400);
+      }
+      if (estStatus !== "accepted") {
+        await setClaim({ status: "failed", error: `estimate status ${estStatus || "sent"}` });
+        return json({ error: `The customer hasn't accepted this estimate yet (status: ${estStatus || "sent"}).` }, 400);
+      }
+
+      // ── 3. Resolve the sender BEFORE converting (GHL: "either userId or sentFrom"). ──
+      let userId = String(est?.sentBy ?? "");
+      if (!userId) {
+        const ur = await ghl(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
+        const users: any[] = Array.isArray(ur.body?.users) ? ur.body.users : [];
+        userId = String(users[0]?.id ?? "");
+      }
+      if (!userId) {
+        // Fail fast: converting first would leave an un-sendable invoice behind.
+        await setClaim({ status: "failed", error: "no GHL user to send as" });
+        return json({ error: "Synergy/GHL has no user to send the invoice as — add a user to that sub-account, then try again. (Nothing was invoiced.)" }, 400);
+      }
+
+      // ── 4. Convert estimate → invoice (IRREVERSIBLE: marks the estimate invoiced). ──
+      const convRes = await ghl(`https://services.leadconnectorhq.com/invoices/estimate/${encodeURIComponent(String(design.ghl_estimate_id))}/invoice`, {
+        method: "POST", headers: ghlHeaders,
+        body: JSON.stringify({ altId: locationId, altType: "location", markAsInvoiced: true }),
+      });
+      if (!convRes.ok) {
+        await setClaim({ status: "failed", error: `convert ${convRes.status}` });
+        return json({ error: `Creating the invoice failed: ${convRes.body?.message ?? convRes.status ?? convRes.netErr}` }, 502);
+      }
+      const invoice = convRes.body?.invoice ?? convRes.body ?? {};
+      invoiceId = String(invoice?._id ?? invoice?.id ?? "");
+      invoiceNumber = invoice?.invoiceNumber != null ? String(invoice.invoiceNumber) : null;
+      if (!invoiceId) {
+        await setClaim({ status: "failed", error: "no invoice id returned" });
+        return json({ error: "Synergy/GHL did not return an invoice id." }, 502);
+      }
+      // Record it IMMEDIATELY: from here on the invoice exists in GHL, so even if the
+      // email fails (or this function dies) the retry re-sends instead of converting.
+      await setClaim({ status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null, sender_user_id: userId });
+
+      // ── 5. Email it to the customer. ──
+      const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
+        method: "POST", headers: ghlHeaders,
+        body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+      });
+      if (!sendRes.ok) {
+        await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
+        return json({
+          error: `Invoice ${invoiceNumber ?? ""} was created in Synergy/GHL but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice again to retry the email — it will NOT create a second invoice.`,
+          invoiceId, invoiceNumber, created: true, sent: false,
+        }, 502);
+      }
+    } else {
+      // ── Recovery path: the invoice already exists, only the email is outstanding.
+      //    Reuse the sender recorded on the first attempt when we have it. ──
+      let userId = resendSenderUserId || "";
+      if (!userId) {
+        const ur = await ghl(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
+        const users: any[] = Array.isArray(ur.body?.users) ? ur.body.users : [];
+        userId = String(users[0]?.id ?? "");
+      }
+      if (!userId) {
+        return json({ error: "Synergy/GHL has no user to send the invoice as — add a user to that sub-account, then retry." }, 400);
+      }
+      const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
+        method: "POST", headers: ghlHeaders,
+        body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+      });
+      if (!sendRes.ok) {
+        await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
+        return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from Synergy/GHL.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+      }
+    }
+
+    // ── 6. Done: mark the ledger sent and cache the design's status. ──
+    await setClaim({ status: "sent", error: null });
     await admin.from("designs")
-      .update({ status: "invoiced", updated_at: new Date().toISOString() })
+      .update({ status: "invoiced", updated_at: nowIso() })
       .eq("client_id", clientId).eq("short_code", shortCode);
 
-    return json({ ok: true, invoiceId, invoiceNumber: invoice?.invoiceNumber ?? null });
+    return json({ ok: true, invoiceId, invoiceNumber, sent: true });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
