@@ -28,11 +28,11 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // header Version: 2021-07-28, Bearer <ghl_api_key>. Two bounded LIST calls per tenant
 // (estimates, and opportunities only if a delivered stage is configured) — not per design.
 //
-// NOTE (verify against a live sub-account before prod): the exact estimate `status` values
-// (draft/sent/viewed/accepted/declined/invoiced/paid) and the list pagination shapes are
-// per GHL's LeadConnector API. The mapping lives in mapEstimateStatus() so it is trivial to
-// adjust after inspecting one real response. GHL failures never throw — the design keeps
-// its cached status.
+// VERIFIED against a live accepted estimate (EST-29, 2026-07-25): the list endpoint
+// returns the status in `estimateStatus` (top-level `status` does not exist / is null),
+// ids in `_id`, rows under `estimates`, and an `estimateActionHistory` array of
+// { estimateStatus, updatedAt } events. Values observed: "accepted". The mapping lives
+// in mapEstimateStatus(); GHL failures never throw — the design keeps its cached status.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -178,7 +178,9 @@ Deno.serve(async (req: Request) => {
   const estStatusById = new Map<string, string>();
   for (const e of estimates) {
     const id = String(e?._id ?? e?.id ?? "");
-    if (id) estStatusById.set(id, String(e?.status ?? "").toLowerCase());
+    // GHL returns the status as `estimateStatus` (verified live 2026-07-25); the
+    // `status` fallback is kept in case older/newer API versions differ.
+    if (id) estStatusById.set(id, String(e?.estimateStatus ?? e?.status ?? "").toLowerCase());
   }
 
   const oppStageById = new Map<string, string>();
