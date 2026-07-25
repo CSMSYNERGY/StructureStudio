@@ -107,7 +107,23 @@ const { createClient } = window.supabase;
 
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Session-expiry guard: if any authenticated call (PostgREST or an edge
+// function) comes back 401, the login session is dead — most often a
+// refresh-token race between multiple open windows revoking it. The custom
+// fetch spots those 401s and hands off to PortalApp (ssOnSessionExpired), which
+// signs out cleanly and shows a friendly message on the login screen instead of
+// raw "non-2xx" errors in every tab. Auth endpoints (/auth/v1/) are
+// deliberately NOT intercepted — a wrong password legitimately 4xxes and must
+// reach the login form's own error handling.
+let ssOnSessionExpired = null; // installed by PortalApp on mount
+const ssFetch = (url, opts) => fetch(url, opts).then((res) => {
+  try {
+    const u = String(url && url.url ? url.url : url);
+    if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1) && ssOnSessionExpired) ssOnSessionExpired();
+  } catch (_e) { /* the guard must never break the request itself */ }
+  return res;
+});
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFetch } });
 
 // ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
 // never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
@@ -194,7 +210,7 @@ function PasswordInput({ style, wrapStyle, ...rest }) {
 }
 
 // ─── Login ───
-function LoginView({ onRecoverySent }) {
+function LoginView({ onRecoverySent, notice }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -227,6 +243,7 @@ function LoginView({ onRecoverySent }) {
       <div style={S.card}>
         <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Business Login</div>
         <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your contacts, designs, and settings.</p>
+        {notice && !error && !info && <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{notice}</div>}
         {error && <div style={S.err}>{error}</div>}
         {info && <div style={S.okMsg}>{info}</div>}
         <form onSubmit={signIn}>
@@ -2872,6 +2889,7 @@ function Dashboard({ session }) {
 function PortalApp() {
   const [session, setSession] = useState(undefined); // undefined = booting
   const [recovery, setRecovery] = useState(false);
+  const [expired, setExpired] = useState(false); // session died mid-use (401s) → notice on login
 
   useEffect(() => {
     // A recovery- or invite-email link lands here with #…type=recovery or
@@ -2884,8 +2902,25 @@ function PortalApp() {
     const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
       setSession(sess || null);
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      if (event === "SIGNED_IN") setExpired(false); // fresh login clears the notice
     });
-    return () => sub.subscription.unsubscribe();
+    // Dead-session handler (see ssFetch): only reacts when someone IS signed in —
+    // the login screen's anon calls can 401 too and must not loop — and collapses
+    // a burst of parallel 401s into a single clean sign-out.
+    let handling = false;
+    ssOnSessionExpired = async () => {
+      if (handling) return;
+      handling = true;
+      try {
+        const { data } = await sb.auth.getSession();
+        if (data && data.session) {
+          setExpired(true);
+          await sb.auth.signOut(); // clears the local session even if the server call fails
+        }
+      } catch (_e) { /* never let the guard crash the app */ }
+      handling = false;
+    };
+    return () => { ssOnSessionExpired = null; sub.subscription.unsubscribe(); };
   }, []);
 
   if (session === undefined) {
@@ -2901,7 +2936,7 @@ function PortalApp() {
           <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal</div>
         </div>
       </div>
-      <LoginView />
+      <LoginView notice={expired ? "Your session expired — please sign in again." : null} />
     </div>
   );
   return <Dashboard session={session} />;
