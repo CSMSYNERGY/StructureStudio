@@ -2411,8 +2411,29 @@ function Dashboard({ session }) {
       try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
       throw new Error(msg || "Could not load this account.");
     }
+    // Backfill the real company name (a ?view= deep link seeds it with the slug).
+    if (data.companyName) setViewing((cur) => (cur && cur.clientId === data.clientId && cur.companyName !== data.companyName) ? { ...cur, companyName: data.companyName } : cur);
     return { designs: data.designs || [], versions: data.versions || [] };
   }, [viewing && viewing.clientId]);
+  // GHL-subaccounts-style deep link: /portal.html?view=<clientId> (e.g. from the
+  // admin console's "Open portal ↗") auto-opens that account once the operator
+  // check passes. Non-operators: ignored (and the server rejects reads anyway).
+  useEffect(() => {
+    if (!isOperator) return;
+    const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
+    if (v && /^[a-z0-9][a-z0-9-]*$/.test(v)) {
+      setViewing((cur) => cur || { clientId: v, companyName: v });
+      setTab("designs");
+    }
+  }, [isOperator]);
+  const openAccount = (c) => {
+    setViewing(c); setTab("designs");
+    window.history.replaceState({}, "", "/portal.html?view=" + encodeURIComponent(c.clientId));
+  };
+  const exitAccount = () => {
+    setViewing(null); setTab("accounts");
+    window.history.replaceState({}, "", "/portal.html");
+  };
 
   useEffect(() => {
     (async () => {
@@ -2602,7 +2623,7 @@ function Dashboard({ session }) {
             <div title="Read-only operator view. Status badges show the last cached value — the live GHL status refresh only runs for the tenant's own login."
               style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#92400E", whiteSpace: "nowrap" }}>
               <span>Viewing {viewing.companyName}</span>
-              <button type="button" onClick={() => { setViewing(null); setTab("accounts"); }}
+              <button type="button" onClick={exitAccount}
                 style={{ background: "#92400E", color: "#FFF", border: "none", borderRadius: 7, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                 Exit
               </button>
@@ -2629,7 +2650,7 @@ function Dashboard({ session }) {
               ? <LeadsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
               : <LeadsTable clientId={tenant.clientId} />)}
             {activeTab === "accounts" && isOperator && (
-              <AccountsTab viewing={viewing} onOpen={(c) => { setViewing(c); setTab("designs"); }} />
+              <AccountsTab viewing={viewing} onOpen={openAccount} />
             )}
             {activeTab === "orders" && (
               <ComingSoon
