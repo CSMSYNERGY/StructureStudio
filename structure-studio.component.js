@@ -645,7 +645,7 @@ function ColorSelect({ value, colors, onPick }) {
 // marked inert (no pointer/keyboard/focus) until the gate is passed.
 // NOTE: a phone-as-login "find my saved designs" flow was intentionally deferred — it needs
 // SMS/OTP verification, else a low-entropy phone could expose a customer's saved address.
-function LeadGate({ config, supabase, accent, onPass }) {
+function LeadGate({ config, supabase, accent, onPass, onClose }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
@@ -665,7 +665,13 @@ function LeadGate({ config, supabase, accent, onPass }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.42)", backdropFilter: "blur(2.5px)", WebkitBackdropFilter: "blur(2.5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div style={{ background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+      <div style={{ position: "relative", background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+        {onClose && (
+          <button type="button" onClick={onClose} aria-label="Close" title="Close"
+            style={{ position: "absolute", top: 10, right: 12, background: "transparent", border: "none", fontSize: 20, color: "#94A3B8", cursor: "pointer", lineHeight: 1, padding: 4 }}>
+            ×
+          </button>
+        )}
         {brand.logo
           ? <img src={brand.logo} alt={brand.companyName || "logo"} style={{ height: 40, objectFit: "contain", marginBottom: 12 }} />
           : <div style={{ fontWeight: 800, fontSize: 18, color: acc, marginBottom: 12 }}>{brand.companyName || "Design Studio"}</div>}
@@ -1202,6 +1208,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
 
   const handleClick = useCallback((e) => {
     if (dragging) return;
+    // Not captured yet: any attempt to work the canvas pops the lead gate instead.
+    if (gateRequired) { setGateOpen(true); return; }
     // Swallow the click that fires immediately after a drag/resize gesture —
     // otherwise the hit test below would deselect items the user just resized.
     if (justGesturedRef.current) {
@@ -1380,10 +1388,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired]);
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
+    if (gateRequired) { setGateOpen(true); return; }
     if (pendingRemoval) return; // pick mode: overlays handle the pick; no select/drag
     if (activeTool) return;
     movedRef.current = false;
@@ -1404,7 +1413,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       return;
     }
     setDragging({ id: item.id, ox: pt.x - item.x, oy: pt.y - item.y, startX: item.x, startY: item.y });
-  }, [activeTool, getSvgPt, resizing, ITEMS, pendingRemoval]);
+  }, [activeTool, getSvgPt, resizing, ITEMS, pendingRemoval, gateRequired]);
 
   const startResize = useCallback((e, item, handle) => {
     e.preventDefault();
@@ -2519,15 +2528,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   };
 
   // ─── RENDER ───
-  // Lead-capture gate: the designer renders BEHIND a dimmed/blurred overlay so shoppers can see
-  // what they're signing into, but can't touch it until they pass the gate (name + phone). While
-  // gated, the designer subtree is marked `inert` (no pointer/keyboard/focus) and page scroll is
-  // locked; the gate is portaled to <body> so it stays interactive outside that inert subtree.
-  // Bypassed for the operator preview (isAdmin), the ?id= reopen flow, and remembered browsers —
-  // see the gatePassed initializer above.
-  // Embedded (in-portal) mounts skip the gate entirely: the viewer is a logged-in
-  // portal user, not a shopper — the gate is lead-capture, not a security boundary.
-  const showGate = !gatePassed && !isAdmin && !embedded;
+  // Lead-capture gate (name + phone), shown as a dimmed/blurred modal over the live page.
+  // While the modal is open the designer subtree is marked `inert` and page scroll is
+  // locked; the gate is portaled to <body> so it stays interactive outside that subtree.
+  // The gate is INTERACTION-triggered (Ahsan 2026-07-24): the page loads fully
+  // visible and browsable; the popup appears only when a not-yet-captured visitor
+  // tries to work the 2D canvas (arm a tool, place, or drag an item). gatePassed
+  // (remembered browsers, ?id= reopens), the operator preview (isAdmin), and
+  // embedded portal mounts never see it.
+  const gateRequired = !gatePassed && !isAdmin && !embedded;
+  const [gateOpen, setGateOpen] = useState(false);
+  const showGate = gateRequired && gateOpen;
   // Gate identity chip (public page only): who this browser is remembered as, plus a
   // reset. contact.name is live right after passing the gate; the localStorage copy
   // covers return visits (the gate flag alone carries no name).
@@ -2557,6 +2568,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   }, [showGate]);
   const gateEl = showGate ? (
     <LeadGate config={C} supabase={supabase} accent={accent}
+      onClose={() => setGateOpen(false)}
       onPass={(info) => {
         if (info && (info.name || info.phone)) setContact((p) => ({ ...p, name: info.name || p.name, phone: info.phone || p.phone }));
         try {
@@ -2564,6 +2576,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           if (info && info.name) localStorage.setItem("ss_gate_name_" + (C.clientId || ""), info.name);
         } catch (_e) {}
         setGatePassed(true);
+        setGateOpen(false);
       }} />
   ) : null;
   return (
@@ -2740,7 +2753,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         {(() => {
           const btn = ([key, cfg]) => (
-            <button key={key} onClick={() => { setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
+            <button key={key} onClick={() => { if (gateRequired) { setGateOpen(true); return; } setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
                 background: activeTool === key ? cfg.color : "#F8FAFC",
