@@ -4,12 +4,14 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // Deposyt subscription-lifecycle webhook → mirrors billing state into
 // public.billing_subscriptions (portal Billing tab reads that, never the gateway).
 //
-// Auth: this endpoint is public at the gateway level (Deposyt cannot send a
-// Supabase JWT) — authentication is the Deposyt HMAC-SHA256 signature over the
-// raw request body, same scheme as BuildBridge:
-//   x-deposyt-signature: sha256=<hex>
-// verified against the DEPOSYT_WEBHOOK_SIGNING_KEY secret. Missing secret =>
-// endpoint refuses everything (503), so it is inert until billing is set up.
+// Auth: this endpoint is public at the gateway level (the gateway cannot send a
+// Supabase JWT) — authentication is the HMAC-SHA256 signature verified against
+// the DEPOSYT_WEBHOOK_SIGNING_KEY secret (the Signing Key shown on the gateway's
+// Options → Settings → Webhooks page). Two schemes accepted:
+//   Webhook-Signature: t=<nonce>,s=<hex>   — NMI's real format (verified against
+//     `${nonce}.${rawBody}`; confirmed via docs.nmi.com 2026-07-25)
+//   x-deposyt-signature: sha256=<hex>      — legacy BuildBridge-style (over raw body)
+// Missing secret => endpoint refuses everything (503), inert until set up.
 //
 // Events handled (anything else is logged + acknowledged):
 //   recurring.subscription.add     → upsert row (client_id from metadata/merchant field)
@@ -50,13 +52,26 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
   if (!SIGNING_KEY) return json({ error: "Billing webhooks are not configured." }, 503);
 
-  // 1. Verify the Deposyt signature over the raw body.
+  // 1. Verify the gateway signature over the raw body (either scheme).
   const raw = await req.text();
-  const sigHeader = req.headers.get("x-deposyt-signature") || "";
-  const [scheme, theirHex] = sigHeader.split("=");
-  if (scheme !== "sha256" || !theirHex) return json({ error: "Missing or malformed x-deposyt-signature." }, 401);
-  const ourHex = await hmacHex(SIGNING_KEY, raw);
-  if (!safeEqual(ourHex, theirHex.toLowerCase())) return json({ error: "Invalid signature." }, 401);
+  const nmiHeader = req.headers.get("webhook-signature") || "";
+  const legacyHeader = req.headers.get("x-deposyt-signature") || "";
+  let verified = false;
+  if (nmiHeader) {
+    // Webhook-Signature: t=<nonce>,s=<hex> — HMAC over `${nonce}.${body}`.
+    const parts = Object.fromEntries(nmiHeader.split(",").map((p) => p.trim().split("=") as [string, string]));
+    if (parts.t && parts.s) {
+      const ourHex = await hmacHex(SIGNING_KEY, `${parts.t}.${raw}`);
+      verified = safeEqual(ourHex, String(parts.s).toLowerCase());
+    }
+  } else if (legacyHeader) {
+    const [scheme, theirHex] = legacyHeader.split("=");
+    if (scheme === "sha256" && theirHex) {
+      const ourHex = await hmacHex(SIGNING_KEY, raw);
+      verified = safeEqual(ourHex, theirHex.toLowerCase());
+    }
+  }
+  if (!verified) return json({ error: "Missing or invalid webhook signature." }, 401);
 
   let payload: any;
   try { payload = JSON.parse(raw); }
@@ -85,18 +100,25 @@ Deno.serve(async (req: Request) => {
   };
 
   try {
-    const sub = payload?.data?.subscription ?? payload?.subscription;
+    // NMI wraps the details in event_body; older Deposyt shapes nested a
+    // subscription object. Accept any of them.
+    const sub = payload?.data?.subscription ?? payload?.subscription ?? payload?.event_body;
     if (!sub) throw new Error("No subscription object in payload");
-    const subId = String(sub.id ?? sub.subscription_id ?? "");
+    const subId = String(sub.subscription_id ?? sub.id ?? "");
     if (!subId) throw new Error("No subscription id in payload");
     const status = sub.status ? String(sub.status) : null;
     const periodEnd = sub.current_period_end ?? sub.next_charge_date ?? null;
-    // Tenant: subscribe-time we set merchant_defined_field_1 = client_id; Deposyt
-    // may echo it as metadata. Fall back to the already-known row for updates.
+    // Tenant: subscribe-time we set merchant_defined_field_1 = client_id. NMI may
+    // echo it as merchant_defined_fields (array or object); older shapes used
+    // metadata. Fall back to the already-known row for updates.
+    const mdf = sub?.merchant_defined_fields;
+    const mdfClientId = Array.isArray(mdf)
+      ? (mdf.find((f: any) => String(f?.id ?? f?.field ?? "") === "1")?.value ?? mdf[0]?.value ?? null)
+      : (mdf && typeof mdf === "object" ? (mdf["1"] ?? mdf.merchant_defined_field_1 ?? null) : null);
     const clientId =
       payload?.data?.subscription?.metadata?.locationId ??
       payload?.subscription?.metadata?.locationId ??
-      sub?.merchant_defined_field_1 ?? sub?.metadata?.clientId ?? null;
+      sub?.merchant_defined_field_1 ?? mdfClientId ?? sub?.metadata?.clientId ?? null;
 
     const norm = (s: string | null) => {
       const v = String(s ?? "").toLowerCase();
