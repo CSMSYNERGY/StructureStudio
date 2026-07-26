@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { checkAdminPassword } from "../_shared/adminGate.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -15,12 +16,6 @@ const cors = {
 };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
-}
-function safeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let m = 0;
-  for (let i = 0; i < a.length; i++) m |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return m === 0;
 }
 const reqStr = (v: unknown, name: string) => {
   if (typeof v !== "string" || !v.trim()) throw new Error(`${name} is required.`);
@@ -169,14 +164,15 @@ Deno.serve(async (req: Request) => {
   let p: any;
   try { p = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const expected = Deno.env.get("ADMIN_PASSWORD");
-  if (!expected) return json({ error: "ADMIN_PASSWORD is not configured on the server." }, 500);
-  if (!p?.adminPassword || !safeEqual(String(p.adminPassword), expected)) {
-    return json({ error: "Incorrect admin password." }, 401);
-  }
-
+  // Service-role client is created BEFORE the gate because the gate needs it for the
+  // attempt ledger + audit. Creating a client grants nothing on its own.
   const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const action = p.action;
+
+  // Throttled + audited password gate (migration 053). Escalating per-IP lockout, a delay
+  // on every failure, and an admin_audit row for each one — see _shared/adminGate.ts.
+  const gate = await checkAdminPassword(req, p?.adminPassword, sb, String(action ?? ""));
+  if (!gate.ok) return json(gate.body, gate.status);
 
   try {
     switch (action) {

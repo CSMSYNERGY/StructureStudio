@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { checkAdminPassword } from "../_shared/adminGate.ts";
 
 // Operator (super-admin) bootstrap tool, used by the designer's ?admin=1 panel.
 // Gated by the shared ADMIN_PASSWORD edge-function secret. Owners use the
@@ -18,13 +19,6 @@ function json(body: unknown, status = 200) {
   });
 }
 
-// Constant-time string compare to thwart timing attacks on the admin password.
-function safeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return mismatch === 0;
-}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -36,20 +30,20 @@ Deno.serve(async (req: Request) => {
 
   const { adminPassword, clientId, ghlLocationId, ghlApiKey, action } = payload || {};
 
-  const expected = Deno.env.get("ADMIN_PASSWORD");
-  if (!expected) {
-    return json({ error: "ADMIN_PASSWORD is not configured on the server. Set it in Supabase → Edge Functions → Secrets." }, 500);
-  }
-  if (!adminPassword || !safeEqual(String(adminPassword), expected)) {
-    return json({ error: "Incorrect admin password." }, 401);
-  }
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  // Created before the gate: the throttle ledger + audit need a service-role client.
+  const supabase = createClient(supabaseUrl, serviceKey);
+
+  // Throttled + audited password gate — SAME shared gate as admin-catalog (migration 053).
+  // Both must use it: they share one secret, so an unthrottled sibling would be a free
+  // guessing oracle for the same password.
+  const gate = await checkAdminPassword(req, adminPassword, supabase, String(action ?? ""));
+  if (!gate.ok) return json(gate.body, gate.status);
+
   if (!clientId || typeof clientId !== "string" || !clientId.trim()) {
     return json({ error: "clientId is required." }, 400);
   }
-
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const supabase = createClient(supabaseUrl, serviceKey);
 
   // "status" lets the admin UI show whether creds are already configured — without
   // ever revealing them. Returns booleans only.
