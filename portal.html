@@ -631,12 +631,21 @@ function buildContactTimeline(act) {
       const num = est.estimateNumber != null ? `EST-${est.estimateNumber}` : (d.ghl_estimate_number ? `EST-${d.ghl_estimate_number}` : "estimate");
       if (est.createdAt) ev.push({ t: est.createdAt, code: d.short_code, text: `${num} emailed to the customer` });
       if (est.lastVisitedAt) ev.push({ t: est.lastVisitedAt, code: d.short_code, text: `Opened ${num}` });
+      // GHL sends estimateActionHistory[].updatedAt as the LOCATION's local time with no
+      // timezone suffix, so parsing it as-is lands the event hours off and mis-sorts the
+      // timeline (verified live 2026-07-25: an accept stamped "…T02:39:13" against a real
+      // "…T07:39:13.211Z"). The estimate's own updatedAt IS zoned, so use it for the event
+      // that matches the CURRENT status; older entries fall back to UTC-normalised.
+      const zoned = (s) => /(?:Z|[+-]\d{2}:?\d{2})$/.test(String(s || ""));
+      const curStatus = String(est.estimateStatus || "").toLowerCase();
       (est.history || []).forEach((h) => {
         const st = String((h && h.estimateStatus) || "").toLowerCase();
         if (!h || !h.updatedAt || !st) return;
-        if (st === "accepted") ev.push({ t: h.updatedAt, code: d.short_code, text: `✅ Accepted ${num}` });
-        else if (st === "invoiced") ev.push({ t: h.updatedAt, code: d.short_code, text: `💵 ${num} invoiced` });
-        else ev.push({ t: h.updatedAt, code: d.short_code, text: `${num} ${st}` });
+        let t = h.updatedAt;
+        if (!zoned(t)) t = (st === curStatus && est.updatedAt) ? est.updatedAt : String(t) + "Z";
+        if (st === "accepted") ev.push({ t, code: d.short_code, text: `✅ Accepted ${num}` });
+        else if (st === "invoiced") ev.push({ t, code: d.short_code, text: `💵 ${num} invoiced` });
+        else ev.push({ t, code: d.short_code, text: `${num} ${st}` });
       });
     }
   });

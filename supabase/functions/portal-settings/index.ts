@@ -771,6 +771,12 @@ Deno.serve(async (req: Request) => {
                   estimateNumber: e?.estimateNumber ?? null,
                   createdAt: e?.createdAt ?? null,
                   lastVisitedAt: e?.lastVisitedAt ?? null,      // customer opened the estimate
+                  // GHL's estimateActionHistory[].updatedAt is the LOCATION's local time with
+                  // NO timezone suffix (verified 2026-07-25: history "…T02:39:13" for an estimate
+                  // whose real updatedAt was "…T07:39:13.211Z" — the tenant's Central offset), so
+                  // the browser would misparse it. `updatedAt` IS zoned, so the UI uses it for the
+                  // current status event instead of trusting the history stamp.
+                  updatedAt: e?.updatedAt ?? null,
                   history: Array.isArray(e?.estimateActionHistory) ? e.estimateActionHistory : [],
                 };
               }
