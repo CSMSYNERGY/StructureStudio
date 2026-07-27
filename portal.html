@@ -2375,7 +2375,10 @@ const FB_STATUS = {
   planned:     { label: "Planned",         bg: "#EEF2FF", fg: "#4F46E5" },
   in_progress: { label: "In progress",     bg: "#DBEAFE", fg: "#1D4ED8" },
   needs_info:  { label: "Needs your info", bg: "#FEE2E2", fg: "#B91C1C" },
-  shipped:     { label: "Shipped",         bg: "#DCFCE7", fg: "#15803D" },
+  // The KEY is the stored value (migration 054's check constraint + both sync
+  // functions) and must stay "shipped"; only this label is client-facing. Renamed to
+  // "Completed" on 2026-07-27 to match what the team now calls it on the Monday board.
+  shipped:     { label: "Completed",       bg: "#DCFCE7", fg: "#15803D" },
   declined:    { label: "Not planned",     bg: "#F1F5F9", fg: "#64748B" },
   duplicate:   { label: "Already tracked", bg: "#F3E8FF", fg: "#7E22CE" },
 };
