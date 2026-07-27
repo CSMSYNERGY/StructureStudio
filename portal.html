@@ -1,13 +1,97 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio — Business Portal</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:920px;margin:0 auto}</style>
+<!-- PWA: the portal is the installable "StructureStudio" app (one branded app,
+     tenants log in). The customer-facing designer stays a plain web link — it
+     deliberately has NO manifest, so visitors never see an install prompt. -->
+<link rel="manifest" href="/manifest.json"/>
+<meta name="theme-color" content="#3D3672"/>
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="StructureStudio"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}
+/* Dashboard shell: fluid, full-width sidebar layout. The sidebar sticks to the viewport
+   while the page scrolls; below 900px it collapses to an icon rail. Logged-out views
+   center themselves (PortalApp wraps them in a 920px container). */
+.ss-shell{display:flex;min-height:100vh;align-items:stretch}
+.ss-side{width:240px;flex:0 0 240px;background:linear-gradient(180deg,#3D3672 0%,#2B4C7E 55%,#1B7895 100%);display:flex;flex-direction:column;padding:20px 14px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.ss-brand{display:flex;align-items:center;gap:11px;padding:4px 8px 18px}
+.ss-logo-ph{width:42px;height:42px;border-radius:10px;background:rgba(117,230,218,0.14);border:1px dashed rgba(117,230,218,0.55);color:#B8F2E9;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.ss-logo-ph svg{width:20px;height:20px}
+.ss-brand .name{font-size:15.5px;font-weight:800;color:#FFF;line-height:1.15;white-space:nowrap}
+.ss-brand .sub{font-size:11px;color:#A9B6D6;margin-top:2px;white-space:nowrap}
+.ss-navlabel{font-size:10px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#8091BC;padding:6px 10px;margin-top:6px;white-space:nowrap}
+.ss-nav{display:flex;flex-direction:column;gap:2px}
+.ss-nav a,.ss-nav button{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:9px;font-size:13.5px;font-weight:600;color:#CBD5E6;text-decoration:none;cursor:pointer;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
+.ss-nav a svg,.ss-nav button svg{width:17px;height:17px;flex-shrink:0}
+.ss-nav a:hover,.ss-nav button:hover{background:rgba(255,255,255,0.08);color:#FFF}
+.ss-nav a.active,.ss-nav button.active{background:#75E6DA;color:#22345B;font-weight:700}
+.ss-nav .soon{margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#22345B;background:#75E6DA;border-radius:6px;padding:2px 6px;flex-shrink:0}
+.ss-nav .active .soon{background:#22345B;color:#75E6DA}
+.ss-spacer{flex:1}
+.ss-foot{border-top:1px solid rgba(255,255,255,0.12);padding-top:14px}
+.ss-newlink{display:flex;align-items:center;gap:6px;font-size:12px;color:#A9B6D6;text-decoration:underline;text-underline-offset:2px;cursor:pointer;margin-bottom:12px;padding:0 4px;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
+.ss-newlink:hover{color:#FFF}
+.ss-newlink svg{width:14px;height:14px;flex-shrink:0}
+.ss-user-wrap{position:relative;margin-bottom:2px}
+.ss-user{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:9px;cursor:pointer;outline:none}
+.ss-user-wrap:hover .ss-user,.ss-user-wrap:focus-within .ss-user{background:rgba(255,255,255,0.08)}
+.ss-user .uchev{width:13px;height:13px;margin-left:auto;color:#9FADD1;flex-shrink:0}
+.ss-user-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:5px;display:none;z-index:80}
+.ss-user-wrap:hover .ss-user-menu,.ss-user-wrap:focus-within .ss-user-menu{display:block}
+.ss-user-menu button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
+.ss-user-menu button:hover{background:#FEF2F2;color:#DC2626}
+.ss-user-menu button svg{width:15px;height:15px;flex-shrink:0}
+.ss-avatar{width:34px;height:34px;border-radius:50%;background:rgba(117,230,218,0.16);border:1px solid rgba(117,230,218,0.5);color:#B8F2E9;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;flex-shrink:0}
+.ss-user .uname{font-size:13px;font-weight:700;color:#FFF;line-height:1.15;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.ss-user .umail{font-size:11px;color:#9FADD1;margin-top:1px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.ss-topbar{background:#FFF;border-bottom:1px solid #E7EBF0;padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:40}
+.ss-topbar .ttl{font-size:18px;font-weight:800;color:#1E293B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.ss-topbar .ttl span{color:#94A3B8;font-weight:600;font-size:13px;margin-left:8px}
+.ss-topbar .tenant{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+.ss-clogo{width:34px;height:34px;border-radius:8px;background:#F1F5F9;border:1px dashed #C3CCD8;display:flex;align-items:center;justify-content:center;color:#64748B;flex-shrink:0;font-size:12px;font-weight:800}
+.ss-tname{font-size:15.5px;font-weight:800;color:#1E293B;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.ss-body{flex:1;padding:20px 24px}
+.ss-inner{max-width:1240px}
+/* Designer tab: fixed-height shell, the embedded designer scrolls inside its host
+   (body scroll would double-scroll under the sticky topbar). */
+.ss-main.ss-designer-active{height:100vh;height:100dvh}
+.ss-main.ss-designer-active .ss-body{padding:0;overflow:hidden;min-height:0;display:flex;flex-direction:column}
+.ss-designer-host{flex:1;min-height:0;width:100%;overflow:auto;background:#F8FAFC}
+.ss-stage-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:2px}
+@media (max-width:680px){.ss-stage-grid{grid-template-columns:1fr}}
+@media (max-width:900px){
+  .ss-side{width:68px;flex-basis:68px;padding:18px 10px;align-items:center}
+  .ss-brand{justify-content:center;padding:4px 0 16px}
+  .ss-brand .btext,.ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-newlink span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext{display:none}
+  .ss-nav{width:100%}
+  .ss-nav a,.ss-nav button{justify-content:center;gap:0;padding:10px 0}
+  .ss-newlink{justify-content:center;padding:0}
+  .ss-user{justify-content:center}
+  .ss-foot{width:100%}
+  .ss-user-menu button{justify-content:center;padding:10px 0}
+}
+@media (max-width:560px){
+  .ss-topbar{padding:12px 14px}
+  .ss-topbar .ttl span{display:none}
+  .ss-tname{display:none}
+  .ss-body{padding:14px 12px}
+}
+</style>
 </head><body><div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<!-- The ONE shared designer module (also loaded by index.html). Publishes
+     window.StructureStudio for the in-portal Designer tab; must load before the
+     main block below. Keep the ?v= cache-buster in lockstep with index.html. -->
+<script src="structure-studio.component.js?v=20260726b" type="text/babel"></script>
 <script type="text/babel">
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
 
 // ─── StructureStudio Business Portal ───
@@ -23,7 +107,23 @@ const { createClient } = window.supabase;
 
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Session-expiry guard: if any authenticated call (PostgREST or an edge
+// function) comes back 401, the login session is dead — most often a
+// refresh-token race between multiple open windows revoking it. The custom
+// fetch spots those 401s and hands off to PortalApp (ssOnSessionExpired), which
+// signs out cleanly and shows a friendly message on the login screen instead of
+// raw "non-2xx" errors in every tab. Auth endpoints (/auth/v1/) are
+// deliberately NOT intercepted — a wrong password legitimately 4xxes and must
+// reach the login form's own error handling.
+let ssOnSessionExpired = null; // installed by PortalApp on mount
+const ssFetch = (url, opts) => fetch(url, opts).then((res) => {
+  try {
+    const u = String(url && url.url ? url.url : url);
+    if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1) && ssOnSessionExpired) ssOnSessionExpired();
+  } catch (_e) { /* the guard must never break the request itself */ }
+  return res;
+});
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFetch } });
 
 // ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
 // never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
@@ -110,7 +210,7 @@ function PasswordInput({ style, wrapStyle, ...rest }) {
 }
 
 // ─── Login ───
-function LoginView({ onRecoverySent }) {
+function LoginView({ onRecoverySent, notice }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -142,7 +242,8 @@ function LoginView({ onRecoverySent }) {
     <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
       <div style={S.card}>
         <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Business Login</div>
-        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your leads, designs, and settings.</p>
+        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your contacts, designs, and settings.</p>
+        {notice && !error && !info && <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{notice}</div>}
         {error && <div style={S.err}>{error}</div>}
         {info && <div style={S.okMsg}>{info}</div>}
         <form onSubmit={signIn}>
@@ -235,14 +336,124 @@ const STATUS_COLORS = {
   invoiced:  { bg: "#FFFBEB", fg: "#B45309" },
   delivered: { bg: "#ECFEFF", fg: "#0E7490" },
 };
-function DesignsTable({ clientId }) {
+// Fulfillment workflow order — used so a Status-column sort follows the pipeline
+// (sent → accepted → invoiced → delivered) rather than sorting alphabetically.
+const STATUS_RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+
+// ─── Column sorting (shared by the Designs + Leads tables) ───
+// Clickable header cell. Clicking cycles the direction on the active column and
+// selects a new column (starting ascending). A faded ▲ hints unsorted columns
+// are clickable; the active column shows a solid ▲/▼ in the brand accent.
+function SortTh({ label, col, sortKey, sortDir, onSort, style }) {
+  const active = sortKey === col;
+  return (
+    <th
+      onClick={() => onSort(col)}
+      title={`Sort by ${label}`}
+      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none" }}
+    >
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 9, verticalAlign: "middle", color: active ? ACCENT : "#CBD5E1" }}>
+        {active ? (sortDir === "asc" ? "▲" : "▼") : "▲"}
+      </span>
+    </th>
+  );
+}
+// Stable-ish sort of `rows` by a per-row comparable value. Blanks (null/""/undefined)
+// always sort last regardless of direction; numbers compare numerically and strings
+// case-insensitively (with numeric-aware collation so "2" < "10"). ISO date strings
+// sort chronologically as plain strings, so no special-casing is needed for dates.
+function sortRows(rows, valueOf, dir) {
+  const arr = [...rows];
+  arr.sort((ra, rb) => {
+    const a = valueOf(ra), b = valueOf(rb);
+    const ae = a === null || a === undefined || a === "";
+    const be = b === null || b === undefined || b === "";
+    if (ae && be) return 0;
+    if (ae) return 1;   // blanks last, both directions
+    if (be) return -1;
+    let c;
+    if (typeof a === "number" && typeof b === "number") c = a - b;
+    else c = String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+    return dir === "asc" ? c : -c;
+  });
+  return arr;
+}
+// Toggle helper for a [sortKey,sortDir] pair: same column flips direction, a new
+// column starts ascending.
+function makeOnSort(sortKey, setSortKey, sortDir, setSortDir) {
+  return (col) => {
+    if (col === sortKey) { setSortDir((d) => (d === "asc" ? "desc" : "asc")); }
+    else { setSortKey(col); setSortDir("asc"); }
+  };
+}
+// Lead activity indicator (traffic light) based on the most-recent activity — i.e. the
+// newest design update for that lead. Anon shed-shoppers have no live login/session, so
+// "active" is recency-based, not real-time presence. Thresholds are easy to tune here.
+function activityInfo(lastActivity) {
+  const t = lastActivity ? Date.parse(lastActivity) : NaN;
+  if (!t || isNaN(t)) return { color: "#94A3B8", label: "No activity yet" };
+  const hours = (Date.now() - t) / 3600000;
+  if (hours <= 10)  return { color: "#16A34A", label: "Active recently (within 10 hours)" }; // green
+  if (hours <= 720) return { color: "#F59E0B", label: "Used within the last 30 days" };      // orange (720h = 30d)
+  return { color: "#EF4444", label: "Idle for over a month" };                               // red
+}
+// Case-insensitive "search all fields": deep-collects every value in a row
+// (including nested contact/selections), plus any derived display text passed as
+// `extra`, then requires every whitespace-separated query token to appear
+// somewhere. Empty query matches everything.
+function rowMatchesQuery(row, query, extra) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const vals = [];
+  const walk = (v) => {
+    if (v == null) return;
+    if (typeof v === "object") { for (const k in v) walk(v[k]); }
+    else vals.push(String(v));
+  };
+  walk(row);
+  if (extra) vals.push(String(extra));
+  const hay = vals.join(" ").toLowerCase();
+  return q.split(/\s+/).every((t) => hay.includes(t));
+}
+
+// Search box used by the Designs and Leads tables. Controlled; shows a clear (×) button.
+function SearchInput({ value, onChange, placeholder }) {
+  return (
+    <div style={{ position: "relative", margin: "0 0 12px" }}>
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#94A3B8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={placeholder}
+        style={{ ...S.input, paddingLeft: 32, paddingRight: 30 }} />
+      {value && (
+        <button onClick={() => onChange("")} title="Clear search" aria-label="Clear search"
+          style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", cursor: "pointer", color: "#64748B", fontSize: 18, lineHeight: 1, padding: "2px 6px" }}>×</button>
+      )}
+    </div>
+  );
+}
+
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
   const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
+  const [query, setQuery] = useState("");        // free-text search across all fields
 
   const load = useCallback(async () => {
     setError(null);
+    // Operator view-as: rows come from operator-portal (service-role, audit-logged).
+    // The live status sync is SKIPPED — sync-design-status is owner-JWT-bound and
+    // would refresh the operator's own tenant, not the viewed one. Cached statuses show.
+    if (fetchDesigns) {
+      try {
+        const { designs, versions } = await fetchDesigns();
+        setRows(designs || []);
+        const map = {};
+        (versions || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+        setVmap(map);
+      } catch (e) { setError(e.message || String(e)); setRows([]); }
+      return;
+    }
     const { data, error: err } = await sb
       .from("designs")
       .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
@@ -269,30 +480,66 @@ function DesignsTable({ clientId }) {
     const map = {};
     (vdata || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
     setVmap(map);
-  }, []);
+  }, [fetchDesigns]);
 
-  useEffect(() => { load(); }, [load]);
+  // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
+  // so the list refetches without a manual Refresh click.
+  useEffect(() => { load(); }, [load, refreshKey]);
+
+  // Client-side "search all fields" over the already-loaded rows.
+  const filtered = (rows || []).filter((r) => {
+    const st = STATUS_LABELS[r.status] ? r.status : "sent";
+    const extra = [r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : "", STATUS_LABELS[st], fmtDate(r.created_at), titleCase((r.selections || {}).style)].join(" ");
+    return rowMatchesQuery(r, query, extra);
+  });
+
+  // Column sort. Default = newest first (matches the created_at DESC load order).
+  const [sortKey, setSortKey] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+  const sortVal = (r) => {
+    const c = r.contact || {}, sel = r.selections || {};
+    switch (sortKey) {
+      case "date":     return r.created_at;
+      case "customer": return c.name;
+      case "contact":  return c.email || c.phone;
+      case "building": return [titleCase(sel.style), sel.size].filter(Boolean).join(" ");
+      case "estimate": return r.ghl_estimate_number != null ? Number(r.ghl_estimate_number) : null;
+      case "status":   return STATUS_RANK[STATUS_LABELS[r.status] ? r.status : "sent"];
+      default:         return r.created_at;
+    }
+  };
+  const sorted = sortRows(filtered, sortVal, sortDir);
 
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Designs &amp; Leads {rows ? `(${rows.length})` : ""}</div>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Designs {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
         <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
+      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && filtered.length === 0 && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs match “{query}”.</p>
+      )}
+      {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              <th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Contact</th>
-              <th style={S.th}>Building</th><th style={S.th}>Estimate #</th><th style={S.th}>Status</th><th style={S.th}>Actions</th>
+              <SortTh label="Date" col="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Customer" col="customer" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Contact" col="contact" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Building" col="building" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Estimate #" col="estimate" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {rows.map((r) => {
+              {sorted.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
                 const vs = vmap[r.short_code] || [];       // newest first
@@ -352,8 +599,320 @@ function DesignsTable({ clientId }) {
   );
 }
 
+// ─── Contact activity helpers (Contacts tab "Details" drawer) ───
+const fmtWhen = (s) => { try { return new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (_) { return s || ""; } };
+// Human diff between two version snapshots — what the customer changed.
+function diffVersionSelections(a, b) {
+  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"]];
+  const parts = [];
+  for (const [k, lbl] of KEYS) {
+    const av = String((a && a[k]) || ""), bv = String((b && b[k]) || "");
+    if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`);
+  }
+  const ap = (a && (a.paintColors || a.paint)) || null, bp = (b && (b.paintColors || b.paint)) || null;
+  if (JSON.stringify(ap) !== JSON.stringify(bp)) parts.push("paint changed");
+  return parts.join(", ");
+}
+// Merge DB history (design versions) + GHL estimate events into one newest-first timeline.
+function buildContactTimeline(act) {
+  const ev = [];
+  (act.designs || []).forEach((d) => {
+    const sel = d.selections || {};
+    const label = [titleCase(sel.style), sel.size].filter(Boolean).join(" ") || d.short_code;
+    const vers = (act.versions || []).filter((v) => v.short_code === d.short_code); // ascending
+    if (vers.length === 0) ev.push({ t: d.created_at, code: d.short_code, text: `Started ${label}` });
+    vers.forEach((v, i) => {
+      if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested a quote (v1)` }); return; }
+      const diff = diffVersionSelections(vers[i - 1].selections || {}, v.selections || {});
+      ev.push({ t: v.created_at, code: d.short_code, text: `Changed the design and resubmitted (v${v.version})${diff ? " — " + diff : ""}` });
+    });
+    const est = d.ghl_estimate_id ? (act.estimates || {})[d.ghl_estimate_id] : null;
+    if (est) {
+      const num = est.estimateNumber != null ? `EST-${est.estimateNumber}` : (d.ghl_estimate_number ? `EST-${d.ghl_estimate_number}` : "estimate");
+      if (est.createdAt) ev.push({ t: est.createdAt, code: d.short_code, text: `${num} emailed to the customer` });
+      if (est.lastVisitedAt) ev.push({ t: est.lastVisitedAt, code: d.short_code, text: `Opened ${num}` });
+      // GHL sends estimateActionHistory[].updatedAt as the LOCATION's local time with no
+      // timezone suffix, so parsing it as-is lands the event hours off and mis-sorts the
+      // timeline (verified live 2026-07-25: an accept stamped "…T02:39:13" against a real
+      // "…T07:39:13.211Z"). The estimate's own updatedAt IS zoned, so use it for the event
+      // that matches the CURRENT status; older entries fall back to UTC-normalised.
+      const zoned = (s) => /(?:Z|[+-]\d{2}:?\d{2})$/.test(String(s || ""));
+      const curStatus = String(est.estimateStatus || "").toLowerCase();
+      (est.history || []).forEach((h) => {
+        const st = String((h && h.estimateStatus) || "").toLowerCase();
+        if (!h || !h.updatedAt || !st) return;
+        let t = h.updatedAt;
+        if (!zoned(t)) t = (st === curStatus && est.updatedAt) ? est.updatedAt : String(t) + "Z";
+        if (st === "accepted") ev.push({ t, code: d.short_code, text: `✅ Accepted ${num}` });
+        else if (st === "invoiced") ev.push({ t, code: d.short_code, text: `💵 ${num} invoiced` });
+        else ev.push({ t, code: d.short_code, text: `${num} ${st}` });
+      });
+    }
+  });
+  return ev.filter((e) => e.t).sort((a, b) => (new Date(b.t)) - (new Date(a.t)));
+}
+
+// ─── Leads table (contact-grouped view of designs) ───
+// Same RLS-scoped designs read as DesignsTable, but grouped by the person
+// (normalized phone → email → name) so a repeat shopper collapses into ONE lead
+// with a design count + activity dates. Read-only. "Last activity" = the newest
+// design's updated_at (portal logins aren't client-readable); status = the
+// highest fulfillment stage across that lead's designs.
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
+  const [rows, setRows] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");  // free-text search across all fields
+
+  const load = useCallback(async () => {
+    setError(null);
+    let list;
+    if (fetchDesigns) {
+      // Operator view-as: rows from operator-portal (service-role, audit-logged);
+      // live status sync skipped (owner-JWT-bound) — cached statuses show.
+      try { list = (await fetchDesigns()).designs || []; }
+      catch (e) { setError(e.message || String(e)); setRows([]); return; }
+    } else {
+    const { data, error: err } = await sb
+      .from("designs")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false });
+    if (err) { setError(err.message); setRows([]); return; }
+    list = data || [];
+    // Freshen fulfillment status from GHL (read-only projection); non-fatal.
+    if (list.length > 0) {
+      try {
+        const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
+        const statuses = sync && sync.statuses;
+        if (statuses) list = list.map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r);
+      } catch (_e) { /* keep cached statuses */ }
+    }
+    }
+    // Group by person: normalized phone, else email, else name (fallback: short_code).
+    const normPhone = (p) => String(p || "").replace(/\D/g, "");
+    const RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+    const groups = new Map();
+    list.forEach((r) => { // list is newest-first
+      const c = r.contact || {};
+      const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
+      let g = groups.get(key);
+      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent", search: "", codes: [], acceptedCodes: [] }; groups.set(key, g); }
+      g.count += 1;
+      g.codes.push(r.short_code);                     // newest-first (list order)
+      if ((STATUS_LABELS[r.status] ? r.status : "sent") === "accepted") g.acceptedCodes.push(r.short_code);
+      // Accumulate design-level searchable text (building + estimate #) so a lead is
+      // findable by those too — they aren't columns here but the requirement is all-fields.
+      const gsel = r.selections || {};
+      g.search += " " + [titleCase(gsel.style), gsel.size, r.ghl_estimate_number, r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : ""].filter(Boolean).join(" ");
+      if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
+      if (!g.email && c.email) g.email = c.email;
+      if (!g.phone && c.phone) g.phone = c.phone;
+      const act = r.updated_at || r.created_at;
+      if (act > g.lastActivity) g.lastActivity = act;
+      if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
+      const st = STATUS_LABELS[r.status] ? r.status : "sent";
+      if (RANK[st] > RANK[g.topStatus]) g.topStatus = st;
+    });
+    setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+  }, [fetchDesigns]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Client-side "search all fields" over the already-grouped leads.
+  const filtered = (rows || []).filter((g) => {
+    const extra = [STATUS_LABELS[g.topStatus], fmtDate(g.firstSeen), fmtDate(g.lastActivity)].join(" ");
+    return rowMatchesQuery(g, query, extra);
+  });
+
+  // Column sort. Default = most-recent activity first (matches the load-time sort).
+  const [sortKey, setSortKey] = useState("lastActivity");
+  const [sortDir, setSortDir] = useState("desc");
+  const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+  const sortVal = (g) => {
+    switch (sortKey) {
+      case "customer":     return g.name;
+      case "contact":      return g.email || g.phone;
+      case "designs":      return g.count;
+      case "firstSeen":    return g.firstSeen;
+      case "lastActivity": return g.lastActivity;
+      case "status":       return STATUS_RANK[g.topStatus];
+      default:             return g.lastActivity;
+    }
+  };
+  const sorted = sortRows(filtered, sortVal, sortDir);
+
+  // ── Details drawer (per contact): what they changed + their estimate activity ──
+  const [detailsFor, setDetailsFor] = useState(null); // group key | null
+  const [activity, setActivity] = useState(null);     // contact_activity payload
+  const [actBusy, setActBusy] = useState(false);
+  const [actErr, setActErr] = useState(null);
+  // Which contact's Send-invoice request is in flight (null = none). Keyed per contact
+  // so one slow send can't disable every other row's button.
+  const [invBusyKey, setInvBusyKey] = useState(null);
+  const [invMsg, setInvMsg] = useState(null);         // { ok } | { err }
+  // Guards against a stale contact_activity response landing under a different contact:
+  // every request stamps this ref, and only the newest one is allowed to render.
+  const actReqRef = useRef(0);
+
+  const fnError = async (err) => { let m = err.message; try { const c = await err.context.json(); if (c && c.error) m = c.error; } catch (_e) {} return m; };
+
+  const openDetails = async (g) => {
+    if (detailsFor === g.key) { setDetailsFor(null); actReqRef.current += 1; return; }
+    const req = ++actReqRef.current;
+    setDetailsFor(g.key); setActivity(null); setActErr(null); setActBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "contact_activity", codes: g.codes } });
+    if (req !== actReqRef.current) return;            // a newer contact was opened — drop this
+    setActBusy(false);
+    if (err) { setActErr(await fnError(err)); return; }
+    setActivity(data);
+  };
+
+  // Sends the invoice for the contact's most recent ACCEPTED design (one click, one
+  // estimate). Owner/admin only — the edge fn enforces it server-side too, and it is
+  // idempotent: a retry after a failed email re-sends the SAME invoice (migration 052).
+  const sendInvoice = async (g) => {
+    const code = g.acceptedCodes[0];
+    if (!code) return;
+    const more = g.acceptedCodes.length > 1 ? `\n\nThis contact has ${g.acceptedCodes.length} accepted designs — this invoices the most recent one (${code}).` : "";
+    if (!window.confirm(`Email an invoice to ${g.name || "this customer"} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.${more}`)) return;
+    setInvBusyKey(g.key); setInvMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code } });
+    setInvBusyKey(null);
+    if (err) { setInvMsg({ err: await fnError(err) }); return; }
+    setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — status is now Invoiced.` });
+    load();
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Contacts {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
+        <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.
+        <span style={{ marginLeft: 6, whiteSpace: "nowrap" }}>
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#16A34A", margin: "0 4px 0 6px", verticalAlign: "middle" }} />active
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#F59E0B", margin: "0 4px 0 10px", verticalAlign: "middle" }} />recent
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#EF4444", margin: "0 4px 0 10px", verticalAlign: "middle" }} />idle
+        </span>
+      </div>
+      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />}
+      {invMsg && invMsg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{invMsg.ok}</div>}
+      {invMsg && invMsg.err && <div style={{ ...S.err, marginBottom: 10 }}>{invMsg.err}</div>}
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts yet. Share your customer link — everyone who submits a design shows up here.</p>
+      )}
+      {rows && rows.length > 0 && filtered.length === 0 && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts match “{query}”.</p>
+      )}
+      {rows && filtered.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <SortTh label="Customer" col="customer" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Contact" col="contact" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Designs" col="designs" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="First seen" col="firstSeen" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Last activity" col="lastActivity" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <th style={S.th}>Actions</th>
+            </tr></thead>
+            <tbody>
+              {sorted.map((g) => {
+                const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
+                const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
+                return (
+                  <React.Fragment key={g.key}>
+                  <tr>
+                    <td style={{ ...S.td, fontWeight: 700 }}>
+                      {(() => { const a = activityInfo(g.lastActivity); return <span title={a.label} style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: a.color, marginRight: 8, verticalAlign: "middle" }} />; })()}
+                      {g.name || "—"}
+                    </td>
+                    <td style={S.td}>
+                      <div>{g.email || ""}</div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{g.phone || ""}</div>
+                    </td>
+                    <td style={S.td}>{g.count}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
+                    <td style={S.td}><span style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[g.topStatus]}</span></td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>
+                      {!fetchDesigns && (
+                        <button type="button" onClick={() => openDetails(g)}
+                          style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
+                          {detailsFor === g.key ? "Hide details" : "Details"}
+                        </button>
+                      )}
+                      {/* Gated on "has an accepted design", NOT on the contact's highest
+                          status — a repeat customer with one design already invoiced must
+                          still be able to invoice their other accepted design. */}
+                      {!fetchDesigns && isAdmin && g.acceptedCodes.length > 0 && (
+                        <button type="button" onClick={() => sendInvoice(g)} disabled={invBusyKey === g.key}
+                          title={g.acceptedCodes.length > 1 ? `${g.acceptedCodes.length} accepted designs — invoices the most recent` : "Create and email the invoice for their accepted estimate"}
+                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === g.key ? 0.6 : 1 }}>
+                          {invBusyKey === g.key ? "Sending…" : (g.acceptedCodes.length > 1 ? `Send invoice (${g.acceptedCodes.length})` : "Send invoice")}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                  {detailsFor === g.key && (
+                    <tr>
+                      <td colSpan={7} style={{ ...S.td, background: "#F8FAFC" }}>
+                        {actBusy && <div style={{ fontSize: 13, color: "#64748B", padding: 8 }}>Loading activity…</div>}
+                        {actErr && <div style={{ color: "#B91C1C", fontSize: 13, padding: 8 }}>{actErr}</div>}
+                        {activity && (() => {
+                          const tl = buildContactTimeline(activity);
+                          return (
+                            <div style={{ padding: "6px 4px" }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                                Activity — {g.name || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
+                              </div>
+                              {/* An invoice that exists in Synergy/GHL but was never
+                                  emailed — otherwise this design just looks Invoiced. */}
+                              {(activity.invoiceSends || []).filter((s) => s.status === "created").map((s) => (
+                                <div key={"pend" + s.short_code} style={{ background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>
+                                  ⚠ Invoice {s.invoice_number || ""} exists in Synergy/GHL for {s.short_code} but the email never went out. Click Send invoice again to retry — it will not create a second invoice.
+                                </div>
+                              ))}
+                              {tl.length === 0 && <div style={{ fontSize: 13, color: "#64748B" }}>No recorded activity yet.</div>}
+                              {tl.map((e, i) => (
+                                <div key={i} style={{ display: "flex", gap: 12, padding: "5px 0", fontSize: 13, borderBottom: "1px solid #EEF2F7", alignItems: "baseline" }}>
+                                  <span style={{ color: "#94A3B8", whiteSpace: "nowrap", minWidth: 130 }}>{fmtWhen(e.t)}</span>
+                                  <span style={{ color: "#94A3B8", whiteSpace: "nowrap", fontSize: 11 }}>{e.code}</span>
+                                  <span style={{ color: "#1E293B" }}>{e.text}</span>
+                                </div>
+                              ))}
+                              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8 }}>
+                                Tracks design submissions &amp; changes (version history) and estimate events from Synergy/GHL (sent · opened · accepted · invoiced). Pre-submit click tracking in the designer is on the roadmap.
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Settings (via portal-settings edge function; API key is write-only) ───
-function SettingsView() {
+function SettingsView({ section }) {
+  // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
+  // or "branding" (customer-link look & feel + business details + pricing
+  // display + testing). No section = all (legacy). Form state always covers
+  // every field (prefilled from status), so the global save stays safe no
+  // matter which section is on screen.
+  const show = (k) => !section || section === k;
   const [status, setStatus] = useState(null);   // response of action:"status"
   const [error, setError] = useState(null);
   const [saved, setSaved] = useState(false);
@@ -365,8 +924,16 @@ function SettingsView() {
   const [ghlApiKey, setGhlApiKey] = useState("");
   const [ghlBusy, setGhlBusy] = useState(false);
   const [ghlMsg, setGhlMsg] = useState(null);   // { ok } | { err }
+  // Synergy/GHL pipelines + stages for the (post-connect) dropdowns. Fetched via
+  // the edge fn using the stored key — the browser never holds it.
+  const [pipelines, setPipelines] = useState([]);   // [{id,name,stages:[{id,name}]}]
+  const [pipesBusy, setPipesBusy] = useState(false);   // loading pipelines
+  const [pipesSaving, setPipesSaving] = useState(false);
+  const [pipesMsg, setPipesMsg] = useState(null);   // { ok } | { err }
   const [form, setForm] = useState({
-    ghlPipelineId: "", ghlStageSendQuoteId: "", ghlStageDeliveredId: "",
+    ghlPipelineId: "", ghlStageSendQuoteId: "",
+    ghlStageAcceptedId: "", ghlStageInvoicedId: "", ghlStageDeliveredId: "",
+    ghlPipelineAcceptedId: "", ghlPipelineInvoicedId: "", ghlPipelineDeliveredId: "",
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
@@ -427,12 +994,15 @@ function SettingsView() {
       if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
       if (!data) { setError("Couldn't load settings (empty response). Please refresh."); return; }
       setStatus(data);
+      if (data.configured) loadPipelines();   // connected → populate the pipeline/stage dropdowns
       const a = data.businessAddress || {};
       const b = data.branding || {};
       setCurrentLogo(b.logoUrl || null);
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
+        ghlStageAcceptedId: data.ghlStageAcceptedId || "",
+        ghlStageInvoicedId: data.ghlStageInvoicedId || "",
         ghlStageDeliveredId: data.ghlStageDeliveredId || "",
         businessName: data.businessName || "",
         businessPhone: data.businessPhone || "",
@@ -478,12 +1048,9 @@ function SettingsView() {
   // fail) or no products (line items unpriced).
   const saveGhl = async () => {
     setGhlMsg(null); setGhlBusy(true);
-    const body = {
-      action: "verify_save_ghl",
-      ghlPipelineId: form.ghlPipelineId,
-      ghlStageSendQuoteId: form.ghlStageSendQuoteId,
-      ghlStageDeliveredId: form.ghlStageDeliveredId,
-    };
+    // Connection step handles credentials only; pipeline + stages are configured
+    // in the "Pipeline & Stages" card that appears once connected.
+    const body = { action: "verify_save_ghl" };
     if (ghlLocationId.trim()) body.ghlLocationId = ghlLocationId.trim();
     if (ghlApiKey.trim()) body.ghlApiKey = ghlApiKey.trim();
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
@@ -493,6 +1060,82 @@ function SettingsView() {
     setGhlApiKey(""); setGhlLocationId("");
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
+    loadPipelines();   // now connected → load pipelines/stages for the dropdowns
+  };
+
+  // Fetch this tenant's Synergy/GHL pipelines + stages (server-side, using the
+  // stored key) to populate the dropdowns. Re-run by the "Refresh" button.
+  const loadPipelines = async () => {
+    setPipesBusy(true); setPipesMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "list_ghl_pipelines" } });
+    setPipesBusy(false);
+    if (err || (data && data.error)) { setPipesMsg({ err: (data && data.error) || (err && err.message) || "Couldn't load pipelines." }); return; }
+    setPipelines(Array.isArray(data.pipelines) ? data.pipelines : []);
+  };
+
+  // Save just the pipeline + stage selection (no re-verify of credentials).
+  const savePipelines = async () => {
+    setPipesSaving(true); setPipesMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "save",
+        ghlPipelineId: form.ghlPipelineId,
+        ghlStageSendQuoteId: form.ghlStageSendQuoteId,
+        ghlStageAcceptedId: form.ghlStageAcceptedId,
+        ghlStageInvoicedId: form.ghlStageInvoicedId,
+        ghlStageDeliveredId: form.ghlStageDeliveredId,
+      },
+    });
+    setPipesSaving(false);
+    if (err || (data && data.error)) { setPipesMsg({ err: (data && data.error) || (err && err.message) || "Save failed." }); return; }
+    setPipesMsg({ ok: "Pipeline & stages saved." });
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // The 4 fulfillment stages map to GHL pipeline stages, each optionally in a DIFFERENT
+  // pipeline. "Send Quote" also needs its PIPELINE persisted (submit-estimate places the opp
+  // there → ghl_pipeline_id). Accepted/Invoiced/Delivered are matched by their globally-unique
+  // STAGE id, so only the stage id is persisted; their pipeline dropdown is UI-only, derived
+  // from the saved stage id (fallback: the send-quote pipeline).
+  const selectedPipeline = pipelines.find((p) => p.id === form.ghlPipelineId) || null;
+  const stageOptions = selectedPipeline ? selectedPipeline.stages : [];
+  const onPipelineChange = (e) => {
+    const pid = e.target.value;
+    const ids = new Set(((pipelines.find((x) => x.id === pid) || {}).stages || []).map((s) => s.id));
+    setForm((prev) => ({ ...prev, ghlPipelineId: pid,
+      ghlStageSendQuoteId: ids.has(prev.ghlStageSendQuoteId) ? prev.ghlStageSendQuoteId : "" }));
+  };
+  // Render one derived-pipeline stage-mapping row (Accepted / Invoiced / Delivered).
+  const derivedRow = (title, transientPipeKey, stageKey) => {
+    const pid = form[transientPipeKey]
+      || (pipelines.find((p) => (p.stages || []).some((s) => s.id === form[stageKey])) || {}).id
+      || form.ghlPipelineId;
+    const opts = (pipelines.find((p) => p.id === pid) || {}).stages || [];
+    const onPipe = (e) => {
+      const np = e.target.value;
+      const ids = new Set(((pipelines.find((x) => x.id === np) || {}).stages || []).map((s) => s.id));
+      setForm((prev) => ({ ...prev, [transientPipeKey]: np, [stageKey]: ids.has(prev[stageKey]) ? prev[stageKey] : "" }));
+    };
+    return (
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
+        <div style={{ ...S.lbl, marginBottom: 8 }}>{title}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+          <div><span style={S.lbl}>Pipeline</span>
+            <select style={S.input} value={pid} onChange={onPipe}>
+              <option value="">— None —</option>
+              {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {pid && !pipelines.some((p) => p.id === pid) && <option value={pid}>saved: {pid} (refresh to update)</option>}
+            </select></div>
+          <div><span style={S.lbl}>Stage</span>
+            <select style={S.input} value={form[stageKey]} onChange={set(stageKey)} disabled={!pid}>
+              <option value="">— None —</option>
+              {opts.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              {form[stageKey] && !opts.some((s) => s.id === form[stageKey]) && <option value={form[stageKey]}>saved: {form[stageKey]}</option>}
+            </select></div>
+        </div>
+      </div>
+    );
   };
 
   if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
@@ -502,6 +1145,7 @@ function SettingsView() {
       {error && <div style={S.err}>{error}</div>}
       {saved && <div style={S.okMsg}>Settings saved.</div>}
 
+      {show("connection") && (<>
       <div style={S.card}>
         <div style={S.h2}>Synergy/GHL Connection</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
@@ -516,17 +1160,65 @@ function SettingsView() {
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
           <div><span style={S.lbl}>Synergy/GHL API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
-          <div><span style={S.lbl}>Pipeline ID (optional)</span>
-            <input style={S.input} name="ss-ghl-pipeline-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlPipelineId} onChange={set("ghlPipelineId")} /></div>
-          <div><span style={S.lbl}>"Send Quote" Stage ID (optional)</span>
-            <input style={S.input} name="ss-ghl-stage-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} /></div>
-          <div><span style={S.lbl}>"Delivered" Stage ID (optional)</span>
-            <input style={S.input} name="ss-ghl-stage-delivered-id" autoComplete="off" data-lpignore="true" data-1p-ignore value={form.ghlStageDeliveredId} onChange={set("ghlStageDeliveredId")} placeholder="drives the Delivered status badge" /></div>
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against Synergy/GHL and saves only if they work. The "Save Settings" button below no longer touches these credentials.</div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against Synergy/GHL and saves only if they work. Once connected, choose your pipeline &amp; stages below.</div>
       </div>
 
+      {status && status.configured && (
+        <div style={S.card}>
+          <div style={S.h2}>Pipeline &amp; Stages</div>
+          <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+            Map each fulfillment stage to a Synergy/GHL pipeline stage. StructureStudio places a new deal at your
+            <b> "Send Quote"</b> stage; then the badge in your Contacts list advances <b>Quote Accepted → Invoiced →
+            Delivered</b> as you move that opportunity into the matching stage in Synergy/GHL. Each stage can live
+            in a <b>different pipeline</b> (e.g. Send Quote in "Building", Invoiced/Delivered in "Invoiced"). All
+            optional — leave any blank to skip that stage.
+          </p>
+          {pipesMsg && pipesMsg.err && <div style={S.err}>{pipesMsg.err}</div>}
+          {pipesMsg && pipesMsg.ok && <div style={S.okMsg}>{pipesMsg.ok}</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            <button type="button" onClick={loadPipelines} disabled={pipesBusy} style={{ ...S.btn("#FFFFFF", ACCENT), border: `1px solid ${ACCENT}`, opacity: pipesBusy ? 0.6 : 1 }}>
+              {pipesBusy ? "Refreshing…" : "↻ Refresh from Synergy/GHL"}
+            </button>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>Pulls the latest pipelines &amp; stages from your connected account.</span>
+          </div>
+          {!pipesBusy && pipelines.length === 0 && !(pipesMsg && pipesMsg.err) && (
+            <p style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>No pipelines loaded yet — click Refresh (or this location has none).</p>
+          )}
+          <div className="ss-stage-grid">
+          {/* Send Quote — its own pipeline + stage (where new estimates land; persisted as ghl_pipeline_id + ghl_stage_send_quote_id) */}
+          <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
+            <div style={{ ...S.lbl, marginBottom: 8 }}>Send Quote — where new estimates land</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <div><span style={S.lbl}>Pipeline</span>
+                <select style={S.input} value={form.ghlPipelineId} onChange={onPipelineChange}>
+                  <option value="">— None (skip pipeline automation) —</option>
+                  {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {form.ghlPipelineId && !pipelines.some((p) => p.id === form.ghlPipelineId) &&
+                    <option value={form.ghlPipelineId}>saved: {form.ghlPipelineId} (refresh to update)</option>}
+                </select></div>
+              <div><span style={S.lbl}>Stage</span>
+                <select style={S.input} value={form.ghlStageSendQuoteId} onChange={set("ghlStageSendQuoteId")} disabled={!form.ghlPipelineId}>
+                  <option value="">— None —</option>
+                  {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {form.ghlStageSendQuoteId && !stageOptions.some((s) => s.id === form.ghlStageSendQuoteId) &&
+                    <option value={form.ghlStageSendQuoteId}>saved: {form.ghlStageSendQuoteId}</option>}
+                </select></div>
+            </div>
+          </div>
+          {derivedRow("Quote Accepted — customer accepted the estimate", "ghlPipelineAcceptedId", "ghlStageAcceptedId")}
+          {derivedRow("Invoiced — an invoice was sent", "ghlPipelineInvoicedId", "ghlStageInvoicedId")}
+          {derivedRow("Delivered — marks the Delivered badge", "ghlPipelineDeliveredId", "ghlStageDeliveredId")}
+          </div>
+          <button type="button" onClick={savePipelines} disabled={pipesSaving} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: pipesSaving ? 0.6 : 1 }}>
+            {pipesSaving ? "Saving…" : "Save Pipeline & Stages"}
+          </button>
+        </div>
+      )}
+      </>)}
+
+      {show("branding") && (
       <div style={S.card}>
         <div style={S.h2}>Designer Branding (your customer link)</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
@@ -560,7 +1252,9 @@ function SettingsView() {
         </div>
         <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
       </div>
+      )}
 
+      {show("branding") && (<>
       <div style={S.card}>
         <div style={S.h2}>Business Details (shown on estimates)</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
@@ -611,6 +1305,7 @@ function SettingsView() {
       </div>
 
       <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
+      </>)}
     </form>
   );
 }
@@ -636,6 +1331,270 @@ function downloadFile(name, text) {
   const b = new Blob([text], { type: "text/csv;charset=utf-8" });
   const u = URL.createObjectURL(b); const a = document.createElement("a");
   a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
+}
+
+// ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
+// Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
+// subscription, chosen monthly or yearly independently. Simple Layout is the
+// required base; features not yet launched render with a COMING SOON overlay and
+// can't be selected. Card entry happens in Collect.js's hosted lightbox (loaded
+// from the gateway with the PUBLIC tokenization key) — card data never touches the
+// portal or Supabase; a returning tenant's card on file (gateway vault) is reused
+// so the lightbox only shows the first time.
+function BillingView() {
+  const [data, setData] = useState(null);   // status response; null = loading
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
+  const [msg, setMsg] = useState(null);      // { ok } | { err }
+  const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
+    if (e || (d && d.error)) { setError((e && e.message) || d.error); setData({}); return; }
+    setData(d || {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const plans = (data && data.plans) || [];
+  const subs = (data && data.subscriptions) || [];
+  const planById = {}; plans.forEach((p) => { planById[p.id] = p; });
+  // Group the plan rows into features (monthly + annual pair per feature).
+  const features = []; const byFeature = {};
+  plans.forEach((p) => {
+    if (!byFeature[p.feature]) { byFeature[p.feature] = { feature: p.feature, name: p.name, availability: p.availability, required: p.required, setup: p.setup_fee_cents, priceVisible: p.price_visible !== false, plans: {} }; features.push(byFeature[p.feature]); }
+    byFeature[p.feature].plans[p.billing_interval] = p;
+  });
+  const liveSubs = subs.filter((s) => s.status !== "cancelled");
+  const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
+  const baseLive = !!liveFeatures["simple_layout"];
+
+  // Simple Layout is required: preselect it (monthly) until it's subscribed.
+  useEffect(() => {
+    if (data && data.configured && !baseLive && byFeature["simple_layout"] && !sel["simple_layout"]) {
+      setSel((p) => ({ ...p, simple_layout: "monthly" }));
+    }
+  }, [data]);
+
+  const fmt$ = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
+  const priceLabel = (p) => p ? `${fmt$(p.price_cents)}${p.billing_interval === "annual" ? "/yr" : "/mo"}` : "—";
+
+  // Cart totals (mixed intervals allowed — each feature bills on its own cycle).
+  const cart = Object.entries(sel).filter(([f]) => byFeature[f] && !liveFeatures[f]);
+  const cartPlans = cart.map(([f, iv]) => byFeature[f].plans[iv]).filter(Boolean);
+  const moTotal = cartPlans.filter((p) => p.billing_interval === "monthly").reduce((s, p) => s + (p.price_cents || 0), 0);
+  const yrTotal = cartPlans.filter((p) => p.billing_interval === "annual").reduce((s, p) => s + (p.price_cents || 0), 0);
+  const setupTotal = cart.reduce((s, [f]) => s + (byFeature[f].setup || 0), 0);
+  const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
+
+  // Load Collect.js once (from the gateway, with the public tokenization key), then
+  // open its hosted card lightbox; the callback hands us a one-time payment token.
+  const getPaymentToken = () => new Promise((resolve, reject) => {
+    const ck = data && data.checkout;
+    if (!ck) return reject(new Error("Billing is not configured yet."));
+    const start = () => {
+      try {
+        window.CollectJS.configure({
+          variant: "lightbox",
+          callback: (resp) => resp && resp.token ? resolve(resp.token) : reject(new Error("Card entry was cancelled.")),
+        });
+        window.CollectJS.startPaymentRequest();
+      } catch (e) { reject(e); }
+    };
+    if (window.CollectJS) return start();
+    const s = document.createElement("script");
+    s.src = ck.collectJsUrl;
+    s.setAttribute("data-tokenization-key", ck.tokenizationKey);
+    s.onload = start;
+    s.onerror = () => reject(new Error("Could not load the secure card form."));
+    document.head.appendChild(s);
+  });
+
+  const toggleFeature = (f) => {
+    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    if (f.required && !baseLive) return;   // Simple Layout stays in the cart
+    setSel((p) => { const n = { ...p }; if (n[f.feature]) delete n[f.feature]; else n[f.feature] = "monthly"; return n; });
+  };
+  const setInterval_ = (f, iv) => {
+    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    setSel((p) => ({ ...p, [f.feature]: iv }));
+  };
+
+  const subscribe = async () => {
+    const planIds = cartPlans.map((p) => p.id);
+    if (planIds.length === 0) { setMsg({ err: "Select at least one feature." }); return; }
+    setMsg(null); setBusy(true);
+    try {
+      const body = { action: "subscribe", planIds };
+      if (!data.hasCard) body.paymentToken = await getPaymentToken();
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
+      if (r.failed && r.failed.length > 0) {
+        setMsg({ err: `Some features could not be started: ${r.failed.map((x) => x.planId).join(", ")}. Contact CSM Synergy.` });
+      } else {
+        setMsg({ ok: "You're subscribed — thank you!" });
+      }
+      setSel({});
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const cancel = async (s) => {
+    const p = planById[s.plan_id] || {};
+    if (!window.confirm(`Cancel ${p.name || "this feature"}? It will stop at the end of the billing period.`)) return;
+    setMsg(null); setBusy(true);
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: s.id } });
+      if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
+      setMsg({ ok: `${p.name || "Feature"} cancelled.` });
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const SUB_BADGE = {
+    active:    { bg: "#F0FDF4", fg: "#15803D", label: "Active" },
+    paused:    { bg: "#FFFBEB", fg: "#B45309", label: "Paused" },
+    past_due:  { bg: "#FEF2F2", fg: "#DC2626", label: "Past due" },
+    cancelled: { bg: "#F1F5F9", fg: "#64748B", label: "Cancelled" },
+  };
+
+  if (data === null) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading billing…</p></div>;
+
+  return (
+    <div>
+      {error && <div style={S.err}>{error}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      {data && data.configured === false && plans.length > 0 && (
+        <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+          Online checkout isn't switched on yet — browse your plans below, and contact CSM Synergy to get started.
+        </div>
+      )}
+      {data && data.configured === false && plans.length === 0 && (
+        <div style={S.card}>
+          <div style={S.h2}>Billing</div>
+          <p style={{ fontSize: 13, color: "#64748B" }}>
+            Billing isn't set up for your account yet. Reach out to CSM Synergy and we'll get your subscription going.
+          </p>
+        </div>
+      )}
+
+      {data && liveSubs.length > 0 && (
+        <div style={S.card}>
+          <div style={S.h2}>Your features</div>
+          {liveSubs.map((s) => {
+            const p = planById[s.plan_id] || {};
+            const b = SUB_BADGE[s.status] || SUB_BADGE.active;
+            return (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", padding: "10px 0", borderBottom: "1px solid #F1F5F9" }}>
+                <div>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginRight: 10 }}>{p.name || s.plan_id}</span>
+                  <span style={{ background: b.bg, color: b.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{b.label}</span>
+                  <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
+                    {s.price_cents != null && <>{fmt$(s.price_cents)}{p.billing_interval === "annual" ? "/yr" : "/mo"} · </>}
+                    started {fmtDate(s.current_period_start)}{s.current_period_end ? ` · renews ${fmtDate(s.current_period_end)}` : ""}
+                  </div>
+                </div>
+                <button type="button" onClick={() => cancel(s)} disabled={busy}
+                  style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12, opacity: busy ? 0.6 : 1 }}>
+                  Cancel
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {data && plans.length > 0 && (
+        <div style={S.card}>
+          <div style={S.h2}>{liveSubs.length > 0 ? "Add features" : "Choose your features"}</div>
+          <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+            Pick monthly or yearly for each feature — yearly is 10× monthly (2 months free). Cancel any feature anytime.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12 }}>
+            {features.filter((f) => !liveFeatures[f.feature]).map((f) => {
+              const soon = f.availability !== "available";
+              const iv = sel[f.feature];
+              const on = !!iv;
+              const shown = f.plans[iv || "monthly"];
+              const lockedBase = f.required && !baseLive;
+              return (
+                <div key={f.feature} onClick={() => toggleFeature(f)}
+                  style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: soon ? "default" : "pointer", overflow: "hidden" }}>
+                  {soon && (
+                    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2, pointerEvents: "none" }}>
+                      <span style={{ transform: "rotate(-12deg)", background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>Coming soon</span>
+                    </div>
+                  )}
+                  <div style={{ opacity: soon ? 0.45 : 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                      <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{f.name}</span>
+                      {f.required && <span style={{ background: "#75E6DA", color: "#134E4A", borderRadius: 20, padding: "2px 8px", fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5 }}>Required</span>}
+                      {!soon && !lockedBase && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
+                    </div>
+                    {!soon && (
+                      <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
+                        {["monthly", "annual"].map((k) => (
+                          <button key={k} type="button" onClick={() => setInterval_(f, k)}
+                            style={{ background: (iv || "monthly") === k ? ACCENT : "transparent", color: (iv || "monthly") === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                            {k === "annual" ? "Yearly" : "Monthly"}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {/* Features whose price isn't published yet show no number at all —
+                        not even the setup fee, which would hint at the tier. Flip
+                        billing_plans.price_visible to true to start showing it. */}
+                    {f.priceVisible ? (<>
+                      <div style={{ fontSize: 19, fontWeight: 800, color: ACCENT }}>
+                        {priceLabel(shown)}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>
+                        {f.setup == null ? "Setup fee: TBD" : f.setup === 0 ? "No setup fee" : `Setup: ${fmt$(f.setup)} one-time`}
+                      </div>
+                    </>) : (
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#64748B" }}>
+                        Pricing announced at launch
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {selectable && (
+            <div style={{ marginTop: 16, borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
+              <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.8 }}>
+                <div>Selected features: <b>{cart.length}</b></div>
+                {moTotal > 0 && <div>Monthly total: <b>{fmt$(moTotal)}/mo</b></div>}
+                {yrTotal > 0 && <div>Yearly total: <b>{fmt$(yrTotal)}/yr</b></div>}
+                <div>One-time setup: <b>{fmt$(setupTotal)}</b></div>
+              </div>
+              {data.configured ? (
+                <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
+                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
+                  {busy ? "Working…" : data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"}
+                </button>
+              ) : (
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 12, fontWeight: 600 }}>
+                  Online checkout opens here soon — contact CSM Synergy to activate your features today.
+                </p>
+              )}
+            </div>
+          )}
+
+          <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 14 }}>
+            StructureStudio integrates with your CRM through Synergy/GHL — CRM setup is available for an additional fee.
+            Card details are entered in a secure form served by the payment gateway; they never pass through StructureStudio.
+          </p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
@@ -1076,20 +2035,24 @@ function LayoutPricing() {
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
       <div style={S.card}>
-        <div style={S.h2}>Layout item pricing</div>
+        <div style={S.h2}>Options</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Set how each item customers can place on the floor plan is priced —
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
           <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
           <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
-          These rates are used on estimates when you don’t price through Synergy/GHL products. Building sizes are priced on the <b>Pricing</b> tab.
+          These rates are used on estimates when you don’t price through Synergy/GHL products. Building sizes are priced on the <b>Structures</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
         ) : (
           <>
-            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+            {/* overflowX wrapper: the method select + rate input enforce ~300px of minimum
+                cell width, so on narrow viewports (68px icon rail) the table scrolls inside
+                its card instead of forcing page-level horizontal scroll. */}
+            <div style={{ overflowX: "auto", marginBottom: 14 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
                 <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th>
               </tr></thead>
@@ -1122,6 +2085,7 @@ function LayoutPricing() {
                 ))}
               </tbody>
             </table>
+            </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <button onClick={() => save()} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save prices"}</button>
               <button onClick={downloadCsv} disabled={busy || !cat} style={S.btn("#F1F5F9", "#334155")}>⬇ Download CSV</button>
@@ -1393,10 +2357,408 @@ function ColorsView() {
   );
 }
 
+// ─── Feedback: bug reports + feature requests ───
+// Submissions are filed into Monday (Bugs Queue / Feature Requests (Intake)) by the
+// `portal-feedback` edge function, which ALSO records them in `feedback_submissions`
+// so the submitter can see the thing they sent instead of it vanishing into Monday.
+// Status and team replies come back via the `feedback-monday-webhook` function.
+//
+// This lives in the PORTAL only — never on the public designer. A submission is
+// attributed to the signed-in user and their tenant, both resolved server-side from
+// the JWT, which is what makes "who filed this, from which client portal" reliable.
+
+// The client-facing status ladder (see migration 054). Monday's internal labels are
+// mapped down to these by the sync function — never rendered raw.
+const FB_STATUS = {
+  submitted:   { label: "Submitted",       bg: "#F1F5F9", fg: "#475569" },
+  in_review:   { label: "In review",       bg: "#FEF3C7", fg: "#B45309" },
+  planned:     { label: "Planned",         bg: "#EEF2FF", fg: "#4F46E5" },
+  in_progress: { label: "In progress",     bg: "#DBEAFE", fg: "#1D4ED8" },
+  needs_info:  { label: "Needs your info", bg: "#FEE2E2", fg: "#B91C1C" },
+  // The KEY is the stored value (migration 054's check constraint + both sync
+  // functions) and must stay "shipped"; only this label is client-facing. Renamed to
+  // "Completed" on 2026-07-27 to match what the team now calls it on the Monday board.
+  shipped:     { label: "Completed",       bg: "#DCFCE7", fg: "#15803D" },
+  declined:    { label: "Not planned",     bg: "#F1F5F9", fg: "#64748B" },
+  duplicate:   { label: "Already tracked", bg: "#F3E8FF", fg: "#7E22CE" },
+};
+// Sort order for the Status column. Deliberately NOT alphabetical — sorting
+// "Already tracked / In progress / In review / Not planned / Planned" by name is
+// noise. Ascending walks the pipeline, with "Needs your info" pulled to the very top
+// because it's the one state that's waiting on the CLIENT rather than on us.
+const FB_STATUS_ORDER = ["needs_info", "submitted", "in_review", "planned", "in_progress", "shipped", "declined", "duplicate"];
+const FB_STATUS_RANK = FB_STATUS_ORDER.reduce((m, k, i) => { m[k] = i; return m; }, {});
+
+const fbBadge = (status) => {
+  const m = FB_STATUS[status] || FB_STATUS.submitted;
+  return <span style={{ background: m.bg, color: m.fg, fontSize: 10, fontWeight: 800, borderRadius: 999, padding: "3px 9px", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>{m.label}</span>;
+};
+
+// Severity choices must match the Monday status labels exactly — portal-feedback
+// drops any value the board doesn't know rather than erroring the whole push.
+const FB_KINDS = {
+  bug: {
+    icon: "🐛", label: "Report an Issue", blurb: "Something broken or not working as expected",
+    titleHint: "What went wrong?", detailHint: "What did you do, what did you expect, and what happened instead?",
+    sevLabel: "How badly is this hurting you?",
+    severities: ["Critical", "High", "Medium", "Low"], sevDefault: "Medium",
+  },
+  feature: {
+    icon: "✨", label: "Request a Feature", blurb: "An idea or improvement you'd like to see",
+    titleHint: "What would you like to be able to do?", detailHint: "Describe the feature and what it would let you get done.",
+    sevLabel: "How important is this to you?",
+    severities: ["Nice to have", "Would really help", "Critical for me"], sevDefault: "Would really help",
+  },
+};
+
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024;   // matches the bucket's file_size_limit
+
+function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
+  const cfg = FB_KINDS[kind];
+  const [title, setTitle] = useState("");
+  const [detail, setDetail] = useState("");
+  const [severity, setSeverity] = useState(cfg.sevDefault);
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!title.trim()) { setErr("Please give this a short title."); return; }
+    if (file && file.size > MAX_ATTACH_BYTES) { setErr("That file is larger than 25 MB — please attach a smaller one."); return; }
+    setBusy(true); setErr(null);
+    try {
+      // Upload first: the storage policy pins the object under this tenant's own
+      // prefix, and the edge function re-checks the prefix before trusting the path.
+      let attachmentPath = null;
+      if (file) {
+        const safe = file.name.replace(/[^\w.\-]+/g, "_").slice(-80);
+        const path = clientId + "/" + crypto.randomUUID() + "-" + safe;
+        const up = await sb.storage.from("feedback-attachments").upload(path, file, { contentType: file.type || undefined });
+        if (up.error) throw new Error("Attachment upload failed: " + up.error.message);
+        attachmentPath = path;
+      }
+      const { data, error } = await sb.functions.invoke("portal-feedback", {
+        body: { action: "submit", kind, title: title.trim(), detail: detail.trim(), severity, attachmentPath },
+      });
+      if (error) throw error;
+      if (data && data.error) throw new Error(data.error);
+      onSubmitted(data && data.submission, data && data.pushed);
+    } catch (e2) {
+      setErr(e2.message || "Something went wrong — please try again.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+      {err && <div style={S.err}>{err}</div>}
+      <div>
+        <label style={S.lbl}>{cfg.titleHint}</label>
+        <input style={S.input} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={250} autoFocus placeholder="A one-line summary" />
+      </div>
+      <div>
+        <label style={S.lbl}>Details</label>
+        <textarea style={{ ...S.input, minHeight: 110, fontWeight: 500, resize: "vertical" }}
+          value={detail} onChange={(e) => setDetail(e.target.value)} placeholder={cfg.detailHint} />
+      </div>
+      <div>
+        <label style={S.lbl}>{cfg.sevLabel}</label>
+        <select style={S.input} value={severity} onChange={(e) => setSeverity(e.target.value)}>
+          {cfg.severities.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div>
+        <label style={S.lbl}>Screenshot or video (optional)</label>
+        <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
+          onChange={(e) => setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+          style={{ ...S.input, padding: "7px 10px", fontWeight: 500 }} />
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A picture of the problem helps us fix it much faster. Max 25 MB.</div>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <button type="button" onClick={onBack} disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1" }}>Back</button>
+        <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), flex: 1, opacity: busy ? 0.6 : 1, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "Sending…" : "Send it"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// Floating launcher + modal. Mounted once by PortalApp; hidden while an operator is
+// viewing someone else's account (the submission would be attributed to the operator's
+// own tenant, not the one on screen, which would be misleading in both places).
+function FeedbackWidget({ clientId, onSubmitted }) {
+  const [view, setView] = useState(null);   // null | "menu" | "bug" | "feature" | "done"
+  const [pushed, setPushed] = useState(true);
+
+  useEffect(() => {
+    if (!view) return;
+    const onKey = (e) => { if (e.key === "Escape") setView(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view]);
+
+  if (!view) {
+    return (
+      <button onClick={() => setView("menu")} aria-label="Send feedback"
+        style={{
+          position: "fixed", right: 20, bottom: 20, zIndex: 900,
+          background: ACCENT, color: "#FFF", border: "none", borderRadius: 999,
+          padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.25)", fontFamily: "inherit",
+        }}>
+        💬 Feedback
+      </button>
+    );
+  }
+
+  const cfg = FB_KINDS[view] || null;
+  const heading = view === "done" ? "✅ Thanks — we've got it"
+    : cfg ? cfg.icon + " " + cfg.label : "💬 Send us feedback";
+
+  return (
+    <div onClick={() => setView(null)} role="dialog" aria-modal="true" aria-label="Send feedback"
+      style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, overflow: "hidden", width: cfg ? "min(560px, 100%)" : "min(420px, 100%)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 8 }}>
+          {cfg && <button onClick={() => setView("menu")} aria-label="Back" style={{ background: "none", border: "none", color: "#FFF", cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1 }}>←</button>}
+          <div style={{ fontSize: 14, fontWeight: 700, flex: 1 }}>{heading}</div>
+          <button onClick={() => setView(null)} aria-label="Close" style={{ background: "none", border: "none", color: "#FFF", cursor: "pointer", fontSize: 18, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+
+        {view === "menu" && (
+          <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+            {["bug", "feature"].map((k) => (
+              <button key={k} onClick={() => setView(k)}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+                <span style={{ fontSize: 22 }}>{FB_KINDS[k].icon}</span>
+                <span>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: "#0F172A" }}>{FB_KINDS[k].label}</span>
+                  <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2 }}>{FB_KINDS[k].blurb}</span>
+                </span>
+              </button>
+            ))}
+            <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.5, marginTop: 2 }}>
+              Everything you send shows up under <b>What's New → My Submissions</b>, so you can track where it got to.
+            </div>
+          </div>
+        )}
+
+        {cfg && (
+          <FeedbackForm kind={view} clientId={clientId} onBack={() => setView("menu")}
+            onSubmitted={(row, wasPushed) => { setPushed(wasPushed !== false); setView("done"); if (onSubmitted) onSubmitted(row); }} />
+        )}
+
+        {view === "done" && (
+          <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
+            Your submission is logged and on our board. You can follow it under{" "}
+            <b>What's New → My Submissions</b> — the status updates there as we work on it,
+            and any reply we post shows up alongside it.
+            {!pushed && (
+              <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
+                Saved — but syncing it to our tracker didn't go through. It's recorded and we'll pick it up; nothing is lost.
+              </div>
+            )}
+            <button onClick={() => setView(null)} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 16, width: "100%" }}>Done</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── My Submissions: this tenant's bugs + feature requests, with our replies ───
+function MySubmissions({ refreshKey }) {
+  const [rows, setRows] = useState(null);       // null = loading
+  const [comments, setComments] = useState({}); // submission_id -> [comment]
+  const [error, setError] = useState(null);
+  const [open, setOpen] = useState(null);       // expanded submission id
+  const [filter, setFilter] = useState("all");  // all | bug | feature
+  const [syncing, setSyncing] = useState(false);
+  const [tick, setTick] = useState(0);
+  // Column sort, same convention as DesignsTable/LeadsTable (SortTh + sortRows).
+  // Default = newest first, matching the created_at DESC load order.
+  const [sortKey, setSortKey] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // RLS scopes both reads to this tenant — no client_id filter needed here, and
+      // adding one would be a false comfort (the policy is the actual boundary).
+      const { data, error: err } = await sb
+        .from("feedback_submissions")
+        .select("id, kind, title, detail, severity, status, submitter_name, attachment_path, monday_item_id, created_at, status_changed_at")
+        .order("created_at", { ascending: false });
+      if (cancelled) return;
+      if (err) { setError(err.message); setRows([]); return; }
+      setRows(data || []);
+      const ids = (data || []).map((r) => r.id);
+      if (!ids.length) { setComments({}); return; }
+      const { data: cs } = await sb
+        .from("feedback_comments")
+        .select("id, submission_id, author_name, body, created_at")
+        .in("submission_id", ids)
+        .order("created_at", { ascending: true });
+      if (cancelled) return;
+      const map = {};
+      for (const c of cs || []) (map[c.submission_id] = map[c.submission_id] || []).push(c);
+      setComments(map);
+    })();
+    return () => { cancelled = true; };
+  }, [refreshKey, tick]);
+
+  // Belt-and-braces against a webhook that never arrived: pull current state from
+  // Monday on demand, then re-read. The webhook is the normal path; this is the button
+  // a client presses when they think we've gone quiet.
+  const resync = async () => {
+    setSyncing(true);
+    try { await sb.functions.invoke("portal-feedback", { body: { action: "refresh" } }); } catch (_) {}
+    setSyncing(false);
+    setTick((t) => t + 1);
+  };
+
+  const openAttachment = async (path) => {
+    const { data, error: err } = await sb.storage.from("feedback-attachments").createSignedUrl(path, 300);
+    if (err || !data) { alert("Couldn't open that attachment."); return; }
+    window.open(data.signedUrl, "_blank", "noopener");
+  };
+
+  const fmtDT = (iso) => {
+    if (!iso) return "";
+    try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch { return iso; }
+  };
+
+  if (error) return <div style={S.err}>Couldn't load your submissions: {error}</div>;
+  if (rows === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading your submissions…</div>;
+
+  const shown = filter === "all" ? rows : rows.filter((r) => r.kind === filter);
+  const sortVal = (r) => {
+    switch (sortKey) {
+      case "name":   return r.title || "";
+      case "user":   return r.submitter_name || "";
+      case "status": return FB_STATUS_RANK[r.status] ?? 99;
+      // ISO timestamps sort chronologically as plain strings — see sortRows.
+      case "date":
+      default:       return r.created_at || "";
+    }
+  };
+  const sorted = sortRows(shown, sortVal, sortDir);
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ ...S.h2, marginBottom: 0 }}>My Submissions</span>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
+        <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
+          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"]].map(([k, lbl]) => (
+            <button key={k} type="button" onClick={() => setFilter(k)}
+              style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: "pointer",
+                border: filter === k ? "1px solid " + ACCENT : "1px solid #E2E8F0",
+                background: filter === k ? ACCENT : "#FFF", color: filter === k ? "#FFF" : "#475569" }}>{lbl}</button>
+          ))}
+          <button type="button" onClick={resync} disabled={syncing}
+            style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: syncing ? "default" : "pointer", border: "1px solid #E2E8F0", background: "#FFF", color: "#475569", opacity: syncing ? 0.6 : 1 }}>
+            {syncing ? "Checking…" : "↻ Check for updates"}
+          </button>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0", lineHeight: 1.6 }}>
+          You haven't sent us anything yet. Use the <b>💬 Feedback</b> button in the bottom-right corner
+          to report an issue or request a feature — it'll show up here so you can follow what happens to it.
+        </div>
+      ) : shown.length === 0 ? (
+        <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing here under this filter.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <SortTh label="Submission" col="name"   sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Submitted by" col="user" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Status" col="status"     sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Date" col="date"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            </tr></thead>
+            <tbody>
+              {sorted.map((r) => {
+                const isOpen = open === r.id;
+                const cs = comments[r.id] || [];
+                const toggle = () => setOpen(isOpen ? null : r.id);
+                return (
+                  <React.Fragment key={r.id}>
+                  <tr onClick={toggle} tabIndex={0} aria-expanded={isOpen}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } }}
+                    style={{ cursor: "pointer", background: isOpen ? "#F8FAFC" : undefined }}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>
+                      <span style={{ color: ACCENT, fontSize: 11, marginRight: 6 }}>{isOpen ? "▾" : "▸"}</span>
+                      <span style={{ marginRight: 6 }}>{r.kind === "bug" ? "🐛" : "✨"}</span>
+                      {r.title}
+                      {/* Tooltip names the sender rather than saying "from us": the reader
+                          IS the client, so "us" scans as their own team — especially next
+                          to a Submitted by column that can read "CSM Synergy". */}
+                      {cs.length > 0 && (
+                        <span title={cs.length + " repl" + (cs.length === 1 ? "y" : "ies") + " from Structure Studio"}
+                          style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" }}>
+                          💬 {cs.length}
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap", color: "#475569" }}>{r.submitter_name}</td>
+                    <td style={S.td}>{fbBadge(r.status)}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>{fmtDT(r.created_at)}</td>
+                  </tr>
+
+                  {isOpen && (
+                    <tr style={{ background: "#F8FAFC" }}>
+                      <td colSpan={4} style={{ ...S.td, paddingTop: 0 }}>
+                        {r.detail && <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{r.detail}</div>}
+                        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                          {r.severity && <span>{r.kind === "bug" ? "Severity" : "Importance"}: <b style={{ color: "#64748B" }}>{r.severity}</b></span>}
+                          {r.status_changed_at && <span>Last update: <b style={{ color: "#64748B" }}>{fmtDT(r.status_changed_at)}</b></span>}
+                          {r.attachment_path && (
+                            <button type="button" onClick={(e) => { e.stopPropagation(); openAttachment(r.attachment_path); }}
+                              style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 700, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+                              View attachment
+                            </button>
+                          )}
+                        </div>
+                        {cs.length > 0 && (
+                          <div style={{ marginTop: 12, borderLeft: "3px solid #E2E8F0", paddingLeft: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                            {cs.map((c) => (
+                              <div key={c.id}>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: "#64748B" }}>
+                                  {c.author_name || "Structure Studio"} <span style={{ fontWeight: 600, color: "#94A3B8" }}>· {fmtDT(c.created_at)}</span>
+                                </div>
+                                <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, whiteSpace: "pre-wrap", marginTop: 2 }}>{c.body}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── What's New: global product changelog (read-only; team-populated) ───
-function ReleasesView() {
+function ReleasesView({ submissionsKey }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
+  const [subtab, setSubtab] = useState("features"); // features | fixes | roadmap | mine
+  const [mineCount, setMineCount] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -1410,18 +2772,28 @@ function ReleasesView() {
     })();
   }, []);
 
+  // Count only — the list itself is fetched by MySubmissions when that tab opens.
+  // RLS scopes this to the signed-in user's tenant.
+  useEffect(() => {
+    (async () => {
+      const { count } = await sb.from("feedback_submissions").select("id", { count: "exact", head: true });
+      setMineCount(count || 0);
+    })();
+  }, [submissionsKey]);
+
   const fmtDT = (iso) => {
     if (!iso) return "";
     try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
     catch { return iso; }
   };
 
-  if (error) return <div style={S.err}>Couldn't load updates: {error}</div>;
-  if (rows === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>;
-
-  const features = rows.filter((r) => r.kind === "feature");
-  const fixes = rows.filter((r) => r.kind === "fix");
-  const requested = rows.filter((r) => r.kind === "requested");
+  // Deliberately NO early return on loading/error: that would also hide the My
+  // Submissions tab, which has its own data path and must stay reachable even when
+  // the release_notes read fails. Both states are rendered inside the tab body below.
+  const list = rows || [];
+  const features = list.filter((r) => r.kind === "feature");
+  const fixes = list.filter((r) => r.kind === "fix");
+  const requested = list.filter((r) => r.kind === "requested");
 
   const statusBadge = (status) => {
     const map = {
@@ -1444,35 +2816,293 @@ function ReleasesView() {
     </div>
   );
 
-  const section = (label, dot, list) => list.length === 0 ? null : (
-    <div style={S.card}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <span style={{ width: 10, height: 10, borderRadius: 3, background: dot, flexShrink: 0 }} />
-        <span style={{ ...S.h2, marginBottom: 0 }}>{label}</span>
-        <span style={{ fontSize: 12, color: "#94A3B8" }}>({list.length})</span>
-      </div>
-      {list.map(entry)}
-    </div>
-  );
+  // Section definitions — one per sub-tab. `empty` shows when that tab has no rows.
+  // "mine" is the odd one out: it renders <MySubmissions /> rather than release_notes
+  // entries, so it carries its own count instead of a `list`.
+  const TABS = [
+    { id: "features", label: "New Features", dot: "#10B981", list: features, empty: "No new features yet — check back soon." },
+    { id: "fixes",    label: "Bug Fixes",    dot: "#F59E0B", list: fixes,    empty: "No bug fixes to report right now." },
+    { id: "roadmap",  label: "Roadmap",      dot: "#6366F1", list: requested, empty: "Nothing on the roadmap yet — check back soon." },
+    { id: "mine",     label: "My Submissions", dot: "#7E22CE", count: mineCount },
+  ];
+  const active = TABS.find((t) => t.id === subtab) || TABS[0];
+  const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
   return (
     <div>
-      <div style={{ ...S.card, background: "linear-gradient(135deg,#3D3672 0%,#1B7895 100%)", color: "#FFF", border: "none" }}>
+      <div style={{ ...S.card, background: "linear-gradient(135deg,#3D3672 0%,#1B7895 100%)", color: "#FFF", border: "none", marginBottom: 12 }}>
         <div style={{ fontSize: 18, fontWeight: 800 }}>What's New</div>
         <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Updates as they ship to your portal — try them out and send us feedback.</div>
       </div>
-      {rows.length === 0 && <div style={{ ...S.card, color: "#64748B" }}>No updates yet — check back soon.</div>}
-      {section("New Features", "#10B981", features)}
-      {section("Bug Fixes", "#F59E0B", fixes)}
-      {section("Requested / Roadmap", "#6366F1", requested)}
+
+      {/* Sub-tab nav: New Features · Bug Fixes · Roadmap */}
+      <div role="tablist" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {TABS.map((t) => {
+          const on = t.id === subtab;
+          return (
+            <button key={t.id} type="button" role="tab" aria-selected={on} onClick={() => setSubtab(t.id)}
+              style={{
+                display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontFamily: "inherit",
+                fontSize: 13, fontWeight: 700, padding: "8px 14px", borderRadius: 999,
+                border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0",
+                background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+              }}>
+              <span style={{ width: 9, height: 9, borderRadius: 3, background: t.dot, flexShrink: 0 }} />
+              {t.label}
+              <span style={{ fontSize: 11, fontWeight: 800, color: on ? "#FFF" : "#94A3B8", opacity: on ? 0.85 : 1 }}>{tabCount(t)}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {subtab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
+        : error ? <div style={S.err}>Couldn't load updates: {error}</div>
+        : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
+        : rows.length === 0
+        ? <div style={{ ...S.card, color: "#64748B" }}>No updates yet — check back soon.</div>
+        : (
+          <div style={S.card}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 3, background: active.dot, flexShrink: 0 }} />
+              <span style={{ ...S.h2, marginBottom: 0 }}>{active.label}</span>
+              <span style={{ fontSize: 12, color: "#94A3B8" }}>({active.list.length})</span>
+            </div>
+            {active.list.length === 0
+              ? <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>{active.empty}</div>
+              : active.list.map(entry)}
+          </div>
+        )}
+    </div>
+  );
+}
+
+// ─── Coming-soon teaser panel ───
+// Placeholder for features that aren't built yet, shown to every logged-in user so
+// they can see what's on the way. Pure presentation — no data, no side effects.
+function ComingSoon({ icon, title, blurb, bullets }) {
+  return (
+    <div style={{ ...S.card, padding: 0, overflow: "hidden", maxWidth: 720 }}>
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "34px 28px", color: "#FFF", display: "flex", alignItems: "center", gap: 20 }}>
+        <div style={{ width: 62, height: 62, borderRadius: 15, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          {icon}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <span style={{ display: "inline-block", background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px", marginBottom: 9 }}>Coming soon</span>
+          <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>{title}</div>
+        </div>
+      </div>
+      <div style={{ padding: "24px 28px" }}>
+        <p style={{ fontSize: 14.5, color: "#334155", lineHeight: 1.6, margin: "0 0 16px" }}>{blurb}</p>
+        {bullets && bullets.length > 0 && (
+          <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 10 }}>
+            {bullets.map((b, i) => (
+              <li key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 13.5, color: "#475569" }}>
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#1B7895" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><path d="M20 6 9 17l-5-5"/></svg>
+                <span>{b}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #F1F5F9", fontSize: 12.5, color: "#94A3B8", fontWeight: 600 }}>
+          We're actively building this — it'll appear right here when it's ready, with nothing for you to set up.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── In-portal Designer tab ───
+// Mounts the shared designer module (structure-studio.component.js, loaded before this
+// block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
+// — the loader then skips URL parsing entirely and can never hit its bare-root
+// /portal.html redirect (which would loop the portal).
+function DesignerTab({ clientId, onSaved }) {
+  const SS = window.StructureStudio;
+  if (!SS) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
+  }
+  return (
+    <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
+      <SS clientId={clientId} embedded onSaved={onSaved} />
+    </div>
+  );
+}
+
+// ─── Operator Accounts tab ───
+// Lists every tenant (operator-portal:list_clients, server-side app_operators gate)
+// and opens one read-only, GHL-subaccounts style. Every list/view is audit-logged.
+function AccountsTab({ viewing, onOpen }) {
+  const [clients, setClients] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_clients" } });
+      if (cancelled) return;
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setError(msg || "Could not load accounts."); setClients([]); return;
+      }
+      // Null-guard the body: a 200 with no/unexpected payload must show an error, not
+      // leave the tab spinning on clients === null forever.
+      if (!data || !Array.isArray(data.clients)) {
+        setError("Synergy returned no account list — reload to try again."); setClients([]); return;
+      }
+      setClients(data.clients);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const filtered = (clients || []).filter((c) => !q || c.clientId.toLowerCase().includes(q) || (c.companyName || "").toLowerCase().includes(q));
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <div style={{ ...S.h2, marginBottom: 0, flex: 1 }}>Client accounts</div>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
+          style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 220 }} />
+      </div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px" }}>
+        Open any client's portal read-only (Designs + Contacts). Views are audit-logged. Status badges show cached values.
+      </p>
+      {error && <div style={{ color: "#B91C1C", fontSize: 13, marginBottom: 10 }}>{error}</div>}
+      {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
+      {clients !== null && !error && filtered.length === 0 && <div style={{ color: "#64748B", fontSize: 13 }}>No accounts match.</div>}
+      {filtered.map((c) => (
+        <div key={c.clientId} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: "1px solid #F1F5F9" }}>
+          <div style={{ width: 34, height: 34, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
+            {(c.companyName || c.clientId).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{c.companyName}</div>
+            <div style={{ fontSize: 12, color: "#94A3B8" }}>{c.clientId}</div>
+          </div>
+          {viewing && viewing.clientId === c.clientId
+            ? <span style={{ fontSize: 12, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 7, padding: "5px 10px" }}>Viewing</span>
+            : <button type="button" onClick={() => onOpen({ clientId: c.clientId, companyName: c.companyName })} style={S.btn("#1E293B", "#FFF")}>Open portal →</button>}
+        </div>
+      ))}
     </div>
   );
 }
 
 // ─── Dashboard shell ───
+function SettingsShell({ clientId }) {
+  const [sub, setSub] = useState("structures");
+  const TABS = [
+    ["structures", "Structures", "Building styles, sizes, and base prices"],
+    ["options", "Options", "Add-on items and rates"],
+    ["colors", "Colors", "Paint, shingle, and metal palettes"],
+    ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
+    ["connection", "Connection", "Synergy/GHL credentials and pipeline mapping"],
+    ["billing", "Billing", "Your StructureStudio subscription"],
+  ];
+  const active = TABS.find((t) => t[0] === sub) || TABS[0];
+  return (
+    <div>
+      {/* Banner — everything below it is Settings */}
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 14, padding: "20px 22px", color: "#FFF", marginBottom: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>Settings</div>
+            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>Everything that configures your business — structures, options, colors, branding &amp; estimate details, your Synergy/GHL connection, and billing.</div>
+          </div>
+        </div>
+      </div>
+      {/* Sub-navigation — underline tabs on the white area (navigation feel, not buttons) */}
+      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
+        {TABS.map(([id, label]) => (
+          <button key={id} type="button" onClick={() => setSub(id)}
+            style={{
+              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+              padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+              color: sub === id ? ACCENT : "#64748B",
+              borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+              marginBottom: -2,
+            }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+      {sub === "structures" && <PricingCsv />}
+      {sub === "options" && <LayoutPricing />}
+      {sub === "colors" && <ColorsView />}
+      {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
+      {sub === "connection" && <SettingsView section="connection" />}
+      {sub === "billing" && <BillingView />}
+    </div>
+  );
+}
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   const [tab, setTab] = useState("designs");
+  // Designer tab: lazy-mount on first open, then KEEP mounted (display toggle below).
+  // A conditional {activeTab==="designer" && …} unmount would discard the user's
+  // in-progress design and re-fetch config on every tab switch.
+  const [designerOpened, setDesignerOpened] = useState(false);
+  // MUST live up here with the other hooks — Dashboard has conditional early returns
+  // below (tenant loading/none), and a hook after them changes the hook count between
+  // renders (React error #310, blank screen). Keyed on raw `tab`, not the derived
+  // activeTab: "designer" is in NONADMIN_TABS so the clamp never rewrites it.
+  useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
+  // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
+  const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
+  // Bumped when the feedback widget files something, so My Submissions + its tab
+  // count pick it up without a page reload.
+  const [feedbackKey, setFeedbackKey] = useState(0);
+  // ── Operator account switcher (GHL-subaccounts style) ──
+  // isOperator only decides whether the Accounts tab SHOWS; every cross-tenant read
+  // is re-authorized server-side by the operator-portal edge fn (app_operators check).
+  const [isOperator, setIsOperator] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("is_operator").then(({ data }) => { if (!cancelled) setIsOperator(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [session]);
+  // viewing = { clientId, companyName } while an operator has another tenant's portal
+  // open. Designs/Contacts then read through operator-portal:get_portal (service-role,
+  // audit-logged); statuses shown are the CACHED values (sync-design-status is
+  // owner-JWT-bound and must not run against the operator's own tenant).
+  const [viewing, setViewing] = useState(null);
+  const viewingFetch = useCallback(async () => {
+    const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
+    if (error) {
+      let msg = error.message;
+      try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+      throw new Error(msg || "Could not load this account.");
+    }
+    // Backfill the real company name (a ?view= deep link seeds it with the slug).
+    if (data.companyName) setViewing((cur) => (cur && cur.clientId === data.clientId && cur.companyName !== data.companyName) ? { ...cur, companyName: data.companyName } : cur);
+    return { designs: data.designs || [], versions: data.versions || [] };
+  }, [viewing && viewing.clientId]);
+  // GHL-subaccounts-style deep link: /portal.html?view=<clientId> (e.g. from the
+  // admin console's "Open portal ↗") auto-opens that account once the operator
+  // check passes. Non-operators: ignored (and the server rejects reads anyway).
+  useEffect(() => {
+    if (!isOperator) return;
+    const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
+    if (v && /^[a-z0-9][a-z0-9-]*$/.test(v)) {
+      setViewing((cur) => cur || { clientId: v, companyName: v });
+      setTab("designs");
+    }
+  }, [isOperator]);
+  const openAccount = (c) => {
+    setViewing(c); setTab("designs");
+    window.history.replaceState({}, "", "/portal.html?view=" + encodeURIComponent(c.clientId));
+  };
+  const exitAccount = () => {
+    setViewing(null); setTab("accounts");
+    window.history.replaceState({}, "", "/portal.html");
+  };
 
   useEffect(() => {
     (async () => {
@@ -1514,49 +3144,351 @@ function Dashboard({ session }) {
   // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
   // can't reach the other views even by forcing the tab state).
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
-  // Non-admins are confined to the designs list, plus the read-only "What's New" tab (product news).
-  const activeTab = (!isAdmin && tab !== "designs" && tab !== "releases") ? "designs" : tab;
+  // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
+  // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
+  const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+  // "accounts" is operator-gated (independent of tenant role); everything else keeps
+  // the existing role clamp. Content renders are ALSO gated (server re-checks anyway).
+  const activeTab = tab === "accounts"
+    ? (isOperator ? "accounts" : "designs")
+    : ((!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab);
 
-  const tabBtn = (id, label) => (
-    <button onClick={() => setTab(id)} style={{
-      ...S.btn(activeTab === id ? "#75E6DA" : "transparent", activeTab === id ? "#3D3672" : "#75E6DA"),
-      borderRadius: "8px 8px 0 0", padding: "10px 18px",
-    }}>{label}</button>
+  // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
+  // Signed-in user identity for the sidebar footer. Auth users are email+password
+  // (no profile name field), so prefer any metadata name and fall back to the
+  // email's local part.
+  const meta = session.user.user_metadata || {};
+  const displayName = meta.full_name || meta.name || (session.user.email || "").split("@")[0];
+  const initials = displayName.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
+  const tenantInitials = String(tenant.businessName || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+
+  const ICONS = {
+    designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
+    accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
+    designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
+    leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+    orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
+    pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
+    "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
+    colors: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9.5" r="1.3"/><circle cx="15.5" cy="9.5" r="1.3"/><circle cx="16.5" cy="14" r="1.3"/><path d="M12 21a3 3 0 0 1 0-6 2 2 0 0 0 0-4"/></svg>,
+    settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+    billing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
+    "on-demand-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>,
+    "build-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>,
+    "delivery-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+    "inventory": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>,
+    "repairs": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>,
+    // Faceted wireframe cube — deliberately NOT the rounded package glyph used by
+    // "orders", so the two read as different things in the rail.
+    "view-3d": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>,
+    "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
+    "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
+    "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+    "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
+  };
+  const TAB_META = {
+    designer: ["Designer", "Design a building and build a quote"],
+    accounts: ["Accounts", "Open any client's portal — operators only"],
+    designs: ["Designs", "Customer designs and submitted quotes"],
+    leads: ["Contacts", "Everyone who has submitted a design"],
+    orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
+    releases: ["What's New", "Latest features and fixes"],
+    settings: ["Settings", "Structures, options, colors, branding & estimates, connection, and billing"],
+    "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
+    "build-schedule": ["Build Schedule", "Track buildings from order to done — coming soon"],
+    "delivery-schedule": ["Delivery Schedule", "Plan and manage deliveries — coming soon"],
+    "inventory": ["Inventory", "Track every building on your lot — coming soon"],
+    "repairs": ["Repairs", "Manage repair jobs from request to done — coming soon"],
+    "view-3d": ["3D Design", "Let customers see their building in 3D — coming soon"],
+    "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
+    "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
+    "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
+    "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
+  };
+  // Real <button>s (not href-less anchors) so the nav stays keyboard- and
+  // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
+  const navItem = (id, label) => (
+    <button type="button" className={activeTab === id ? "active" : ""} title={label} onClick={() => setTab(id)}>
+      {ICONS[id]}
+      <span className="lbl">{label}</span>
+    </button>
+  );
+  // Same as navItem but with a "Soon" pill — for the coming-soon teaser tabs.
+  const soonItem = (id, label) => (
+    <button type="button" className={activeTab === id ? "active" : ""} title={label + " — coming soon"} onClick={() => setTab(id)}>
+      {ICONS[id]}
+      <span className="lbl">{label}</span>
+      <span className="soon">Soon</span>
+    </button>
   );
 
   return (
-    <div>
-      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "0 24px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 0 12px" }}>
-          <div style={S.badge}>SS</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 800, fontSize: 17, color: "#FFF" }}>{tenant.businessName}</div>
-            <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal · {session.user.email}</div>
+    <div className="ss-shell">
+      <aside className="ss-side">
+        <div className="ss-brand">
+          <div className="ss-logo-ph" aria-label="Structure Studio logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-            <button onClick={signOut} style={{ ...S.btn("rgba(255,255,255,0.1)", "#E2E8F0"), border: "1px solid rgba(255,255,255,0.2)" }}>Sign Out</button>
-            <span onClick={() => setTab("releases")}
-              style={{ fontSize: 12, color: "#94A3B8", cursor: "pointer", textDecoration: "underline", whiteSpace: "nowrap" }}>
-              New features / Bug fixes
-            </span>
+          <div className="btext">
+            <div className="name">Structure Studio</div>
+            <div className="sub">Business Portal</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 4 }}>
-          {tabBtn("designs", "Designs & Leads")}
-          {isAdmin && tabBtn("pricing", "Pricing")}
-          {isAdmin && tabBtn("layout-pricing", "Layout Pricing")}
-          {isAdmin && tabBtn("colors", "Colors")}
-          {isAdmin && tabBtn("settings", "Settings")}
+
+        <div className="ss-navlabel">Workspace</div>
+        <nav className="ss-nav">
+          {!viewing && navItem("designer", "Designer")}
+          {navItem("designs", "Designs")}
+          {navItem("leads", "Contacts")}
+          {!viewing && soonItem("orders", "Orders")}
+        </nav>
+
+        {!viewing && (<>
+        <div className="ss-navlabel">Coming Soon</div>
+        <nav className="ss-nav">
+          {soonItem("on-demand-pricing", "RealTime Pricing")}
+          {soonItem("inventory", "Inventory")}
+          {soonItem("repairs", "Repairs")}
+          {soonItem("view-3d", "3D Design")}
+          {soonItem("rent-to-own-contracts", "Rent to Own")}
+          {soonItem("commissions", "Commissions")}
+          {soonItem("reports", "Reports")}
+          {soonItem("build-schedule", "Build Schedule")}
+          {soonItem("delivery-schedule", "Delivery Schedule")}
+          {soonItem("self-serve-display-units", "Self Serve Displays")}
+        </nav>
+        </>)}
+
+        {isOperator && (<>
+        <div className="ss-navlabel">Operator</div>
+        <nav className="ss-nav">
+          {navItem("accounts", "Accounts")}
+        </nav>
+        </>)}
+
+        <div className="ss-spacer"></div>
+
+        {/* Settings pinned at the bottom, just above the footer divider */}
+        {!viewing && isAdmin && (
+          <nav className="ss-nav" style={{ marginBottom: 10 }}>
+            {navItem("settings", "Settings")}
+          </nav>
+        )}
+
+        <div className="ss-foot">
+          <button type="button" className="ss-newlink" onClick={() => setTab("releases")} title="New features / Bug fixes">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
+            <span>New features / Bug fixes</span>
+          </button>
+          {/* Hovering (or focusing/tapping) the identity row reveals a small
+              flyout menu above it with Sign Out — no standalone button. */}
+          <div className="ss-user-wrap">
+            <div className="ss-user" title={session.user.email} tabIndex={0} role="button" aria-haspopup="menu" aria-label={`Account menu for ${displayName}`}>
+              <div className="ss-avatar">{initials}</div>
+              <div className="utext">
+                <div className="uname">{displayName}</div>
+                <div className="umail">{session.user.email}</div>
+              </div>
+              <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+            </div>
+            <div className="ss-user-menu" role="menu">
+              <button type="button" onClick={signOut} role="menuitem">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
+                <span className="mtext">Sign Out</span>
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
-      <div style={{ padding: "20px 24px" }}>
-        {activeTab === "designs" && (<><ShareLinkCard clientId={tenant.clientId} /><DesignsTable clientId={tenant.clientId} /></>)}
-        {activeTab === "releases" && <ReleasesView />}
-        {activeTab === "pricing" && isAdmin && <PricingCsv />}
-        {activeTab === "layout-pricing" && isAdmin && <LayoutPricing />}
-        {activeTab === "colors" && isAdmin && <ColorsView />}
-        {activeTab === "settings" && isAdmin && <SettingsView />}
-      </div>
+      </aside>
+
+      <section className={"ss-main" + (activeTab === "designer" ? " ss-designer-active" : "")}>
+        <div className="ss-topbar">
+          <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
+          {viewing && (
+            <div title="Read-only operator view. Status badges show the last cached value — the live GHL status refresh only runs for the tenant's own login."
+              style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#92400E", whiteSpace: "nowrap" }}>
+              <span>Viewing {viewing.companyName}</span>
+              <button type="button" onClick={exitAccount}
+                style={{ background: "#92400E", color: "#FFF", border: "none", borderRadius: 7, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                Exit
+              </button>
+            </div>
+          )}
+          <div className="tenant" title={tenant.businessName}>
+            <div className="ss-clogo" aria-label={`${tenant.businessName} logo`}>{tenantInitials}</div>
+            <span className="ss-tname">{tenant.businessName}</span>
+          </div>
+        </div>
+        <div className="ss-body">
+          {/* Keep-mounted designer host — full-bleed sibling of .ss-inner (its 1240px
+              max-width would box the designer in); hidden, never unmounted, off-tab. */}
+          {designerOpened && (
+            <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
+              <DesignerTab clientId={tenant.clientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)} />
+            </div>
+          )}
+          <div className="ss-inner">
+            {activeTab === "designs" && (viewing
+              ? <DesignsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
+              : <DesignsTable clientId={tenant.clientId} refreshKey={designsRefreshKey} />)}
+            {activeTab === "leads" && (viewing
+              ? <LeadsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
+              : <LeadsTable clientId={tenant.clientId} isAdmin={isAdmin} />)}
+            {activeTab === "accounts" && isOperator && (
+              <AccountsTab viewing={viewing} onOpen={openAccount} />
+            )}
+            {activeTab === "orders" && (
+              <ComingSoon
+                title="Orders"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>}
+                blurb="When a customer accepts a quote it becomes an order you can track in one place — from the sale, through the build, to the day it's delivered. No more chasing status across spreadsheets and texts."
+                bullets={[
+                  "Every accepted quote turns into a tracked order",
+                  "See each order's stage — sold, building, delivered",
+                  "Linked to the customer's contact and design",
+                  "Know what's due and what's paid at a glance",
+                ]}
+              />
+            )}
+            {activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
+            {activeTab === "settings" && isAdmin && <SettingsShell clientId={tenant.clientId} />}
+            {activeTab === "on-demand-pricing" && (
+              <ComingSoon
+                title="RealTime Pricing"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>}
+                blurb="Bring your lumber prices into Structure Studio and we'll build out every style and size with the exact lumber each building needs. Update your lumber costs each month or quarter and every building's price recalculates on its own — so you always know your true, current cost and profit margin."
+                bullets={[
+                  "Load your lumber prices; we map them to every style and size",
+                  "Update costs monthly or quarterly — building prices refresh automatically",
+                  "Know your real build cost and profit margin in real time",
+                ]}
+              />
+            )}
+            {activeTab === "build-schedule" && (
+              <ComingSoon
+                title="Build Schedule"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>}
+                blurb="Follow every building from signed order to finished product. A clear production timeline shows what's queued, what's in progress, and what's ready — so you and your crew always know what's being built and when."
+                bullets={[
+                  "See every order's build stage at a glance",
+                  "Queue, in-progress, and completed views",
+                  "Keep the shop floor and the office on the same page",
+                ]}
+              />
+            )}
+            {activeTab === "delivery-schedule" && (
+              <ComingSoon
+                title="Delivery Schedule"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>}
+                blurb="Plan and manage every delivery in one place. Schedule drop-offs, see the week ahead at a glance, and keep customers in the loop on exactly when their building will arrive."
+                bullets={[
+                  "Schedule and reschedule deliveries with ease",
+                  "A week-at-a-glance calendar of upcoming drop-offs",
+                  "Automatic customer notifications when a delivery is set",
+                ]}
+              />
+            )}
+            {activeTab === "inventory" && (
+              <ComingSoon
+                title="Inventory"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>}
+                blurb="Know exactly what's on your lot at all times. Every building — in stock, on display, or sold and awaiting delivery — tracked in one live list."
+                bullets={[
+                  "Live list of every building on your lot",
+                  "Stock, display, and sold statuses at a glance",
+                  "Know what's ready to sell today",
+                ]}
+              />
+            )}
+            {activeTab === "repairs" && (
+              <ComingSoon
+                title="Repairs"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>}
+                blurb="Manage repair and service work from request to done. Log a repair, track the job, and keep the full service history with the customer's building."
+                bullets={[
+                  "Log repair requests in seconds",
+                  "Track each job from request to completed",
+                  "Service history tied to each building and customer",
+                ]}
+              />
+            )}
+            {activeTab === "view-3d" && (
+              <ComingSoon
+                title="3D Design"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>}
+                blurb="Let customers see the building they just designed in 3D, not just as a floor plan. Spin it, look at it from any angle, and see their real style, size, and color choices on the actual structure — so they know exactly what's showing up on their lot."
+                bullets={[
+                  "Turn any design into a 3D view — no extra work for you",
+                  "Their own siding, trim, and roof colors shown on the building",
+                  "Doors, windows, and lofts appear right where they placed them",
+                  "Share the 3D view alongside the estimate to help close the sale",
+                ]}
+              />
+            )}
+            {activeTab === "rent-to-own-contracts" && (
+              <ComingSoon
+                title="Rent to Own"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>}
+                blurb="Offer rent-to-own without the paperwork headache. Turn any quote into a rent-to-own agreement, set the term, down payment, and monthly schedule, and keep every signed contract organized in one place."
+                bullets={[
+                  "Turn any quote into a rent-to-own agreement in a click",
+                  "Set the term, down payment, and monthly schedule",
+                  "Every signed contract stored and easy to find",
+                ]}
+              />
+            )}
+            {activeTab === "self-serve-display-units" && (
+              <ComingSoon
+                title="Self Serve Displays"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>}
+                blurb="Put a kiosk right inside a display unit on your lot. Customers walk in, design and estimate their own shed on the spot, and — at the push of a button — reach a live person who can help them through it."
+                bullets={[
+                  "A walk-in kiosk built into a display unit",
+                  "Customers design and estimate their own shed on site",
+                  "One-touch access to a live person for help",
+                ]}
+              />
+            )}
+            {activeTab === "commissions" && (
+              <ComingSoon
+                title="Commissions"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>}
+                blurb="Commissions are calculated automatically on every sale, so each sales rep can see exactly what they've earned and what their next payout will be — no spreadsheets, no guesswork."
+                bullets={[
+                  "Commissions calculated automatically on every sale",
+                  "Each rep sees their own earnings and payouts",
+                  "Clear running totals, ready at pay period",
+                ]}
+              />
+            )}
+            {activeTab === "reports" && (
+              <ComingSoon
+                title="Reports"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>}
+                blurb="Pull any report you want on your business — sales, leads, customers, revenue, builds delivered, and more. Filter by date range, rep, or building type and export it whenever you need it."
+                bullets={[
+                  "Sales and revenue over any date range",
+                  "Leads and customer activity at a glance",
+                  "Builds delivered and pipeline throughput",
+                  "Break down by rep, building type, or status",
+                  "Export to share or drop into your books",
+                ]}
+              />
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Bug / feature intake. Hidden while an operator is viewing someone else's
+          account: portal-feedback attributes a submission to the JWT's own tenant,
+          which would NOT be the client on screen — filing from here would land the
+          ticket under the operator's own business and read as that client's report. */}
+      {!viewing && (
+        <FeedbackWidget
+          clientId={tenant.clientId}
+          onSubmitted={() => setFeedbackKey((k) => k + 1)}
+        />
+      )}
     </div>
   );
 }
@@ -1565,6 +3497,7 @@ function Dashboard({ session }) {
 function PortalApp() {
   const [session, setSession] = useState(undefined); // undefined = booting
   const [recovery, setRecovery] = useState(false);
+  const [expired, setExpired] = useState(false); // session died mid-use (401s) → notice on login
 
   useEffect(() => {
     // A recovery- or invite-email link lands here with #…type=recovery or
@@ -1577,8 +3510,25 @@ function PortalApp() {
     const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
       setSession(sess || null);
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      if (event === "SIGNED_IN") setExpired(false); // fresh login clears the notice
     });
-    return () => sub.subscription.unsubscribe();
+    // Dead-session handler (see ssFetch): only reacts when someone IS signed in —
+    // the login screen's anon calls can 401 too and must not loop — and collapses
+    // a burst of parallel 401s into a single clean sign-out.
+    let handling = false;
+    ssOnSessionExpired = async () => {
+      if (handling) return;
+      handling = true;
+      try {
+        const { data } = await sb.auth.getSession();
+        if (data && data.session) {
+          setExpired(true);
+          await sb.auth.signOut(); // clears the local session even if the server call fails
+        }
+      } catch (_e) { /* never let the guard crash the app */ }
+      handling = false;
+    };
+    return () => { ssOnSessionExpired = null; sub.subscription.unsubscribe(); };
   }, []);
 
   if (session === undefined) {
@@ -1586,7 +3536,7 @@ function PortalApp() {
   }
   if (session && recovery) return <ResetPasswordView onDone={() => { setRecovery(false); window.location.hash = ""; }} />;
   if (!session) return (
-    <div>
+    <div style={{ maxWidth: 920, margin: "0 auto" }}>
       <div style={S.header}>
         <div style={S.badge}>SS</div>
         <div>
@@ -1594,11 +3544,21 @@ function PortalApp() {
           <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal</div>
         </div>
       </div>
-      <LoginView />
+      <LoginView notice={expired ? "Your session expired — please sign in again." : null} />
     </div>
   );
   return <Dashboard session={session} />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<PortalApp />);
+</script>
+<script>
+// PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
+// beta still deploy instantly). Registered at root scope so the offline
+// fallback also covers designer pages opened from inside the installed app.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js").catch(function () { /* non-fatal: app works without it */ });
+  });
+}
 </script></body></html>

@@ -8,11 +8,16 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // stage per design and persist it. Precedence: delivered > invoiced > accepted > sent.
 //
 //   Sent      — an estimate exists (StructureStudio sent it). Baseline.
-//   Accepted  — the GHL estimate's status is "accepted".
-//   Invoiced  — the GHL estimate's status is "invoiced" or "paid" (an invoice was created
-//               from the estimate and sent — per the owner's flow, this happens after accept).
-//   Delivered — the design's GHL opportunity is at the tenant's configured "delivered"
-//               pipeline stage (client_settings.ghl_stage_delivered_id).
+//   Accepted  — the GHL estimate's status is "accepted", OR the design's opportunity is at
+//               the tenant's configured "Quote Accepted" pipeline stage.
+//   Invoiced  — the GHL estimate's status is "invoiced"/"paid", OR the opportunity is at the
+//               tenant's configured "Invoiced" pipeline stage.
+//   Delivered — the design's opportunity is at the tenant's configured "Delivered" stage.
+//
+// Accepted/Invoiced/Delivered each map to a client_settings.ghl_stage_*_id; the design's
+// opportunity's current pipelineStageId is matched against them (pipeline-agnostic — stage
+// ids are globally unique in GHL). This pipeline-stage path means status advances purely
+// from where the tenant moves the deal in their pipeline, independent of the estimate API.
 //
 // Auth mirrors portal-settings: verify_jwt alone is not auth (the anon key passes the
 // gateway), so we resolve a real user via auth.getUser() and map user → client via
@@ -23,11 +28,11 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // header Version: 2021-07-28, Bearer <ghl_api_key>. Two bounded LIST calls per tenant
 // (estimates, and opportunities only if a delivered stage is configured) — not per design.
 //
-// NOTE (verify against a live sub-account before prod): the exact estimate `status` values
-// (draft/sent/viewed/accepted/declined/invoiced/paid) and the list pagination shapes are
-// per GHL's LeadConnector API. The mapping lives in mapEstimateStatus() so it is trivial to
-// adjust after inspecting one real response. GHL failures never throw — the design keeps
-// its cached status.
+// VERIFIED against a live accepted estimate (EST-29, 2026-07-25): the list endpoint
+// returns the status in `estimateStatus` (top-level `status` does not exist / is null),
+// ids in `_id`, rows under `estimates`, and an `estimateActionHistory` array of
+// { estimateStatus, updatedAt } events. Values observed: "accepted". The mapping lives
+// in mapEstimateStatus(); GHL failures never throw — the design keeps its cached status.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -143,12 +148,20 @@ Deno.serve(async (req: Request) => {
   // 4. Tenant GHL creds.
   const { data: settings } = await admin
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_stage_delivered_id")
+    .select("ghl_location_id, ghl_api_key, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id")
     .eq("client_id", clientId)
     .maybeSingle();
   const locationId = settings?.ghl_location_id || null;
   const apiKey = settings?.ghl_api_key || null;
+  const acceptedStageId = settings?.ghl_stage_accepted_id || null;
+  const invoicedStageId = settings?.ghl_stage_invoiced_id || null;
   const deliveredStageId = settings?.ghl_stage_delivered_id || null;
+  // Map each configured pipeline-stage id → our fulfillment stage, so a design's status
+  // advances from wherever the tenant has moved its opportunity in GHL.
+  const stageIdToStatus = new Map<string, "accepted" | "invoiced" | "delivered">();
+  if (acceptedStageId)  stageIdToStatus.set(acceptedStageId, "accepted");
+  if (invoicedStageId)  stageIdToStatus.set(invoicedStageId, "invoiced");
+  if (deliveredStageId) stageIdToStatus.set(deliveredStageId, "delivered");
   if (!locationId || !apiKey) {
     return json({ ok: true, statuses: cached, synced: false, reason: "GHL not configured" });
   }
@@ -160,16 +173,18 @@ Deno.serve(async (req: Request) => {
     Accept: "application/json",
   };
 
-  // 5. Bounded GHL reads. Opportunities only matter if a delivered stage is configured.
+  // 5. Bounded GHL reads. Opportunities only matter if any pipeline-stage is mapped.
   const estimates = await listEstimates(locationId, ghlHeaders);
   const estStatusById = new Map<string, string>();
   for (const e of estimates) {
     const id = String(e?._id ?? e?.id ?? "");
-    if (id) estStatusById.set(id, String(e?.status ?? "").toLowerCase());
+    // GHL returns the status as `estimateStatus` (verified live 2026-07-25); the
+    // `status` fallback is kept in case older/newer API versions differ.
+    if (id) estStatusById.set(id, String(e?.estimateStatus ?? e?.status ?? "").toLowerCase());
   }
 
   const oppStageById = new Map<string, string>();
-  if (deliveredStageId) {
+  if (stageIdToStatus.size > 0) {
     const opps = await listOpportunities(locationId, ghlHeaders);
     for (const o of opps) {
       const id = String(o?.id ?? o?._id ?? "");
@@ -189,9 +204,10 @@ Deno.serve(async (req: Request) => {
       if (STAGE_RANK[mapped] > STAGE_RANK[stage]) stage = mapped;
     }
 
-    if (deliveredStageId && d.ghl_opportunity_id) {
+    if (stageIdToStatus.size > 0 && d.ghl_opportunity_id) {
       const oppStage = oppStageById.get(String(d.ghl_opportunity_id));
-      if (oppStage && oppStage === deliveredStageId) stage = "delivered";
+      const mappedFromStage = oppStage ? stageIdToStatus.get(oppStage) : undefined;
+      if (mappedFromStage && STAGE_RANK[mappedFromStage] > STAGE_RANK[stage]) stage = mappedFromStage;
     }
 
     statuses[d.short_code] = stage;

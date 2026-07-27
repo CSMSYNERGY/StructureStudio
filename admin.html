@@ -181,6 +181,8 @@ function downloadFile(name, text) {
 
 function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
 
+// ─── Read-only impersonation view (operator "view portal as <client>") ───
+// Renders the SAME Designs & Leads table the owner portal shows, from the
 function AdminApp() {
   const [pwd, setPwd] = useState("");
   const [authed, setAuthed] = useState(false);
@@ -502,6 +504,9 @@ function AdminApp() {
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
           <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
+          {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
+              client (portal.html auto-opens ?view= for logged-in operators). */}
+          {sel && <a href={`/portal.html?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -630,6 +635,7 @@ function AdminApp() {
         )}
 
         {tab !== "master" && !sel && <div style={S.card}>Select a client above to manage their styles and items.</div>}
+
 
         {tab === "items" && sel && cat && master && (() => {
           const saved = new Set((cat.clientLayoutItems || []).filter((i) => i.active).map((i) => i.item_key));

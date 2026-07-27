@@ -1,10 +1,12 @@
-import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
-import { createPortal } from "react-dom";
-import { createClient } from "@supabase/supabase-js";
-// NOTE: the bug/feature feedback widget deliberately does NOT live here any more.
-// It moved into portal.html (2026-07-26): a submission has to be attributable to a
-// signed-in portal user and their tenant, and the public designer's visitors are
-// anonymous shed-shoppers who should never see a "Report a bug" button at all.
+// structure-studio.component.js — the ONE shared designer module, loaded by BOTH
+// index.html and portal.html via <script src=... type="text/babel">. Hand-mirrored
+// twin of StructureStudio.jsx (the ES-module canon) in the babel/global-destructure
+// dialect — every body/wrapper edit lands in BOTH files (see CLAUDE.md).
+// Self-contained on purpose: Babel compiles each text/babel block independently, so
+// nothing here leans on the host page's consts; the page mounts alias the globals
+// published at the bottom. No createRoot here — mounting is the host page's job.
+const {useState,useRef,useCallback,useEffect,useMemo,Component}=React;
+const { createPortal } = ReactDOM;
 
 // Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
 // carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
@@ -23,6 +25,7 @@ function PasswordInput({ style, wrapStyle, ...rest }) {
     </div>
   );
 }
+const { createClient } = window.supabase;
 
 // ─── Supabase project ───
 // Single shared project across all white-label tenants. The anon key is browser-safe
@@ -3761,6 +3764,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   );
 }
 
+// ─── FeedbackWidget: REMOVED from the designer (2026-07-26) ───
+// The bug/feature widget now lives in portal.html only. A submission has to be
+// attributable to a signed-in portal user and their tenant (portal-feedback resolves
+// both server-side from the JWT), and the public designer's visitors are anonymous
+// shed-shoppers who should never have seen a "Report a bug" button on a tenant's
+// customer-facing page. Mirror note: StructureStudio.jsx dropped its
+// `import FeedbackWidget from "./FeedbackWidget.jsx"` in the same change.
+
 // ─── Client-config loader (default export) ───
 // Every page load fetches the tenant's config from public.client_configs — there
 // is no in-source copy of any client. Resolution order:
@@ -3809,7 +3820,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null }) {
+function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -3923,3 +3934,8 @@ export default function StructureStudio({ config: configProp = null, clientId: c
   }
   return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} /></DesignerErrorBoundary>;
 }
+
+// Publish for the host pages' thin mount blocks (cross-block const sharing does not
+// exist under Babel-standalone; JSX also needs a capitalized in-scope identifier).
+window.StructureStudio = StructureStudio;
+window.ssAllowedOrigin = ssAllowedOrigin;
