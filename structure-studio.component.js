@@ -225,12 +225,38 @@ function getFrontWall(items) {
 
 // Map a positional wall to a display label (FRONT/BACK/LEFT/RIGHT)
 // based on which wall is currently FRONT. Returns null if no front set.
-// LEFT/RIGHT are determined from outside the building looking at the front.
+//
+// VIEWPOINT: a customer standing OUTSIDE the building, in front of the doors, looking
+// at them. LEFT/RIGHT are that person's left and right — what they'd say pointing at
+// the real building — NOT what a plan reader sees on screen. For a north- or
+// south-facing front those two are mirror images of each other, which is exactly what
+// makes this easy to get wrong.
+//
+// Facing the front wall, the customer's left is the direction they face rotated 90°
+// counter-clockwise on the compass:
+//
+//   front   customer faces   LEFT    RIGHT
+//   north   south            east    west
+//   south   north            west    east
+//   east    west             south   north
+//   west    east             north   south
+//
+// (Plan orientation, per getWallFromClick: north = top of the canvas, south = bottom,
+// west = left, east = right.)
+//
+// FIXED 2026-07-26 (reported by Junior Barns): the north and south rows were inverted.
+// They described an INSIDE-looking-out viewpoint while east/west already used
+// outside-looking-in, so a door on the north or south wall reported its sides
+// backwards while an end-wall door read correctly — an inconsistency, not a uniform
+// flip. This function is the single source of truth for the on-screen labels, the
+// exported PNG/PDF, and the `wall` field in the submit payload, so it drives the
+// emailed estimate too. Check any edit against the table above, not against a
+// screenshot of the plan.
 function getDisplayLabel(positionalWall, frontWall) {
   if (!frontWall || !positionalWall) return null;
   const map = {
-    north: { north: "FRONT", south: "BACK",  west: "LEFT",  east: "RIGHT" },
-    south: { south: "FRONT", north: "BACK",  east: "LEFT",  west: "RIGHT" },
+    north: { north: "FRONT", south: "BACK",  east: "LEFT",  west: "RIGHT" },
+    south: { south: "FRONT", north: "BACK",  west: "LEFT",  east: "RIGHT" },
     east:  { east: "FRONT",  west: "BACK",   south: "LEFT", north: "RIGHT" },
     west:  { west: "FRONT",  east: "BACK",   north: "LEFT", south: "RIGHT" },
   };
