@@ -27,7 +27,44 @@ const FEATURE_BOARD = "18420525473";
 const BUG_STATUS_COL = "bug_status";
 const FEATURE_STATUS_COL = "color_mm502bcj";
 
-const STATUS_TO_CLIENT: Record<string, string> = {
+// Monday label IDs → the client-facing ladder.
+//
+// Keyed on ID, not on the label's TEXT, because text is editable in the Monday UI and
+// an ID is not: renaming "Shipped" to "Completed" on 2026-07-27 silently stopped the
+// sync (the rename kept id 1, so an ID-keyed map would not have noticed). The team
+// renames labels; treat the text as a display string, never as a key.
+//
+// IDs are per-board and DO collide across the two boards with different meanings —
+// e.g. id 2 is "Missing Info" on the bug board but "Declined" on the feature board —
+// so this must always be looked up as (board, id), never by id alone.
+const STATUS_BY_ID: Record<string, Record<number, string>> = {
+  // Bugs Queue · bug_status
+  "18419456589": {
+    9: "in_review",     // Awaiting Review
+    14: "planned",      // Ready for Dev
+    3: "planned",       // Move to 'Sprints'
+    4: "in_review",     // Known Bug
+    0: "in_progress",   // Fixing
+    7: "in_progress",   // Pending Deploy
+    1: "shipped",       // Fixed
+    2: "needs_info",    // Missing Info
+    8: "duplicate",     // Duplicated
+    // id 5 is the blank label — intentionally unmapped, leaves the status untouched.
+  },
+  // Feature Requests (Intake) · color_mm502bcj
+  "18420525473": {
+    7: "submitted",     // New
+    9: "in_review",     // Under Review
+    10: "planned",      // Planned
+    1: "shipped",       // Completed (was "Shipped" until 2026-07-27)
+    2: "declined",      // Declined
+  },
+};
+
+// Fallback only, for a payload that carries the label text but no id. Kept in sync
+// with the names above; a rename makes an entry here stale, which is exactly why the
+// ID map is the primary lookup.
+const STATUS_BY_TEXT: Record<string, string> = {
   "Awaiting Review": "in_review",
   "Ready for Dev": "planned",
   "Move to 'Sprints'": "planned",
@@ -41,8 +78,23 @@ const STATUS_TO_CLIENT: Record<string, string> = {
   "Under Review": "in_review",
   "Planned": "planned",
   "Shipped": "shipped",
+  "Completed": "shipped",
   "Declined": "declined",
 };
+
+// Resolve a Monday status cell to the client ladder. Returns undefined when the label
+// is unknown, and the callers deliberately leave the tenant's status untouched rather
+// than inventing one — a NEW label should stall visibly, not silently mislabel.
+function toClientStatus(boardId: string, labelId: unknown, labelText: unknown): string | undefined {
+  const byId = STATUS_BY_ID[String(boardId)];
+  const id = typeof labelId === "number" ? labelId : (labelId != null && labelId !== "" ? Number(labelId) : NaN);
+  if (byId && Number.isFinite(id) && byId[id] !== undefined) return byId[id];
+  if (typeof labelText === "string" && STATUS_BY_TEXT[labelText]) return STATUS_BY_TEXT[labelText];
+  if (labelText || Number.isFinite(id)) {
+    console.error(`UNMAPPED Monday status on board ${boardId}: id=${String(labelId)} text=${JSON.stringify(labelText)} — add it to STATUS_BY_ID in BOTH edge functions`);
+  }
+  return undefined;
+}
 
 const CLIENT_MARKER = /^\s*\/client\b[:\s-]*/i;
 
@@ -151,8 +203,11 @@ Deno.serve(async (req: Request) => {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": token, "API-Version": "2024-01" },
       body: JSON.stringify({
+        // `board { id }` is required: label IDs collide across the two boards with
+        // different meanings, so the lookup must be (board, id). `value` carries the
+        // stable label index; `text` is only the fallback.
         query: `query ($ids: [ID!]) { items (ids: $ids) {
-          id column_values { id text } updates (limit: 50) { id text_body created_at creator { name } } } }`,
+          id board { id } column_values { id text value } updates (limit: 50) { id text_body created_at creator { name } } } }`,
         variables: { ids: rows.map((r: any) => r.monday_item_id) },
       }),
     });
@@ -163,10 +218,13 @@ Deno.serve(async (req: Request) => {
     for (const it of body2?.data?.items ?? []) {
       const row2 = byItem.get(String(it.id));
       if (!row2) continue;
+      const itemBoard = String(it.board?.id ?? "");
       const cell = (it.column_values ?? []).find(
         (c: any) => c.id === BUG_STATUS_COL || c.id === FEATURE_STATUS_COL,
       );
-      const mapped = cell?.text ? STATUS_TO_CLIENT[cell.text] : undefined;
+      let cellIndex: unknown = null;
+      try { cellIndex = cell?.value ? JSON.parse(cell.value)?.index : null; } catch { /* text fallback */ }
+      const mapped = cell ? toClientStatus(itemBoard, cellIndex, cell.text) : undefined;
       if (mapped && mapped !== row2.status) {
         const now2 = new Date().toISOString();
         await admin2.from("feedback_submissions")
@@ -223,11 +281,13 @@ Deno.serve(async (req: Request) => {
     if (!expectedCol || ev.columnId !== expectedCol) {
       return json({ ok: true, ignored: "not the status column" });
     }
-    const label = ev.value?.label?.text ?? ev.value?.label ?? null;
-    const mapped = typeof label === "string" ? STATUS_TO_CLIENT[label] : undefined;
+    // `index` is Monday's stable label ID; `text` is the editable display name.
+    const labelId = ev.value?.label?.index ?? ev.value?.index ?? null;
+    const labelText = ev.value?.label?.text ?? (typeof ev.value?.label === "string" ? ev.value.label : null);
+    const mapped = toClientStatus(boardId, labelId, labelText);
     if (!mapped) {
-      // Unknown/cleared label: leave the tenant's status as-is rather than inventing one.
-      console.log("Unmapped Monday status label:", label);
+      // Unknown/cleared label: leave the tenant's status as-is rather than inventing
+      // one. toClientStatus has already logged the specifics.
       return json({ ok: true, ignored: "unmapped label" });
     }
     if (mapped === row.status) return json({ ok: true, unchanged: true });

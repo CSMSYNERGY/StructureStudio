@@ -76,8 +76,39 @@ const BOARDS = {
 // Everything a tenant sees goes through this map first — see migration 054's
 // trust-boundary note. An unmapped label leaves the stored status untouched rather
 // than inventing one, so a new Monday label can never surface as raw text.
-const STATUS_TO_CLIENT: Record<string, string> = {
-  // Bugs Queue (bug_status)
+//
+// Keyed on Monday's stable label ID, not the label's TEXT: text is editable in the
+// Monday UI, and renaming "Shipped" to "Completed" on 2026-07-27 silently stalled the
+// sync. IDs are per-board and COLLIDE across the two boards with different meanings
+// (id 2 = "Missing Info" on bugs, "Declined" on features), so always look up
+// (board, id) — never id alone.
+const STATUS_BY_ID: Record<string, Record<number, string>> = {
+  // Bugs Queue · bug_status
+  "18419456589": {
+    9: "in_review",     // Awaiting Review
+    14: "planned",      // Ready for Dev
+    3: "planned",       // Move to 'Sprints'
+    4: "in_review",     // Known Bug
+    0: "in_progress",   // Fixing
+    7: "in_progress",   // Pending Deploy
+    1: "shipped",       // Fixed
+    2: "needs_info",    // Missing Info
+    8: "duplicate",     // Duplicated
+    // id 5 is the blank label — intentionally unmapped.
+  },
+  // Feature Requests (Intake) · color_mm502bcj
+  "18420525473": {
+    7: "submitted",     // New
+    9: "in_review",     // Under Review
+    10: "planned",      // Planned
+    1: "shipped",       // Completed (was "Shipped" until 2026-07-27)
+    2: "declined",      // Declined
+  },
+};
+
+// Fallback for a payload carrying text but no id, and the lookup used by
+// statusAfterPush (which works from our own initialStatus constant, not from Monday).
+const STATUS_BY_TEXT: Record<string, string> = {
   "Awaiting Review": "in_review",
   "Ready for Dev": "planned",
   "Move to 'Sprints'": "planned",
@@ -87,13 +118,24 @@ const STATUS_TO_CLIENT: Record<string, string> = {
   "Fixed": "shipped",
   "Missing Info": "needs_info",
   "Duplicated": "duplicate",
-  // Feature Requests (color_mm502bcj)
   "New": "submitted",
   "Under Review": "in_review",
   "Planned": "planned",
   "Shipped": "shipped",
+  "Completed": "shipped",
   "Declined": "declined",
 };
+
+function toClientStatus(boardId: string, labelId: unknown, labelText: unknown): string | undefined {
+  const byId = STATUS_BY_ID[String(boardId)];
+  const id = typeof labelId === "number" ? labelId : (labelId != null && labelId !== "" ? Number(labelId) : NaN);
+  if (byId && Number.isFinite(id) && byId[id] !== undefined) return byId[id];
+  if (typeof labelText === "string" && STATUS_BY_TEXT[labelText]) return STATUS_BY_TEXT[labelText];
+  if (labelText || Number.isFinite(id)) {
+    console.error(`UNMAPPED Monday status on board ${boardId}: id=${String(labelId)} text=${JSON.stringify(labelText)} — add it to STATUS_BY_ID in BOTH edge functions`);
+  }
+  return undefined;
+}
 
 // A Monday update reaches the tenant ONLY when the team prefixes it with /client.
 // Everything else stays internal and is never stored on our side at all.
@@ -144,7 +186,7 @@ async function attachFile(
 // value made feature requests display "In review" and then appear to move BACKWARDS
 // to "Submitted" the first time the webhook or reconcile ran.
 function statusAfterPush(kind: "bug" | "feature"): string {
-  return STATUS_TO_CLIENT[BOARDS[kind].initialStatus] ?? "submitted";
+  return STATUS_BY_TEXT[BOARDS[kind].initialStatus] ?? "submitted";
 }
 
 // Creates the Monday item for an already-persisted submission row and returns its id.
@@ -320,10 +362,13 @@ Deno.serve(async (req: Request) => {
     if (!ids.length) return json({ ok: true, refreshed: 0 });
 
     const byItem = new Map((rows ?? []).map((r: any) => [String(r.monday_item_id), r]));
+    // board { id } + value.index: label ids collide across boards, and `text` is only
+    // a display name the team can rename out from under us.
     const q = `query ($ids: [ID!]) {
       items (ids: $ids) {
         id
-        column_values { id text }
+        board { id }
+        column_values { id text value }
         updates (limit: 50) { id text_body created_at creator { name } }
       }
     }`;
@@ -339,10 +384,13 @@ Deno.serve(async (req: Request) => {
     for (const it of items) {
       const row = byItem.get(String(it.id));
       if (!row) continue;
+      const itemBoard = String(it.board?.id ?? "");
       const statusCell = (it.column_values ?? []).find(
         (c: any) => c.id === BOARDS.bug.colStatus || c.id === BOARDS.feature.colStatus,
       );
-      const mapped = statusCell?.text ? STATUS_TO_CLIENT[statusCell.text] : undefined;
+      let cellIndex: unknown = null;
+      try { cellIndex = statusCell?.value ? JSON.parse(statusCell.value)?.index : null; } catch { /* text fallback */ }
+      const mapped = statusCell ? toClientStatus(itemBoard, cellIndex, statusCell.text) : undefined;
       if (mapped && mapped !== row.status) {
         await admin.from("feedback_submissions").update({
           status: mapped,
