@@ -2698,8 +2698,11 @@ function MySubmissions({ refreshKey }) {
                       <span style={{ color: ACCENT, fontSize: 11, marginRight: 6 }}>{isOpen ? "▾" : "▸"}</span>
                       <span style={{ marginRight: 6 }}>{r.kind === "bug" ? "🐛" : "✨"}</span>
                       {r.title}
+                      {/* Tooltip names the sender rather than saying "from us": the reader
+                          IS the client, so "us" scans as their own team — especially next
+                          to a Submitted by column that can read "CSM Synergy". */}
                       {cs.length > 0 && (
-                        <span title={cs.length + " repl" + (cs.length === 1 ? "y" : "ies") + " from us"}
+                        <span title={cs.length + " repl" + (cs.length === 1 ? "y" : "ies") + " from Structure Studio"}
                           style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" }}>
                           💬 {cs.length}
                         </span>
