@@ -1,7 +1,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
-import FeedbackWidget from "./FeedbackWidget.jsx";
+// NOTE: the bug/feature feedback widget deliberately does NOT live here any more.
+// It moved into portal.html (2026-07-26): a submission has to be attributable to a
+// signed-in portal user and their tenant, and the public designer's visitors are
+// anonymous shed-shoppers who should never see a "Report a bug" button at all.
 
 // Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
 // carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
@@ -3884,21 +3887,13 @@ export default function StructureStudio({ config: configProp = null, clientId: c
   }
   if (state.status === "error") {
     return (
-      <>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: embedded ? "40vh" : "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
-          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
-          <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
-          <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
-        </div>
-        {!embedded && <FeedbackWidget />}
-      </>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: embedded ? "40vh" : "100vh", padding: "0 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1E293B", textAlign: "center" }}>
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Could not load configuration</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 4 }}>Client: <code>{state.clientId}</code></div>
+        <div style={{ fontSize: 13, color: "#64748B", maxWidth: 480 }}>{state.message}</div>
+        <button onClick={() => setState({ status: "loading" })} style={{ marginTop: 20, padding: "8px 16px", background: "#1E293B", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Retry</button>
+      </div>
     );
   }
-  return (
-    <>
-      <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} /></DesignerErrorBoundary>
-      {!embedded && <FeedbackWidget />}
-    </>
-  );
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} /></DesignerErrorBoundary>;
 }

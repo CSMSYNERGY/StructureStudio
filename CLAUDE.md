@@ -12,7 +12,7 @@ StructureStudio is a multi-tenant SaaS floor-plan designer + quote builder for c
 - `portal.html` — standalone owner login + dashboard (designs/contacts lists, settings, billing) with an in-portal **Designer** tab that mounts the shared module (`<StructureStudio clientId=… embedded/>`). **HTML-only — it has no .jsx sibling and is exempt from the mirror rule.**
 
 **The hand-mirrored pair is `StructureStudio.jsx` ↔ `structure-studio.component.js`.** The only structural differences:
-1. Module top: `const {useState,useRef,useCallback,useEffect,useMemo,Component}=React;` etc. instead of `import ... from "react";`, and `FeedbackWidget` is inlined (the .jsx imports it).
+1. Module top: `const {useState,useRef,useCallback,useEffect,useMemo,Component}=React;` etc. instead of `import ... from "react";`. (Historically `FeedbackWidget` was also inlined here; it was removed from the designer entirely on 2026-07-26 — see "Feedback / bug intake" below.)
 2. `export default function StructureStudio` (the config-loader) in the .jsx is a plain `function` declaration in the module.
 3. Module bottom: `window.StructureStudio` / `window.ssAllowedOrigin` publishes (no `createRoot` — mounting belongs to the host pages).
 
@@ -47,6 +47,29 @@ Edge functions (sources mirrored in `supabase/functions/`, deployed via Supabase
 - `submit-estimate` — creates/updates the GHL contact, opportunity, estimate, and emails it. Business identity (name/phone/website/address/logo/terms) comes from `client_settings.business_*`; beta mode (`beta_mode`/`beta_email` or request `betaMode`) redirects the estimate email to a test inbox.
 - `portal-settings` — owner-facing settings read/save. JWT-authenticated: `verify_jwt` alone is NOT auth (the anon key passes the gateway) — the function resolves a real user via `auth.getUser()` and maps it through `client_users`; `client_id` is never trusted from the body. The GHL API key is write-only (masked status, absent/empty never blanks it).
 - `admin-save-settings` — operator bootstrap tool behind the shared `ADMIN_PASSWORD` secret (used by the designer's `?admin=1` panel).
+- `portal-feedback` — bug / feature-request intake from the portal. Same JWT→`client_users` auth as `portal-settings`; tenant and submitter are resolved server-side and never read from the body. Records the row in `feedback_submissions` FIRST, then creates the Monday item, so a Monday outage can't lose a submission (the failure lands in `monday_error` and `action:"retry_push"` re-attempts). Also serves `action:"refresh"` — an on-demand pull of status + `/client` updates, the safety net for a missed webhook.
+- `feedback-monday-webhook` — the return leg (`verify_jwt=false`; Monday can't send a Supabase JWT). Subscribed to `change_column_value` + `create_update` on both boards. Auth is a shared secret in the URL (`?key=` ⇄ `FEEDBACK_SYNC_SECRET`) compared in constant time, because Monday does **not** sign board-level webhooks created via the API. **Rotating the secret means re-creating all four webhooks.**
+
+## Feedback / bug intake (portal → Monday → portal)
+
+Monday remains the team's system of record; Supabase holds a tenant-facing **mirror** so a client can see that their report landed and what came of it. Tables: `feedback_submissions` + `feedback_comments` (migration `054`), both read-only to `authenticated` and RLS-scoped to `current_client_id()`; every write is service-role, through the edge functions. Attachments go to the **private** `feedback-attachments` bucket under `{client_id}/…` and are re-uploaded into the Monday item's Attachment column.
+
+Monday boards: **Bugs Queue** `18419456589` and **Feature Requests (Intake)** `18420525473`. Both gained an `Attachment` (file) and a `Client` (text) column in this change. Exact column ids live in `portal-feedback/index.ts`; the board ids, status column ids and `STATUS_TO_CLIENT` map are **duplicated** in the webhook function — change both.
+
+Two rules that are easy to break and expensive to get wrong:
+
+1. **`/client` is the publication marker.** A Monday update reaches the tenant's portal ONLY if its text starts with `/client`. Unmarked updates are discarded by the webhook and never written to our database at all — so internal triage stays internal even if a later RLS or UI change goes wrong. Do **not** "simplify" this into storing everything with a `visible_to_client` flag; the whole safety property is that there is nothing there to leak.
+2. **Tenants never see Monday's raw status labels.** `bug_status` / `color_mm502bcj` are mapped down to a client-facing ladder (`submitted → in_review → planned → in_progress → shipped`, plus `needs_info`, `declined`, `duplicate`) so internal vocabulary like "Move to 'Sprints'" or "Known Bug" never surfaces. An **unmapped** label deliberately leaves the tenant's status untouched rather than inventing one — so adding a new Monday label is safe, but it won't move the client's view until you add it to `STATUS_TO_CLIENT` in **both** functions.
+
+The widget is **portal-only** (`portal.html`: `FeedbackForm`, `FeedbackWidget`, `MySubmissions`; surfaced under What's New → My Submissions). It was removed from the public designer on 2026-07-26 — submissions must be attributable to a signed-in user and tenant, and the designer's visitors are anonymous shed-shoppers who should never see a "Report a bug" button on a tenant's customer-facing page. `FeedbackWidget.jsx` is now an empty signpost file; nothing imports it. The widget is also hidden while an operator is viewing another tenant's account, since the submission would be attributed to the operator's own tenant.
+
+## What's New changelog — what must NEVER be published
+
+`release_notes` (migration `045`) is the tenant-facing changelog behind the What's New tab. It is hand-authored: nothing in the codebase writes to it, and no code change should ever auto-generate an entry.
+
+**Commercial and internal-posture changes are not release notes.** Specifically, never log an entry for: pricing changes or pricing *visibility* (e.g. `billing_plans.price_visible`, migration `055`), plan/catalog cost edits, margin or packaging decisions, or anything describing how we present money to tenants. Announcing "prices are now hidden" tells every tenant to go look at what changed and anchors them to whatever they last saw — the exact harm hiding the number was meant to avoid. This was an explicit instruction from the project owner on 2026-07-26.
+
+Log a release note when a tenant gains something they can *use* — a feature, a fix, a roadmap item. If the change is about what we charge or what we're willing to reveal about what we charge, it ships silently.
 
 SQL migrations live in `supabase/migrations/`. `000`–`027` are **all applied to live** (the post-`004` ones were hand-applied via MCP `execute_sql` / `supabase db query --linked`, NOT via `db push`). **The migration ledger was reconciled on 2026-06-19**: every repo file-version (`000`–`027`) is now recorded in `supabase_migrations.schema_migrations` (marked applied via `version`+`name`, no re-execution), so `supabase db push` sees **zero pending** migrations and can no longer re-run `008`–`011`'s `DROP TABLE … recreate` and wipe the catalog. Note: the ledger also still carries 15 legacy **timestamp-versioned** rows (`20260504…`–`20260613…`) for the pre-tenancy schema + the originally-recorded `001`–`011`; these have no matching repo file, so `migration list` shows them as remote-only — harmless (push never deletes remote-only rows). **Going forward, add new migrations with the next `NNN_` prefix and record them in the ledger as you apply them; still hand-apply via the SQL Editor / MCP rather than `db push` until the team verifies a clean `migration list`.**
 

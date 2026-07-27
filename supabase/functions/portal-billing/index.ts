@@ -99,7 +99,7 @@ Deno.serve(async (req: Request) => {
   // All active plan rows — needed by every action (feature lookup for subs too).
   const { data: planRows, error: plansErr } = await admin
     .from("billing_plans")
-    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order")
+    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order, price_visible")
     .eq("active", true)
     .order("sort_order", { ascending: false });
   if (plansErr) return json({ error: plansErr.message }, 500);
@@ -126,7 +126,11 @@ Deno.serve(async (req: Request) => {
   const vaultId: string | null = vaultRow?.vault_id ?? null;
 
   if (action === "status") {
-    // gateway_plan_id stays server-side; everything else drives the UI.
+    // gateway_plan_id stays server-side; everything else drives the UI — including
+    // `price_visible`, which is a DISPLAY flag the Billing tab reads to decide whether
+    // to print the amount. Prices themselves are untouched here and in the gateway;
+    // hiding is deliberately presentation-only, so publishing a price later is a
+    // one-field flip with no billing-path involvement.
     const publicPlans = plans.map(({ gateway_plan_id: _g, ...p }) => p);
     return json({
       configured,
