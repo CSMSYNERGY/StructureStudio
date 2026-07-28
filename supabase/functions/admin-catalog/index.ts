@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
+import { checkAdminAuth } from "../_shared/adminAuth.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -169,10 +170,39 @@ Deno.serve(async (req: Request) => {
   const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const action = p.action;
 
-  // Throttled + audited password gate (migration 053). Escalating per-IP lockout, a delay
-  // on every failure, and an admin_audit row for each one — see _shared/adminGate.ts.
-  const gate = await checkAdminPassword(req, p?.adminPassword, sb, String(action ?? ""));
+  // Dual-credential gate: a valid operator JWT (the portal's embedded Admin tab, which
+  // already carries the operator's session) OR the shared password (standalone admin.html).
+  // Password callers keep the full throttle/lockout/audit behaviour of migration 053 —
+  // see _shared/adminAuth.ts for why a signed-in NON-operator is refused outright rather
+  // than being allowed to fall through and probe the password.
+  const gate = await checkAdminAuth(req, p?.adminPassword, sb, String(action ?? ""));
   if (!gate.ok) return json(gate.body, gate.status);
+  const identity = gate.identity;
+
+  // Step-up: a few actions stay password-gated even for an operator, because their blast
+  // radius is not the one tenant being administered.
+  //   delete_client       — irreversibly wipes a tenant AND deletes their auth logins.
+  //   connect/disconnect_email — rewrite the PROJECT-WIDE Auth SMTP config, so they affect
+  //                         every tenant's password-reset mail, not just this one.
+  const PASSWORD_REQUIRED = new Set(["delete_client", "connect_email", "disconnect_email"]);
+  if (identity.via === "operator" && PASSWORD_REQUIRED.has(String(action ?? ""))) {
+    const stepUp = await checkAdminPassword(req, p?.adminPassword, sb, String(action ?? ""));
+    if (!stepUp.ok) return json(stepUp.body, stepUp.status);
+  }
+
+  // Successful operator-authenticated calls are recorded. Until now only FAILURES were
+  // audited, which meant an authorized admin action left no trace at all.
+  if (identity.via === "operator") {
+    try {
+      await sb.from("admin_audit").insert({
+        action: `admin_${String(action ?? "")}`,
+        target_client_id: typeof p?.clientId === "string" ? p.clientId : null,
+        actor_email: identity.email,
+        actor_user_id: identity.userId,
+        note: "via=operator_jwt",
+      });
+    } catch (_e) { /* best-effort: never block the console on a log failure */ }
+  }
 
   try {
     switch (action) {
@@ -201,40 +231,6 @@ Deno.serve(async (req: Request) => {
         if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
         return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
       }
-      case "get_client_portal": {
-        // Read-only operator "impersonation": view a tenant's Designs & Leads without
-        // their login. RLS confines authenticated owners to their own client_id, so the
-        // ONLY correct cross-tenant path is this service-role read gated by ADMIN_PASSWORD
-        // (verified above) — never a faked session or a weakened designs RLS policy.
-        // Returns the SAME columns/shape the portal DesignsTable uses. Every view is
-        // audit-logged (impersonation exposes cross-tenant customer PII).
-        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
-        const [designs, versions, cfg] = await Promise.all([
-          sb.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
-            .eq("client_id", clientId).order("created_at", { ascending: false }),
-          sb.from("design_versions")
-            .select("short_code, version, created_at, selections, image_url")
-            .eq("client_id", clientId).order("version", { ascending: false }),
-          sb.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
-        ]);
-        if (designs.error) throw designs.error;
-        if (versions.error) throw versions.error;
-        try {
-          await sb.from("admin_audit").insert({
-            action: "get_client_portal",
-            target_client_id: clientId,
-            row_count: (designs.data || []).length,
-            note: typeof p.note === "string" ? p.note.slice(0, 500) : null,
-          });
-        } catch (_) { /* audit is best-effort — never block the view on a log failure */ }
-        return json({
-          ok: true, clientId,
-          companyName: (cfg.data && cfg.data.company_name) || clientId,
-          designs: designs.data || [], versions: versions.data || [],
-        });
-      }
-
       // ── layout-item assignment ──────────────────────────────────────────
       case "toggle_item":
       case "save_item_assignment": {
