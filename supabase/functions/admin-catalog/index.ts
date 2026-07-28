@@ -1,6 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
+import { checkAdminAuth } from "../_shared/adminAuth.ts";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -21,6 +23,21 @@ const reqStr = (v: unknown, name: string) => {
   if (typeof v !== "string" || !v.trim()) throw new Error(`${name} is required.`);
   return v.trim();
 };
+
+// ── Where every auth email lands ────────────────────────────────────────────
+// ONE canonical destination for invite / set-password / reset links, regardless of
+// which host generated them. Callers used to pass `location.origin + "/portal"`, so a
+// link created from beta.structurestudio.app carried redirect_to=beta — and Supabase
+// only honours allow-listed redirects, silently substituting Site URL for anything
+// else. Verified 2026-07-28 against this project: beta got back the *identical*
+// response as a deliberately hostile control URL. Every invite Carolyn created from
+// beta therefore bounced to the apex, which is how these links broke.
+//
+// Forcing the apex is correct rather than a workaround: beta and production share ONE
+// Supabase project, so a password set here is immediately valid on beta too. A
+// caller-supplied portalUrl is IGNORED on purpose — one allow-listed destination
+// cannot drift out of the allow-list, and no future caller can reintroduce this bug.
+const AUTH_PORTAL_URL = "https://structurestudio.app/portal";
 
 // ── Supabase Auth custom-SMTP config via the Management API ──────────────────
 // Powers the admin.html "Email Sender" card. Pointing the project's Auth SMTP at
@@ -157,7 +174,7 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -169,10 +186,39 @@ Deno.serve(async (req: Request) => {
   const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const action = p.action;
 
-  // Throttled + audited password gate (migration 053). Escalating per-IP lockout, a delay
-  // on every failure, and an admin_audit row for each one — see _shared/adminGate.ts.
-  const gate = await checkAdminPassword(req, p?.adminPassword, sb, String(action ?? ""));
+  // Dual-credential gate: a valid operator JWT (the portal's embedded Admin tab, which
+  // already carries the operator's session) OR the shared password (standalone admin.html).
+  // Password callers keep the full throttle/lockout/audit behaviour of migration 053 —
+  // see _shared/adminAuth.ts for why a signed-in NON-operator is refused outright rather
+  // than being allowed to fall through and probe the password.
+  const gate = await checkAdminAuth(req, p?.adminPassword, sb, String(action ?? ""));
   if (!gate.ok) return json(gate.body, gate.status);
+  const identity = gate.identity;
+
+  // Step-up: a few actions stay password-gated even for an operator, because their blast
+  // radius is not the one tenant being administered.
+  //   delete_client       — irreversibly wipes a tenant AND deletes their auth logins.
+  //   connect/disconnect_email — rewrite the PROJECT-WIDE Auth SMTP config, so they affect
+  //                         every tenant's password-reset mail, not just this one.
+  const PASSWORD_REQUIRED = new Set(["delete_client", "connect_email", "disconnect_email"]);
+  if (identity.via === "operator" && PASSWORD_REQUIRED.has(String(action ?? ""))) {
+    const stepUp = await checkAdminPassword(req, p?.adminPassword, sb, String(action ?? ""));
+    if (!stepUp.ok) return json(stepUp.body, stepUp.status);
+  }
+
+  // Successful operator-authenticated calls are recorded. Until now only FAILURES were
+  // audited, which meant an authorized admin action left no trace at all.
+  if (identity.via === "operator") {
+    try {
+      await sb.from("admin_audit").insert({
+        action: `admin_${String(action ?? "")}`,
+        target_client_id: typeof p?.clientId === "string" ? p.clientId : null,
+        actor_email: identity.email,
+        actor_user_id: identity.userId,
+        note: "via=operator_jwt",
+      });
+    } catch (_e) { /* best-effort: never block the console on a log failure */ }
+  }
 
   try {
     switch (action) {
@@ -201,40 +247,6 @@ Deno.serve(async (req: Request) => {
         if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
         return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
       }
-      case "get_client_portal": {
-        // Read-only operator "impersonation": view a tenant's Designs & Leads without
-        // their login. RLS confines authenticated owners to their own client_id, so the
-        // ONLY correct cross-tenant path is this service-role read gated by ADMIN_PASSWORD
-        // (verified above) — never a faked session or a weakened designs RLS policy.
-        // Returns the SAME columns/shape the portal DesignsTable uses. Every view is
-        // audit-logged (impersonation exposes cross-tenant customer PII).
-        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
-        const [designs, versions, cfg] = await Promise.all([
-          sb.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
-            .eq("client_id", clientId).order("created_at", { ascending: false }),
-          sb.from("design_versions")
-            .select("short_code, version, created_at, selections, image_url")
-            .eq("client_id", clientId).order("version", { ascending: false }),
-          sb.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
-        ]);
-        if (designs.error) throw designs.error;
-        if (versions.error) throw versions.error;
-        try {
-          await sb.from("admin_audit").insert({
-            action: "get_client_portal",
-            target_client_id: clientId,
-            row_count: (designs.data || []).length,
-            note: typeof p.note === "string" ? p.note.slice(0, 500) : null,
-          });
-        } catch (_) { /* audit is best-effort — never block the view on a log failure */ }
-        return json({
-          ok: true, clientId,
-          companyName: (cfg.data && cfg.data.company_name) || clientId,
-          designs: designs.data || [], versions: versions.data || [],
-        });
-      }
-
       // ── layout-item assignment ──────────────────────────────────────────
       case "toggle_item":
       case "save_item_assignment": {
@@ -404,6 +416,18 @@ Deno.serve(async (req: Request) => {
         });
         if (ins.error) throw ins.error;
 
+        // Non-billable (CSM Synergy internal / demo / testing) accounts skip the billing
+        // gate entirely. This is the ONLY place the flag is set at creation, and it needs
+        // a client_settings row to live in — which create_client otherwise leaves for the
+        // owner to fill in via the portal. A normal new client gets no row here, so
+        // billing_exempt reads false and the gate applies: they land on Billing and pay
+        // before anything unlocks.
+        if (p.billingExempt === true) {
+          const bx = await sb.from("client_settings")
+            .upsert({ client_id: clientId, billing_exempt: true, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+          if (bx.error) throw bx.error;
+        }
+
         // Clone the template's FULL catalog so the new client is usable immediately — the
         // config row alone has no styles/sizes/prices/items/colors (the old bug: a cloned
         // client "didn't bring it all over"). New rows get fresh ids; foreign keys are
@@ -505,10 +529,9 @@ Deno.serve(async (req: Request) => {
         const email = reqStr(p.email, "email").toLowerCase();
         const role = ["owner", "admin", "user"].includes(String(p.role || "").toLowerCase())
           ? String(p.role).toLowerCase() : "owner";
-        // Where the set-password link lands (the portal). The panel passes
-        // location.origin + "/portal.html"; fall back to production.
-        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
-          ? p.portalUrl : "https://structurestudio.app/portal.html";
+        // Where the set-password link lands. ALWAYS the canonical production portal —
+        // a caller-supplied portalUrl is deliberately ignored (see AUTH_PORTAL_URL).
+        const portalUrl = AUTH_PORTAL_URL;
 
         // 1. find an existing auth user by email (admin API, paginated)
         let user: any = null;
@@ -628,9 +651,7 @@ Deno.serve(async (req: Request) => {
         if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
 
         // Where the reset link lands; the panel passes location.origin + "/portal.html".
-        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
-          ? p.portalUrl : "https://structurestudio.app/portal.html";
-        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: portalUrl });
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: AUTH_PORTAL_URL });
         if (error) throw error;
         return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });
       }
@@ -702,4 +723,4 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     return json({ error: (e as Error).message || String(e) }, 400);
   }
-});
+}));

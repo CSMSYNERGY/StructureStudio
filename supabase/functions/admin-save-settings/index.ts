@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { checkAdminPassword } from "../_shared/adminGate.ts";
+import { checkAdminAuth } from "../_shared/adminAuth.ts";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Operator (super-admin) bootstrap tool, used by the designer's ?admin=1 panel.
 // Gated by the shared ADMIN_PASSWORD edge-function secret. Owners use the
@@ -20,7 +21,7 @@ function json(body: unknown, status = 200) {
 }
 
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -35,10 +36,12 @@ Deno.serve(async (req: Request) => {
   // Created before the gate: the throttle ledger + audit need a service-role client.
   const supabase = createClient(supabaseUrl, serviceKey);
 
-  // Throttled + audited password gate — SAME shared gate as admin-catalog (migration 053).
-  // Both must use it: they share one secret, so an unthrottled sibling would be a free
-  // guessing oracle for the same password.
-  const gate = await checkAdminPassword(req, adminPassword, supabase, String(action ?? ""));
+  // SAME dual-credential gate as admin-catalog — operator JWT or the shared password.
+  // Both siblings must use the same gate: they share one secret, so an unthrottled (or
+  // differently-gated) sibling would be a free guessing oracle for the same password.
+  // Behaviour-neutral for today's caller — the designer's ?admin=1 panel sends the anon
+  // key, which resolves to no user and falls through to the unchanged password path.
+  const gate = await checkAdminAuth(req, adminPassword, supabase, String(action ?? ""));
   if (!gate.ok) return json(gate.body, gate.status);
 
   if (!clientId || typeof clientId !== "string" || !clientId.trim()) {
@@ -84,4 +87,4 @@ Deno.serve(async (req: Request) => {
 
   if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
   return json({ ok: true });
-});
+}));

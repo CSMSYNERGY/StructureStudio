@@ -1,5 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { withErrorLog } from "../_shared/logError.ts";
+
+// Only `status` is a read here; subscribe/cancel move real money.
+const BILLING_READS = new Set(["status"]);
 
 // Platform billing endpoint for the portal's Billing tab — CSM Synergy charging
 // tenants for StructureStudio features via the Deposyt/NMI gateway.
@@ -60,40 +65,25 @@ async function nmiPost(params: Record<string, string>) {
   return parsed as Record<string, string>;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
-
+  // Auth + tenant resolution, shared with portal-settings / sync-design-status.
+  // requireBilling: an operator additionally needs the can_bill capability here, because
+  // every non-read action on this function moves real money against the tenant's card.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: mapping, error: mapErr } = await admin
-    .from("client_users")
-    .select("client_id, role")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (mapErr) return json({ error: mapErr.message }, 500);
-  if (!mapping) return json({ error: "No business is linked to this account." }, 403);
-  const clientId: string = mapping.client_id;
-
-  if (mapping.role !== "owner" && mapping.role !== "admin") {
-    return json({ error: "Billing is only available to the account owner or an admin." }, 403);
-  }
-
-  let payload: any;
-  try { payload = await req.json(); }
-  catch { return json({ error: "Invalid JSON" }, 400); }
-  const action = payload?.action || "status";
+  const r = await resolveTenant(req, admin, {
+    readActions: BILLING_READS,
+    defaultAction: "status",
+    requireBilling: true,
+  });
+  if (!r.ok) return json(r.body, r.status);
+  const { clientId, operator, payload, action, userEmail, audit, auditStrict } = r.ctx;
+  if (operator) audit(`operator_billing_${action}`).catch(() => {});
   const configured = Boolean(SECURITY_KEY && TOKENIZATION_KEY);
 
   // All active plan rows — needed by every action (feature lookup for subs too).
@@ -109,7 +99,7 @@ Deno.serve(async (req: Request) => {
   // All subscription rows for this tenant, newest first (cancelled kept for history).
   const { data: subRows, error: subsErr } = await admin
     .from("billing_subscriptions")
-    .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
+    .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at, past_due_since")
     .eq("client_id", clientId)
     .order("created_at", { ascending: false });
   if (subsErr) return json({ error: subsErr.message }, 500);
@@ -125,6 +115,78 @@ Deno.serve(async (req: Request) => {
     .from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle();
   const vaultId: string | null = vaultRow?.vault_id ?? null;
 
+  // ── Entitlement: may this tenant use the portal, and which features? ──────────
+  // Computed HERE, not in the browser: client_settings (which holds billing_exempt)
+  // is service-role only, so a tenant can't read the flag, let alone self-grant.
+  //
+  // A FAILED payment gets a grace period — a paying customer with an expired card
+  // keeps working (with a warning) instead of being locked out mid-week. A
+  // CANCELLATION is deliberate and locks immediately.
+  const GRACE_DAYS = 7;
+  const { data: csRow } = await admin
+    .from("client_settings").select("billing_exempt").eq("client_id", clientId).maybeSingle();
+  const exempt = Boolean(csRow?.billing_exempt);
+
+  const graceEndOf = (s: any): number | null => {
+    const since = s?.past_due_since ? Date.parse(s.past_due_since) : NaN;
+    // No timestamp (e.g. a row that predates this column) → grace from now, so a
+    // missing value is generous rather than an instant lockout.
+    return Number.isFinite(since) ? since + GRACE_DAYS * 86400000 : Date.now() + GRACE_DAYS * 86400000;
+  };
+  const now = Date.now();
+  // Best state per feature: active beats in-grace beats everything else.
+  const featureState = new Map<string, { usable: boolean; state: string; graceEnds: number | null }>();
+  for (const s of subs) {
+    const feature = planById.get(s.plan_id)?.feature;
+    if (!feature) continue;
+    let st = { usable: false, state: String(s.status || ""), graceEnds: null as number | null };
+    if (s.status === "active") st = { usable: true, state: "active", graceEnds: null };
+    else if (s.status === "past_due") {
+      const ends = graceEndOf(s);
+      st = ends > now ? { usable: true, state: "grace", graceEnds: ends } : { usable: false, state: "past_due", graceEnds: ends };
+    }
+    const prior = featureState.get(feature);
+    const rank = (x: { state: string }) => (x.state === "active" ? 3 : x.state === "grace" ? 2 : x.state === "past_due" ? 1 : 0);
+    if (!prior || rank(st) > rank(prior)) featureState.set(feature, st);
+  }
+
+  const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
+  const features: Record<string, boolean> = {};
+  for (const p of plans) features[p.feature] = exempt || Boolean(featureState.get(p.feature)?.usable);
+
+  let entState = "active";
+  let reason = "active";
+  let graceEndsAt: string | null = null;
+  if (exempt) { entState = "exempt"; reason = "exempt"; }
+  else if (requiredFeatures.length > 0) {
+    // The gate turns on the REQUIRED feature(s) — today that's Simple Layout, which is
+    // the product itself; without it there is nothing to let them into.
+    const states = requiredFeatures.map((f) => featureState.get(f));
+    if (states.some((s) => s?.state === "active")) { entState = "active"; reason = "active"; }
+    else if (states.some((s) => s?.state === "grace")) {
+      entState = "grace"; reason = "past_due";
+      const ends = Math.max(...states.map((s) => s?.graceEnds ?? 0));
+      graceEndsAt = new Date(ends).toISOString();
+    } else {
+      entState = "locked";
+      const seen = requiredFeatures.flatMap((f) =>
+        subs.filter((s) => planById.get(s.plan_id)?.feature === f).map((s) => String(s.status)));
+      reason = seen.includes("past_due") ? "past_due"
+        : seen.includes("paused") ? "paused"
+        : seen.includes("cancelled") ? "cancelled"
+        : "never_paid";
+    }
+  }
+  const entitlement = {
+    exempt,
+    state: entState,                 // exempt | active | grace | locked
+    locked: entState === "locked",
+    reason,                          // exempt|active|never_paid|past_due|paused|cancelled
+    graceEndsAt,
+    graceDays: GRACE_DAYS,
+    features,
+  };
+
   if (action === "status") {
     // gateway_plan_id stays server-side; everything else drives the UI — including
     // `price_visible`, which is a DISPLAY flag the Billing tab reads to decide whether
@@ -135,6 +197,7 @@ Deno.serve(async (req: Request) => {
     return json({
       configured,
       hasCard: Boolean(vaultId),
+      entitlement,
       plans: publicPlans,
       subscriptions: subs,
       checkout: configured
@@ -153,6 +216,21 @@ Deno.serve(async (req: Request) => {
       : [];
     const paymentToken = String(payload?.paymentToken || "").trim();
     if (planIds.length === 0) return json({ error: "Select at least one feature." }, 400);
+
+    // ── Operator refusals ────────────────────────────────────────────────────────
+    // A paymentToken is a Collect.js token minted in the CARDHOLDER'S browser. In
+    // operator mode that browser belongs to CSM Synergy staff, so an operator-supplied
+    // token means someone here typed a customer's card number. Refuse it outright, and
+    // require a card the tenant vaulted themselves. This still allows the genuinely
+    // useful case — an already-vaulted tenant asking us to add a feature on a call.
+    if (operator) {
+      if (paymentToken) {
+        return json({ error: "An operator cannot enter a card on a tenant's behalf. Ask the owner to add their card first." }, 400);
+      }
+      if (!vaultId) {
+        return json({ error: "This tenant has no card on file. The owner must add one themselves before an operator can change their subscription." }, 409);
+      }
+    }
 
     const chosen = planIds.map((id) => planById.get(id));
     if (chosen.some((p) => !p)) return json({ error: "Unknown plan in selection." }, 400);
@@ -182,7 +260,7 @@ Deno.serve(async (req: Request) => {
           payment_token: paymentToken,
           first_name: String(payload?.firstName || ""),
           last_name: String(payload?.lastName || ""),
-          email: String(payload?.email || user.email || ""),
+          email: String(payload?.email || userEmail || ""),
           merchant_defined_field_1: clientId,
         });
       } catch (e) {
@@ -197,6 +275,25 @@ Deno.serve(async (req: Request) => {
 
     // One-time setup fees (NULL = TBD = not charged yet, per the founding pricing).
     const setupTotal = chosen.reduce((s, p) => s + (p!.setup_fee_cents || 0), 0);
+
+    // Last gate before any money moves. Two operator-only conditions:
+    //   1. A setup fee is an immediate real charge, so the caller must have named the
+    //      exact amount — the same confirm-the-value idiom admin-catalog uses for
+    //      delete_client's confirmClientId.
+    //   2. A DURABLE audit row, written before the first nmiPost. auditStrict throws, and
+    //      we refuse on failure: if we cannot record who charged a client's card, we do
+    //      not charge it. (Reads elsewhere use best-effort audit for the opposite reason.)
+    if (operator) {
+      if (setupTotal > 0 && Number(payload?.confirmChargeCents) !== setupTotal) {
+        return json({ error: `This will charge the tenant a one-time setup fee of $${(setupTotal / 100).toFixed(2)}. Re-send with confirmChargeCents=${setupTotal} to proceed.` }, 400);
+      }
+      try {
+        await auditStrict("operator_billing_subscribe_attempt", chosen.length, `plans=${planIds.join(",")} setup_cents=${setupTotal}`);
+      } catch (e) {
+        return json({ error: (e as Error).message }, 503);
+      }
+    }
+
     if (setupTotal > 0) {
       try {
         await nmiPost({
@@ -245,6 +342,9 @@ Deno.serve(async (req: Request) => {
     if (created.length === 0) {
       return json({ error: `Subscription failed: ${failed.map((f) => f.error).join("; ")}` }, 402);
     }
+    // Closes the attempt row above. Best-effort — the charge already happened, so failing
+    // the response now would only mislead the operator about what occurred.
+    if (operator) audit("operator_billing_subscribe_result", created.length, `created=${created.map((c: any) => c?.plan_id).join(",")} failed=${failed.length}`);
     return json({ ok: true, created, failed });
   }
 
@@ -255,6 +355,17 @@ Deno.serve(async (req: Request) => {
     const owned = subs.find((s) => s.id === subscriptionId);
     if (!owned) return json({ error: "Subscription not found." }, 404);
     if (owned.status === "cancelled") return json({ error: "Already cancelled." }, 409);
+
+    // Cancelling reduces charges rather than creating them, so there is no confirm-amount
+    // step — but it still ends a client's paid feature, so it gets the same durable
+    // pre-flight audit as subscribe.
+    if (operator) {
+      try {
+        await auditStrict("operator_billing_cancel_attempt", null, `subscription=${subscriptionId} plan=${owned.plan_id ?? ""}`);
+      } catch (e) {
+        return json({ error: (e as Error).message }, 503);
+      }
+    }
 
     try {
       await nmiPost({ recurring: "delete_subscription", subscription_id: subscriptionId });
@@ -269,8 +380,9 @@ Deno.serve(async (req: Request) => {
       .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
       .maybeSingle();
     if (upErr) return json({ error: upErr.message }, 500);
+    if (operator) audit("operator_billing_cancel_result", null, `subscription=${subscriptionId}`);
     return json({ ok: true, subscription: row });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
-});
+}));

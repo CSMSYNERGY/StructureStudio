@@ -1,5 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { withErrorLog } from "../_shared/logError.ts";
+
+// This function exposes a single implicit action; everything it does is a read.
+const SYNC_READS = new Set(["sync"]);
 
 // sync-design-status — refresh each design's fulfillment status FROM GoHighLevel.
 //
@@ -96,37 +101,25 @@ async function listOpportunities(locationId: string, headers: HeadersInit): Prom
   return out;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
-
-  // 2. Resolve the caller's tenant (service role; client_id never from the body).
+  // Auth + tenant resolution (shared with portal-settings / portal-billing).
+  // An operator viewing another tenant sends targetClientId; everyone else resolves to
+  // their own client_users row exactly as before.
+  //
+  // Classified as a READ. This function has never had an owner/admin role gate — that is
+  // precisely what lets a role-"user" team member refresh the Designs list — so do NOT
+  // reclassify it as a write just because it caches `designs.status`. Doing so would
+  // silently break every non-admin login.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: mapping, error: mapErr } = await admin
-    .from("client_users")
-    .select("client_id")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (mapErr) return json({ error: mapErr.message }, 500);
-  if (!mapping) return json({ error: "No business is linked to this account." }, 403);
-  const clientId: string = mapping.client_id;
-
-  let payload: any;
-  try { payload = await req.json(); }
-  catch { return json({ error: "Invalid JSON" }, 400); }
+  const r = await resolveTenant(req, admin, { readActions: SYNC_READS, defaultAction: "sync" });
+  if (!r.ok) return json(r.body, r.status);
+  const { clientId, payload } = r.ctx;
 
   const shortCodes: string[] = Array.isArray(payload?.shortCodes)
     ? payload.shortCodes.map((c: unknown) => String(c)).filter(Boolean).slice(0, 500)
@@ -226,4 +219,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ ok: true, statuses, synced: true, changed: updates.length });
-});
+}));

@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Operator account-switcher backend (portal.html "Accounts" tab): lets a platform
 // operator (app_operators row — Carolyn / Ahsan / support) open any tenant's portal
@@ -45,7 +46,7 @@ async function assertClient(admin: any, raw: unknown): Promise<string> {
   return v;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -130,4 +131,4 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     return json({ error: (e as Error).message || "Unexpected error" }, 400);
   }
-});
+}));

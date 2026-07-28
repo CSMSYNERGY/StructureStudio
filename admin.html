@@ -203,6 +203,9 @@ function AdminApp() {
   const [ncCompany, setNcCompany] = useState("");
   const [ncTemplate, setNcTemplate] = useState("__none__");
   const [ncIdTouched, setNcIdTouched] = useState(false);
+  // Non-billable = CSM Synergy's own / demo / testing accounts: they skip the billing
+  // gate. A normal new client is billable, so this defaults OFF.
+  const [ncExempt, setNcExempt] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
@@ -267,7 +270,7 @@ function AdminApp() {
     if (!to) return;
     setEmailTestBusy(true); setMsg(null);
     try {
-      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal.html" });
+      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal" });
       flash({ ok: `Test sent to ${r.sentTo}${r.senderEmail ? ` from ${r.senderEmail}` : ""} — check the inbox. It's a password-reset email; nothing changes unless you click the link.` });
     } catch (e) { flash({ err: e.message }); }
     setEmailTestBusy(false);
@@ -287,7 +290,7 @@ function AdminApp() {
     if (!id || !ncCompany.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate });
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt });
       const c = await api("list_clients", pwd); setClients(c.clients || []);
       setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false);
       await loadClient(id);
@@ -304,7 +307,7 @@ function AdminApp() {
       const email = ownerEmail.trim();
       const r = await api("link_owner", pwd, {
         clientId: sel, email, role: linkRole,
-        portalUrl: location.origin + "/portal.html",
+        portalUrl: location.origin + "/portal",
         ...(reassign ? { reassign: true } : {}),
       });
       const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
@@ -506,7 +509,7 @@ function AdminApp() {
           <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
               client (portal.html auto-opens ?view= for logged-in operators). */}
-          {sel && <a href={`/portal.html?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
+          {sel && <a href={`/portal?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -534,6 +537,16 @@ function AdminApp() {
               </select>
               <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>
             </div>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+              <input type="checkbox" checked={ncExempt} onChange={(e) => setNcExempt(e.target.checked)} style={{ marginTop: 2 }} />
+              <span>
+                <b>Non-billable</b> — CSM Synergy internal / demo / testing account
+                <div style={{ fontSize: 11.5, color: "#475569", marginTop: 2, lineHeight: 1.45 }}>
+                  Skips the billing gate: the portal opens normally with no subscription and is never charged.
+                  Leave this OFF for a real customer — they'll land on Billing and activate before anything unlocks.
+                </div>
+              </span>
+            </label>
           </div>
         )}
 
