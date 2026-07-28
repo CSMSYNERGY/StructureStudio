@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 
 // capture-lead: called by the PUBLIC designer's name+phone gate. Upserts a GHL contact
 // (the lead) into the tenant's GHL location using the tenant's stored creds, so an
@@ -18,7 +19,7 @@ const cors = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -67,13 +68,25 @@ Deno.serve(async (req: Request) => {
       }),
     });
     if (!r.ok) {
-      console.warn("capture-lead: GHL upsert non-OK", r.status, (await r.text().catch(() => "")).slice(0, 300));
+      const detail = (await r.text().catch(() => "")).slice(0, 300);
+      console.warn("capture-lead: GHL upsert non-OK", r.status, detail);
+      // Logged explicitly: this returns HTTP 200 by design (the gate must never block),
+      // so withErrorLog cannot see it — yet a lead was just lost.
+      await logEdgeError({
+        fn: "capture-lead", req, clientId, code: `ghl_${r.status}`,
+        message: `GHL contact upsert failed (${r.status}) — lead not captured`,
+        context: { ghlStatus: r.status, ghlBody: detail },
+      });
       return json({ ok: true, captured: false, reason: `ghl_${r.status}` });
     }
     const d = await r.json();
     return json({ ok: true, captured: true, contactId: (d && d.contact && d.contact.id) || null });
   } catch (e) {
     console.warn("capture-lead: GHL upsert error", (e as Error).message);
+    await logEdgeError({
+      fn: "capture-lead", req, clientId, code: "ghl_error",
+      message: `GHL contact upsert threw — lead not captured: ${(e as Error).message}`,
+    });
     return json({ ok: true, captured: false, reason: "ghl_error" });
   }
-});
+}));

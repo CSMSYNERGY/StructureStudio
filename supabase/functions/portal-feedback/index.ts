@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Portal-facing bug / feature-request intake for portal.html.
 //
@@ -238,7 +239,7 @@ async function pushToMonday(admin: any, token: string, row: any, businessName: s
   return String(itemId);
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -415,4 +416,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ error: "Unknown action." }, 400);
-});
+}));

@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
 // operator with can_write). Hoisted above the handler so the resolver can consult it.
@@ -131,7 +132,7 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -1014,4 +1015,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
-});
+}));

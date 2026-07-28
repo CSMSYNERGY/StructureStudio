@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
 const BILLING_READS = new Set(["status"]);
@@ -64,7 +65,7 @@ async function nmiPost(params: Record<string, string>) {
   return parsed as Record<string, string>;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -311,4 +312,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
-});
+}));

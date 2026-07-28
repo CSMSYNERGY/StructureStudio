@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -158,7 +159,7 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -698,4 +699,4 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     return json({ error: (e as Error).message || String(e) }, 400);
   }
-});
+}));

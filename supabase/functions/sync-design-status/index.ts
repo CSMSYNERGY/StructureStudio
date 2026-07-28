@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // This function exposes a single implicit action; everything it does is a read.
 const SYNC_READS = new Set(["sync"]);
@@ -100,7 +101,7 @@ async function listOpportunities(locationId: string, headers: HeadersInit): Prom
   return out;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -218,4 +219,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ ok: true, statuses, synced: true, changed: updates.length });
-});
+}));

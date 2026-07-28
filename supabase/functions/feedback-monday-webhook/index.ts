@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { withErrorLog } from "../_shared/logError.ts";
 
 // Monday → Supabase sync for portal feedback (the return leg of portal-feedback).
 //
@@ -159,7 +160,7 @@ async function mondayUserName(token: string | undefined, userId: unknown): Promi
   }
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
   if (req.method === "GET") return json({ ok: true, service: "feedback-monday-webhook" });
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
@@ -320,4 +321,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ ok: true, ignored: "event:" + type });
-});
+}, { minStatus: 400 }));
