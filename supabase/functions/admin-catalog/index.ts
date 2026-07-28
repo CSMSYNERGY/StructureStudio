@@ -504,7 +504,7 @@ Deno.serve(async (req: Request) => {
         // Where the set-password link lands (the portal). The panel passes
         // location.origin + "/portal.html"; fall back to production.
         const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
-          ? p.portalUrl : "https://structurestudio.app/portal.html";
+          ? p.portalUrl : "https://structurestudio.app/portal";
 
         // 1. find an existing auth user by email (admin API, paginated)
         let user: any = null;
@@ -625,7 +625,7 @@ Deno.serve(async (req: Request) => {
 
         // Where the reset link lands; the panel passes location.origin + "/portal.html".
         const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
-          ? p.portalUrl : "https://structurestudio.app/portal.html";
+          ? p.portalUrl : "https://structurestudio.app/portal";
         const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: portalUrl });
         if (error) throw error;
         return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });

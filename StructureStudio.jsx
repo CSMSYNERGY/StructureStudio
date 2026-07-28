@@ -3854,7 +3854,7 @@ export default function StructureStudio({ config: configProp = null, clientId: c
         setState({ status: "error", clientId: "", message: "No client id was supplied to the embedded designer." });
         return;
       }
-      window.location.replace("/portal.html");
+      window.location.replace("/portal");
       return;
     }
     let cancelled = false;

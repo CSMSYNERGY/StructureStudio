@@ -61,6 +61,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-main.ss-designer-active{height:100vh;height:100dvh}
 .ss-main.ss-designer-active .ss-body{padding:0;overflow:hidden;min-height:0;display:flex;flex-direction:column}
 .ss-designer-host{flex:1;min-height:0;width:100%;overflow:auto;background:#F8FAFC}
+.ss-main.ss-admin-active{height:100vh;height:100dvh}
+.ss-main.ss-admin-active .ss-body{padding:0;overflow:hidden;min-height:0;display:flex;flex-direction:column}
+.ss-admin-host{flex:1;min-height:0;width:100%;display:flex;overflow:hidden;background:#F8FAFC}
+.ss-admin-host iframe{flex:1;width:100%;height:100%;border:0;display:block}
+.ss-main.ss-viewing{box-shadow:inset 0 3px 0 #B45309}
 .ss-stage-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:2px}
 @media (max-width:680px){.ss-stage-grid{grid-template-columns:1fr}}
 @media (max-width:900px){
@@ -89,7 +94,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 <!-- The ONE shared designer module (also loaded by index.html). Publishes
      window.StructureStudio for the in-portal Designer tab; must load before the
      main block below. Keep the ?v= cache-buster in lockstep with index.html. -->
-<script src="structure-studio.component.js?v=20260726b" type="text/babel"></script>
+<script src="structure-studio.component.js?v=20260728a" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -151,18 +156,63 @@ window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.messag
   { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
 window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
   { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
+// ── Operator "view as" tenant override (transport-level) ──────────────────────
+// While an operator has another tenant's portal open, every portal-settings /
+// portal-billing / sync-design-status call must act on THAT tenant. This is a property of
+// the transport, not of any component, so it is applied once here rather than threaded
+// through ~23 call sites in six components — five of which take no clientId prop at all.
+//
+// Why not props or context: both need an edit at every call site, and both share one
+// failure mode — a site missed today, or added in six months, silently reads AND WRITES
+// the operator's own tenant. A wrong-tenant save_colors (a full-list replace with a
+// server-side delete) or send_invoice is unrecoverable and invisible. Here, forgetting is
+// impossible. Same module-level-transport-state pattern as ssOnSessionExpired above.
+let ssTargetClientId = null;   // set by Dashboard during render; null when not viewing
+
+// Allow-list, not a deny-list: a function added later gets NO injection until it is named
+// here. operator-portal is deliberately absent — it passes its own explicit clientId, and
+// its list_clients is a cross-tenant listing that must never look tenant-scoped.
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status"];
+
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 const __ssInvoke = sb.functions.invoke.bind(sb.functions);
 sb.functions.invoke = async (name, opts) => {
+  let injected = null;
+  if (
+    ssTargetClientId &&
+    SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 &&
+    opts && opts.body && typeof opts.body === "object" &&
+    !(opts.body instanceof FormData) && !(opts.body instanceof Blob) && !(opts.body instanceof ArrayBuffer) &&
+    opts.body.targetClientId === undefined                       // an explicit value always wins
+  ) {
+    injected = ssTargetClientId;
+    // Never mutate the caller's object — several call sites build a local `body` and reuse it.
+    opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
+  }
   const res = await __ssInvoke(name, opts);
   try {
     if (res && (res.error || (res.data && res.data.error))) {
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
-        (res.error && res.error.name) || null, { fn: name, action: opts && opts.body && opts.body.action });
+        (res.error && res.error.name) || null, { fn: name, action: opts && opts.body && opts.body.action, target: injected });
     }
   } catch (_) {}
+  // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
+  // what we asked for, the backend is older than this page and is silently serving the
+  // operator's OWN tenant — so refuse the response instead of rendering someone else's
+  // data under this client's name. This is what makes the deploy order (backend first)
+  // enforce itself rather than depending on anyone remembering it.
+  if (injected && res && res.data && res.data.clientId && res.data.clientId !== injected) {
+    ssLogError(SS_ERR_SOURCE, "operator view: server resolved a different tenant", null,
+      { fn: name, asked: injected, got: res.data.clientId });
+    return { data: null, error: new Error("This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists.") };
+  }
   return res;
 };
+
+// Operator console, loaded into the Admin tab's iframe. Extensionless — _redirects
+// rewrites /admin to /admin.html (a plain static server ignores _redirects, so this
+// 404s under `python -m http.server`; verify the Admin tab on beta).
+const ADMIN_URL = "/admin";
 
 const ACCENT = "#3D3672";  // brand purple
 const S = {
@@ -658,7 +708,7 @@ function buildContactTimeline(act) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLabel = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
@@ -774,9 +824,16 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
     const code = g.acceptedCodes[0];
     if (!code) return;
     const more = g.acceptedCodes.length > 1 ? `\n\nThis contact has ${g.acceptedCodes.length} accepted designs — this invoices the most recent one (${code}).` : "";
-    if (!window.confirm(`Email an invoice to ${g.name || "this customer"} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.${more}`)) return;
+    // Acting as another tenant: name them in the confirm, because this emails a real
+    // invoice to THEIR customer, from THEIR account.
+    const asOperator = Boolean(viewingLabel);
+    const who = asOperator ? `${viewingLabel}'s customer ${g.name || ""}`.trim() : (g.name || "this customer");
+    const asNote = asOperator ? `\n\nYou are doing this AS ${viewingLabel}.` : "";
+    if (!window.confirm(`Email an invoice to ${who} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.${asNote}${more}`)) return;
     setInvBusyKey(g.key); setInvMsg(null);
-    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code } });
+    // confirmSend is required server-side in operator mode — the confirm above is
+    // client-only, and a mis-scoped script must not be able to email a stranger's customers.
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code, ...(asOperator ? { confirmSend: true } : {}) } });
     setInvBusyKey(null);
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
     setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — status is now Invoiced.` });
@@ -840,7 +897,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
                     <td style={S.td}><span style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>
-                      {!fetchDesigns && (
+                      {(
                         <button type="button" onClick={() => openDetails(g)}
                           style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
                           {detailsFor === g.key ? "Hide details" : "Details"}
@@ -849,7 +906,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false }) {
                       {/* Gated on "has an accepted design", NOT on the contact's highest
                           status — a repeat customer with one design already invoiced must
                           still be able to invoice their other accepted design. */}
-                      {!fetchDesigns && isAdmin && g.acceptedCodes.length > 0 && (
+                      {isAdmin && g.acceptedCodes.length > 0 && (
                         <button type="button" onClick={() => sendInvoice(g)} disabled={invBusyKey === g.key}
                           title={g.acceptedCodes.length > 1 ? `${g.acceptedCodes.length} accepted designs — invoices the most recent` : "Create and email the invoice for their accepted estimate"}
                           style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === g.key ? 0.6 : 1 }}>
@@ -1341,7 +1398,7 @@ function downloadFile(name, text) {
 // from the gateway with the PUBLIC tokenization key) — card data never touches the
 // portal or Supabase; a returning tenant's card on file (gateway vault) is reused
 // so the lightbox only shows the first time.
-function BillingView() {
+function BillingView({ viewingLabel = null }) {
   const [data, setData] = useState(null);   // status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
@@ -1426,7 +1483,17 @@ function BillingView() {
     setMsg(null); setBusy(true);
     try {
       const body = { action: "subscribe", planIds };
-      if (!data.hasCard) body.paymentToken = await getPaymentToken();
+      if (viewingLabel) {
+        // Real money against THEIR card. Confirm with the client named and the amount
+        // spelt out, then echo the setup total so the server can verify we meant it.
+        const amount = setupTotal > 0 ? ` and charge a one-time setup fee of ${fmt$(setupTotal)}` : "";
+        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s)${amount}?
+
+This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
+        body.confirmChargeCents = Math.round(setupTotal * 100);
+      } else if (!data.hasCard) {
+        body.paymentToken = await getPaymentToken();
+      }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
       if (r.failed && r.failed.length > 0) {
@@ -1442,7 +1509,9 @@ function BillingView() {
 
   const cancel = async (s) => {
     const p = planById[s.plan_id] || {};
-    if (!window.confirm(`Cancel ${p.name || "this feature"}? It will stop at the end of the billing period.`)) return;
+    if (!window.confirm(viewingLabel
+      ? `Cancel ${p.name || "this feature"} for ${viewingLabel}? It will stop at the end of their billing period.`
+      : `Cancel ${p.name || "this feature"}? It will stop at the end of the billing period.`)) return;
     setMsg(null); setBusy(true);
     try {
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: s.id } });
@@ -1574,12 +1643,20 @@ function BillingView() {
                 {yrTotal > 0 && <div>Yearly total: <b>{fmt$(yrTotal)}/yr</b></div>}
                 <div>One-time setup: <b>{fmt$(setupTotal)}</b></div>
               </div>
-              {data.configured ? (
+              {/* An operator must never be the one entering a card: a Collect.js token is
+                  minted in the CARDHOLDER's browser, so in operator mode it would be ours.
+                  The server refuses that outright, so surface it here rather than failing. */}
+              {data.configured ? (viewingLabel && !data.hasCard ? (
+                <p style={{ fontSize: 12.5, color: "#92400E", background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "8px 12px", marginTop: 12, fontWeight: 600 }}>
+                  {viewingLabel} has no card on file. Card details must be entered by the owner
+                  themselves — ask them to add a card, then you can change their plan from here.
+                </p>
+              ) : (
                 <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
                   style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
-                  {busy ? "Working…" : data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"}
+                  {busy ? "Working…" : (viewingLabel ? `Subscribe ${viewingLabel} with card on file` : (data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"))}
                 </button>
-              ) : (
+              )) : (
                 <p style={{ fontSize: 12, color: "#64748B", marginTop: 12, fontWeight: 600 }}>
                   Online checkout opens here soon — contact CSM Synergy to activate your features today.
                 </p>
@@ -1598,7 +1675,7 @@ function BillingView() {
 }
 
 // ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
-function PricingCsv() {
+function PricingCsv({ viewingLabel = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -1715,6 +1792,7 @@ function PricingCsv() {
   const confirmDelete = async () => {
     const s = pendingDelete;
     if (!s) return;
+    if (viewingLabel && !window.confirm(`Delete “${s.label}” — and all its sizes and prices — from ${viewingLabel}'s account?`)) return;
     setStyleBusy(true); setMsg(null);
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "delete_style", styleId: s.id } });
@@ -2161,7 +2239,7 @@ const METAL_LIBRARY = [
   { name: "Gallery Blue", hex: "#0E3A52" }, { name: "Ocean Blue", hex: "#3D6678" },
 ];
 
-function ColorsView() {
+function ColorsView({ viewingLabel = null }) {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
   // paint = siding/trim (and not shingle/metal), shingle = shingle, metal = metal.
@@ -2199,6 +2277,11 @@ function ColorsView() {
   // One save persists every section at once — the whole list is always sent, so the
   // server's "delete anything not in the payload" stays safe across categories.
   const save = async () => {
+    // Full-list replace: the server removes any colour not in this payload. Harmless
+    // on your own palette, not harmless on someone else's.
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE colour list with these ${rows.length} colour(s)?
+
+Anything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
       const colors = rows.map((r, i) => ({
@@ -2930,7 +3013,8 @@ function DesignerTab({ clientId, onSaved }) {
 
 // ─── Operator Accounts tab ───
 // Lists every tenant (operator-portal:list_clients, server-side app_operators gate)
-// and opens one read-only, GHL-subaccounts style. Every list/view is audit-logged.
+// and opens one with FULL access, GHL-subaccounts style. Every list/view is audit-logged,
+// and every cross-tenant read/write is re-authorized server-side against app_operators.
 function AccountsTab({ viewing, onOpen }) {
   const [clients, setClients] = useState(null); // null = loading
   const [error, setError] = useState(null);
@@ -2967,7 +3051,7 @@ function AccountsTab({ viewing, onOpen }) {
           style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 220 }} />
       </div>
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px" }}>
-        Open any client's portal read-only (Designs + Contacts). Views are audit-logged. Status badges show cached values.
+        Open any client's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values.
       </p>
       {error && <div style={{ color: "#B91C1C", fontSize: 13, marginBottom: 10 }}>{error}</div>}
       {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
@@ -2991,7 +3075,7 @@ function AccountsTab({ viewing, onOpen }) {
 }
 
 // ─── Dashboard shell ───
-function SettingsShell({ clientId }) {
+function SettingsShell({ clientId, viewingLabel = null }) {
   const [sub, setSub] = useState("structures");
   const TABS = [
     ["structures", "Structures", "Building styles, sizes, and base prices"],
@@ -3032,12 +3116,12 @@ function SettingsShell({ clientId }) {
         ))}
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
-      {sub === "structures" && <PricingCsv />}
+      {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
       {sub === "options" && <LayoutPricing />}
-      {sub === "colors" && <ColorsView />}
+      {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
-      {sub === "billing" && <BillingView />}
+      {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );
 }
@@ -3049,11 +3133,14 @@ function Dashboard({ session }) {
   // A conditional {activeTab==="designer" && …} unmount would discard the user's
   // in-progress design and re-fetch config on every tab switch.
   const [designerOpened, setDesignerOpened] = useState(false);
+  // Same lazy-then-keep-mounted treatment for the operator console (see the render).
+  const [adminOpened, setAdminOpened] = useState(false);
   // MUST live up here with the other hooks — Dashboard has conditional early returns
   // below (tenant loading/none), and a hook after them changes the hook count between
   // renders (React error #310, blank screen). Keyed on raw `tab`, not the derived
   // activeTab: "designer" is in NONADMIN_TABS so the clamp never rewrites it.
   useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
+  useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
   // Bumped when the feedback widget files something, so My Submissions + its tab
@@ -3096,13 +3183,26 @@ function Dashboard({ session }) {
     }
   }, [isOperator]);
   const openAccount = (c) => {
+    // Switching account remounts the Designer, discarding anything in progress.
+    if (designerOpened && !window.confirm("Opening another account will discard the design you have open in the Designer tab. Continue?")) return;
+    ssTargetClientId = c.clientId;              // same tick as the click, before the re-render
     setViewing(c); setTab("designs");
-    window.history.replaceState({}, "", "/portal.html?view=" + encodeURIComponent(c.clientId));
+    window.history.replaceState({}, "", "/portal?view=" + encodeURIComponent(c.clientId));
   };
   const exitAccount = () => {
+    ssTargetClientId = null;
     setViewing(null); setTab("accounts");
-    window.history.replaceState({}, "", "/portal.html");
+    window.history.replaceState({}, "", "/portal");
   };
+
+  // Keep the transport override in lockstep with `viewing`. Assigned during RENDER, not in
+  // an effect: React runs CHILD effects before PARENT effects on mount, so an effect here
+  // would let the first fetch of a newly-opened account (SettingsView status, PricingCsv
+  // catalog, BillingView status all fire on their own mount) hit the operator's own tenant
+  // — the exact bug this whole change exists to fix, only harder to see.
+  ssTargetClientId = viewing ? viewing.clientId : null;
+  // Sign-out / unmount must not leave a tenant override armed for the next mount.
+  useEffect(() => () => { ssTargetClientId = null; }, []);
 
   useEffect(() => {
     (async () => {
@@ -3147,11 +3247,22 @@ function Dashboard({ session }) {
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
   const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
-  // "accounts" is operator-gated (independent of tenant role); everything else keeps
-  // the existing role clamp. Content renders are ALSO gated (server re-checks anyway).
-  const activeTab = tab === "accounts"
-    ? (isOperator ? "accounts" : "designs")
-    : ((!isAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab);
+  // While VIEWING another tenant, operator status is the admin grant. isAdmin above
+  // describes the operator's role in their OWN client_users row — routinely "user", or
+  // absent entirely — so using it here would leave Settings dead in the viewed account,
+  // which is exactly the "only two tabs" symptom Carolyn reported.
+  const canAdmin = viewing ? isOperator : isAdmin;
+  // The tenant every surface should read and write. Feeds the clientId props and the
+  // remount keys; the invoke wrapper handles the edge functions.
+  const effClientId = viewing ? viewing.clientId : tenant.clientId;
+
+  // "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
+  // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
+  // that array is the role escape hatch and would hand the operator console to every team
+  // member. Content renders are ALSO gated (and the server re-checks regardless).
+  const activeTab = (tab === "accounts" || tab === "admin")
+    ? (isOperator ? tab : "designs")
+    : ((!canAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab);
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
   // Signed-in user identity for the sidebar footer. Auth users are email+password
@@ -3160,9 +3271,14 @@ function Dashboard({ session }) {
   const meta = session.user.user_metadata || {};
   const displayName = meta.full_name || meta.name || (session.user.email || "").split("@")[0];
   const initials = displayName.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
-  const tenantInitials = String(tenant.businessName || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+  // The business shown in the topbar is the one being ACTED ON, not the login's own —
+  // otherwise an operator sees their own company named in the slot styled as "the account
+  // you are in" while the banner names someone else.
+  const shownBusiness = viewing ? (viewing.companyName || viewing.clientId) : tenant.businessName;
+  const tenantInitials = String(shownBusiness || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 
   const ICONS = {
+    admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
     designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
     accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
     designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
@@ -3189,6 +3305,7 @@ function Dashboard({ session }) {
   const TAB_META = {
     designer: ["Designer", "Design a building and build a quote"],
     accounts: ["Accounts", "Open any client's portal — operators only"],
+    admin: ["Admin", "Operator console — master catalog, client setup, and onboarding"],
     designs: ["Designs", "Customer designs and submitted quotes"],
     leads: ["Contacts", "Everyone who has submitted a design"],
     orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
@@ -3237,13 +3354,12 @@ function Dashboard({ session }) {
 
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
-          {!viewing && navItem("designer", "Designer")}
+          {navItem("designer", "Designer")}
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
-          {!viewing && soonItem("orders", "Orders")}
+          {soonItem("orders", "Orders")}
         </nav>
 
-        {!viewing && (<>
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing")}
@@ -3257,19 +3373,19 @@ function Dashboard({ session }) {
           {soonItem("delivery-schedule", "Delivery Schedule")}
           {soonItem("self-serve-display-units", "Self Serve Displays")}
         </nav>
-        </>)}
 
         {isOperator && (<>
         <div className="ss-navlabel">Operator</div>
         <nav className="ss-nav">
           {navItem("accounts", "Accounts")}
+          {navItem("admin", "Admin")}
         </nav>
         </>)}
 
         <div className="ss-spacer"></div>
 
         {/* Settings pinned at the bottom, just above the footer divider */}
-        {!viewing && isAdmin && (
+        {canAdmin && (
           <nav className="ss-nav" style={{ marginBottom: 10 }}>
             {navItem("settings", "Settings")}
           </nav>
@@ -3301,22 +3417,25 @@ function Dashboard({ session }) {
         </div>
       </aside>
 
-      <section className={"ss-main" + (activeTab === "designer" ? " ss-designer-active" : "")}>
+      <section className={"ss-main"
+        + (activeTab === "designer" ? " ss-designer-active" : "")
+        + (activeTab === "admin" ? " ss-admin-active" : "")
+        + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
           {viewing && (
-            <div title="Read-only operator view. Status badges show the last cached value — the live GHL status refresh only runs for the tenant's own login."
-              style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#92400E", whiteSpace: "nowrap" }}>
-              <span>Viewing {viewing.companyName}</span>
+            <div title="You are acting as this client. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
+              style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEE2E2", border: "1px solid #DC2626", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#991B1B", whiteSpace: "nowrap" }}>
+              <span>Editing as operator — changes are live</span>
               <button type="button" onClick={exitAccount}
                 style={{ background: "#92400E", color: "#FFF", border: "none", borderRadius: 7, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                 Exit
               </button>
             </div>
           )}
-          <div className="tenant" title={tenant.businessName}>
-            <div className="ss-clogo" aria-label={`${tenant.businessName} logo`}>{tenantInitials}</div>
-            <span className="ss-tname">{tenant.businessName}</span>
+          <div className="tenant" title={shownBusiness}>
+            <div className="ss-clogo" aria-label={`${shownBusiness} logo`}>{tenantInitials}</div>
+            <span className="ss-tname">{shownBusiness}</span>
           </div>
         </div>
         <div className="ss-body">
@@ -3324,16 +3443,29 @@ function Dashboard({ session }) {
               max-width would box the designer in); hidden, never unmounted, off-tab. */}
           {designerOpened && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
-              <DesignerTab clientId={tenant.clientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)} />
+              <DesignerTab key={"d-" + effClientId} clientId={effClientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)} />
+            </div>
+          )}
+          {/* Keep-mounted operator console. MUST stay mounted: admin.html holds the
+              ADMIN_PASSWORD only in its own React state, so unmounting re-prompts on every
+              tab switch — and repeated re-entry can trip the per-IP lockout (migration 053).
+              Full-bleed sibling of .ss-inner, and the host is overflow:hidden so the IFRAME'S
+              document is the only scroller (no double scrollbar). */}
+          {adminOpened && isOperator && (
+            <div className="ss-admin-host" style={{ display: activeTab === "admin" ? "flex" : "none" }}>
+              <iframe src={ADMIN_URL} title="Operator Admin console" referrerPolicy="same-origin" />
             </div>
           )}
           <div className="ss-inner">
-            {activeTab === "designs" && (viewing
-              ? <DesignsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
-              : <DesignsTable clientId={tenant.clientId} refreshKey={designsRefreshKey} />)}
-            {activeTab === "leads" && (viewing
-              ? <LeadsTable key={"view-" + viewing.clientId} clientId={viewing.clientId} fetchDesigns={viewingFetch} />
-              : <LeadsTable clientId={tenant.clientId} isAdmin={isAdmin} />)}
+            {activeTab === "designs" && (
+              <DesignsTable key={"t-" + effClientId} clientId={effClientId}
+                fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey} />
+            )}
+            {activeTab === "leads" && (
+              <LeadsTable key={"t-" + effClientId} clientId={effClientId}
+                fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
+            )}
             {activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount} />
             )}
@@ -3351,7 +3483,10 @@ function Dashboard({ session }) {
               />
             )}
             {activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
-            {activeTab === "settings" && isAdmin && <SettingsShell clientId={tenant.clientId} />}
+            {activeTab === "settings" && canAdmin && (
+              <SettingsShell key={"t-" + effClientId} clientId={effClientId}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
+            )}
             {activeTab === "on-demand-pricing" && (
               <ComingSoon
                 title="RealTime Pricing"
