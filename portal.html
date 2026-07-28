@@ -3739,19 +3739,96 @@ function PortalApp() {
   const [session, setSession] = useState(undefined); // undefined = booting
   const [recovery, setRecovery] = useState(false);
   const [expired, setExpired] = useState(false); // session died mid-use (401s) → notice on login
+  const [linkError, setLinkError] = useState(null); // dead/expired email link → explain it on login
 
   useEffect(() => {
-    // A recovery- or invite-email link lands here with #…type=recovery or
-    // #…type=invite. supabase-js exchanges the token automatically
-    // (detectSessionInUrl); we route both to the set-password view so a freshly
-    // invited owner sets a password instead of dropping into the dashboard with none.
-    const h = window.location.hash;
-    if (h.includes("type=recovery") || h.includes("type=invite")) setRecovery(true);
-    sb.auth.getSession().then(({ data }) => setSession(data.session || null));
+    // ── Email-link landing (password reset + invite) ──────────────────────────
+    // Supabase reports the outcome of an email link in one of THREE shapes, and
+    // this page has to answer all three. Handling only the first is why a reset
+    // link looked broken (reported 2026-07-28):
+    //
+    //   1. implicit success → #access_token=…&type=recovery|invite
+    //   2. PKCE success     → ?code=…            (needs exchangeCodeForSession)
+    //   3. failure          → #error=access_denied&error_code=otp_expired&…
+    //
+    // Shape 3 was previously ignored outright: nothing matched `type=recovery`, so
+    // `recovery` stayed false and an owner with an expired link landed on a bare
+    // login form with no idea why — indistinguishable from a dead link. Now it
+    // says so and tells them to request another.
+    //
+    // Shape 2 is handled because which flow fires depends both on the project's
+    // auth settings and on the supabase-js build jsDelivr serves (the CDN tag is
+    // unpinned — see CLAUDE.md's CDN version lock note), so this must not bet on
+    // one. A `?code=` arrival is always treated as recovery: the portal has no
+    // magic-link login, so the only way to get one is a reset or invite mail, and
+    // being asked to set a password is the correct outcome for both.
+    let cancelled = false;
+    const hash = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
+    const query = new URLSearchParams(window.location.search || "");
+    const pick = (k) => hash.get(k) || query.get(k);
+
+    // Strip the token/code/error out of the visible URL once it has been read, so a
+    // refresh can't replay a consumed link and no access token lingers in history.
+    const scrubUrl = () => {
+      try {
+        window.history.replaceState(null, "", window.location.pathname);
+      } catch (_e) { /* non-fatal — a stale URL is cosmetic */ }
+    };
+
+    const bootstrap = async () => {
+      const errCode = pick("error_code");
+      const rawErr = pick("error");
+      if (errCode || rawErr) {
+        const desc = String(pick("error_description") || "").replace(/\+/g, " ");
+        const isExpired = /expired/i.test(errCode || "") || /expired/i.test(desc);
+        setLinkError(
+          isExpired
+            ? "That password reset link has expired or was already used. Enter your email below and click “Forgot password?” to get a fresh one."
+            : "That password reset link is no longer valid. Enter your email below and click “Forgot password?” to get a new one.",
+        );
+        ssLogError(SS_ERR_SOURCE, "recovery link rejected: " + (desc || "no description"), errCode || rawErr, { expired: isExpired });
+        scrubUrl();
+        if (!cancelled) setSession(null);
+        return;
+      }
+
+      const linkType = pick("type");
+      if (linkType === "recovery" || linkType === "invite") setRecovery(true);
+
+      // getSession() resolves after supabase-js has finished its own URL detection,
+      // so anything still unconsumed below is genuinely ours to handle.
+      let { data } = await sb.auth.getSession();
+      const code = query.get("code");
+      if (!data.session && code) {
+        const res = await sb.auth.exchangeCodeForSession(code);
+        if (res.error) {
+          setLinkError("That password reset link has expired or was already used. Enter your email below and click “Forgot password?” to get a fresh one.");
+          ssLogError(SS_ERR_SOURCE, "recovery code exchange failed: " + res.error.message, "pkce_exchange_failed");
+          scrubUrl();
+          if (!cancelled) setSession(null);
+          return;
+        }
+        data = res.data;
+        setRecovery(true);
+      }
+      // Arrived on a recovery/invite link but ended up with no session: the token was
+      // rejected without Supabase supplying error params (a truncated or rewritten link,
+      // a mail client that mangled the fragment). Say so rather than rendering a bare
+      // login form — silently doing nothing is the failure this whole block exists to end.
+      if ((linkType === "recovery" || linkType === "invite") && !data.session) {
+        setRecovery(false);
+        setLinkError("That password reset link could not be verified — it may have expired or been altered by your email app. Enter your email below and click “Forgot password?” to get a fresh one.");
+        ssLogError(SS_ERR_SOURCE, "recovery link produced no session (type=" + linkType + ")", "recovery_no_session");
+      }
+      if (linkType || code) scrubUrl();
+      if (!cancelled) setSession(data.session || null);
+    };
+    bootstrap();
+
     const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
       setSession(sess || null);
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
-      if (event === "SIGNED_IN") setExpired(false); // fresh login clears the notice
+      if (event === "SIGNED_IN") { setExpired(false); setLinkError(null); } // fresh login clears both notices
     });
     // Dead-session handler (see ssFetch): only reacts when someone IS signed in —
     // the login screen's anon calls can 401 too and must not loop — and collapses
@@ -3769,7 +3846,7 @@ function PortalApp() {
       } catch (_e) { /* never let the guard crash the app */ }
       handling = false;
     };
-    return () => { ssOnSessionExpired = null; sub.subscription.unsubscribe(); };
+    return () => { cancelled = true; ssOnSessionExpired = null; sub.subscription.unsubscribe(); };
   }, []);
 
   if (session === undefined) {
@@ -3785,7 +3862,9 @@ function PortalApp() {
           <div style={{ fontSize: 12, color: "#94A3B8" }}>Business Portal</div>
         </div>
       </div>
-      <LoginView notice={expired ? "Your session expired — please sign in again." : null} />
+      {/* linkError wins over the session-expired notice: a dead reset link is the
+          more specific, more actionable thing to tell someone who just clicked one. */}
+      <LoginView notice={linkError || (expired ? "Your session expired — please sign in again." : null)} />
     </div>
   );
   return <Dashboard session={session} />;
