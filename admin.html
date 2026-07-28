@@ -203,6 +203,9 @@ function AdminApp() {
   const [ncCompany, setNcCompany] = useState("");
   const [ncTemplate, setNcTemplate] = useState("__none__");
   const [ncIdTouched, setNcIdTouched] = useState(false);
+  // Non-billable = CSM Synergy's own / demo / testing accounts: they skip the billing
+  // gate. A normal new client is billable, so this defaults OFF.
+  const [ncExempt, setNcExempt] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
@@ -287,7 +290,7 @@ function AdminApp() {
     if (!id || !ncCompany.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate });
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt });
       const c = await api("list_clients", pwd); setClients(c.clients || []);
       setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false);
       await loadClient(id);
@@ -534,6 +537,16 @@ function AdminApp() {
               </select>
               <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>
             </div>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+              <input type="checkbox" checked={ncExempt} onChange={(e) => setNcExempt(e.target.checked)} style={{ marginTop: 2 }} />
+              <span>
+                <b>Non-billable</b> — CSM Synergy internal / demo / testing account
+                <div style={{ fontSize: 11.5, color: "#475569", marginTop: 2, lineHeight: 1.45 }}>
+                  Skips the billing gate: the portal opens normally with no subscription and is never charged.
+                  Leave this OFF for a real customer — they'll land on Billing and activate before anything unlocks.
+                </div>
+              </span>
+            </label>
           </div>
         )}
 

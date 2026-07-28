@@ -99,7 +99,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // All subscription rows for this tenant, newest first (cancelled kept for history).
   const { data: subRows, error: subsErr } = await admin
     .from("billing_subscriptions")
-    .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
+    .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at, past_due_since")
     .eq("client_id", clientId)
     .order("created_at", { ascending: false });
   if (subsErr) return json({ error: subsErr.message }, 500);
@@ -115,6 +115,78 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     .from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle();
   const vaultId: string | null = vaultRow?.vault_id ?? null;
 
+  // ── Entitlement: may this tenant use the portal, and which features? ──────────
+  // Computed HERE, not in the browser: client_settings (which holds billing_exempt)
+  // is service-role only, so a tenant can't read the flag, let alone self-grant.
+  //
+  // A FAILED payment gets a grace period — a paying customer with an expired card
+  // keeps working (with a warning) instead of being locked out mid-week. A
+  // CANCELLATION is deliberate and locks immediately.
+  const GRACE_DAYS = 7;
+  const { data: csRow } = await admin
+    .from("client_settings").select("billing_exempt").eq("client_id", clientId).maybeSingle();
+  const exempt = Boolean(csRow?.billing_exempt);
+
+  const graceEndOf = (s: any): number | null => {
+    const since = s?.past_due_since ? Date.parse(s.past_due_since) : NaN;
+    // No timestamp (e.g. a row that predates this column) → grace from now, so a
+    // missing value is generous rather than an instant lockout.
+    return Number.isFinite(since) ? since + GRACE_DAYS * 86400000 : Date.now() + GRACE_DAYS * 86400000;
+  };
+  const now = Date.now();
+  // Best state per feature: active beats in-grace beats everything else.
+  const featureState = new Map<string, { usable: boolean; state: string; graceEnds: number | null }>();
+  for (const s of subs) {
+    const feature = planById.get(s.plan_id)?.feature;
+    if (!feature) continue;
+    let st = { usable: false, state: String(s.status || ""), graceEnds: null as number | null };
+    if (s.status === "active") st = { usable: true, state: "active", graceEnds: null };
+    else if (s.status === "past_due") {
+      const ends = graceEndOf(s);
+      st = ends > now ? { usable: true, state: "grace", graceEnds: ends } : { usable: false, state: "past_due", graceEnds: ends };
+    }
+    const prior = featureState.get(feature);
+    const rank = (x: { state: string }) => (x.state === "active" ? 3 : x.state === "grace" ? 2 : x.state === "past_due" ? 1 : 0);
+    if (!prior || rank(st) > rank(prior)) featureState.set(feature, st);
+  }
+
+  const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
+  const features: Record<string, boolean> = {};
+  for (const p of plans) features[p.feature] = exempt || Boolean(featureState.get(p.feature)?.usable);
+
+  let entState = "active";
+  let reason = "active";
+  let graceEndsAt: string | null = null;
+  if (exempt) { entState = "exempt"; reason = "exempt"; }
+  else if (requiredFeatures.length > 0) {
+    // The gate turns on the REQUIRED feature(s) — today that's Simple Layout, which is
+    // the product itself; without it there is nothing to let them into.
+    const states = requiredFeatures.map((f) => featureState.get(f));
+    if (states.some((s) => s?.state === "active")) { entState = "active"; reason = "active"; }
+    else if (states.some((s) => s?.state === "grace")) {
+      entState = "grace"; reason = "past_due";
+      const ends = Math.max(...states.map((s) => s?.graceEnds ?? 0));
+      graceEndsAt = new Date(ends).toISOString();
+    } else {
+      entState = "locked";
+      const seen = requiredFeatures.flatMap((f) =>
+        subs.filter((s) => planById.get(s.plan_id)?.feature === f).map((s) => String(s.status)));
+      reason = seen.includes("past_due") ? "past_due"
+        : seen.includes("paused") ? "paused"
+        : seen.includes("cancelled") ? "cancelled"
+        : "never_paid";
+    }
+  }
+  const entitlement = {
+    exempt,
+    state: entState,                 // exempt | active | grace | locked
+    locked: entState === "locked",
+    reason,                          // exempt|active|never_paid|past_due|paused|cancelled
+    graceEndsAt,
+    graceDays: GRACE_DAYS,
+    features,
+  };
+
   if (action === "status") {
     // gateway_plan_id stays server-side; everything else drives the UI — including
     // `price_visible`, which is a DISPLAY flag the Billing tab reads to decide whether
@@ -125,6 +197,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     return json({
       configured,
       hasCard: Boolean(vaultId),
+      entitlement,
       plans: publicPlans,
       subscriptions: subs,
       checkout: configured

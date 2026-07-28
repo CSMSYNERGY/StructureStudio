@@ -143,10 +143,25 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         break;
       }
       case "recurring.subscription.update": {
+        const next = norm(status) ?? "active";
+        // Stamp when a subscription FIRST goes past_due — that starts the grace clock
+        // the portal gate reads (a failed payment keeps working for a few days with a
+        // warning instead of locking a paying customer out over an expired card).
+        // Clear it the moment the payment recovers. Read-then-write so a repeated
+        // past_due event doesn't keep pushing the deadline forward.
+        let pastDuePatch: Record<string, unknown> = {};
+        if (next === "past_due") {
+          const { data: cur } = await admin.from("billing_subscriptions")
+            .select("past_due_since").eq("id", subId).maybeSingle();
+          if (!cur?.past_due_since) pastDuePatch = { past_due_since: new Date().toISOString() };
+        } else {
+          pastDuePatch = { past_due_since: null };
+        }
         const { error } = await admin.from("billing_subscriptions").update({
-          status: norm(status) ?? "active",
+          status: next,
           current_period_end: periodEnd ? new Date(periodEnd).toISOString() : undefined,
           updated_at: new Date().toISOString(),
+          ...pastDuePatch,
         }).eq("id", subId);
         if (error) throw new Error(error.message);
         break;

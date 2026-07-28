@@ -401,6 +401,18 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         });
         if (ins.error) throw ins.error;
 
+        // Non-billable (CSM Synergy internal / demo / testing) accounts skip the billing
+        // gate entirely. This is the ONLY place the flag is set at creation, and it needs
+        // a client_settings row to live in — which create_client otherwise leaves for the
+        // owner to fill in via the portal. A normal new client gets no row here, so
+        // billing_exempt reads false and the gate applies: they land on Billing and pay
+        // before anything unlocks.
+        if (p.billingExempt === true) {
+          const bx = await sb.from("client_settings")
+            .upsert({ client_id: clientId, billing_exempt: true, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+          if (bx.error) throw bx.error;
+        }
+
         // Clone the template's FULL catalog so the new client is usable immediately — the
         // config row alone has no styles/sizes/prices/items/colors (the old bug: a cloned
         // client "didn't bring it all over"). New rows get fresh ids; foreign keys are
