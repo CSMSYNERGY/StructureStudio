@@ -24,6 +24,21 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
+// ── Where every auth email lands ────────────────────────────────────────────
+// ONE canonical destination for invite / set-password / reset links, regardless of
+// which host generated them. Callers used to pass `location.origin + "/portal"`, so a
+// link created from beta.structurestudio.app carried redirect_to=beta — and Supabase
+// only honours allow-listed redirects, silently substituting Site URL for anything
+// else. Verified 2026-07-28 against this project: beta got back the *identical*
+// response as a deliberately hostile control URL. Every invite Carolyn created from
+// beta therefore bounced to the apex, which is how these links broke.
+//
+// Forcing the apex is correct rather than a workaround: beta and production share ONE
+// Supabase project, so a password set here is immediately valid on beta too. A
+// caller-supplied portalUrl is IGNORED on purpose — one allow-listed destination
+// cannot drift out of the allow-list, and no future caller can reintroduce this bug.
+const AUTH_PORTAL_URL = "https://structurestudio.app/portal";
+
 // ── Supabase Auth custom-SMTP config via the Management API ──────────────────
 // Powers the admin.html "Email Sender" card. Pointing the project's Auth SMTP at
 // a Google account (Gmail host + app password) makes ALL auth emails — owner
@@ -514,10 +529,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const email = reqStr(p.email, "email").toLowerCase();
         const role = ["owner", "admin", "user"].includes(String(p.role || "").toLowerCase())
           ? String(p.role).toLowerCase() : "owner";
-        // Where the set-password link lands (the portal). The panel passes
-        // location.origin + "/portal.html"; fall back to production.
-        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
-          ? p.portalUrl : "https://structurestudio.app/portal";
+        // Where the set-password link lands. ALWAYS the canonical production portal —
+        // a caller-supplied portalUrl is deliberately ignored (see AUTH_PORTAL_URL).
+        const portalUrl = AUTH_PORTAL_URL;
 
         // 1. find an existing auth user by email (admin API, paginated)
         let user: any = null;
@@ -637,9 +651,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
 
         // Where the reset link lands; the panel passes location.origin + "/portal.html".
-        const portalUrl = (typeof p.portalUrl === "string" && /^https?:\/\/[^\s]+$/.test(p.portalUrl))
-          ? p.portalUrl : "https://structurestudio.app/portal";
-        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: portalUrl });
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: AUTH_PORTAL_URL });
         if (error) throw error;
         return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });
       }

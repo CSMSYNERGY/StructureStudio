@@ -282,8 +282,14 @@ function LoginView({ onRecoverySent, notice }) {
     setError(null); setInfo(null);
     if (!email.trim()) { setError("Enter your email above first, then click “Forgot password” again."); return; }
     setBusy(true);
+    // Always the canonical production portal, never window.location.origin. Supabase
+    // honours only allow-listed redirects and silently substitutes Site URL otherwise,
+    // so a reset started on beta (or localhost) used to produce a link that bounced to
+    // the apex root — see AUTH_PORTAL_URL in supabase/functions/admin-catalog/index.ts.
+    // Safe because beta and production share one Supabase project: the password set
+    // here works on beta immediately.
     const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: window.location.origin + window.location.pathname,
+      redirectTo: "https://structurestudio.app/portal",
     });
     setBusy(false);
     if (err) setError(err.message);
