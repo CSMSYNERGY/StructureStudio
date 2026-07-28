@@ -1,5 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { resolveTenant } from "../_shared/resolveTenant.ts";
+
+// Any linked account may read these; everything else requires owner/admin (or an
+// operator with can_write). Hoisted above the handler so the resolver can consult it.
+const READ_ACTIONS = new Set(["status", "catalog", "contact_activity"]);
 
 // Owner-facing settings endpoint for the portal (portal.html).
 //
@@ -131,43 +136,26 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
-
-  // 2. Resolve the caller's tenant. Service role: client_users has no write
-  //    policies and this lookup must not depend on the caller's own claims.
+  // Auth + tenant resolution, shared with portal-billing / sync-design-status.
+  //
+  // Authorization: any linked account may READ (status/catalog/contact_activity), but only
+  // the tenant owner/admin may MUTATE. The portal UI hides the settings/pricing/colors tabs
+  // for role "user", but that is a client-only control — a direct POST would bypass it — so
+  // the gate lives in the resolver, server-side.
+  //
+  // An OPERATOR (app_operators, see _shared/resolveTenant.ts) may additionally pass
+  // `targetClientId` to act on another tenant — that is what makes the portal's "view as"
+  // mode actually read and write the viewed account instead of the operator's own.
+  // Everything below this block is unchanged and simply uses `clientId`.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: mapping, error: mapErr } = await admin
-    .from("client_users")
-    .select("client_id, role")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (mapErr) return json({ error: mapErr.message }, 500);
-  if (!mapping) return json({ error: "No business is linked to this account." }, 403);
-  const clientId: string = mapping.client_id;
+  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, defaultAction: "status" });
+  if (!r.ok) return json(r.body, r.status);
+  const { clientId, role, operator, payload, action, audit, auditStrict } = r.ctx;
 
-  let payload: any;
-  try { payload = await req.json(); }
-  catch { return json({ error: "Invalid JSON" }, 400); }
-  const action = payload?.action || "status";
-
-  // Authorization: any linked account may READ (status/catalog), but only the
-  // tenant owner/admin may MUTATE. The portal UI hides the settings/pricing/colors
-  // tabs for role "user", but that is a client-only control — a direct POST would
-  // bypass it — so the gate must also live here (server-side).
-  const READ_ACTIONS = new Set(["status", "catalog", "contact_activity"]);
-  if (!READ_ACTIONS.has(action) && mapping.role !== "owner" && mapping.role !== "admin") {
-    return json({ error: "Your account can view designs and leads but not change settings. Ask an owner or admin." }, 403);
-  }
+  // Reads are logged best-effort; writes get a durable row (below, per action).
+  if (operator) audit(`operator_${action}`).catch(() => {});
 
   if (action === "status") {
     const { data, error } = await admin
@@ -184,8 +172,13 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     return json({
       ok: true,
+      // clientId is the RESOLVED tenant (the viewed one in operator mode). portal.html's
+      // invoke wrapper compares it against the targetClientId it injected and refuses the
+      // response if they disagree — that tripwire is what stops a frontend deployed ahead
+      // of this function from silently reading/writing the operator's own tenant.
       clientId,
-      role: mapping.role,
+      role,
+      operatorMode: Boolean(operator),
       configured: Boolean(data?.ghl_location_id && data?.ghl_api_key),
       ghlLocationIdMasked: maskId(data?.ghl_location_id ?? null),
       hasApiKey: Boolean(data?.ghl_api_key),
@@ -812,6 +805,25 @@ Deno.serve(async (req: Request) => {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
 
+    // An operator is emailing a real invoice to SOMEONE ELSE'S customer. Two extra
+    // conditions, neither of which applies to a tenant sending their own:
+    //   1. An explicit confirmation in the body. portal.html already shows a confirm
+    //      dialog, but that is client-side only and a mis-scoped script must not be able
+    //      to email a stranger's customers.
+    //   2. A durable audit row written BEFORE the irreversible convert below. This is
+    //      auditStrict, not the best-effort audit used for reads: if we cannot record who
+    //      triggered it, we do not trigger it.
+    if (operator) {
+      if (payload?.confirmSend !== true) {
+        return json({ error: "Operator sends require explicit confirmation (confirmSend)." }, 400);
+      }
+      try {
+        await auditStrict("operator_send_invoice_attempt", null, `short_code=${shortCode}`);
+      } catch (e) {
+        return json({ error: (e as Error).message }, 503);
+      }
+    }
+
     const { data: design, error: desErr } = await admin
       .from("designs")
       .select("short_code, status, ghl_estimate_id, contact")
@@ -857,9 +869,14 @@ Deno.serve(async (req: Request) => {
     let resendInvoiceId: string | null = null;   // set when recovering a created-but-unsent invoice
     let resendInvoiceNumber: string | null = null;
     let resendSenderUserId: string | null = null;
+    // The claim key is (client_id, short_code) where client_id is the TENANT — never the
+    // actor. Do NOT add the operator to this key: an operator send and an owner send would
+    // then each take their own claim on the same design and both could convert the same
+    // estimate. Attribution belongs in sent_by_operator, which is not part of the PK.
     const claimIns = await admin.from("invoice_sends").insert({
       client_id: clientId, short_code: shortCode,
       ghl_estimate_id: String(design.ghl_estimate_id), status: "claimed", attempts: 1,
+      sent_by_operator: operator ? operator.email : null,
     });
     if (claimIns.error) {
       // 23505 = the row exists → inspect it instead of converting again.
@@ -989,6 +1006,9 @@ Deno.serve(async (req: Request) => {
     await admin.from("designs")
       .update({ status: "invoiced", updated_at: nowIso() })
       .eq("client_id", clientId).eq("short_code", shortCode);
+    // Result row closes the attempt row written before the convert. Best-effort here —
+    // the money has already moved, so failing the response now would only mislead.
+    if (operator) audit("operator_send_invoice_result", null, `short_code=${shortCode} invoice=${invoiceNumber ?? invoiceId}`);
 
     return json({ ok: true, invoiceId, invoiceNumber, sent: true });
   }
