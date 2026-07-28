@@ -3854,7 +3854,15 @@ export default function StructureStudio({ config: configProp = null, clientId: c
         setState({ status: "error", clientId: "", message: "No client id was supplied to the embedded designer." });
         return;
       }
-      window.location.replace("/portal");
+      // Carry the query AND hash across. Supabase delivers auth-email outcomes in the
+      // URL — `#access_token=…&type=invite|recovery` (implicit), `?code=…` (PKCE), or
+      // `#error=…&error_code=otp_expired` — and a bare replace("/portal") DESTROYS them,
+      // so the portal booted with a clean URL, found no session, and showed a login form
+      // instead of the set-password screen. That is the "invite/reset link just takes me
+      // to login" bug (Carolyn, 2026-07-28). It reaches this page at all whenever the
+      // link's redirect_to is not in Supabase's allow-list, because Supabase then falls
+      // back to Site URL (the apex root). portal.html already handles all three shapes.
+      window.location.replace("/portal" + window.location.search + window.location.hash);
       return;
     }
     let cancelled = false;
