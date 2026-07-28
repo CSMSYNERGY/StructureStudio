@@ -14,6 +14,11 @@ import { withErrorLog } from "../_shared/logError.ts";
 //   x-deposyt-signature: sha256=<hex>      — legacy BuildBridge-style (over raw body)
 // Missing secret => endpoint refuses everything (503), inert until set up.
 //
+// DEPLOY NOTE: this function MUST stay verify_jwt=false. Deposyt cannot send a
+// Supabase JWT, so with JWT verification on, the gateway 401s every delivery before
+// this code runs — the signature is never even checked and nothing is recorded.
+// That silently broke the whole billing lifecycle until 2026-07-28.
+//
 // Events handled (anything else is logged + acknowledged):
 //   recurring.subscription.add     → upsert row (client_id from metadata/merchant field)
 //   recurring.subscription.update  → status / period end
@@ -71,6 +76,56 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
       const ourHex = await hmacHex(SIGNING_KEY, raw);
       verified = safeEqual(ourHex, theirHex.toLowerCase());
     }
+  }
+  // ── TEMPORARY DIAGNOSTIC — remove once a real delivery verifies ─────────────
+  // A rejection happens BEFORE the billing_webhook_events insert, so we otherwise
+  // have no record of what was actually sent. This records SHAPE ONLY, to tell a
+  // wrong signing key apart from a signature scheme that differs from NMI's spec.
+  // Deliberately never recorded: the signature value, the signing key, the request
+  // body, or anything about the customer/payment. Behaviour is unchanged — a bad
+  // signature is still rejected below.
+  if (!verified) {
+    try {
+      const rawHmac = async (key: string, data: string) => {
+        const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key),
+          { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+        return new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data)));
+      };
+      const toHex = (u: Uint8Array) => Array.from(u).map((b) => b.toString(16).padStart(2, "0")).join("");
+      const toB64 = (u: Uint8Array) => btoa(String.fromCharCode(...u));
+      const p = Object.fromEntries((nmiHeader || "").split(",").map((x) => x.trim().split("=")));
+      const nonce = String(p.t ?? "");
+      const theirSig = String(p.s ?? (legacyHeader.split("=")[1] ?? ""));
+      // Which construction, if any, reproduces their signature? Names only.
+      const cand: Record<string, string> = {};
+      if (nonce) {
+        const a = await rawHmac(SIGNING_KEY, `${nonce}.${raw}`);
+        cand["nonce.body/hex"] = toHex(a); cand["nonce.body/base64"] = toB64(a);
+      }
+      const b = await rawHmac(SIGNING_KEY, raw);
+      cand["body-only/hex"] = toHex(b); cand["body-only/base64"] = toB64(b);
+      const matched = Object.entries(cand)
+        .filter(([, v]) => v.toLowerCase() === theirSig.toLowerCase()).map(([k]) => k);
+      const diag = {
+        headerNames: [...req.headers.keys()].sort(),
+        hasWebhookSignature: Boolean(nmiHeader),
+        hasLegacyHeader: Boolean(legacyHeader),
+        parsedNonce: Boolean(nonce),
+        parsedSig: Boolean(theirSig),
+        sigLength: theirSig.length,
+        sigCharset: /^[0-9a-fA-F]+$/.test(theirSig) ? "hex"
+          : /^[A-Za-z0-9+/]+={0,2}$/.test(theirSig) ? "base64" : "other",
+        schemeMatched: matched.length ? matched : "NONE — signing key does not match",
+      };
+      console.log("[billing-webhook][diag] " + JSON.stringify(diag));
+      // The runtime console stream is not reliably queryable on this project, so
+      // persist the shape to app_errors too — that table demonstrably works.
+      const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+      await sb.from("app_errors").insert({
+        source: "edge:billing-webhook", severity: "error", code: "sig_diag",
+        message: "signature rejected — shape diagnostic", context: diag,
+      });
+    } catch (_e) { /* a diagnostic must never change behaviour */ }
   }
   if (!verified) return json({ error: "Missing or invalid webhook signature." }, 401);
 
