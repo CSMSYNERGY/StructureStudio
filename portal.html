@@ -3431,6 +3431,17 @@ function Dashboard({ session }) {
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt
     ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
     : null;
+  // Dated free period: everything works, with a countdown and the real rate. Distinct from
+  // grace — nothing has failed here, they simply haven't started paying yet, so the copy must
+  // not imply a payment problem.
+  const gateTransition = !viewing && !!entitlement && entitlement.state === "transition";
+  const transEndsAt = gateTransition && entitlement.transitionEndsAt ? Date.parse(entitlement.transitionEndsAt) : null;
+  const transDaysLeft = transEndsAt ? Math.max(0, Math.ceil((transEndsAt - Date.now()) / 86400000)) : null;
+  const transDateLabel = transEndsAt
+    ? new Date(transEndsAt).toLocaleDateString(undefined, { month: "long", day: "numeric" })
+    : null;
+  const rate = (entitlement && entitlement.requiredRate) || null;
+  const fmtRate = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
 
   // Real <button>s (not href-less anchors) so the nav stays keyboard- and
   // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
@@ -3572,6 +3583,30 @@ function Dashboard({ session }) {
             </div>
           )}
           <div className="ss-inner">
+            {/* Dated free period. Nothing has gone wrong — they simply haven't started paying
+                yet — so this is deliberately informational (blue) rather than a warning, and
+                never says anything about a failed payment. */}
+            {gateTransition && (
+              <div style={{ background: "#EFF6FF", border: "1px solid #93C5FD", borderRadius: 10, padding: "11px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#1D4ED8" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1E3A8A" }}>
+                  {transDaysLeft === 0
+                    ? "Your account moves to a paid plan today."
+                    : `Your account moves to a paid plan${transDateLabel ? ` on ${transDateLabel}` : ""} — ${transDaysLeft} day${transDaysLeft === 1 ? "" : "s"} left.`}
+                  {rate && rate.discountPercent > 0 && (rate.monthlyCents != null || rate.annualCents != null) && (
+                    <span style={{ fontWeight: 600 }}>
+                      {" "}Your rate: {[rate.monthlyCents != null ? `${fmtRate(rate.monthlyCents)}/mo` : null,
+                                       rate.annualCents != null ? `${fmtRate(rate.annualCents)}/yr` : null]
+                        .filter(Boolean).join(" or ")} — {rate.discountPercent}% off for life.
+                    </span>
+                  )}
+                </span>
+                {isAdmin && (
+                  <button type="button" onClick={() => setTab("settings")}
+                    style={{ ...S.btn("#1D4ED8", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Choose your plan</button>
+                )}
+              </div>
+            )}
             {/* Grace period: a failed payment hasn't locked them out yet. Everything
                 still works — this is the warning that it won't for long. */}
             {gateGrace && (

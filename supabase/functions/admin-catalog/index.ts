@@ -230,7 +230,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // and who is discounted. client_settings is service-role only — this function is
         // the only place it can be read from.
         const { data: cs } = await sb.from("client_settings")
-          .select("client_id, billing_exempt, discount_percent, discount_features");
+          .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features");
         const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
         // The billable feature list, so the console can offer a per-feature discount
         // picker without hardcoding a copy of the catalogue that would drift from
@@ -250,6 +250,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             billingExempt: Boolean(s?.billing_exempt),
             discountPercent: Number(s?.discount_percent) || 0,
             discountFeatures: s?.discount_features ?? null,
+            exemptUntil: s?.billing_exempt_until ?? null,
           };
         });
         return json({ ok: true, clients, features });
@@ -595,6 +596,20 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           patch.discount_features = Array.isArray(p.discountFeatures) && p.discountFeatures.length
             ? p.discountFeatures.map((f: unknown) => String(f))
             : null;
+        }
+        // Dated free period (059). Empty string clears it. A date-only value is taken as the
+        // END of that day in UTC, so "free until Aug 5" includes all of Aug 5 rather than
+        // expiring at midnight as it begins.
+        if (p.exemptUntil !== undefined) {
+          const raw = String(p.exemptUntil ?? "").trim();
+          if (!raw) {
+            patch.billing_exempt_until = null;
+          } else {
+            const iso = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T23:59:59.999Z` : raw;
+            const t = Date.parse(iso);
+            if (!Number.isFinite(t)) throw new Error(`exemptUntil is not a valid date: ${raw}`);
+            patch.billing_exempt_until = new Date(t).toISOString();
+          }
         }
         const { error } = await sb.from("client_settings").upsert(patch, { onConflict: "client_id" });
         if (error) throw error;

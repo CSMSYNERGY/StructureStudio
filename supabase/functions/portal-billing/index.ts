@@ -124,9 +124,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // CANCELLATION is deliberate and locks immediately.
   const GRACE_DAYS = 7;
   const { data: csRow } = await admin
-    .from("client_settings").select("billing_exempt, discount_percent, discount_features")
+    .from("client_settings").select("billing_exempt, billing_exempt_until, discount_percent, discount_features")
     .eq("client_id", clientId).maybeSingle();
   const exempt = Boolean(csRow?.billing_exempt);
+  // A DATED free period (migration 059) — an existing customer moving from free to paid gets
+  // a warned window instead of a wall. Unlike billing_exempt this is visible (countdown
+  // banner) and self-expiring, and it is deliberately checked AFTER the normal entitlement
+  // so that subscribing supersedes it rather than nagging someone who has already paid.
+  const exemptUntilMs = csRow?.billing_exempt_until ? Date.parse(csRow.billing_exempt_until) : NaN;
+  const inTransition = Number.isFinite(exemptUntilMs) && exemptUntilMs > Date.now();
 
   // ── Account discount (migration 058) ──────────────────────────────────────────
   // An attribute of the ACCOUNT, not of a purchase, so it applies to whatever they
@@ -173,7 +179,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
 
   const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
   const features: Record<string, boolean> = {};
-  for (const p of plans) features[p.feature] = exempt || Boolean(featureState.get(p.feature)?.usable);
+  for (const p of plans) features[p.feature] = exempt || inTransition || Boolean(featureState.get(p.feature)?.usable);
 
   let entState = "active";
   let reason = "active";
@@ -198,13 +204,42 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         : "never_paid";
     }
   }
+  // A dated free period rescues an otherwise-locked account, and ONLY that case: an active
+  // or in-grace subscription already speaks for itself, and a permanent exemption was
+  // handled above. Ordering it here is what makes subscribing during the window end the
+  // countdown instead of nagging a customer who has already paid.
+  let transitionEndsAt: string | null = null;
+  if (entState === "locked" && inTransition) {
+    entState = "transition";
+    reason = "transition";
+    transitionEndsAt = new Date(exemptUntilMs).toISOString();
+  }
+
+  // The required feature's price AS THIS TENANT WOULD PAY IT, so a transition banner can
+  // state the actual rate instead of sending them off to find it.
+  const requiredRate = (() => {
+    const rp = plans.filter((p) => p.required);
+    const mo = rp.find((p) => p.billing_interval === "monthly");
+    const yr = rp.find((p) => p.billing_interval === "annual");
+    const anchor = mo ?? yr;
+    return {
+      monthlyCents: mo ? chargeCentsFor(mo) : null,
+      annualCents: yr ? chargeCentsFor(yr) : null,
+      listMonthlyCents: mo?.price_cents ?? null,
+      listAnnualCents: yr?.price_cents ?? null,
+      discountPercent: anchor ? discountForFeature(anchor.feature) : 0,
+    };
+  })();
+
   const entitlement = {
     exempt,
-    state: entState,                 // exempt | active | grace | locked
+    state: entState,                 // exempt | active | grace | transition | locked
     locked: entState === "locked",
-    reason,                          // exempt|active|never_paid|past_due|paused|cancelled
+    reason,                          // exempt|active|never_paid|past_due|paused|cancelled|transition
     graceEndsAt,
     graceDays: GRACE_DAYS,
+    transitionEndsAt,                // dated free period; null unless state === "transition"
+    requiredRate,                    // what the required feature costs THIS tenant
     features,
   };
 

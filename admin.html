@@ -218,6 +218,8 @@ function AdminApp() {
   const [billExempt, setBillExempt] = useState(false);
   const [billAllFeat, setBillAllFeat] = useState(true);
   const [billFeat, setBillFeat] = useState([]);
+  // Dated free period (059) — yyyy-mm-dd, blank = none.
+  const [billUntil, setBillUntil] = useState("");
   // Billable features, from billing_plans via list_clients — never hardcoded here.
   const [features, setFeatures] = useState([]);
   const [linkOpen, setLinkOpen] = useState(false);
@@ -300,6 +302,7 @@ function AdminApp() {
     // NULL / empty in the database means "every feature", which is the radio default.
     const scoped = Array.isArray(row?.discountFeatures) ? row.discountFeatures : [];
     setBillAllFeat(scoped.length === 0); setBillFeat(scoped);
+    setBillUntil(row?.exemptUntil ? String(row.exemptUntil).slice(0, 10) : "");
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -365,7 +368,7 @@ function AdminApp() {
     setBusy(true); setMsg(null);
     try {
       const r = await api("set_billing", pwd, { clientId: sel, billingExempt: billExempt, discountPercent: pct,
-        discountFeatures: billAllFeat ? [] : billFeat });
+        discountFeatures: billAllFeat ? [] : billFeat, exemptUntil: billUntil });
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setBillOpen(false);
       flash({ ok: `Billing saved for ${sel}. ${r.note || ""}`.trim() });
@@ -671,6 +674,11 @@ function AdminApp() {
                 <input type="checkbox" checked={billExempt} onChange={(e) => setBillExempt(e.target.checked)} />
                 <b>Non-billable</b> (never charged, skips the gate)
               </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                <b>Free until</b>
+                <input type="date" value={billUntil} onChange={(e) => setBillUntil(e.target.value)} style={{ ...S.input, width: 160 }} />
+                {billUntil && <button type="button" onClick={() => setBillUntil("")} style={{ ...S.btn("#F1F5F9", "#64748B"), padding: "5px 9px", fontSize: 11 }}>clear</button>}
+              </label>
               <button onClick={saveBilling} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save billing</button>
             </div>
             {!billExempt && (
@@ -688,6 +696,13 @@ function AdminApp() {
               <b>Applies to future subscriptions only.</b> The gateway stores the amount on each subscription,
               so changing the discount does not re-price anything already running — it affects what they
               subscribe to next.
+              <div style={{ marginTop: 6 }}>
+                <b>Non-billable vs Free until.</b> Non-billable is permanent and silent — a failed payment on
+                such an account produces no warning and no lock, because it bypasses the gate entirely. "Free
+                until" is a dated window: they keep working and see a countdown with their rate, then the normal
+                gate takes over. Subscribing ends the countdown early. Use the date for a customer you intend to
+                convert; use Non-billable for our own accounts.
+              </div>
               {billExempt === false && clients.find((c) => c.client_id === sel)?.billingExempt && (
                 <div style={{ marginTop: 6, color: "#991B1B" }}>
                   <b>Careful:</b> you are removing Non-billable. If {sel} has no active subscription they will be
