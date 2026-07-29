@@ -31,6 +31,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-nav a.active svg,.ss-nav button.active svg{stroke:#3D3672}
 .ss-nav .soon{margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#0F4C46;background:#75E6DA;border-radius:6px;padding:2px 6px;flex-shrink:0}
 .ss-nav .lock{width:13px;height:13px;margin-left:auto;flex-shrink:0;opacity:.6;stroke:#94A3B8}
+/* Page-banner icon: the shared ICONS svgs have no intrinsic size. */
+.ss-bnr-ic svg{width:22px;height:22px;stroke:currentColor}
 .ss-nav .soon + .lock{margin-left:6px}
 .ss-nav .active .soon{background:#3D3672;color:#75E6DA}
 .ss-spacer{flex:1}
@@ -2946,10 +2948,9 @@ function ReleasesView({ submissionsKey }) {
 
   return (
     <div>
-      <div style={{ ...S.card, background: "linear-gradient(135deg,#3D3672 0%,#1B7895 100%)", color: "#FFF", border: "none", marginBottom: 12 }}>
-        <div style={{ fontSize: 18, fontWeight: 800 }}>What's New</div>
-        <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Updates as they ship to your portal — try them out and send us feedback.</div>
-      </div>
+      {/* No header here: the shared PageBanner supplies it, with the icon and the same
+          proportions as every other page. This used to carry its own smaller gradient card,
+          which stacked into two banners once the shared one arrived. */}
 
       {/* Sub-tab nav: New Features · Bug Fixes · Roadmap */}
       <div role="tablist" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
@@ -3596,6 +3597,37 @@ function Dashboard({ session }) {
     "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
     "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
   };
+  // ── Page banner ────────────────────────────────────────────────────────────────
+  // The gradient header that opens Settings, now opening every page. Driven by the same
+  // TAB_META and ICONS the sidebar and topbar already use, so a new tab gets its banner
+  // for free and the title can never drift between the two.
+  //
+  // NOT rendered for: designer (a full-bleed canvas — a banner would steal the height it
+  // needs), admin (an iframed console with its own chrome), settings and the Coming Soon
+  // pages (each already has its own richer header; a second gradient would stack).
+  const OWN_HEADER = new Set(["designer", "admin", "settings", "orders", "on-demand-pricing",
+    "build-schedule", "delivery-schedule", "inventory", "repairs", "view-3d",
+    "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"]);
+  const PageBanner = ({ tab }) => {
+    const meta = TAB_META[tab];
+    if (!meta) return null;
+    return (
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 14, padding: "20px 22px", color: "#FFF", marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          {/* The ICONS entries carry no width/height — the sidebar sizes them via CSS, so
+              they need their own rule here or they render at the SVG default. */}
+          <div className="ss-bnr-ic" style={{ width: 44, height: 44, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "#FFF" }}>
+            {ICONS[tab]}
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>{meta[0]}</div>
+            {meta[1] && <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>{meta[1]}</div>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // Billing gate. Locked = the required subscription isn't active. Nav stays fully
   // visible (locked items get a padlock) and the CONTENT area shows the gate whatever
   // they click — so they can see the whole product and always land on how to switch it
@@ -3822,6 +3854,9 @@ function Dashboard({ session }) {
               </div>
             )}
             {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
+            {/* One banner for every page that doesn't already have its own. Sits above the
+                tab content so each view stays unaware of it. */}
+            {!gateLocked && !OWN_HEADER.has(activeTab) && <PageBanner tab={activeTab} />}
             {!gateLocked && activeTab === "designs" && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey} />
