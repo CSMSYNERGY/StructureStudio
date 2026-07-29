@@ -375,14 +375,14 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
               plan_payments: "0",                                          // 0 = until cancelled
               month_frequency: p!.billing_interval === "annual" ? "12" : "1",
               day_of_month: String(billingDay),
-              // Do NOT re-add plan_name here. Tested live 2026-07-28 against Deposyt: it is
-              // accepted without error and silently ignored — the Recurring Customer List
-              // still showed a gateway-generated number (697489475). NMI documents plan_name
-              // for v5 only. The Plan ID column can only be changed by referencing a REAL
-              // named plan, which would mean a gateway plan per feature x interval x percent
-              // and would reintroduce exactly what the custom amount avoids: a shared plan
-              // whose price goes stale when the list price moves. order_description below
-              // carries the discount instead.
+              // Undocumented for the classic custom-amount form (NMI documents plan_name
+              // for v5 only) but VERIFIED HONOURED: a live webhook payload came back with
+              // plan.name = "SS_SIMPLE_LAYOUT_MONTHLY_25OFF" (2026-07-28). Deposyt's
+              // Recurring Customer List still shows a bare number for these because that
+              // column renders plan.id, which is "" for a custom subscription — the name is
+              // stored, just not shown there. Don't remove this on the strength of that
+              // screen; check the payload.
+              plan_name: `${p!.gateway_plan_id}_${pct}OFF`,
             }
             : { plan_id: p!.gateway_plan_id }),
           customer_vault_id: vault,

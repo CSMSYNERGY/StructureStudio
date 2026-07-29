@@ -77,56 +77,6 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
       verified = safeEqual(ourHex, theirHex.toLowerCase());
     }
   }
-  // ── TEMPORARY DIAGNOSTIC — remove once a real delivery verifies ─────────────
-  // A rejection happens BEFORE the billing_webhook_events insert, so we otherwise
-  // have no record of what was actually sent. This records SHAPE ONLY, to tell a
-  // wrong signing key apart from a signature scheme that differs from NMI's spec.
-  // Deliberately never recorded: the signature value, the signing key, the request
-  // body, or anything about the customer/payment. Behaviour is unchanged — a bad
-  // signature is still rejected below.
-  if (!verified) {
-    try {
-      const rawHmac = async (key: string, data: string) => {
-        const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key),
-          { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-        return new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data)));
-      };
-      const toHex = (u: Uint8Array) => Array.from(u).map((b) => b.toString(16).padStart(2, "0")).join("");
-      const toB64 = (u: Uint8Array) => btoa(String.fromCharCode(...u));
-      const p = Object.fromEntries((nmiHeader || "").split(",").map((x) => x.trim().split("=")));
-      const nonce = String(p.t ?? "");
-      const theirSig = String(p.s ?? (legacyHeader.split("=")[1] ?? ""));
-      // Which construction, if any, reproduces their signature? Names only.
-      const cand: Record<string, string> = {};
-      if (nonce) {
-        const a = await rawHmac(SIGNING_KEY, `${nonce}.${raw}`);
-        cand["nonce.body/hex"] = toHex(a); cand["nonce.body/base64"] = toB64(a);
-      }
-      const b = await rawHmac(SIGNING_KEY, raw);
-      cand["body-only/hex"] = toHex(b); cand["body-only/base64"] = toB64(b);
-      const matched = Object.entries(cand)
-        .filter(([, v]) => v.toLowerCase() === theirSig.toLowerCase()).map(([k]) => k);
-      const diag = {
-        headerNames: [...req.headers.keys()].sort(),
-        hasWebhookSignature: Boolean(nmiHeader),
-        hasLegacyHeader: Boolean(legacyHeader),
-        parsedNonce: Boolean(nonce),
-        parsedSig: Boolean(theirSig),
-        sigLength: theirSig.length,
-        sigCharset: /^[0-9a-fA-F]+$/.test(theirSig) ? "hex"
-          : /^[A-Za-z0-9+/]+={0,2}$/.test(theirSig) ? "base64" : "other",
-        schemeMatched: matched.length ? matched : "NONE — signing key does not match",
-      };
-      console.log("[billing-webhook][diag] " + JSON.stringify(diag));
-      // The runtime console stream is not reliably queryable on this project, so
-      // persist the shape to app_errors too — that table demonstrably works.
-      const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-      await sb.from("app_errors").insert({
-        source: "edge:billing-webhook", severity: "error", code: "sig_diag",
-        message: "signature rejected — shape diagnostic", context: diag,
-      });
-    } catch (_e) { /* a diagnostic must never change behaviour */ }
-  }
   if (!verified) return json({ error: "Missing or invalid webhook signature." }, 401);
 
   let payload: any;
@@ -163,7 +113,18 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
     const subId = String(sub.subscription_id ?? sub.id ?? "");
     if (!subId) throw new Error("No subscription id in payload");
     const status = sub.status ? String(sub.status) : null;
-    const periodEnd = sub.current_period_end ?? sub.next_charge_date ?? null;
+    // NMI sends next_charge_date: "1970-01-01" as its placeholder for "no scheduled date"
+    // — observed on EVERY live event 2026-07-28, adds and deletes alike. Stored at face
+    // value that puts an epoch-zero renewal date in front of the tenant and makes any
+    // "period has ended" comparison instantly true, so an implausibly old date is treated
+    // as absent rather than trusted.
+    const rawPeriodEnd = sub.current_period_end ?? sub.next_charge_date ?? null;
+    const periodEnd = (() => {
+      if (!rawPeriodEnd) return null;
+      const t = Date.parse(String(rawPeriodEnd));
+      if (!Number.isFinite(t) || t < Date.parse("2020-01-01")) return null;
+      return new Date(t).toISOString();
+    })();
     // Tenant: subscribe-time we set merchant_defined_field_1 = client_id. NMI may
     // echo it as merchant_defined_fields (array or object); older shapes used
     // metadata. Fall back to the already-known row for updates.
@@ -187,13 +148,48 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
 
     switch (eventType) {
       case "recurring.subscription.add": {
-        if (!clientId) throw new Error("subscription.add without a client id (metadata/merchant field)");
-        const { error } = await admin.from("billing_subscriptions").upsert({
-          id: subId, client_id: String(clientId),
-          status: norm(status) ?? "active",
-          current_period_start: new Date().toISOString(),
-          current_period_end: periodEnd ? new Date(periodEnd).toISOString() : null,
-        }, { onConflict: "id" });
+        // NMI does NOT echo merchant_defined_fields in the webhook payload. Verified
+        // against live events 2026-07-28: event_body carries subscription_id, order_id,
+        // order_description, plan{id,name,amount,payments,day_of_month,month_frequency},
+        // card, merchant, billing_address, shipping, tax, features, next_charge_date,
+        // attempted_payments, completed_payments, remaining_payments — and no MDF or
+        // metadata block anywhere. So merchant_defined_field_1 (which we DO send on
+        // add_subscription) cannot be read back here, and every add event failed with
+        // "without a client id" until this was fixed.
+        //
+        // Two recoveries, both reliable:
+        //   1. The row we already wrote. portal-billing creates it immediately after the
+        //      gateway call, so by the time this arrives the tenant is already known.
+        //      This is authoritative — it is our own record, not a parsed string.
+        //   2. order_id, which is ours: `ss_<clientId>_<planId>`. clientId is a DNS-safe
+        //      slug (it doubles as a subdomain, so no underscores), hence the segment
+        //      after "ss_" is exactly it. Covers a subscription created directly in the
+        //      gateway, which we would have no row for.
+        const { data: existingSub } = await admin.from("billing_subscriptions")
+          .select("client_id, current_period_start, status").eq("id", subId).maybeSingle();
+        const orderId = String(sub.order_id ?? sub.orderid ?? "");
+        const fromOrderId = /^ss_([a-z0-9-]+)_/.exec(orderId)?.[1] ?? null;
+        const tenant = existingSub?.client_id ?? clientId ?? fromOrderId;
+        if (!tenant) {
+          throw new Error(`subscription.add: cannot resolve tenant (order_id=${orderId || "absent"})`);
+        }
+        // This event's real value is next_charge_date — portal-billing cannot know it.
+        // Don't clobber what we already recorded: leave current_period_start alone on a
+        // row that exists, and never overwrite a period end with null.
+        const addPatch: Record<string, unknown> = {
+          id: subId,
+          client_id: String(tenant),
+        };
+        // `add` is the FIRST event in a subscription's life, so one arriving for a row we
+        // already hold as cancelled is a stale replay — and Deposyt does retry failed
+        // deliveries for hours. Applying its status would resurrect the subscription to
+        // active and silently hand a cancelled tenant their account back. Never let an
+        // add event raise the status of an already-cancelled row.
+        if (existingSub?.status !== "cancelled") addPatch.status = norm(status) ?? "active";
+        if (periodEnd) addPatch.current_period_end = periodEnd;
+        if (!existingSub) addPatch.current_period_start = new Date().toISOString();
+        const { error } = await admin.from("billing_subscriptions")
+          .upsert(addPatch, { onConflict: "id" });
         if (error) throw new Error(error.message);
         break;
       }
@@ -214,7 +210,7 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         }
         const { error } = await admin.from("billing_subscriptions").update({
           status: next,
-          current_period_end: periodEnd ? new Date(periodEnd).toISOString() : undefined,
+          current_period_end: periodEnd ?? undefined,
           updated_at: new Date().toISOString(),
           ...pastDuePatch,
         }).eq("id", subId);
