@@ -232,6 +232,17 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const { data: cs } = await sb.from("client_settings")
           .select("client_id, billing_exempt, discount_percent, discount_features");
         const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
+        // The billable feature list, so the console can offer a per-feature discount
+        // picker without hardcoding a copy of the catalogue that would drift from
+        // billing_plans. One entry per feature (monthly/annual share a feature).
+        const { data: planRows } = await sb.from("billing_plans")
+          .select("feature, name, availability, required").eq("active", true).order("sort_order", { ascending: false });
+        const seenFeature = new Set<string>();
+        const features = (planRows ?? []).filter((p: any) => {
+          if (!p.feature || seenFeature.has(p.feature)) return false;
+          seenFeature.add(p.feature);
+          return true;
+        }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required }));
         const clients = (data ?? []).map((c: any) => {
           const s = byId.get(c.client_id);
           return {
@@ -241,7 +252,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             discountFeatures: s?.discount_features ?? null,
           };
         });
-        return json({ ok: true, clients });
+        return json({ ok: true, clients, features });
       }
       case "get_master": {
         // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
@@ -441,11 +452,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
           throw new Error("discountPercent must be a whole number from 0 to 100.");
         }
+        // Empty/absent = the discount applies to EVERY feature. A list narrows it.
+        const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
+          ? p.discountFeatures.map((f: unknown) => String(f))
+          : null;
         if (p.billingExempt === true || newDiscount > 0) {
           const bx = await sb.from("client_settings").upsert({
             client_id: clientId,
             billing_exempt: p.billingExempt === true,
             discount_percent: newDiscount,
+            discount_features: newDiscountFeatures,
             updated_at: new Date().toISOString(),
           }, { onConflict: "client_id" });
           if (bx.error) throw bx.error;

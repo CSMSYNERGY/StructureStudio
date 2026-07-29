@@ -209,10 +209,17 @@ function AdminApp() {
   // Account-level discount (migration 058) — an attribute of the customer, not of a
   // purchase, so it follows them onto every feature they add later.
   const [ncDiscount, setNcDiscount] = useState("0");
+  // Scope: all features, or only the ones ticked. Empty list on the wire = everything.
+  const [ncAllFeat, setNcAllFeat] = useState(true);
+  const [ncFeat, setNcFeat] = useState([]);
   // Per-client billing editor: the customers who need a discount usually already exist.
   const [billOpen, setBillOpen] = useState(false);
   const [billPct, setBillPct] = useState("0");
   const [billExempt, setBillExempt] = useState(false);
+  const [billAllFeat, setBillAllFeat] = useState(true);
+  const [billFeat, setBillFeat] = useState([]);
+  // Billable features, from billing_plans via list_clients — never hardcoded here.
+  const [features, setFeatures] = useState([]);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
@@ -237,7 +244,7 @@ function AdminApp() {
     try {
       const c = await api("list_clients", pwd);
       const m = await api("get_master", pwd);
-      setClients(c.clients || []); setMaster(m); setAuthed(true);
+      setClients(c.clients || []); setFeatures(c.features || []); setMaster(m); setAuthed(true);
       loadEmailSender();   // best-effort; never blocks login
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
@@ -290,6 +297,9 @@ function AdminApp() {
     // Seed the billing editor from the list row so it opens showing what is actually set.
     const row = clients.find((c) => c.client_id === cid);
     setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
+    // NULL / empty in the database means "every feature", which is the radio default.
+    const scoped = Array.isArray(row?.discountFeatures) ? row.discountFeatures : [];
+    setBillAllFeat(scoped.length === 0); setBillFeat(scoped);
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -301,22 +311,62 @@ function AdminApp() {
     if (!id || !ncCompany.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt, discountPercent: ncExempt ? 0 : (Number(ncDiscount) || 0) });
-      const c = await api("list_clients", pwd); setClients(c.clients || []);
-      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false); setNcExempt(false); setNcDiscount("0");
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt, discountPercent: ncExempt ? 0 : (Number(ncDiscount) || 0), discountFeatures: ncAllFeat ? [] : ncFeat });
+      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
+      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false); setNcExempt(false); setNcDiscount("0"); setNcAllFeat(true); setNcFeat([]);
       await loadClient(id);
       flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
+  // Which features a discount covers. All (empty list on the wire) or a chosen few.
+  // Rendered in both the New client form and the per-client Billing panel.
+  const FeatureScope = ({ all, setAll, picked, setPicked, disabled }) => (
+    <div style={{ marginTop: 8, opacity: disabled ? 0.5 : 1, pointerEvents: disabled ? "none" : "auto" }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, color: "#1E293B" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="radio" checked={all} onChange={() => setAll(true)} />
+          <span>Every feature</span>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="radio" checked={!all} onChange={() => setAll(false)} />
+          <span>Only the ones I pick</span>
+        </label>
+      </div>
+      {!all && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginTop: 8, paddingLeft: 2 }}>
+          {features.length === 0 && <span style={{ fontSize: 12, color: "#B91C1C" }}>No billable features found.</span>}
+          {features.map((f) => (
+            <label key={f.feature} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+              <input type="checkbox" checked={picked.indexOf(f.feature) !== -1}
+                onChange={(e) => setPicked(e.target.checked
+                  ? picked.concat([f.feature])
+                  : picked.filter((x) => x !== f.feature))} />
+              <span>{f.name}{f.required ? " (required)" : ""}{f.availability === "coming_soon" ? " — soon" : ""}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {!all && picked.length === 0 && (
+        <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 6 }}>
+          Pick at least one feature, or choose "Every feature" — an empty list means no discount applies anywhere.
+        </div>
+      )}
+    </div>
+  );
+
   const saveBilling = async () => {
     if (!sel) return;
     const pct = Math.round(Number(billPct));
     if (!Number.isFinite(pct) || pct < 0 || pct > 100) { flash({ err: "Discount must be a whole number from 0 to 100." }); return; }
+    if (pct > 0 && !billExempt && !billAllFeat && billFeat.length === 0) {
+      flash({ err: "Choose which features the discount applies to, or select \"Every feature\"." }); return;
+    }
     setBusy(true); setMsg(null);
     try {
-      const r = await api("set_billing", pwd, { clientId: sel, billingExempt: billExempt, discountPercent: pct });
-      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      const r = await api("set_billing", pwd, { clientId: sel, billingExempt: billExempt, discountPercent: pct,
+        discountFeatures: billAllFeat ? [] : billFeat });
+      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setBillOpen(false);
       flash({ ok: `Billing saved for ${sel}. ${r.note || ""}`.trim() });
     } catch (e) { flash({ err: e.message }); }
@@ -363,7 +413,7 @@ function AdminApp() {
     setBusy(true); setMsg(null);
     try {
       const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
-      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
       const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
       flash({ ok: `Client "${id}" deleted${parts ? ` (${parts})` : ""}.` });
@@ -581,12 +631,18 @@ function AdminApp() {
               <span>
                 <b>% off</b> — ongoing discount on recurring price
                 <div style={{ fontSize: 11.5, color: "#475569", marginTop: 2, lineHeight: 1.45 }}>
-                  Leave 0 for full price. Applies to every feature they ever subscribe to, for as long as the
-                  subscription runs — no coupon code to re-enter. Setup fees are never discounted.
+                  Leave 0 for full price. Applies for as long as each subscription runs — no coupon code to
+                  re-enter. Setup fees are never discounted.
                   {ncExempt && <b> Not applicable to a non-billable account.</b>}
                 </div>
               </span>
             </div>
+            {Number(ncDiscount) > 0 && !ncExempt && (
+              <div style={{ marginTop: 4, paddingLeft: 2 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Discount applies to</div>
+                <FeatureScope all={ncAllFeat} setAll={setNcAllFeat} picked={ncFeat} setPicked={setNcFeat} />
+              </div>
+            )}
           </div>
         )}
 
@@ -611,6 +667,12 @@ function AdminApp() {
               </label>
               <button onClick={saveBilling} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save billing</button>
             </div>
+            {Number(billPct) > 0 && !billExempt && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Discount applies to</div>
+                <FeatureScope all={billAllFeat} setAll={setBillAllFeat} picked={billFeat} setPicked={setBillFeat} />
+              </div>
+            )}
             {/* Two ways to get this wrong, both expensive, so say them out loud. */}
             <div style={{ fontSize: 12, color: "#166534", marginTop: 12, lineHeight: 1.55, background: "#DCFCE7", borderRadius: 8, padding: "9px 12px" }}>
               <b>Applies to future subscriptions only.</b> The gateway stores the amount on each subscription,
