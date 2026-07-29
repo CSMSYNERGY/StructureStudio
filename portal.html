@@ -3055,17 +3055,29 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   const [users, setUsers] = useState({});
   const [userErr, setUserErr] = useState({});
 
+  // In-flight guard. Expand-all fires one request per tenant at once, and a second click
+  // (or a refresh landing mid-expand) would otherwise duplicate every one of them.
+  const inFlight = useRef({});
+
   const loadUsers = useCallback(async (clientId) => {
+    if (inFlight.current[clientId]) return;
+    inFlight.current[clientId] = true;
     setUserErr((e) => ({ ...e, [clientId]: null }));
-    const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId } });
-    if (err) {
-      let msg = err.message;
-      try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
-      setUserErr((e) => ({ ...e, [clientId]: msg || "Could not load users." }));
-      setUsers((u) => ({ ...u, [clientId]: [] }));
-      return;
+    try {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId } });
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setUserErr((e) => ({ ...e, [clientId]: msg || "Could not load users." }));
+        setUsers((u) => ({ ...u, [clientId]: [] }));
+        return;
+      }
+      setUsers((u) => ({ ...u, [clientId]: Array.isArray(data && data.users) ? data.users : [] }));
+    } finally {
+      // Always released, including on the error path — otherwise one failure would leave
+      // that tenant permanently unrefreshable for the rest of the session.
+      delete inFlight.current[clientId];
     }
-    setUsers((u) => ({ ...u, [clientId]: Array.isArray(data && data.users) ? data.users : [] }));
   }, []);
 
   const toggle = (clientId) => {
@@ -3073,6 +3085,23 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
     setOpen((o) => ({ ...o, [clientId]: next }));
     if (next && users[clientId] === undefined) loadUsers(clientId);
   };
+
+  const q = query.trim().toLowerCase();
+  const filtered = (clients || []).filter((c) => !q || c.clientId.toLowerCase().includes(q) || (c.companyName || "").toLowerCase().includes(q));
+
+  // Expand/collapse acts on what is CURRENTLY FILTERED, not the whole list — after a search
+  // for "barns", "Expand all" that also opened every hidden tenant would be a surprise (and
+  // would fetch personal details for accounts you are not looking at).
+  const expandAll = () => {
+    setOpen((o) => {
+      const next = { ...o };
+      filtered.forEach((c) => { next[c.clientId] = true; });
+      return next;
+    });
+    filtered.forEach((c) => { if (users[c.clientId] === undefined) loadUsers(c.clientId); });
+  };
+  const collapseAll = () => setOpen({});
+  const openCount = filtered.filter((c) => open[c.clientId]).length;
 
   // After an edit, re-fetch only the tenants currently expanded — the edited name has to
   // appear without collapsing what the operator was looking at.
@@ -3108,13 +3137,23 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
     return () => { cancelled = true; };
   }, []);
 
-  const q = query.trim().toLowerCase();
-  const filtered = (clients || []).filter((c) => !q || c.clientId.toLowerCase().includes(q) || (c.companyName || "").toLowerCase().includes(q));
 
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 0, flex: 1 }}>Client accounts</div>
+        {/* Acts on the filtered set, and each is disabled when it would do nothing — so the
+            control tells you the current state instead of being a pair of dead buttons. */}
+        <button type="button" onClick={expandAll} disabled={!filtered.length || openCount === filtered.length}
+          title="Show the users under every account listed"
+          style={{ ...S.btn("#F1F5F9", openCount === filtered.length || !filtered.length ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
+          Expand all
+        </button>
+        <button type="button" onClick={collapseAll} disabled={openCount === 0}
+          title="Hide all user lists"
+          style={{ ...S.btn("#F1F5F9", openCount === 0 ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
+          Collapse all
+        </button>
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
           style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 220 }} />
       </div>
