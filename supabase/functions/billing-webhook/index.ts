@@ -194,7 +194,27 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         break;
       }
       case "recurring.subscription.update": {
-        const next = norm(status) ?? "active";
+        // An UNMAPPED status must never be read as "everything is fine". This used to
+        // default to "active", which would take a payment-failure state we don't
+        // recognise and silently keep a non-paying tenant fully entitled — the gate's
+        // entire purpose inverted, and invisibly. norm() only guesses at what NMI sends
+        // on a decline (past_due / pastdue / failed / declined); the real string has never
+        // been observed, because no test has yet driven a card failure.
+        //
+        // Same rule as the Monday status map: an unknown label leaves the tenant's state
+        // untouched and shouts, rather than inventing one. Throwing records the event as
+        // FAILED in billing_webhook_events with the offending string, so it is
+        // discoverable and Deposyt's retries will apply the mapping once it is added.
+        const next = norm(status);
+        if (!next) {
+          console.warn(`[billing-webhook] UNMAPPED status "${status}" on ${eventType}`);
+          const { error: peErr } = await admin.from("billing_subscriptions").update({
+            current_period_end: periodEnd ?? undefined,
+            updated_at: new Date().toISOString(),
+          }).eq("id", subId);
+          if (peErr) throw new Error(peErr.message);
+          throw new Error(`Unmapped subscription status "${status}" — left status unchanged; add it to norm()`);
+        }
         // Stamp when a subscription FIRST goes past_due — that starts the grace clock
         // the portal gate reads (a failed payment keeps working for a few days with a
         // warning instead of locking a paying customer out over an expired card).
