@@ -3436,7 +3436,11 @@ function Dashboard({ session }) {
   // not imply a payment problem.
   const gateTransition = !viewing && !!entitlement && entitlement.state === "transition";
   const transEndsAt = gateTransition && entitlement.transitionEndsAt ? Date.parse(entitlement.transitionEndsAt) : null;
-  const transDaysLeft = transEndsAt ? Math.max(0, Math.ceil((transEndsAt - Date.now()) / 86400000)) : null;
+  // Counted in whole CALENDAR days in the viewer's own timezone, which is how people read a
+  // deadline. An elapsed-milliseconds ceil() says "9 days" when 8 days and 2 hours remain.
+  const transDaysLeft = transEndsAt
+    ? Math.max(0, Math.round((new Date(transEndsAt).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000))
+    : null;
   const transDateLabel = transEndsAt
     ? new Date(transEndsAt).toLocaleDateString(undefined, { month: "long", day: "numeric" })
     : null;
