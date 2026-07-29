@@ -3094,6 +3094,31 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   // (or a refresh landing mid-expand) would otherwise duplicate every one of them.
   const inFlight = useRef({});
 
+  // Per-user reset state, keyed by userId. Kept per-user rather than as one shared flag so
+  // resetting person A doesn't grey out the button next to person B.
+  const [resetBusy, setResetBusy] = useState({});
+  const [resetInfo, setResetInfo] = useState({});
+
+  const sendReset = async (clientId, u) => {
+    if (resetBusy[u.userId]) return;
+    setResetBusy((b) => ({ ...b, [u.userId]: true }));
+    setResetInfo((r) => ({ ...r, [u.userId]: null }));
+    try {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", {
+        body: { action: "send_reset_link", clientId, userId: u.userId },
+      });
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setResetInfo((r) => ({ ...r, [u.userId]: { error: msg || "Could not send the reset link." } }));
+        return;
+      }
+      setResetInfo((r) => ({ ...r, [u.userId]: data || {} }));
+    } finally {
+      setResetBusy((b) => { const n = { ...b }; delete n[u.userId]; return n; });
+    }
+  };
+
   const loadUsers = useCallback(async (clientId) => {
     if (inFlight.current[clientId]) return;
     inFlight.current[clientId] = true;
@@ -3242,7 +3267,8 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
                     </tr></thead>
                     <tbody>
                       {users[c.clientId].map((u) => (
-                        <tr key={u.userId} style={{ borderTop: "1px solid #F1F5F9" }}>
+                        <React.Fragment key={u.userId}>
+                        <tr style={{ borderTop: "1px solid #F1F5F9" }}>
                           <td style={{ padding: "7px 8px 7px 0", color: u.fullName ? "#1E293B" : "#94A3B8", fontWeight: u.fullName ? 700 : 400 }}>
                             {u.fullName || "— not set —"}
                           </td>
@@ -3265,11 +3291,56 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
                           <td style={{ padding: "7px 8px 7px 0", color: "#94A3B8", whiteSpace: "nowrap" }}>
                             {u.lastSignInAt ? new Date(u.lastSignInAt).toLocaleDateString() : "never"}
                           </td>
-                          <td style={{ padding: "7px 0", textAlign: "right" }}>
+                          <td style={{ padding: "7px 0", textAlign: "right", whiteSpace: "nowrap" }}>
                             <button type="button" onClick={() => onEditUser(c, u)}
                               style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 9px", fontSize: 11 }}>Edit</button>
+                            {/* Disabled without an email rather than hidden: "why is there no
+                                button here" is a worse question than a tooltip that answers it. */}
+                            <button type="button" onClick={() => sendReset(c.clientId, u)}
+                              disabled={!u.email || !!resetBusy[u.userId]}
+                              title={u.email
+                                ? `Email ${u.email} a link to set a new password`
+                                : "This login has no email address, so nothing can be sent to it"}
+                              style={{ ...S.btn("#F1F5F9", (!u.email || resetBusy[u.userId]) ? "#CBD5E1" : "#334155"), padding: "4px 9px", fontSize: 11, marginLeft: 5 }}>
+                              {resetBusy[u.userId] ? "Sending…" : "Send reset"}
+                            </button>
                           </td>
                         </tr>
+                        {resetInfo[u.userId] && (
+                          <tr>
+                            <td colSpan={6} style={{ padding: "0 0 8px 0" }}>
+                              {resetInfo[u.userId].error ? (
+                                <div style={{ fontSize: 12, color: "#B91C1C" }}>{resetInfo[u.userId].error}</div>
+                              ) : (
+                                <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px" }}>
+                                  <div style={{ fontSize: 12, color: resetInfo[u.userId].emailSent ? "#166534" : "#92400E", fontWeight: 600 }}>
+                                    {resetInfo[u.userId].note || (resetInfo[u.userId].emailSent ? "Sent." : "Not sent.")}
+                                  </div>
+                                  {/* The link is shown every time, not only on failure. Email
+                                      delivery is the part that has actually failed in onboarding,
+                                      and by then the operator has usually closed this row. */}
+                                  {resetInfo[u.userId].resetLink && (
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                                      <input readOnly value={resetInfo[u.userId].resetLink}
+                                        onFocus={(e) => e.target.select()}
+                                        style={{ flex: 1, minWidth: 0, border: "1px solid #E2E8F0", borderRadius: 6, padding: "5px 8px", fontSize: 11, color: "#475569", fontFamily: "ui-monospace, monospace" }} />
+                                      <button type="button"
+                                        onClick={() => { try { navigator.clipboard.writeText(resetInfo[u.userId].resetLink); } catch (_e) {} }}
+                                        style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 9px", fontSize: 11, flexShrink: 0 }}>Copy</button>
+                                    </div>
+                                  )}
+                                  {/* Always lands on the production portal, by design — one Supabase
+                                      project serves both hosts, so a password set there works on beta
+                                      too. Said out loud because a beta operator WILL notice. */}
+                                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5 }}>
+                                    The link opens structurestudio.app/portal — a password set there works everywhere, including beta.
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>

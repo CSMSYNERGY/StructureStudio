@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
+import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 
 // Operator account-switcher backend (portal.html "Accounts" tab): lets a platform
 // operator (app_operators row — Carolyn / Ahsan / support) open any tenant's portal
@@ -21,6 +22,10 @@ import { withErrorLog } from "../_shared/logError.ts";
 //   { action: "get_portal", clientId }    → the tenant's designs + versions + name,
 //     byte-compatible with what portal.html's DesignsTable/LeadsTable read for the
 //     owner's own tenant. Every call is audit-logged to admin_audit (cross-tenant PII).
+//   { action: "list_users", clientId }    → the people under one tenant
+//   { action: "save_user", … }            → correct a user's name/phone
+//   { action: "send_reset_link", clientId, userId } → email that user a set-password link
+//     and hand back a copyable one. Write actions require app_operators.can_write.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -197,6 +202,66 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         if (!updated) return json({ error: "That user is not in this account." }, 404);
         await auditStrict("operator_save_user", clientId, `user=${userId}`);
         return json({ ok: true });
+      }
+      case "send_reset_link": {
+        // Email one of a tenant's users a set-password link. Carolyn asked for this on
+        // 2026-07-29 ("Reset — reset password, all of that. Yes, absolutely."), and it earns its
+        // keep: the invite/reset journey has broken twice in onboarding, both times over where
+        // the link LANDS, which is why the destination is not a parameter — see AUTH_PORTAL_URL.
+        if (!op.can_write) return json({ error: "This operator account is read-only." }, 403);
+        const clientId = await assertClient(admin, payload.clientId);
+        const userId = String(payload.userId || "").trim();
+        if (!userId) return json({ error: "userId is required." }, 400);
+
+        // Scoped by BOTH ids, same as save_user: the caller supplies a userId, and without the
+        // client_id predicate an operator could send a reset for someone in another tenant just
+        // by pasting their id. Membership is checked BEFORE we look the email up, so a
+        // wrong-tenant id cannot even leak whether that user exists.
+        const { data: member, error: memberErr } = await admin.from("client_users")
+          .select("user_id").eq("user_id", userId).eq("client_id", clientId).maybeSingle();
+        if (memberErr) throw memberErr;
+        if (!member) return json({ error: "That user is not in this account." }, 404);
+
+        // The email is auth's, not client_users' — deliberately read from the auth record rather
+        // than accepted from the caller, so the link can only ever go to the address that
+        // actually signs in.
+        const { data: au, error: auErr } = await admin.auth.admin.getUserById(userId);
+        if (auErr) throw auErr;
+        const email = String(au?.user?.email || "").trim();
+        if (!email) return json({ error: "That user has no email address on their login, so no reset can be sent." }, 400);
+
+        // No custom-SMTP precondition here, unlike admin-catalog's `test_email`. That guard
+        // exists to stop a *test* passing via Supabase's default sender and proving nothing —
+        // applying it here would refuse a real reset the default sender would have delivered.
+        const { error: sendErr } = await admin.auth.resetPasswordForEmail(email, { redirectTo: AUTH_PORTAL_URL });
+
+        // A copyable link regardless, for the case that has actually bitten us: SMTP down or
+        // unconfigured, so the email never arrives and the operator needs something to paste
+        // into a chat. Best-effort — a missing link must not fail a reset that WAS emailed.
+        let resetLink: string | null = null;
+        try {
+          const gl = await admin.auth.admin.generateLink({
+            type: "recovery", email, options: { redirectTo: AUTH_PORTAL_URL },
+          });
+          if (!gl.error) resetLink = gl.data?.properties?.action_link || null;
+        } catch (_) { /* link is best-effort */ }
+
+        // Report the email failure only after the fallback link is in hand — otherwise an SMTP
+        // outage would throw away the one thing that still works.
+        if (sendErr && !resetLink) throw sendErr;
+
+        await auditStrict("operator_send_reset_link", clientId, `user=${userId}`);
+        return json({
+          ok: true,
+          email,
+          emailSent: !sendErr,
+          resetLink,
+          // GoTrue rate-limits recovery per email per hour; a second click inside that window
+          // fails at Supabase, not here, so say so rather than letting it look like our bug.
+          note: sendErr
+            ? `Could not send the email (${sendErr.message}) — use the link below instead.`
+            : "Sent. Supabase limits reset emails to a few per address per hour; the link below works either way.",
+        });
       }
       case "get_portal": {
         const clientId = await assertClient(admin, payload.clientId);

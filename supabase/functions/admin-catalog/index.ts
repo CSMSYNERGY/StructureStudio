@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
+import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -24,20 +25,10 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
-// ── Where every auth email lands ────────────────────────────────────────────
-// ONE canonical destination for invite / set-password / reset links, regardless of
-// which host generated them. Callers used to pass `location.origin + "/portal"`, so a
-// link created from beta.structurestudio.app carried redirect_to=beta — and Supabase
-// only honours allow-listed redirects, silently substituting Site URL for anything
-// else. Verified 2026-07-28 against this project: beta got back the *identical*
-// response as a deliberately hostile control URL. Every invite Carolyn created from
-// beta therefore bounced to the apex, which is how these links broke.
-//
-// Forcing the apex is correct rather than a workaround: beta and production share ONE
-// Supabase project, so a password set here is immediately valid on beta too. A
-// caller-supplied portalUrl is IGNORED on purpose — one allow-listed destination
-// cannot drift out of the allow-list, and no future caller can reintroduce this bug.
-const AUTH_PORTAL_URL = "https://structurestudio.app/portal";
+// AUTH_PORTAL_URL — the one destination every auth email lands on — moved to
+// `_shared/authPortalUrl.ts` (imported above) when operator-portal gained its own
+// reset-link action. The reasoning is in that file; the short version is that a second
+// copy of this constant would be exactly the drift it exists to prevent.
 
 // ── Supabase Auth custom-SMTP config via the Management API ──────────────────
 // Powers the admin.html "Email Sender" card. Pointing the project's Auth SMTP at
