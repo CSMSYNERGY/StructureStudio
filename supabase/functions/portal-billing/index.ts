@@ -365,6 +365,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     for (const p of chosen) {
       try {
         const chargeCents = chargeCentsFor(p!);
+        const pct = discountForFeature(p!.feature);
         const discounted = chargeCents !== p!.price_cents;
         const r = await nmiPost({
           recurring: "add_subscription",
@@ -374,12 +375,22 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
               plan_payments: "0",                                          // 0 = until cancelled
               month_frequency: p!.billing_interval === "annual" ? "12" : "1",
               day_of_month: String(billingDay),
+              // EXPERIMENTAL (2026-07-28), undocumented on this form: NMI documents
+              // plan_name only for v5, and a custom-amount subscription otherwise shows a
+              // gateway-generated number in Deposyt's Recurring Customer List — unreadable
+              // beside a plan-based row's SS_SIMPLE_LAYOUT_YEARLY. Gateways normally ignore
+              // parameters they don't recognise, so this is inert if unsupported and free
+              // readability if not. A rejection surfaces as a per-plan failure with no money
+              // moved. Remove it if the gateway ever errors on it.
+              plan_name: `${p!.gateway_plan_id}_${pct}OFF`,
             }
             : { plan_id: p!.gateway_plan_id }),
           customer_vault_id: vault,
           merchant_defined_field_1: clientId,
           orderid: `ss_${clientId}_${p!.id}`,
-          order_description: `StructureStudio ${p!.name} (${p!.billing_interval})`,
+          order_description: discounted
+            ? `StructureStudio ${p!.name} (${p!.billing_interval}) - ${pct}% off, $${(chargeCents / 100).toFixed(2)}`
+            : `StructureStudio ${p!.name} (${p!.billing_interval})`,
         });
         const subId = r.subscription_id || r.transactionid;
         const { data: row, error: insErr } = await admin
