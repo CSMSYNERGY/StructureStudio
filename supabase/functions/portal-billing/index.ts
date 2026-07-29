@@ -124,8 +124,29 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // CANCELLATION is deliberate and locks immediately.
   const GRACE_DAYS = 7;
   const { data: csRow } = await admin
-    .from("client_settings").select("billing_exempt").eq("client_id", clientId).maybeSingle();
+    .from("client_settings").select("billing_exempt, discount_percent, discount_features")
+    .eq("client_id", clientId).maybeSingle();
   const exempt = Boolean(csRow?.billing_exempt);
+
+  // ── Account discount (migration 058) ──────────────────────────────────────────
+  // An attribute of the ACCOUNT, not of a purchase, so it applies to whatever they
+  // subscribe to whenever — no coupon to re-enter. Read here (service-role) and never
+  // accepted from the browser. RECURRING ONLY: setup fees are charged in full.
+  const discountPct = Math.max(0, Math.min(100, Number(csRow?.discount_percent) || 0));
+  const discountFeatures: string[] = Array.isArray(csRow?.discount_features) ? csRow!.discount_features : [];
+  // Empty list = every feature.
+  const discountForFeature = (feature: string | null | undefined): number => {
+    if (!discountPct || !feature) return 0;
+    if (discountFeatures.length && !discountFeatures.includes(feature)) return 0;
+    return discountPct;
+  };
+  // Round HALF UP on the customer's side of the deal: 50% of $19.99 bills as $10.00,
+  // never $9.99, so we can never under-collect by a cent against the stated percentage.
+  const chargeCentsFor = (plan: { feature?: string | null; price_cents?: number | null }): number => {
+    const list = Number(plan?.price_cents) || 0;
+    const pct = discountForFeature(plan?.feature);
+    return pct ? Math.round((list * (100 - pct)) / 100) : list;
+  };
 
   const graceEndOf = (s: any): number | null => {
     const since = s?.past_due_since ? Date.parse(s.past_due_since) : NaN;
@@ -193,11 +214,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // to print the amount. Prices themselves are untouched here and in the gateway;
     // hiding is deliberately presentation-only, so publishing a price later is a
     // one-field flip with no billing-path involvement.
-    const publicPlans = plans.map(({ gateway_plan_id: _g, ...p }) => p);
+    // charge_cents is what this tenant would actually be billed — equal to price_cents
+    // for everyone without a discount. The UI shows the pair so a discounted customer
+    // can see the list price struck through and what they save.
+    const publicPlans = plans.map(({ gateway_plan_id: _g, ...p }) => ({
+      ...p,
+      charge_cents: chargeCentsFor(p),
+      discount_percent: discountForFeature(p.feature),
+    }));
     return json({
       configured,
       hasCard: Boolean(vaultId),
       entitlement,
+      discount: { percent: discountPct, features: discountFeatures },
       plans: publicPlans,
       subscriptions: subs,
       checkout: configured
@@ -308,17 +337,49 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       }
     }
 
+    // Bill on today's day-of-month, capped at 28 so a subscription started on the 29th-31st
+    // has the same anniversary in February as in every other month rather than drifting.
+    const billingDay = Math.min(new Date().getUTCDate(), 28);
+
     // One recurring subscription per feature, sequentially; report partial failures.
+    //
+    // TWO gateway forms, chosen per plan:
+    //
+    //   plan_id       — full price. The amount lives in a plan record inside the gateway.
+    //                   This is the long-proven path (every subscription to date).
+    //   plan_amount   — discounted. NMI has no coupon/discount concept, so a discount can
+    //                   only be expressed as a lower amount, and the plan_id form cannot
+    //                   carry one: editing the gateway plan would re-price EVERY subscriber
+    //                   on it. Per NMI the custom amount is stored on the subscription and
+    //                   every rebill uses it — no further API calls, immune to plan edits.
+    //
+    // Why not use plan_amount for everyone (which would also make price_cents the single
+    // source of truth — today it is never transmitted and can silently disagree with what
+    // the card is charged): NMI's classic Subscription Management reference does not
+    // document customer_vault_id for the custom-amount form. Our code proves the vault
+    // works with plan_id; the combination is unverified. Until a real discounted
+    // subscription confirms it, an unproven call is kept out of the full-price path that
+    // every ordinary customer uses. Collapse to one path once proven.
     const created: any[] = [];
     const failed: { planId: string; error: string }[] = [];
     for (const p of chosen) {
       try {
+        const chargeCents = chargeCentsFor(p!);
+        const discounted = chargeCents !== p!.price_cents;
         const r = await nmiPost({
           recurring: "add_subscription",
-          plan_id: p!.gateway_plan_id,
+          ...(discounted
+            ? {
+              plan_amount: (chargeCents / 100).toFixed(2),
+              plan_payments: "0",                                          // 0 = until cancelled
+              month_frequency: p!.billing_interval === "annual" ? "12" : "1",
+              day_of_month: String(billingDay),
+            }
+            : { plan_id: p!.gateway_plan_id }),
           customer_vault_id: vault,
           merchant_defined_field_1: clientId,
           orderid: `ss_${clientId}_${p!.id}`,
+          order_description: `StructureStudio ${p!.name} (${p!.billing_interval})`,
         });
         const subId = r.subscription_id || r.transactionid;
         const { data: row, error: insErr } = await admin
@@ -327,11 +388,12 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             id: subId,
             client_id: clientId,
             plan_id: p!.id,
-            price_cents: p!.price_cents,
+            price_cents: chargeCents,          // what the gateway will actually bill
+            list_price_cents: p!.price_cents,  // what it would have been without the discount
             status: "active",
             current_period_start: new Date().toISOString(),
           }, { onConflict: "id" })
-          .select("id, plan_id, status, price_cents, current_period_start, current_period_end, canceled_at, created_at")
+          .select("id, plan_id, status, price_cents, list_price_cents, current_period_start, current_period_end, canceled_at, created_at")
           .maybeSingle();
         if (insErr) throw new Error(insErr.message);
         created.push(row);

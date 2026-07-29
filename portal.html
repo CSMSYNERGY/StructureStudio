@@ -1442,13 +1442,20 @@ function BillingView({ viewingLabel = null }) {
   }, [data]);
 
   const fmt$ = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
-  const priceLabel = (p) => p ? `${fmt$(p.price_cents)}${p.billing_interval === "annual" ? "/yr" : "/mo"}` : "—";
+  // What this tenant actually pays. charge_cents is computed server-side from their
+  // account discount; falling back to price_cents keeps the page honest against an
+  // older portal-billing that doesn't send it yet.
+  const chargeOf = (p) => (p && p.charge_cents != null ? p.charge_cents : (p ? p.price_cents : null));
+  const isCut = (p) => p && p.charge_cents != null && p.charge_cents < p.price_cents;
+  const per = (p) => (p && p.billing_interval === "annual" ? "/yr" : "/mo");
+  const priceLabel = (p) => p ? `${fmt$(chargeOf(p))}${per(p)}` : "—";
+  const acctDiscount = Number(data?.discount?.percent) || 0;
 
   // Cart totals (mixed intervals allowed — each feature bills on its own cycle).
   const cart = Object.entries(sel).filter(([f]) => byFeature[f] && !liveFeatures[f]);
   const cartPlans = cart.map(([f, iv]) => byFeature[f].plans[iv]).filter(Boolean);
-  const moTotal = cartPlans.filter((p) => p.billing_interval === "monthly").reduce((s, p) => s + (p.price_cents || 0), 0);
-  const yrTotal = cartPlans.filter((p) => p.billing_interval === "annual").reduce((s, p) => s + (p.price_cents || 0), 0);
+  const moTotal = cartPlans.filter((p) => p.billing_interval === "monthly").reduce((s, p) => s + (chargeOf(p) || 0), 0);
+  const yrTotal = cartPlans.filter((p) => p.billing_interval === "annual").reduce((s, p) => s + (chargeOf(p) || 0), 0);
   const setupTotal = cart.reduce((s, [f]) => s + (byFeature[f].setup || 0), 0);
   const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
 
@@ -1627,8 +1634,20 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                         billing_plans.price_visible to true to start showing it. */}
                     {f.priceVisible ? (<>
                       <div style={{ fontSize: 19, fontWeight: 800, color: ACCENT }}>
+                        {/* Discounted tenants see what they'd have paid struck through, so the
+                            price they're agreeing to is unambiguous rather than mysteriously low. */}
+                        {isCut(shown) && (
+                          <span style={{ fontSize: 14, fontWeight: 600, color: "#94A3B8", textDecoration: "line-through", marginRight: 6 }}>
+                            {fmt$(shown.price_cents)}
+                          </span>
+                        )}
                         {priceLabel(shown)}
                       </div>
+                      {isCut(shown) && (
+                        <div style={{ display: "inline-block", fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#166534", background: "#DCFCE7", border: "1px solid #86EFAC", borderRadius: 6, padding: "2px 7px", marginTop: 4 }}>
+                          {shown.discount_percent}% off
+                        </div>
+                      )}
                       <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>
                         {f.setup == null ? "Setup fee: TBD" : f.setup === 0 ? "No setup fee" : `Setup: ${fmt$(f.setup)} one-time`}
                       </div>

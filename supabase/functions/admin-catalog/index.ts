@@ -226,7 +226,22 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "list_clients": {
         const { data, error } = await sb.from("client_configs").select("client_id, company_name").order("client_id");
         if (error) throw error;
-        return json({ ok: true, clients: data });
+        // Billing posture per tenant, so the console can show at a glance who is comped
+        // and who is discounted. client_settings is service-role only — this function is
+        // the only place it can be read from.
+        const { data: cs } = await sb.from("client_settings")
+          .select("client_id, billing_exempt, discount_percent, discount_features");
+        const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
+        const clients = (data ?? []).map((c: any) => {
+          const s = byId.get(c.client_id);
+          return {
+            ...c,
+            billingExempt: Boolean(s?.billing_exempt),
+            discountPercent: Number(s?.discount_percent) || 0,
+            discountFeatures: s?.discount_features ?? null,
+          };
+        });
+        return json({ ok: true, clients });
       }
       case "get_master": {
         // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
@@ -422,9 +437,17 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // owner to fill in via the portal. A normal new client gets no row here, so
         // billing_exempt reads false and the gate applies: they land on Billing and pay
         // before anything unlocks.
-        if (p.billingExempt === true) {
-          const bx = await sb.from("client_settings")
-            .upsert({ client_id: clientId, billing_exempt: true, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+        const newDiscount = Math.round(Number(p.discountPercent) || 0);
+        if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
+          throw new Error("discountPercent must be a whole number from 0 to 100.");
+        }
+        if (p.billingExempt === true || newDiscount > 0) {
+          const bx = await sb.from("client_settings").upsert({
+            client_id: clientId,
+            billing_exempt: p.billingExempt === true,
+            discount_percent: newDiscount,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: "client_id" });
           if (bx.error) throw bx.error;
         }
 
@@ -524,6 +547,53 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // needs SMTP), and either way we return a one-time set-password link the
       // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
       // Settings) or "user" (Designs & Leads only).
+      case "set_billing": {
+        // Billing posture for an EXISTING tenant: the comp flag and the account discount.
+        // Separate from create_client because the customers most likely to need a discount
+        // — founding customers — already exist by the time you decide to give them one.
+        //
+        // Two things this deliberately does NOT do:
+        //   1. It does not touch live subscriptions. NMI stores the amount on the
+        //      subscription itself, so a discount set now applies to what they subscribe
+        //      to NEXT, not to what is already running. Re-pricing an existing
+        //      subscription would mean a gateway update_subscription call and is a
+        //      separate, money-moving operation.
+        //   2. Clearing billing_exempt on a tenant with no active subscription LOCKS them
+        //      out immediately — the gate has nothing to let them in on. Order matters:
+        //      set the discount first, let them subscribe, then remove the exemption.
+        const clientId = reqStr(p.clientId, "clientId");
+        const { data: exists } = await sb.from("client_configs")
+          .select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown client: ${clientId}`);
+
+        const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
+        if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
+        if (p.discountPercent !== undefined) {
+          const pct = Math.round(Number(p.discountPercent));
+          if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+            throw new Error("discountPercent must be a whole number from 0 to 100.");
+          }
+          patch.discount_percent = pct;
+        }
+        if (p.discountFeatures !== undefined) {
+          patch.discount_features = Array.isArray(p.discountFeatures) && p.discountFeatures.length
+            ? p.discountFeatures.map((f: unknown) => String(f))
+            : null;
+        }
+        const { error } = await sb.from("client_settings").upsert(patch, { onConflict: "client_id" });
+        if (error) throw error;
+
+        // Warn the operator when the change cannot take effect on its own.
+        const { data: live } = await sb.from("billing_subscriptions")
+          .select("id").eq("client_id", clientId).neq("status", "cancelled").limit(1);
+        return json({
+          ok: true,
+          hasLiveSubscription: Boolean(live && live.length),
+          note: live && live.length
+            ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
+            : "Saved.",
+        });
+      }
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const email = reqStr(p.email, "email").toLowerCase();

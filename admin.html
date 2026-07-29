@@ -206,6 +206,13 @@ function AdminApp() {
   // Non-billable = CSM Synergy's own / demo / testing accounts: they skip the billing
   // gate. A normal new client is billable, so this defaults OFF.
   const [ncExempt, setNcExempt] = useState(false);
+  // Account-level discount (migration 058) — an attribute of the customer, not of a
+  // purchase, so it follows them onto every feature they add later.
+  const [ncDiscount, setNcDiscount] = useState("0");
+  // Per-client billing editor: the customers who need a discount usually already exist.
+  const [billOpen, setBillOpen] = useState(false);
+  const [billPct, setBillPct] = useState("0");
+  const [billExempt, setBillExempt] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
@@ -279,6 +286,10 @@ function AdminApp() {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null); setReassignFrom(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
     setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
+    setBillOpen(false);
+    // Seed the billing editor from the list row so it opens showing what is actually set.
+    const row = clients.find((c) => c.client_id === cid);
+    setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -290,11 +301,24 @@ function AdminApp() {
     if (!id || !ncCompany.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt });
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt, discountPercent: ncExempt ? 0 : (Number(ncDiscount) || 0) });
       const c = await api("list_clients", pwd); setClients(c.clients || []);
-      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false);
+      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false); setNcExempt(false); setNcDiscount("0");
       await loadClient(id);
       flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  const saveBilling = async () => {
+    if (!sel) return;
+    const pct = Math.round(Number(billPct));
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) { flash({ err: "Discount must be a whole number from 0 to 100." }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api("set_billing", pwd, { clientId: sel, billingExempt: billExempt, discountPercent: pct });
+      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      setBillOpen(false);
+      flash({ ok: `Billing saved for ${sel}. ${r.note || ""}`.trim() });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -506,6 +530,7 @@ function AdminApp() {
           </select>
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
+          <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a client first"}>{billOpen ? "Cancel" : "Billing"}</button>
           <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
               client (portal.html auto-opens ?view= for logged-in operators). */}
@@ -547,6 +572,58 @@ function AdminApp() {
                 </div>
               </span>
             </label>
+            {/* Account discount, not a coupon: it belongs to the ACCOUNT, so it applies to
+                whatever they subscribe to whenever, with no code to re-enter or share. */}
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 13, color: "#1E293B" }}>
+              <input type="number" min="0" max="100" step="1" value={ncDiscount}
+                onChange={(e) => setNcDiscount(e.target.value)} disabled={ncExempt}
+                style={{ ...S.input, width: 74, marginTop: -2, opacity: ncExempt ? 0.5 : 1 }} />
+              <span>
+                <b>% off</b> — ongoing discount on recurring price
+                <div style={{ fontSize: 11.5, color: "#475569", marginTop: 2, lineHeight: 1.45 }}>
+                  Leave 0 for full price. Applies to every feature they ever subscribe to, for as long as the
+                  subscription runs — no coupon code to re-enter. Setup fees are never discounted.
+                  {ncExempt && <b> Not applicable to a non-billable account.</b>}
+                </div>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {billOpen && (
+          <div style={{ ...S.card, background: "#F0FDF4", border: "1px solid #86EFAC" }}>
+            <div style={S.h2}>Billing — {sel}</div>
+            <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
+              The discount belongs to the <b>account</b>, so it applies to every feature this tenant ever
+              subscribes to, for as long as each subscription runs. Recurring price only — setup fees are
+              never discounted.
+            </div>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                <input type="number" min="0" max="100" step="1" value={billPct}
+                  onChange={(e) => setBillPct(e.target.value)} disabled={billExempt}
+                  style={{ ...S.input, width: 74, opacity: billExempt ? 0.5 : 1 }} />
+                <b>% off recurring</b>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+                <input type="checkbox" checked={billExempt} onChange={(e) => setBillExempt(e.target.checked)} />
+                <b>Non-billable</b> (never charged, skips the gate)
+              </label>
+              <button onClick={saveBilling} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save billing</button>
+            </div>
+            {/* Two ways to get this wrong, both expensive, so say them out loud. */}
+            <div style={{ fontSize: 12, color: "#166534", marginTop: 12, lineHeight: 1.55, background: "#DCFCE7", borderRadius: 8, padding: "9px 12px" }}>
+              <b>Applies to future subscriptions only.</b> The gateway stores the amount on each subscription,
+              so changing the discount does not re-price anything already running — it affects what they
+              subscribe to next.
+              {billExempt === false && clients.find((c) => c.client_id === sel)?.billingExempt && (
+                <div style={{ marginTop: 6, color: "#991B1B" }}>
+                  <b>Careful:</b> you are removing Non-billable. If {sel} has no active subscription they will be
+                  locked out of their portal the moment this saves. Set the discount first, have them subscribe,
+                  then remove the exemption.
+                </div>
+              )}
+            </div>
           </div>
         )}
 
