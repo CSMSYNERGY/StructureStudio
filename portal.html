@@ -496,6 +496,36 @@ function SearchInput({ value, onChange, placeholder }) {
   );
 }
 
+// ─── Tinted card header ───
+// The brand's light blue behind the header a card already had. Colours something worth
+// reading — the count, the page's own description, its legend — rather than repeating the
+// page name the topbar is already showing two inches above.
+//
+// It bleeds to the card's edges via negative margins exactly equal to S.card's padding (20),
+// so no card has to be restructured into header + padded body. Radius is 11 not 12: the card
+// has a 1px border, so the inner corner is one pixel tighter than the outer.
+//
+// #DBEAFF with #3D3672 on it is ~9:1 — the one pairing in the brand palette that can carry
+// small body text. Mint could not do this job at 1.6:1.
+function CardHead({ title, count, desc, right, children }) {
+  return (
+    <div style={{ background: "#DBEAFF", margin: "-20px -20px 14px", padding: "13px 20px", borderRadius: "11px 11px 0 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#3D3672", letterSpacing: 0.3 }}>{title}</div>
+        {count != null && count !== "" && (
+          <span style={{ fontSize: 12.5, fontWeight: 800, background: "#3D3672", color: "#FFF", borderRadius: 6, padding: "1px 8px" }}>{count}</span>
+        )}
+        {right && <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>{right}</div>}
+      </div>
+      {desc && (
+        <div style={{ fontSize: 12, color: "#4B4680", marginTop: 5, lineHeight: 1.5 }}>
+          {desc}{children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
@@ -577,10 +607,12 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
 
   return (
     <div style={S.card}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Designs {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
-        <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
-      </div>
+      <CardHead
+        title="Designs"
+        count={rows ? (query ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        desc="Every building a customer has designed, newest first. Open one to reopen it in the designer, or resend its estimate."
+        right={<button onClick={load} style={{ ...S.btn("#FFF", "#3D3672"), border: "1px solid #C3D9F7", padding: "6px 12px" }}>↻ Refresh</button>}
+      />
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
@@ -856,17 +888,20 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
 
   return (
     <div style={S.card}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ ...S.h2, marginBottom: 0 }}>Contacts {rows ? (query ? `(${filtered.length} of ${rows.length})` : `(${rows.length})`) : ""}</div>
-        <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
-      </div>
-      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only.
+      <CardHead
+        title="Contacts"
+        count={rows ? (query ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        desc="Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only."
+        right={<button onClick={load} style={{ ...S.btn("#FFF", "#3D3672"), border: "1px solid #C3D9F7", padding: "6px 12px" }}>↻ Refresh</button>}
+      >
+        {/* The status dots keep their own semantic colours — green/amber/red mean the same
+            thing everywhere and must not be recoloured to fit a header tint. */}
         <span style={{ marginLeft: 6, whiteSpace: "nowrap" }}>
           <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#16A34A", margin: "0 4px 0 6px", verticalAlign: "middle" }} />active
           <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#F59E0B", margin: "0 4px 0 10px", verticalAlign: "middle" }} />recent
           <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#EF4444", margin: "0 4px 0 10px", verticalAlign: "middle" }} />idle
         </span>
-      </div>
+      </CardHead>
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />}
       {invMsg && invMsg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{invMsg.ok}</div>}
       {invMsg && invMsg.err && <div style={{ ...S.err, marginBottom: 10 }}>{invMsg.err}</div>}
@@ -3144,26 +3179,27 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
 
   return (
     <div style={S.card}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-        <div style={{ ...S.h2, marginBottom: 0, flex: 1 }}>Client accounts</div>
-        {/* Acts on the filtered set, and each is disabled when it would do nothing — so the
-            control tells you the current state instead of being a pair of dead buttons. */}
-        <button type="button" onClick={expandAll} disabled={!filtered.length || openCount === filtered.length}
-          title="Show the users under every account listed"
-          style={{ ...S.btn("#F1F5F9", openCount === filtered.length || !filtered.length ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
-          Expand all
-        </button>
-        <button type="button" onClick={collapseAll} disabled={openCount === 0}
-          title="Hide all user lists"
-          style={{ ...S.btn("#F1F5F9", openCount === 0 ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
-          Collapse all
-        </button>
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
-          style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 220 }} />
-      </div>
-      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px" }}>
-        Open any client's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values.
-      </p>
+      <CardHead
+        title="Client accounts"
+        count={clients ? (query ? `${filtered.length} of ${clients.length}` : clients.length) : null}
+        desc="Open any client's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values."
+        right={<>
+          {/* Acts on the filtered set, and each is disabled when it would do nothing — so the
+              control tells you the current state instead of being a pair of dead buttons. */}
+          <button type="button" onClick={expandAll} disabled={!filtered.length || openCount === filtered.length}
+            title="Show the users under every account listed"
+            style={{ ...S.btn("#FFF", openCount === filtered.length || !filtered.length ? "#A9B6D6" : "#3D3672"), border: "1px solid #C3D9F7", padding: "7px 11px", fontSize: 12 }}>
+            Expand all
+          </button>
+          <button type="button" onClick={collapseAll} disabled={openCount === 0}
+            title="Hide all user lists"
+            style={{ ...S.btn("#FFF", openCount === 0 ? "#A9B6D6" : "#3D3672"), border: "1px solid #C3D9F7", padding: "7px 11px", fontSize: 12 }}>
+            Collapse all
+          </button>
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
+            style={{ border: "1px solid #C3D9F7", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 190, background: "#FFF" }} />
+        </>}
+      />
       {error && <div style={{ color: "#B91C1C", fontSize: 13, marginBottom: 10 }}>{error}</div>}
       {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
       {clients !== null && !error && filtered.length === 0 && <div style={{ color: "#64748B", fontSize: 13 }}>No accounts match.</div>}
@@ -3733,7 +3769,10 @@ function Dashboard({ session }) {
         + (activeTab === "admin" ? " ss-admin-active" : "")
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
-          <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
+          {/* Page NAME only. The subtitle used to live here too, saying a shorter version of
+              the sentence the card header below now carries — the same duplication twice over.
+              TAB_META still holds those strings; nothing else reads slot [1] on this page. */}
+          <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}</div>
           {viewing && (
             <div title="You are acting as this client. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
               style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEE2E2", border: "1px solid #DC2626", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#991B1B", whiteSpace: "nowrap" }}>
