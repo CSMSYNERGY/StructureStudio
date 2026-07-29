@@ -1493,7 +1493,13 @@ function BillingView({ viewingLabel = null }) {
   const cartPlans = cart.map(([f, iv]) => byFeature[f].plans[iv]).filter(Boolean);
   const moTotal = cartPlans.filter((p) => p.billing_interval === "monthly").reduce((s, p) => s + (chargeOf(p) || 0), 0);
   const yrTotal = cartPlans.filter((p) => p.billing_interval === "annual").reduce((s, p) => s + (chargeOf(p) || 0), 0);
-  const setupTotal = cart.reduce((s, [f]) => s + (byFeature[f].setup || 0), 0);
+  // From the SELECTED plan rows, not byFeature.setup — that field is whichever interval's
+  // row happened to be seen first, and monthly/annual can carry different setup fees.
+  const setupTotal = cartPlans.reduce((s, p) => s + (p.setup_fee_cents || 0), 0);
+  // Charged at checkout: first period of every cart item plus setup fees. Registering a
+  // recurring never charges anything by itself — the server runs this as an immediate sale
+  // and schedules the subscription's own first charge at the renewal. All cents.
+  const dueTodayCents = cartPlans.reduce((s, p) => s + (chargeOf(p) || 0), 0) + setupTotal;
   const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
@@ -1534,22 +1540,35 @@ function BillingView({ viewingLabel = null }) {
     if (planIds.length === 0) { setMsg({ err: "Select at least one feature." }); return; }
     setMsg(null); setBusy(true);
     try {
-      const body = { action: "subscribe", planIds };
+      // EVERY caller echoes the exact amount shown, and the server refuses a mismatch —
+      // so the card can only ever be charged the number that was on screen. dueTodayCents
+      // is already cents (the old operator path sent setupTotal * 100, cents times a
+      // hundred; never bit only because every setup fee is $0).
+      const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents };
       if (viewingLabel) {
-        // Real money against THEIR card. Confirm with the client named and the amount
-        // spelt out, then echo the setup total so the server can verify we meant it.
-        const amount = setupTotal > 0 ? ` and charge a one-time setup fee of ${fmt$(setupTotal)}` : "";
-        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s)${amount}?
+        // Real money against THEIR card: confirm with the client named and the amount out loud.
+        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and charge ${fmt$(dueTodayCents)} today?
 
 This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
-        body.confirmChargeCents = Math.round(setupTotal * 100);
       } else if (!data.hasCard) {
         body.paymentToken = await getPaymentToken();
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
-      if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
+      if (e) {
+        // A non-2xx from the function carries the real story in its BODY — a declined-card
+        // message, a "charge may not have been reversed (ref …)" with the transaction id,
+        // or the fresh due-today amount on a price mismatch. e.message alone is the generic
+        // "non-2xx status code" and would hide all of it.
+        let msg = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_x) {}
+        throw new Error(msg);
+      }
+      if (r && r.error) throw new Error(r.error);
       if (r.failed && r.failed.length > 0) {
-        setMsg({ err: `Some features could not be started: ${r.failed.map((x) => x.planId).join(", ")}. Contact CSM Synergy.` });
+        // The per-feature error text matters here: it may carry a transaction reference or
+        // an explicit "do NOT try again" — a bare plan id would hide exactly the part the
+        // customer and support need.
+        setMsg({ err: `Some features could not be started - ${r.failed.map((x) => `${x.planId}: ${x.error}`).join(" | ")}` });
       } else {
         setMsg({ ok: "You're subscribed — thank you!" });
       }
@@ -1706,6 +1725,13 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 {moTotal > 0 && <div>Monthly total: <b>{fmt$(moTotal)}/mo</b></div>}
                 {yrTotal > 0 && <div>Yearly total: <b>{fmt$(yrTotal)}/yr</b></div>}
                 <div>One-time setup: <b>{fmt$(setupTotal)}</b></div>
+                {/* The first period is charged at checkout — the recurring only takes over
+                    at renewal — so the number the card sees today is stated in bold before
+                    the button, not discovered on a statement. */}
+                <div style={{ marginTop: 4, fontSize: 14.5, color: "#1E293B" }}>
+                  Due today: <b style={{ color: "#3D3672" }}>{fmt$(dueTodayCents)}</b>
+                  <span style={{ fontSize: 12, color: "#64748B" }}> — first {yrTotal > 0 && moTotal > 0 ? "period" : yrTotal > 0 ? "year" : "month"}{setupTotal > 0 ? " + setup" : ""}. Renews automatically.</span>
+                </div>
               </div>
               {/* An operator must never be the one entering a card: a Collect.js token is
                   minted in the CARDHOLDER's browser, so in operator mode it would be ours.

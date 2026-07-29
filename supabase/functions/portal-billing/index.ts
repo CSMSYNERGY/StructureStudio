@@ -50,14 +50,35 @@ const SECURITY_KEY = Deno.env.get("NMI_SECURITY_KEY") || "";
 const TOKENIZATION_KEY = Deno.env.get("NMI_TOKENIZATION_KEY") || "";
 
 // POST to the gateway's Payment API. Form-urlencoded in/out; response=1 approved.
+//
+// TWO distinct failure kinds, and money-path callers must not conflate them:
+//   - a DECLINE: the gateway answered and said no. The outcome is KNOWN — nothing charged.
+//   - TRANSPORT failure (timeout, reset, 5xx before a parseable body): the outcome is
+//     UNKNOWN. The gateway may have processed the request — including charging the card —
+//     and we simply never heard. Callers must treat this as "possibly happened", never as
+//     "didn't happen"; treating it as a decline is how a customer gets charged twice.
+// isGatewayUnknown() tells them apart. The 30s timeout turns an indefinite hang into an
+// explicit unknown instead of letting the whole function die mid-loop with no catch.
+const GATEWAY_UNKNOWN = "GATEWAY_UNKNOWN:";
+export function isGatewayUnknown(e: unknown): boolean {
+  return String((e as Error)?.message ?? "").startsWith(GATEWAY_UNKNOWN);
+}
 async function nmiPost(params: Record<string, string>) {
   const body = new URLSearchParams({ security_key: SECURITY_KEY, ...params });
-  const res = await fetch(`${GATEWAY}/api/transact.php`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  const text = await res.text();
+  let text: string;
+  try {
+    const res = await fetch(`${GATEWAY}/api/transact.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (res.status >= 500) throw new Error(`${GATEWAY_UNKNOWN} gateway returned HTTP ${res.status}`);
+    text = await res.text();
+  } catch (e) {
+    if (isGatewayUnknown(e)) throw e;
+    throw new Error(`${GATEWAY_UNKNOWN} ${(e as Error).message}`);
+  }
   const parsed = Object.fromEntries(new URLSearchParams(text));
   if (parsed.response !== "1") {
     throw new Error(parsed.responsetext || "transaction declined");
@@ -171,9 +192,20 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     else if (s.status === "past_due") {
       const ends = graceEndOf(s);
       st = ends > now ? { usable: true, state: "grace", graceEnds: ends } : { usable: false, state: "past_due", graceEnds: ends };
+    } else if (s.status === "cancelled") {
+      // Since 2026-07-29 checkout charges each period UP FRONT, so a cancellation must keep
+      // access through what was already paid — locking at once would confiscate a prepaid
+      // year, and the cancel dialog explicitly promises "stops at the end of the billing
+      // period". current_period_end is reliable on rows created since the same change; the
+      // legacy rows without it (nothing was prepaid under the old bill-in-arrears flow)
+      // fall through to the old lock-immediately behaviour, which for them is correct.
+      const paidThrough = s.current_period_end ? Date.parse(s.current_period_end) : NaN;
+      if (Number.isFinite(paidThrough) && paidThrough > now) {
+        st = { usable: true, state: "cancelled_paid", graceEnds: null };
+      }
     }
     const prior = featureState.get(feature);
-    const rank = (x: { state: string }) => (x.state === "active" ? 3 : x.state === "grace" ? 2 : x.state === "past_due" ? 1 : 0);
+    const rank = (x: { state: string }) => (x.state === "active" ? 3 : x.state === "grace" || x.state === "cancelled_paid" ? 2 : x.state === "past_due" ? 1 : 0);
     if (!prior || rank(st) > rank(prior)) featureState.set(feature, st);
   }
 
@@ -189,7 +221,10 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // The gate turns on the REQUIRED feature(s) — today that's Simple Layout, which is
     // the product itself; without it there is nothing to let them into.
     const states = requiredFeatures.map((f) => featureState.get(f));
-    if (states.some((s) => s?.state === "active")) { entState = "active"; reason = "active"; }
+    // cancelled_paid classifies as ACTIVE, not as a warning state: they paid for this
+    // period and nothing is wrong — the only difference is that no renewal will happen,
+    // which the Billing tab's cancelled row already shows.
+    if (states.some((s) => s?.state === "active" || s?.state === "cancelled_paid")) { entState = "active"; reason = "active"; }
     else if (states.some((s) => s?.state === "grace")) {
       entState = "grace"; reason = "past_due";
       const ends = Math.max(...states.map((s) => s?.graceEnds ?? 0));
@@ -337,44 +372,58 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       if (vErr) return json({ error: vErr.message }, 500);
     }
 
-    // One-time setup fees (NULL = TBD = not charged yet, per the founding pricing).
-    const setupTotal = chosen.reduce((s, p) => s + (p!.setup_fee_cents || 0), 0);
+    // ── What the card is charged TODAY ──────────────────────────────────────────────
+    // Registering a recurring subscription never charges anything. NMI starts the clock at
+    // the subscribe date and takes the first plan_amount at the END of the first cycle —
+    // proven live 2026-07-29 on subscription 12358527270 (Query API): created 2026-07-28
+    // with a $0 setup fee, its first charge was scheduled for 2027-07-28. As originally
+    // written, checkout gave every subscriber their first period FREE — a year, for an
+    // annual plan — while the UI presented it as paying now.
+    //
+    // So checkout now charges first period + setup as an immediate SALE, and registers the
+    // subscription so its first gateway charge is the RENEWAL.
+    const dueTodayTotal = chosen.reduce((s, p) => s + chargeCentsFor(p!) + (p!.setup_fee_cents || 0), 0);
 
-    // Last gate before any money moves. Two operator-only conditions:
-    //   1. A setup fee is an immediate real charge, so the caller must have named the
-    //      exact amount — the same confirm-the-value idiom admin-catalog uses for
-    //      delete_client's confirmClientId.
-    //   2. A DURABLE audit row, written before the first nmiPost. auditStrict throws, and
-    //      we refuse on failure: if we cannot record who charged a client's card, we do
-    //      not charge it. (Reads elsewhere use best-effort audit for the opposite reason.)
+    // Last gate before any money moves. EVERY caller — tenant or operator — must name the
+    // exact amount that will hit the card today; a mismatch means the browser showed one
+    // number and the server would charge another (stale prices, a discount changed mid-
+    // session), and the caller must re-confirm against the fresh amount returned here.
+    if (Number(payload?.confirmChargeCents) !== dueTodayTotal) {
+      return json({
+        error: `Your total due today is $${(dueTodayTotal / 100).toFixed(2)} (first period plus any setup fees). Confirm the amount and try again.`,
+        dueTodayCents: dueTodayTotal,
+      }, 400);
+    }
+    // Operators additionally leave a DURABLE audit row before the first nmiPost.
+    // auditStrict throws, and we refuse on failure: if we cannot record who charged a
+    // client's card, we do not charge it.
     if (operator) {
-      if (setupTotal > 0 && Number(payload?.confirmChargeCents) !== setupTotal) {
-        return json({ error: `This will charge the tenant a one-time setup fee of $${(setupTotal / 100).toFixed(2)}. Re-send with confirmChargeCents=${setupTotal} to proceed.` }, 400);
-      }
       try {
-        await auditStrict("operator_billing_subscribe_attempt", chosen.length, `plans=${planIds.join(",")} setup_cents=${setupTotal}`);
+        await auditStrict("operator_billing_subscribe_attempt", chosen.length, `plans=${planIds.join(",")} due_today_cents=${dueTodayTotal}`);
       } catch (e) {
         return json({ error: (e as Error).message }, 503);
       }
     }
 
-    if (setupTotal > 0) {
-      try {
-        await nmiPost({
-          type: "sale",
-          amount: (setupTotal / 100).toFixed(2),
-          customer_vault_id: vault,
-          orderid: `ss_setup_${clientId}`,
-          order_description: `StructureStudio setup: ${features.join(", ")}`,
-        });
-      } catch (e) {
-        return json({ error: `Setup fee charge failed: ${(e as Error).message}` }, 402);
-      }
-    }
-
+    // ONE clock for the whole checkout: billingDay and the renewal arithmetic must never
+    // observe different dates (a midnight straddle between two `new Date()` calls would
+    // compute a renewal a month off).
+    const checkoutNow = new Date();
     // Bill on today's day-of-month, capped at 28 so a subscription started on the 29th-31st
     // has the same anniversary in February as in every other month rather than drifting.
-    const billingDay = Math.min(new Date().getUTCDate(), 28);
+    const billingDay = Math.min(checkoutNow.getUTCDate(), 28);
+    // First renewal, custom-amount path: one interval from today on billingDay (≤28, so
+    // month arithmetic can never roll over). This exact date is TRANSMITTED as start_date.
+    const renewalOf = (interval: string): Date =>
+      new Date(Date.UTC(checkoutNow.getUTCFullYear(), checkoutNow.getUTCMonth() + (interval === "annual" ? 12 : 1), billingDay));
+    // First renewal, plan_id path: NOT transmitted — the gateway plan's own schedule rules,
+    // and those plans use day_frequency (proven 365 for yearly via the Query API; 30 assumed
+    // for monthly, same plan-creation batch). So the DB mirror uses the same arithmetic the
+    // gateway will, not the capped-day date it was never told about.
+    const planPathRenewal = (interval: string): Date =>
+      new Date(checkoutNow.getTime() + (interval === "annual" ? 365 : 30) * 86400000);
+    const yyyymmdd = (d: Date) =>
+      `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
 
     // One recurring subscription per feature, sequentially; report partial failures.
     //
@@ -397,11 +446,110 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // every ordinary customer uses. Collapse to one path once proven.
     const created: any[] = [];
     const failed: { planId: string; error: string }[] = [];
-    for (const p of chosen) {
+    // Required base first: if Simple Layout cannot be started, charging for add-ons would
+    // take money for features behind a portal that is about to be locked.
+    const orderedChosen = [...chosen].sort((a, b) => Number(b!.required) - Number(a!.required));
+    let baseFailed = false;
+    for (const p of orderedChosen) {
+      const chargeCents = chargeCentsFor(p!);
+      const pct = discountForFeature(p!.feature);
+      const discounted = chargeCents !== p!.price_cents;
+      const firstCents = chargeCents + (p!.setup_fee_cents || 0);
+      const renewal = discounted ? renewalOf(p!.billing_interval) : planPathRenewal(p!.billing_interval);
+
+      if (baseFailed && !p!.required && !liveFeatures.has(requiredFeatures[0] ?? "")) {
+        failed.push({ planId: p!.id, error: "Skipped - the required base plan could not be started, and this feature would be unusable without it." });
+        continue;
+      }
+      // A 100% discount reaches the gateway as plan_amount "0.00", which either errors or
+      // registers a pointless $0 recurring. Fully-free accounts have a real mechanism.
+      if (firstCents === 0) {
+        failed.push({ planId: p!.id, error: "This account's discount makes this feature free - use the Non-billable setting instead of a 100% discount." });
+        if (p!.required) baseFailed = true;
+        continue;
+      }
+
+      // ── Attempt ledger: the charge exists in OUR records before it exists anywhere ──
+      // A prior attempt whose outcome could not be verified blocks this plan entirely:
+      // retrying an unverified charge is how a customer gets billed twice.
+      const { data: unknownPrior } = await admin.from("billing_charge_attempts")
+        .select("id").eq("client_id", clientId).eq("plan_id", p!.id).eq("state", "closed_unknown").limit(1);
+      if (unknownPrior && unknownPrior.length) {
+        failed.push({ planId: p!.id, error: "A previous payment attempt for this feature could not be verified. To avoid a double charge, contact CSM Synergy before trying again." });
+        if (p!.required) baseFailed = true;
+        continue;
+      }
+      // An 'open' attempt older than 10 minutes means a checkout DIED mid-flight — the one
+      // failure the catch below can never see. That outcome is exactly as unknown as a lost
+      // gateway response, so it is promoted to closed_unknown (blocking, support resolves)
+      // rather than left blocking forever behind a misleading "in progress" message.
+      const { data: staleOpen } = await admin.from("billing_charge_attempts")
+        .select("id, created_at").eq("client_id", clientId).eq("plan_id", p!.id).eq("state", "open").limit(1);
+      if (staleOpen && staleOpen.length) {
+        const ageMs = Date.now() - Date.parse(staleOpen[0].created_at);
+        if (ageMs > 10 * 60 * 1000) {
+          await admin.from("billing_charge_attempts")
+            .update({ state: "closed_unknown", detail: "stale open attempt - checkout crashed mid-flight; verify at the gateway", closed_at: new Date().toISOString() })
+            .eq("id", staleOpen[0].id).eq("state", "open");
+          failed.push({ planId: p!.id, error: "A previous payment attempt did not finish and could not be verified. To avoid a double charge, contact CSM Synergy before trying again." });
+        } else {
+          failed.push({ planId: p!.id, error: "Another checkout for this feature is already in progress. Give it a moment, then refresh." });
+        }
+        if (p!.required) baseFailed = true;
+        continue;
+      }
+      // Inserting the 'open' row is also the concurrency guard: a simultaneous second
+      // request hits the partial unique index and stops here, before any charge.
+      const { data: attempt, error: attErr } = await admin.from("billing_charge_attempts")
+        .insert({ client_id: clientId, plan_id: p!.id, orderid: `ss_first_${clientId}_${p!.id}` })
+        .select("id").maybeSingle();
+      if (attErr || !attempt) {
+        failed.push({ planId: p!.id, error: "Another checkout for this feature is already in progress. Give it a moment, then refresh." });
+        if (p!.required) baseFailed = true;
+        continue;
+      }
+      const closeAttempt = (state: string, detail: string | null, txn: string | null) =>
+        admin.from("billing_charge_attempts")
+          .update({ state, detail, sale_txn: txn, closed_at: new Date().toISOString() })
+          .eq("id", attempt.id).then(() => undefined, () => undefined);
+
+      // Per-FEATURE sale + registration, so a failure can be unwound feature-by-feature:
+      // money and access must never disagree. saleTxn / regSubId track how far this
+      // feature got, and the catch reverses exactly that much.
+      let saleTxn: string | null = null;
+      let regSubId: string | null = null;
       try {
-        const chargeCents = chargeCentsFor(p!);
-        const pct = discountForFeature(p!.feature);
-        const discounted = chargeCents !== p!.price_cents;
+        // 1. Charge the first period (plus this feature's setup fee) NOW.
+        try {
+          const sale = await nmiPost({
+            type: "sale",
+            amount: (firstCents / 100).toFixed(2),
+            customer_vault_id: vault,
+            orderid: `ss_first_${clientId}_${p!.id}`,
+            order_description: `StructureStudio ${p!.name} (${p!.billing_interval}) - first ${p!.billing_interval === "annual" ? "year" : "month"}${(p!.setup_fee_cents || 0) > 0 ? " + setup" : ""}${discounted ? `, ${pct}% off` : ""}`,
+          });
+          saleTxn = sale.transactionid || null;
+        } catch (se) {
+          if (isGatewayUnknown(se)) {
+            // The card MAY have been charged and we cannot know. Do not guess, do not
+            // retry, do not tell the customer nothing happened. The closed_unknown row
+            // blocks every further attempt for this plan until support reconciles.
+            await closeAttempt("closed_unknown", `sale outcome unverifiable: ${(se as Error).message}`, null);
+            failed.push({ planId: p!.id, error: "We could not confirm whether your card was charged. Do NOT try again - contact CSM Synergy and we will confirm and finish the setup." });
+            if (p!.required) baseFailed = true;
+            continue;
+          }
+          await closeAttempt("closed_declined", (se as Error).message, null);
+          failed.push({ planId: p!.id, error: (se as Error).message });
+          if (p!.required) baseFailed = true;
+          continue;
+        }
+        // 2. Register the recurring so its first gateway charge is the RENEWAL.
+        //    plan_id path: proven to bill at period end (that is the very bug being fixed),
+        //    so with period 1 paid above, its built-in schedule is now correct as-is.
+        //    Custom-amount path: day_of_month alone is ambiguous about the first charge
+        //    (subscribe ON the billing day could mean today), so start_date pins it to the
+        //    renewal explicitly — a documented parameter on this form.
         const r = await nmiPost({
           recurring: "add_subscription",
           ...(discounted
@@ -410,6 +558,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
               plan_payments: "0",                                          // 0 = until cancelled
               month_frequency: p!.billing_interval === "annual" ? "12" : "1",
               day_of_month: String(billingDay),
+              start_date: yyyymmdd(renewal),
               // Undocumented for the classic custom-amount form (NMI documents plan_name
               // for v5 only) but VERIFIED HONOURED: a live webhook payload came back with
               // plan.name = "SS_SIMPLE_LAYOUT_MONTHLY_25OFF" (2026-07-28). Deposyt's
@@ -428,23 +577,62 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             : `StructureStudio ${p!.name} (${p!.billing_interval})`,
         });
         const subId = r.subscription_id || r.transactionid;
+        regSubId = subId || null;
         const { data: row, error: insErr } = await admin
           .from("billing_subscriptions")
           .upsert({
             id: subId,
             client_id: clientId,
             plan_id: p!.id,
-            price_cents: chargeCents,          // what the gateway will actually bill
+            price_cents: chargeCents,          // what the gateway bills at each renewal
             list_price_cents: p!.price_cents,  // what it would have been without the discount
             status: "active",
             current_period_start: new Date().toISOString(),
+            current_period_end: renewal.toISOString(),   // period 1 is PAID (the sale above)
           }, { onConflict: "id" })
           .select("id, plan_id, status, price_cents, list_price_cents, current_period_start, current_period_end, canceled_at, created_at")
           .maybeSingle();
         if (insErr) throw new Error(insErr.message);
+        await closeAttempt("closed_ok", null, saleTxn);
         created.push(row);
       } catch (e) {
-        failed.push({ planId: p!.id, error: (e as Error).message });
+        // Unwind exactly as far as this feature got. Order matters: stop FUTURE charges
+        // first (delete the registration), then return TODAY's money.
+        //
+        // A registration failure that is GATEWAY_UNKNOWN is itself an unresolved state —
+        // an orphan recurring may exist that would bill at every renewal — so it lands in
+        // the same closed_unknown bucket as unverified money.
+        const unwindErrors: string[] = [];
+        if (isGatewayUnknown(e)) unwindErrors.push(`registration outcome unverifiable: ${(e as Error).message}`);
+        if (regSubId) {
+          try { await nmiPost({ recurring: "delete_subscription", subscription_id: regSubId }); }
+          catch (de) { unwindErrors.push(`delete_subscription ${regSubId}: ${(de as Error).message}`); }
+        }
+        if (saleTxn) {
+          // Void first (free, works pre-settlement); if the batch has already settled the
+          // void fails, so fall back to a refund of the exact amount.
+          try { await nmiPost({ type: "void", transactionid: saleTxn }); }
+          catch (_ve) {
+            try { await nmiPost({ type: "refund", transactionid: saleTxn, amount: (firstCents / 100).toFixed(2) }); }
+            catch (re) { unwindErrors.push(`void AND refund of ${saleTxn} failed: ${(re as Error).message}`); }
+          }
+        }
+        if (unwindErrors.length) {
+          // Money moved (or a registration stands) and could not be reversed automatically.
+          // Never silent: durable app_errors row, the attempt stays closed_unknown (which
+          // BLOCKS retries for this plan), and the caller gets the reference.
+          await closeAttempt("closed_unknown", `${(e as Error).message} | unwind: ${unwindErrors.join(" | ")}`, saleTxn);
+          await admin.from("app_errors").insert({
+            source: "edge:portal-billing", severity: "error", code: "charge_unwind_failed",
+            message: `subscribe ${p!.id} for ${clientId} failed (${(e as Error).message}) and the unwind also failed: ${unwindErrors.join(" | ")}`,
+            client_id: clientId,
+          }).then(() => undefined, () => undefined);
+          failed.push({ planId: p!.id, error: `The charge may not have been fully reversed (ref ${saleTxn ?? regSubId ?? "n/a"}). CSM Synergy has been notified and will make it right.` });
+        } else {
+          await closeAttempt("closed_declined", (e as Error).message, saleTxn);
+          failed.push({ planId: p!.id, error: saleTxn ? `${(e as Error).message} - the charge was reversed.` : (e as Error).message });
+        }
+        if (p!.required) baseFailed = true;
       }
     }
     if (created.length === 0) {
@@ -481,6 +669,10 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       return json({ error: `Payment gateway error: ${(e as Error).message}` }, 402);
     }
 
+    // current_period_end is deliberately NOT touched: since checkout charges each period up
+    // front, the entitlement treats a cancelled row with a future current_period_end as
+    // usable until that date ("cancelled_paid"). Nulling it here would confiscate the
+    // prepaid remainder — the exact thing the cancel dialog promises does not happen.
     const { data: row, error: upErr } = await admin
       .from("billing_subscriptions")
       .update({ status: "cancelled", canceled_at: new Date().toISOString(), updated_at: new Date().toISOString() })
