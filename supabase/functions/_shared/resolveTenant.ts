@@ -104,7 +104,19 @@ function makeAudit(admin: Admin, actor: { userId: string; email: string } | null
 export async function resolveTenant(
   req: Request,
   admin: Admin,
-  opts: { readActions: Set<string>; defaultAction?: string; requireBilling?: boolean },
+  opts: {
+    readActions: Set<string>;
+    defaultAction?: string;
+    requireBilling?: boolean;
+    /**
+     * Actions ANY authenticated tenant user may perform because they touch only their OWN
+     * row — self-service, e.g. editing your own name and phone. Deliberately separate from
+     * readActions: these are writes, and calling them "reads" to slip them past the
+     * owner/admin gate would make this security check lie about what it permits. The
+     * HANDLER is still responsible for scoping the write to ctx.userId.
+     */
+    selfActions?: Set<string>;
+  },
 ): Promise<Resolved> {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -125,6 +137,9 @@ export async function resolveTenant(
   catch { return { ok: false, status: 400, body: { error: "Invalid JSON" } }; }
   const action = String(payload?.action || opts.defaultAction || "status");
   const isRead = opts.readActions.has(action);
+  // A self-service write is allowed for any role, but ONLY on the caller's own row —
+  // enforced by the handler, which must key off ctx.userId and never a body-supplied id.
+  const isSelf = Boolean(opts.selfActions?.has(action));
 
   // 3. The caller's own tenant. Service role: client_users has no browser policies and
   //    this lookup must not depend on the caller's own claims.
@@ -149,7 +164,7 @@ export async function resolveTenant(
   // ── Normal path: unchanged behaviour ─────────────────────────────────────────
   if (!wantsOverride) {
     if (!mapping) return { ok: false, status: 403, body: { error: "No business is linked to this account." } };
-    if (!isRead && mapping.role !== "owner" && mapping.role !== "admin") {
+    if (!isRead && !isSelf && mapping.role !== "owner" && mapping.role !== "admin") {
       return {
         ok: false,
         status: 403,

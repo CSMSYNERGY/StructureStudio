@@ -5,7 +5,12 @@ import { withErrorLog } from "../_shared/logError.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
 // operator with can_write). Hoisted above the handler so the resolver can consult it.
-const READ_ACTIONS = new Set(["status", "catalog", "contact_activity"]);
+const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile"]);
+// Self-service: a WRITE any role may make, because it only ever touches the caller's own
+// client_users row (scoped to ctx.userId below, never to anything from the body). Kept out of
+// READ_ACTIONS on purpose — mislabelling a write as a read would make the permission gate
+// misdescribe what it allows. Without this a "user"-role account could not set its own name.
+const SELF_ACTIONS = new Set(["save_profile"]);
 
 // Owner-facing settings endpoint for the portal (portal.html).
 //
@@ -151,12 +156,41 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // mode actually read and write the viewed account instead of the operator's own.
   // Everything below this block is unchanged and simply uses `clientId`.
   const admin = createClient(supabaseUrl, serviceKey);
-  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, defaultAction: "status" });
+  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, selfActions: SELF_ACTIONS, defaultAction: "status" });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, role, operator, payload, action, audit, auditStrict } = r.ctx;
+  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
+
+  // ── The caller's own name and phone ─────────────────────────────────────────────
+  // Keyed on userId from the verified session — NEVER on anything in the body — so this
+  // cannot be pointed at another person's row whatever the caller sends. Any role may use
+  // it (see SELF_ACTIONS): a "user" account still needs to be able to fill in its own name.
+  if (action === "get_profile") {
+    const { data, error } = await admin
+      .from("client_users").select("full_name, phone, role").eq("user_id", userId).maybeSingle();
+    if (error) return json({ error: error.message }, 500);
+    return json({
+      fullName: data?.full_name ?? "",
+      phone: data?.phone ?? "",
+      role: data?.role ?? role,
+      email: userEmail,
+      // Drives the one-time nudge: users predating migration 060 have neither.
+      needsDetails: !(data?.full_name || "").trim(),
+    });
+  }
+
+  if (action === "save_profile") {
+    const fullName = String(payload?.fullName ?? "").trim().slice(0, 120);
+    const phone = String(payload?.phone ?? "").trim().slice(0, 40);
+    if (!fullName) return json({ error: "Please enter your name." }, 400);
+    const { error } = await admin.from("client_users")
+      .update({ full_name: fullName, phone: phone || null })
+      .eq("user_id", userId);        // own row only
+    if (error) return json({ error: error.message }, 500);
+    return json({ ok: true, fullName, phone });
+  }
 
   if (action === "status") {
     const { data, error } = await admin

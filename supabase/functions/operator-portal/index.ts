@@ -67,7 +67,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: op, error: opErr } = await admin
     .from("app_operators")
-    .select("user_id, email")
+    .select("user_id, email, can_write")   // can_write gates the write actions below
     .eq("user_id", user.id)
     .maybeSingle();
   if (opErr) return json({ error: opErr.message }, 500);
@@ -89,6 +89,17 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
     } catch (_) { /* audit is best-effort — never block the view on a log failure */ }
   };
 
+  // Writes get a DURABLE record: if we cannot log who changed a tenant's data, we don't change
+  // it. Same reasoning as portal-billing's auditStrict — best-effort is right for a read, where
+  // failing the request would block legitimate work, and wrong for a mutation.
+  const auditStrict = async (action: string, targetClientId: string | null, note: string) => {
+    const { error } = await admin.from("admin_audit").insert({
+      action, target_client_id: targetClientId, row_count: null,
+      note: `operator:${op.email || user.email || user.id} ${note}`.trim(),
+    });
+    if (error) throw new Error(`Could not record this change in the audit log: ${error.message}`);
+  };
+
   try {
     switch (action) {
       case "list_clients": {
@@ -97,11 +108,95 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
           .select("client_id, company_name")
           .order("client_id");
         if (error) throw error;
+        // A COUNT per tenant, not the people. The Accounts list shows "3 users" on a collapsed
+        // row and fetches the actual names/emails/phones only when one is expanded, so simply
+        // opening the tab does not pull every user's personal details into the browser — and
+        // each expansion is audit-logged against the tenant it belongs to.
+        const { data: cu, error: cuErr } = await admin.from("client_users").select("client_id");
+        if (cuErr) throw cuErr;
+        const counts = new Map<string, number>();
+        for (const r of cu || []) counts.set((r as any).client_id, (counts.get((r as any).client_id) || 0) + 1);
         await audit("operator_list_clients", null, (data || []).length);
         return json({
           ok: true,
-          clients: (data || []).map((r: any) => ({ clientId: r.client_id, companyName: r.company_name || r.client_id })),
+          clients: (data || []).map((r: any) => ({
+            clientId: r.client_id,
+            companyName: r.company_name || r.client_id,
+            userCount: counts.get(r.client_id) || 0,
+          })),
         });
+      }
+      case "list_users": {
+        // The people under ONE tenant. client_users holds no email, and its RLS lets a browser
+        // read only its own row, so this has to be a service-role read joined to auth.users.
+        const clientId = await assertClient(admin, payload.clientId);
+        const { data: rows, error } = await admin
+          .from("client_users")
+          .select("user_id, role, full_name, phone, created_at")
+          .eq("client_id", clientId)
+          .order("created_at");
+        if (error) throw error;
+        // Operator status is cross-tenant (app_operators), NOT a role within this client — a
+        // person can be an operator AND an owner here, so it is reported as a separate flag
+        // rather than folded into `role`, which would misstate who they are.
+        const { data: ops } = await admin.from("app_operators").select("user_id, can_write, can_bill");
+        const opById = new Map((ops || []).map((o: any) => [o.user_id, o]));
+        const users = [];
+        for (const r of rows || []) {
+          const uid = (r as any).user_id;
+          // No bulk join to auth.users is available through the client, so fetch per user.
+          // Tenants have single-digit user counts, so this stays a handful of calls.
+          let email = "", lastSignInAt = null, emailConfirmed = false, invitedAt = null;
+          try {
+            const { data: au } = await admin.auth.admin.getUserById(uid);
+            const u: any = au?.user;
+            if (u) {
+              email = u.email || "";
+              lastSignInAt = u.last_sign_in_at || null;
+              emailConfirmed = Boolean(u.email_confirmed_at);
+              invitedAt = u.invited_at || null;
+            }
+          } catch { /* a missing auth user must not break the whole list */ }
+          // NOT named `op` — that is the authenticated CALLER above, and shadowing it here is
+          // how a future `if (!op.can_write)` inside this loop would end up checking the
+          // listed user's rights instead of the caller's.
+          const listedOp: any = opById.get(uid);
+          users.push({
+            userId: uid,
+            email,
+            fullName: (r as any).full_name || "",
+            phone: (r as any).phone || "",
+            role: (r as any).role || "user",
+            isOperator: Boolean(listedOp),
+            operatorCanWrite: Boolean(listedOp?.can_write),
+            operatorCanBill: Boolean(listedOp?.can_bill),
+            lastSignInAt, emailConfirmed, invitedAt,
+            createdAt: (r as any).created_at,
+          });
+        }
+        await audit("operator_list_users", clientId, users.length);
+        return json({ ok: true, clientId, users });
+      }
+      case "save_user": {
+        // Operator fills in / corrects a user's name and phone. Contact details only — role and
+        // tenant are deliberately NOT editable here, because changing either grants or moves
+        // access and belongs with the deliberate link_owner flow, not an inline edit.
+        if (!op.can_write) return json({ error: "This operator account is read-only." }, 403);
+        const clientId = await assertClient(admin, payload.clientId);
+        const userId = String(payload.userId || "").trim();
+        if (!userId) return json({ error: "userId is required." }, 400);
+        const fullName = String(payload.fullName ?? "").trim().slice(0, 120);
+        const phone = String(payload.phone ?? "").trim().slice(0, 40);
+        // Scoped by BOTH ids: a userId from another tenant matches nothing rather than
+        // being edited across the boundary.
+        const { data: updated, error } = await admin.from("client_users")
+          .update({ full_name: fullName || null, phone: phone || null })
+          .eq("user_id", userId).eq("client_id", clientId)
+          .select("user_id").maybeSingle();
+        if (error) throw error;
+        if (!updated) return json({ error: "That user is not in this account." }, 404);
+        await auditStrict("operator_save_user", clientId, `user=${userId}`);
+        return json({ ok: true });
       }
       case "get_portal": {
         const clientId = await assertClient(admin, payload.clientId);

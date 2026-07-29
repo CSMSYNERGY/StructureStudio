@@ -45,6 +45,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-user-wrap:hover .ss-user-menu,.ss-user-wrap:focus-within .ss-user-menu{display:block}
 .ss-user-menu button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
 .ss-user-menu button:hover{background:#FEF2F2;color:#DC2626}
+/* Sign Out owns the red hover; a neutral item must not look destructive. */
+.ss-user-menu button.neutral:hover{background:#F1F5F9;color:#1E293B}
 .ss-user-menu button svg{width:15px;height:15px;flex-shrink:0}
 .ss-avatar{width:34px;height:34px;border-radius:50%;background:rgba(117,230,218,0.16);border:1px solid rgba(117,230,218,0.5);color:#B8F2E9;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;flex-shrink:0}
 .ss-user .uname{font-size:13px;font-weight:700;color:#FFF;line-height:1.15;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
@@ -3042,10 +3044,49 @@ function DesignerTab({ clientId, onSaved }) {
 // Lists every tenant (operator-portal:list_clients, server-side app_operators gate)
 // and opens one with FULL access, GHL-subaccounts style. Every list/view is audit-logged,
 // and every cross-tenant read/write is re-authorized server-side against app_operators.
-function AccountsTab({ viewing, onOpen }) {
+function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   const [clients, setClients] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
+  // Users are fetched PER TENANT, only when a row is expanded — opening the tab must not pull
+  // every user's name, email and phone into the browser, and each expansion is audit-logged
+  // against the tenant it belongs to. `users[clientId] === undefined` means "not loaded yet".
+  const [open, setOpen] = useState({});
+  const [users, setUsers] = useState({});
+  const [userErr, setUserErr] = useState({});
+
+  const loadUsers = useCallback(async (clientId) => {
+    setUserErr((e) => ({ ...e, [clientId]: null }));
+    const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId } });
+    if (err) {
+      let msg = err.message;
+      try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+      setUserErr((e) => ({ ...e, [clientId]: msg || "Could not load users." }));
+      setUsers((u) => ({ ...u, [clientId]: [] }));
+      return;
+    }
+    setUsers((u) => ({ ...u, [clientId]: Array.isArray(data && data.users) ? data.users : [] }));
+  }, []);
+
+  const toggle = (clientId) => {
+    const next = !open[clientId];
+    setOpen((o) => ({ ...o, [clientId]: next }));
+    if (next && users[clientId] === undefined) loadUsers(clientId);
+  };
+
+  // After an edit, re-fetch only the tenants currently expanded — the edited name has to
+  // appear without collapsing what the operator was looking at.
+  useEffect(() => {
+    if (!usersRefreshKey) return;
+    Object.keys(open).filter((k) => open[k]).forEach((k) => loadUsers(k));
+  }, [usersRefreshKey]);
+
+  const roleChip = (r) => ({
+    fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", borderRadius: 5, padding: "1px 5px",
+    color: r === "owner" ? "#065F46" : r === "admin" ? "#1E40AF" : "#475569",
+    background: r === "owner" ? "#D1FAE5" : r === "admin" ? "#DBEAFE" : "#F1F5F9",
+    border: `1px solid ${r === "owner" ? "#6EE7B7" : r === "admin" ? "#93C5FD" : "#E2E8F0"}`,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -3084,17 +3125,83 @@ function AccountsTab({ viewing, onOpen }) {
       {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
       {clients !== null && !error && filtered.length === 0 && <div style={{ color: "#64748B", fontSize: 13 }}>No accounts match.</div>}
       {filtered.map((c) => (
-        <div key={c.clientId} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: "1px solid #F1F5F9" }}>
-          <div style={{ width: 34, height: 34, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
-            {(c.companyName || c.clientId).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
+        <div key={c.clientId} style={{ borderBottom: "1px solid #F1F5F9" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px" }}>
+            {/* The whole identity block toggles, so the hit target is the row rather than a
+                6px chevron. aria-expanded so it reads as a disclosure, not a mystery button. */}
+            <button type="button" onClick={() => toggle(c.clientId)}
+              aria-expanded={!!open[c.clientId]}
+              title={open[c.clientId] ? "Hide users" : "Show users"}
+              style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", textAlign: "left" }}>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#94A3B8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                style={{ flexShrink: 0, transform: open[c.clientId] ? "rotate(90deg)" : "none", transition: "transform .12s" }}><path d="M9 18l6-6-6-6"/></svg>
+              <div style={{ width: 34, height: 34, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
+                {(c.companyName || c.clientId).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{c.companyName}</div>
+                <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                  {c.clientId}
+                  {c.userCount != null && <> · {c.userCount} {c.userCount === 1 ? "user" : "users"}</>}
+                </div>
+              </div>
+            </button>
+            {viewing && viewing.clientId === c.clientId
+              ? <span style={{ fontSize: 12, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 7, padding: "5px 10px" }}>Viewing</span>
+              : <button type="button" onClick={() => onOpen({ clientId: c.clientId, companyName: c.companyName })} style={S.btn("#1E293B", "#FFF")}>Open portal →</button>}
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{c.companyName}</div>
-            <div style={{ fontSize: 12, color: "#94A3B8" }}>{c.clientId}</div>
-          </div>
-          {viewing && viewing.clientId === c.clientId
-            ? <span style={{ fontSize: 12, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 7, padding: "5px 10px" }}>Viewing</span>
-            : <button type="button" onClick={() => onOpen({ clientId: c.clientId, companyName: c.companyName })} style={S.btn("#1E293B", "#FFF")}>Open portal →</button>}
+          {open[c.clientId] && (
+            <div style={{ padding: "2px 4px 12px 42px" }}>
+              {users[c.clientId] === undefined && <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "6px 0" }}>Loading users…</div>}
+              {userErr[c.clientId] && <div style={{ fontSize: 12.5, color: "#B91C1C", padding: "6px 0" }}>{userErr[c.clientId]}</div>}
+              {Array.isArray(users[c.clientId]) && users[c.clientId].length === 0 && (
+                <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "6px 0" }}>No logins linked to this account yet.</div>
+              )}
+              {Array.isArray(users[c.clientId]) && users[c.clientId].length > 0 && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead><tr>
+                      {["Name", "Email", "Phone", "Role", "Last sign-in", ""].map((h, i) => (
+                        <th key={i} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: "#94A3B8", padding: "4px 8px 6px 0", whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {users[c.clientId].map((u) => (
+                        <tr key={u.userId} style={{ borderTop: "1px solid #F1F5F9" }}>
+                          <td style={{ padding: "7px 8px 7px 0", color: u.fullName ? "#1E293B" : "#94A3B8", fontWeight: u.fullName ? 700 : 400 }}>
+                            {u.fullName || "— not set —"}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "#475569" }}>
+                            {u.email || <span style={{ color: "#94A3B8" }}>unknown</span>}
+                            {u.email && !u.emailConfirmed && (
+                              <span title="Has not confirmed their email / set a password yet" style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", color: "#92400E", background: "#FEF3C7", borderRadius: 5, padding: "1px 5px" }}>pending</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: u.phone ? "#475569" : "#CBD5E1" }}>{u.phone || "—"}</td>
+                          <td style={{ padding: "7px 8px 7px 0", whiteSpace: "nowrap" }}>
+                            <span style={roleChip(u.role)}>{u.role}</span>
+                            {/* Operator is cross-tenant (app_operators) — a separate badge, never
+                                merged into the tenant role, which would misstate who they are. */}
+                            {u.isOperator && (
+                              <span title="CSM Synergy operator — access spans every tenant, not just this one"
+                                style={{ marginLeft: 5, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", color: "#3730A3", background: "#E0E7FF", border: "1px solid #A5B4FC", borderRadius: 5, padding: "1px 5px" }}>operator</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "#94A3B8", whiteSpace: "nowrap" }}>
+                            {u.lastSignInAt ? new Date(u.lastSignInAt).toLocaleDateString() : "never"}
+                          </td>
+                          <td style={{ padding: "7px 0", textAlign: "right" }}>
+                            <button type="button" onClick={() => onEditUser(c, u)}
+                              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 9px", fontSize: 11 }}>Edit</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -3322,6 +3429,27 @@ function Dashboard({ session }) {
     })();
   }, [session]);
 
+  // ── Who the signed-in person is, and the operator's user editor ────────────────
+  // `profile` is the caller's own client_users row. needsDetails drives a one-time nudge:
+  // every user predating migration 060 has no name, and until they enter one the portal has
+  // been showing their email local-part as their name.
+  const [profile, setProfile] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [nudgeHidden, setNudgeHidden] = useState(false);
+  const [editUser, setEditUser] = useState(null);        // operator editing someone else
+  const [usersRefreshKey, setUsersRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await sb.functions.invoke("portal-settings", { body: { action: "get_profile" } });
+        if (!cancelled && data) setProfile(data);
+      } catch (_e) { /* a missing profile must never block the portal */ }
+    })();
+    return () => { cancelled = true; };
+  }, [session]);
+
   const signOut = () => sb.auth.signOut();
 
   if (tenant === null) {
@@ -3368,7 +3496,11 @@ function Dashboard({ session }) {
   // (no profile name field), so prefer any metadata name and fall back to the
   // email's local part.
   const meta = session.user.user_metadata || {};
-  const displayName = meta.full_name || meta.name || (session.user.email || "").split("@")[0];
+  // client_users.full_name (migration 060) is the real answer now — auth metadata never
+  // carried a name on this project, so this used to always fall through to the email's
+  // local part. Metadata is kept in the chain in case a future SSO provider supplies one.
+  const displayName = (profile && profile.fullName)
+    || meta.full_name || meta.name || (session.user.email || "").split("@")[0];
   const initials = displayName.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
   // The business shown in the topbar is the one being ACTED ON, not the login's own —
   // otherwise an operator sees their own company named in the slot styled as "the account
@@ -3445,6 +3577,10 @@ function Dashboard({ session }) {
     ? new Date(transEndsAt).toLocaleDateString(undefined, { month: "long", day: "numeric" })
     : null;
   const rate = (entitlement && entitlement.requiredRate) || null;
+
+  // Never nag an operator who is looking at someone else's account — the prompt is about
+  // the signed-in person's own details, and it would read as if it were the tenant's.
+  const showNudge = !viewing && !nudgeHidden && !!profile && profile.needsDetails;
   const fmtRate = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
 
   // Real <button>s (not href-less anchors) so the nav stays keyboard- and
@@ -3538,6 +3674,12 @@ function Dashboard({ session }) {
               <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
             </div>
             <div className="ss-user-menu" role="menu">
+              {/* Reachable by EVERY role. The Settings tab is owner/admin only, so a
+                  "user"-role account would have nowhere else to edit their own details. */}
+              <button type="button" className="neutral" onClick={() => setProfileOpen(true)} role="menuitem">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span className="mtext">Your details</span>
+              </button>
               <button type="button" onClick={signOut} role="menuitem">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
                 <span className="mtext">Sign Out</span>
@@ -3587,6 +3729,20 @@ function Dashboard({ session }) {
             </div>
           )}
           <div className="ss-inner">
+            {/* One-time nudge for a user with no name on file. Dismissible: it is a courtesy,
+                not a gate — nothing about it should block someone from doing their job. */}
+            {showNudge && (
+              <div style={{ background: "#F5F3FF", border: "1px solid #C4B5FD", borderRadius: 10, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#6D28D9" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: "#4C1D95" }}>
+                  Add your name and phone number so your team knows who's who.
+                </span>
+                <button type="button" onClick={() => setProfileOpen(true)}
+                  style={{ ...S.btn("#6D28D9", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Add details</button>
+                <button type="button" onClick={() => setNudgeHidden(true)} title="Dismiss"
+                  style={{ background: "none", border: "none", color: "#7C3AED", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "6px 2px" }}>Later</button>
+              </div>
+            )}
             {/* Dated free period. Nothing has gone wrong — they simply haven't started paying
                 yet — so this is deliberately informational (blue) rather than a warning, and
                 never says anything about a failed payment. */}
@@ -3637,7 +3793,9 @@ function Dashboard({ session }) {
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (
-              <AccountsTab viewing={viewing} onOpen={openAccount} />
+              <AccountsTab viewing={viewing} onOpen={openAccount}
+                onEditUser={(c, u) => setEditUser({ clientId: c.clientId, companyName: c.companyName, user: u })}
+                usersRefreshKey={usersRefreshKey} />
             )}
             {!gateLocked && activeTab === "orders" && (
               <ComingSoon
@@ -3794,6 +3952,110 @@ function Dashboard({ session }) {
           onSubmitted={() => setFeedbackKey((k) => k + 1)}
         />
       )}
+
+      {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
+          verified session's user id — the browser never says whose row to update. */}
+      {profileOpen && (
+        <ProfileDialog
+          initial={profile}
+          email={session.user.email}
+          onClose={() => setProfileOpen(false)}
+          onSaved={(p) => {
+            setProfile((prev) => ({ ...(prev || {}), fullName: p.fullName, phone: p.phone, needsDetails: false }));
+            setProfileOpen(false);
+          }}
+        />
+      )}
+
+      {/* Operator filling in someone else's details from the Accounts tab. Contact fields
+          only — role and tenant are not editable here, since either would move access. */}
+      {editUser && (
+        <ProfileDialog
+          title={`${editUser.user.fullName || editUser.user.email || "User"} — ${editUser.companyName}`}
+          initial={{ fullName: editUser.user.fullName, phone: editUser.user.phone }}
+          email={editUser.user.email}
+          save={async (fullName, phone) => {
+            const { data, error } = await sb.functions.invoke("operator-portal", {
+              body: { action: "save_user", clientId: editUser.clientId, userId: editUser.user.userId, fullName, phone },
+            });
+            if (error) {
+              let msg = error.message;
+              try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+              throw new Error(msg || "Could not save.");
+            }
+            if (data && data.error) throw new Error(data.error);
+          }}
+          onClose={() => setEditUser(null)}
+          onSaved={() => { setEditUser(null); setUsersRefreshKey((k) => k + 1); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Name + phone editor ───
+// One component for two callers: a user editing their OWN details (default save → the
+// self-service portal-settings action) and an operator editing someone else's (save injected
+// by the caller). Email is shown read-only — changing a login's email is an auth operation,
+// not a contact-detail edit, and belongs with the deliberate owner-linking flow.
+function ProfileDialog({ initial, email, onClose, onSaved, title, save }) {
+  const [fullName, setFullName] = useState((initial && initial.fullName) || "");
+  const [phone, setPhone] = useState((initial && initial.phone) || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const submit = async () => {
+    const n = fullName.trim();
+    if (!n) { setErr("Please enter a name."); return; }
+    setBusy(true); setErr(null);
+    try {
+      if (save) {
+        await save(n, phone.trim());
+      } else {
+        const { data, error } = await sb.functions.invoke("portal-settings", {
+          body: { action: "save_profile", fullName: n, phone: phone.trim() },
+        });
+        if (error) {
+          let msg = error.message;
+          try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+          throw new Error(msg || "Could not save.");
+        }
+        if (data && data.error) throw new Error(data.error);
+      }
+      onSaved({ fullName: n, phone: phone.trim() });
+    } catch (e) {
+      setErr(e.message || "Could not save.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div onClick={() => !busy && onClose()}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+      <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 420, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>{title || "Your details"}</div>
+        <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Used so your team knows who's who. Your phone number is visible to admins on this
+          account and to StructureStudio support — it is never shown to your customers.
+        </div>
+        {err && <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#B91C1C", borderRadius: 8, padding: "8px 11px", fontSize: 12.5, marginBottom: 12 }}>{err}</div>}
+        <span style={S.lbl}>Name</span>
+        <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Jane Yoder"
+          autoFocus style={{ ...S.input, marginBottom: 12 }} />
+        <span style={S.lbl}>Phone</span>
+        <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="(555) 123-4567"
+          inputMode="tel" style={{ ...S.input, marginBottom: 12 }} />
+        <span style={S.lbl}>Email</span>
+        <input value={email || ""} readOnly title="Contact StructureStudio to change the email on a login"
+          style={{ ...S.input, marginBottom: 18, background: "#F8FAFC", color: "#94A3B8" }} />
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button type="button" onClick={onClose} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+          <button type="button" onClick={submit} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
