@@ -4032,6 +4032,30 @@ function Dashboard({ session }) {
   );
 }
 
+// Format a US phone as it is typed: 5551234567 -> (555) 123-4567.
+//
+// Only when the input is plainly a US number. An explicit non-+1 country code, or more digits
+// than a US number holds (an extension, another country), is returned EXACTLY as entered —
+// silently reshaping "+44 20 7123 4567" into a US pattern would corrupt a real number, and
+// truncating to 10 digits would lose one. Idempotent, so re-formatting its own output is a
+// no-op, and it degrades cleanly while typing or backspacing rather than fighting the caret.
+function formatPhone(input) {
+  const raw = String(input == null ? "" : input);
+  const t = raw.trim();
+  if (/^\+/.test(t) && !/^\+\s*1\b/.test(t) && !/^\+\s*1\d/.test(t)) return raw;
+  const plus1Typed = /^\+\s*1/.test(t);
+  let d = raw.replace(/\D/g, "");
+  let cc = false;
+  if (plus1Typed && d[0] === "1") { d = d.slice(1); cc = true; }
+  else if (d.length === 11 && d[0] === "1") { d = d.slice(1); cc = true; }
+  if (d.length > 10) return raw;
+  const p = cc ? "+1 " : "";
+  if (!d) return cc ? "+1 " : "";
+  if (d.length <= 3) return p + d;
+  if (d.length <= 6) return `${p}(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `${p}(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
 // ─── Name + phone editor ───
 // One component for two callers: a user editing their OWN details (default save → the
 // self-service portal-settings action) and an operator editing someone else's (save injected
@@ -4039,7 +4063,9 @@ function Dashboard({ session }) {
 // not a contact-detail edit, and belongs with the deliberate owner-linking flow.
 function ProfileDialog({ initial, email, onClose, onSaved, title, save }) {
   const [fullName, setFullName] = useState((initial && initial.fullName) || "");
-  const [phone, setPhone] = useState((initial && initial.phone) || "");
+  // Format what is already stored too, so an operator-typed or legacy value renders the same
+  // as a freshly entered one rather than only tidying up once someone edits it.
+  const [phone, setPhone] = useState(formatPhone((initial && initial.phone) || ""));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -4083,8 +4109,8 @@ function ProfileDialog({ initial, email, onClose, onSaved, title, save }) {
         <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Jane Yoder"
           autoFocus style={{ ...S.input, marginBottom: 12 }} />
         <span style={S.lbl}>Phone</span>
-        <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="(555) 123-4567"
-          inputMode="tel" style={{ ...S.input, marginBottom: 12 }} />
+        <input value={phone} onChange={(e) => setPhone(formatPhone(e.target.value))} placeholder="(555) 123-4567"
+          inputMode="tel" autoComplete="tel" style={{ ...S.input, marginBottom: 12 }} />
         <span style={S.lbl}>Email</span>
         <input value={email || ""} readOnly title="Contact StructureStudio to change the email on a login"
           style={{ ...S.input, marginBottom: 18, background: "#F8FAFC", color: "#94A3B8" }} />
