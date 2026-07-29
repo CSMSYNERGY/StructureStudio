@@ -637,10 +637,16 @@ function AdminApp() {
                 </div>
               </span>
             </div>
-            {Number(ncDiscount) > 0 && !ncExempt && (
+            {/* Always rendered, greyed until a percentage exists — hiding it entirely meant
+                the per-feature option was undiscoverable unless you already knew it existed. */}
+            {!ncExempt && (
               <div style={{ marginTop: 4, paddingLeft: 2 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Discount applies to</div>
-                <FeatureScope all={ncAllFeat} setAll={setNcAllFeat} picked={ncFeat} setPicked={setNcFeat} />
+                <div style={{ fontSize: 12, fontWeight: 700, color: Number(ncDiscount) > 0 ? "#334155" : "#94A3B8" }}>
+                  Discount applies to
+                  {!(Number(ncDiscount) > 0) && <span style={{ fontWeight: 600 }}> — enter a % above to choose</span>}
+                </div>
+                <FeatureScope all={ncAllFeat} setAll={setNcAllFeat} picked={ncFeat} setPicked={setNcFeat}
+                  disabled={!(Number(ncDiscount) > 0)} />
               </div>
             )}
           </div>
@@ -667,10 +673,14 @@ function AdminApp() {
               </label>
               <button onClick={saveBilling} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save billing</button>
             </div>
-            {Number(billPct) > 0 && !billExempt && (
+            {!billExempt && (
               <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Discount applies to</div>
-                <FeatureScope all={billAllFeat} setAll={setBillAllFeat} picked={billFeat} setPicked={setBillFeat} />
+                <div style={{ fontSize: 12, fontWeight: 700, color: Number(billPct) > 0 ? "#334155" : "#94A3B8" }}>
+                  Discount applies to
+                  {!(Number(billPct) > 0) && <span style={{ fontWeight: 600 }}> — enter a % above to choose</span>}
+                </div>
+                <FeatureScope all={billAllFeat} setAll={setBillAllFeat} picked={billFeat} setPicked={setBillFeat}
+                  disabled={!(Number(billPct) > 0)} />
               </div>
             )}
             {/* Two ways to get this wrong, both expensive, so say them out loud. */}
