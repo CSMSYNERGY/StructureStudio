@@ -4353,7 +4353,9 @@ function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
         {!cat && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading catalog…</div>}
         {cat && styles.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No styles yet — add one below.</div>}
         {styles.map((row) => {
-          const mine = sizes.filter((s) => s.style_key === row.key);
+          // Sizes join on the style's UUID `id`, NOT its `key`. Getting this wrong is silent:
+          // every style renders "0 sizes" while the tenant actually has dozens.
+          const mine = sizes.filter((s) => s.style_id === row.id);
           return (
             <div key={row.key} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -4503,8 +4505,9 @@ function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
     const sizes = (cat && cat.buildingSizes) || [];
     const inc = (cat && cat.inclusions) || [];
     const rows = sizes.map((s) => {
-      const st = styles.find((x) => x.key === s.style_key);
-      const base = [st ? (st.label || st.key) : s.style_key, s.width_ft, s.length_ft, s.base_price];
+      // Join on the style's UUID `id` — buildingSizes carries `style_id`, never `style_key`.
+      const st = styles.find((x) => x.id === s.style_id);
+      const base = [st ? (st.label || st.key) : "", s.width_ft, s.length_ft, s.base_price];
       const counts = items.map((i) => {
         const hit = inc.find((n) => n.size_id === s.id && n.item_key === i.key);
         return hit ? hit.qty : 0;
