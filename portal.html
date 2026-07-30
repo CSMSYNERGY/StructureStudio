@@ -1056,7 +1056,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       if (act > g.lastActivity) g.lastActivity = act;
       if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
       const st = normStatus(r.status);
-      if (RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
+      // was `RANK[st]`: the refactor that replaced LeadsTable's private RANK copy with the
+      // shared STATUS_RANK missed this one usage, so load() threw ReferenceError on the
+      // first design row and Contacts sat on "Loading…" forever.
+      if (STATUS_RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
     });
     // Browsing leads join the same list, SUPPRESSED once the person has a real design —
     // matched by normalized phone first, then email, the same identity rules the design
