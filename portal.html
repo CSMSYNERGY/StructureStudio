@@ -4789,32 +4789,6 @@ function Dashboard({ session }) {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // Keep the address bar honest about where you actually are.
-  //
-  // MUST live up here with the other hooks. Dashboard early-returns below (tenant loading /
-  // no tenant), and a hook after those returns changes the hook count between renders —
-  // React error #310, blank screen. It recomputes the clamp via ssClampTab rather than
-  // reading `activeTab`, which is only available after those returns.
-  //
-  // Two jobs. (1) A cold load at bare /portal has no page in the path, so write the
-  // resolved one in with replaceState — no history entry, because you did not navigate.
-  // (2) If the clamp REFUSED the requested page (a team member deep-linking /portal/admin),
-  // rewrite the URL to what is really on screen. Leaving the old path up is worse than the
-  // bounce: reload and you bounce again, so the link looks half-broken.
-  //
-  // `wanted` holds the URL's request until the gates have actually resolved, so an operator
-  // whose app_operators row is still in flight is not mistaken for a refusal.
-  const canAdminForUrl = viewing ? isOperator : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
-  const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl);
-  useEffect(() => {
-    if (!tenant || tenant === "none") return;          // nothing routable yet
-    const p = ssParsePath();
-    const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
-    if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
-    if (wanted.current) wanted.current = null;
-    if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
-    try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
-  }, [resolvedTab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
   // Designer tab: lazy-mount on first open, then KEEP mounted (display toggle below).
   // A conditional {activeTab==="designer" && …} unmount would discard the user's
   // in-progress design and re-fetch config on every tab switch.
@@ -4863,6 +4837,39 @@ function Dashboard({ session }) {
   // audit-logged); statuses shown are the CACHED values (sync-design-status is
   // owner-JWT-bound and must not run against the operator's own tenant).
   const [viewing, setViewing] = useState(null);
+
+  // Keep the address bar honest about where you actually are.
+  //
+  // Placement is doubly constrained, and BOTH constraints bit once.
+  //   Below the early returns (tenant loading / no tenant) → the hook count changes
+  //     between renders → React error #310 → blank screen.
+  //   Above `isOperator`/`viewing`/`entitlement` → Babel compiles const to var, so those
+  //     read `undefined` instead of throwing, `undefined` is falsy, and ssClampTab quietly
+  //     rewrote /portal/admin and /portal/accounts to /portal/designs while the page
+  //     correctly rendered Admin. Silent, and only on the two operator-gated tabs.
+  // So: after every state it reads, before the first early return. Do not move it.
+  // It recomputes the clamp via ssClampTab rather than reading `activeTab`, which is only
+  // available after those returns.
+  //
+  // Two jobs. (1) A cold load at bare /portal has no page in the path, so write the
+  // resolved one in with replaceState — no history entry, because you did not navigate.
+  // (2) If the clamp REFUSED the requested page (a team member deep-linking /portal/admin),
+  // rewrite the URL to what is really on screen. Leaving the old path up is worse than the
+  // bounce: reload and you bounce again, so the link looks half-broken.
+  //
+  // `wanted` holds the URL's request until the gates have actually resolved, so an operator
+  // whose app_operators row is still in flight is not mistaken for a refusal.
+  const canAdminForUrl = viewing ? isOperator : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl);
+  useEffect(() => {
+    if (!tenant || tenant === "none") return;          // nothing routable yet
+    const p = ssParsePath();
+    const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
+    if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
+    if (wanted.current) wanted.current = null;
+    if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
+    try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
+  }, [resolvedTab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
