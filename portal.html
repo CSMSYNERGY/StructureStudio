@@ -479,6 +479,52 @@ const STATUS_COLORS = {
 // (sent → accepted → invoiced → delivered) rather than sorting alphabetically.
 const STATUS_RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
 
+// The one place an unrecognised/absent status becomes "sent". This expression was written out
+// by hand in seven places (search, sort, badge, and three times inside the Leads grouping),
+// and LeadsTable additionally kept its own private copy of STATUS_RANK — so a filter deriving
+// counts from one of them could disagree with the rows rendered from another. One function now.
+const normStatus = (s) => (STATUS_LABELS[s] ? s : "sent");
+
+// ─── Status filter chips (Designs + Contacts) ───
+// Carolyn, 2026-06-18: filters so a client can tell leads from customers at a glance — the
+// urgency came from Junior Barns selling three buildings in one day.
+//
+// Counts come from the SAME rows the table is about to render, so a chip can never promise
+// rows the list won't show. Zero-count chips are omitted rather than greyed: "Delivered" is 0
+// on every tenant today (no tenant has the delivered stage mapped), and a permanently dead
+// chip reads as a broken feature. `extra` carries Contacts' synthetic "browsing" group, which
+// is not a designs.status value at all.
+function StatusChips({ counts, value, onChange, extra = [] }) {
+  const present = Object.keys(STATUS_LABELS).filter((k) => (counts[k] || 0) > 0).map((k) => [k, STATUS_LABELS[k], STATUS_COLORS[k]]);
+  const extras = extra.filter(([k]) => (counts[k] || 0) > 0);
+  const items = extras.concat(present);
+  // One bucket means the chips carry no information — don't spend a row on them.
+  if (items.length < 2) return null;
+  const total = items.reduce((n, [k]) => n + (counts[k] || 0), 0);
+  const all = [["all", "All", null]].concat(items);
+  return (
+    <div role="group" aria-label="Filter by status" style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "0 0 12px" }}>
+      {all.map(([k, label, color]) => {
+        const on = value === k;
+        const n = k === "all" ? total : (counts[k] || 0);
+        return (
+          <button key={k} type="button" aria-pressed={on} onClick={() => onChange(k)}
+            style={{
+              display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999,
+              border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0",
+              background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+            }}>
+            {color && <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 4, background: color.fg, flexShrink: 0, opacity: on ? 0.9 : 1 }} />}
+            {label}
+            <span style={{ fontSize: 11, fontWeight: 800, color: on ? "#FFF" : "#94A3B8", opacity: on ? 0.85 : 1 }}>{n}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Column sorting (shared by the Designs + Leads tables) ───
 // Clickable header cell. Clicking cycles the direction on the active column and
 // selects a new column (starting ascending). A faded ▲ hints unsorted columns
@@ -652,9 +698,16 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
   // so the list refetches without a manual Refresh click.
   useEffect(() => { load(); }, [load, refreshKey]);
 
-  // Client-side "search all fields" over the already-loaded rows.
-  const filtered = (rows || []).filter((r) => {
-    const st = STATUS_LABELS[r.status] ? r.status : "sent";
+  // Status chips. Counts are taken over ALL loaded rows (not the searched subset) so the
+  // numbers don't shuffle while someone types — the chips describe the dataset, the search
+  // narrows within it.
+  const [statusFilter, setStatusFilter] = useState("all");
+  const statusCounts = (rows || []).reduce((a, r) => { const k = normStatus(r.status); a[k] = (a[k] || 0) + 1; return a; }, {});
+
+  // Chip filter first, then the free-text search over what survives.
+  const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((r) => normStatus(r.status) === statusFilter);
+  const filtered = byStatus.filter((r) => {
+    const st = normStatus(r.status);
     const extra = [r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : "", STATUS_LABELS[st], fmtDate(r.created_at), titleCase((r.selections || {}).style)].join(" ");
     return rowMatchesQuery(r, query, extra);
   });
@@ -671,7 +724,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
       case "contact":  return c.email || c.phone;
       case "building": return [titleCase(sel.style), sel.size].filter(Boolean).join(" ");
       case "estimate": return r.ghl_estimate_number != null ? Number(r.ghl_estimate_number) : null;
-      case "status":   return STATUS_RANK[STATUS_LABELS[r.status] ? r.status : "sent"];
+      case "status":   return STATUS_RANK[normStatus(r.status)];
       default:         return r.created_at;
     }
   };
@@ -681,17 +734,22 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
     <div style={S.card}>
       <CardHead
         title="Designs"
-        count={rows ? (query ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        count={rows ? ((query || statusFilter !== "all") ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       />
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
+      {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
-        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs match “{query}”.</p>
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+          {query
+            ? <>No designs match “{query}”{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}.</>
+            : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
+        </p>
       )}
       {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
@@ -732,7 +790,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
                       )}
                     </td>
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
-                    <td style={S.td}>{(() => { const st = STATUS_LABELS[r.status] ? r.status : "sent"; const c = STATUS_COLORS[st]; return <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>; })()}</td>
+                    <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>; })()}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
                       {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
@@ -867,7 +925,6 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
     }
     // Group by person: normalized phone, else email, else name (fallback: short_code).
     const normPhone = (p) => String(p || "").replace(/\D/g, "");
-    const RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
     const groups = new Map();
     list.forEach((r) => { // list is newest-first
       const c = r.contact || {};
@@ -876,7 +933,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent", search: "", codes: [], acceptedCodes: [] }; groups.set(key, g); }
       g.count += 1;
       g.codes.push(r.short_code);                     // newest-first (list order)
-      if ((STATUS_LABELS[r.status] ? r.status : "sent") === "accepted") g.acceptedCodes.push(r.short_code);
+      if (normStatus(r.status) === "accepted") g.acceptedCodes.push(r.short_code);
       // Accumulate design-level searchable text (building + estimate #) so a lead is
       // findable by those too — they aren't columns here but the requirement is all-fields.
       const gsel = r.selections || {};
@@ -887,8 +944,8 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       const act = r.updated_at || r.created_at;
       if (act > g.lastActivity) g.lastActivity = act;
       if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
-      const st = STATUS_LABELS[r.status] ? r.status : "sent";
-      if (RANK[st] > RANK[g.topStatus]) g.topStatus = st;
+      const st = normStatus(r.status);
+      if (RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
     });
     // Browsing leads join the same list, SUPPRESSED once the person has a real design —
     // matched by normalized phone first, then email, the same identity rules the design
@@ -912,8 +969,18 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
 
   useEffect(() => { load(); }, [load]);
 
-  // Client-side "search all fields" over the already-grouped leads.
-  const filtered = (rows || []).filter((g) => {
+  // Status chips. NOTE this filters PEOPLE by their furthest-along design, because
+  // `topStatus` is a max over the person's group — "Accepted" here means "has at least one
+  // accepted design", not "all their designs are accepted". That is the useful reading for a
+  // contact list (it answers "who are my customers?"), and it is why the same component is
+  // fed a different bucket set than the Designs table: `browsing` is a synthetic group with
+  // no design behind it at all.
+  const [statusFilter, setStatusFilter] = useState("all");
+  const statusCounts = (rows || []).reduce((a, g) => { a[g.topStatus] = (a[g.topStatus] || 0) + 1; return a; }, {});
+
+  // Chip filter first, then the free-text search over what survives.
+  const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((g) => g.topStatus === statusFilter);
+  const filtered = byStatus.filter((g) => {
     const extra = [STATUS_LABELS[g.topStatus], fmtDate(g.firstSeen), fmtDate(g.lastActivity)].join(" ");
     return rowMatchesQuery(g, query, extra);
   });
@@ -988,7 +1055,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
     <div style={S.card}>
       <CardHead
         title="Contacts"
-        count={rows ? (query ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        count={rows ? ((query || statusFilter !== "all") ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         desc="Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only."
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       >
@@ -1001,6 +1068,12 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
         </span>
       </CardHead>
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />}
+      {/* `browsing` is passed via `extra` because it is not a designs.status — it is the
+          synthetic group built from captured_leads for people who never submitted anything. */}
+      {rows && rows.length > 0 && (
+        <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter}
+          extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
+      )}
       {invMsg && invMsg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{invMsg.ok}</div>}
       {invMsg && invMsg.err && <div style={{ ...S.err, marginBottom: 10 }}>{invMsg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
@@ -1009,7 +1082,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts yet. Share your customer link — everyone who submits a design shows up here.</p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
-        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts match “{query}”.</p>
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+          {query
+            ? <>No contacts match “{query}”{statusFilter !== "all" ? <> in <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong></> : null}.</>
+            : <>No contacts are <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong> yet.</>}
+        </p>
       )}
       {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
