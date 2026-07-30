@@ -8,8 +8,42 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 // never finish/submit a design. BEST-EFFORT: never blocks the gate (returns ok on any GHL
 // issue). clientId comes from the body (public endpoint) but is validated against
 // client_configs; GHL creds are read service-role from client_settings (never exposed to
-// the browser). This mirrors submit-estimate's existing anon->GHL exposure; rate-limiting
-// is a recommended hardening follow-up.
+// the browser). This mirrors submit-estimate's existing anon->GHL exposure.
+//
+// RATE LIMITED per tenant since 2026-07-30 — see RATE_* below. Before that, anyone holding
+// the public anon key could drive unlimited contact upserts into ANY configured tenant's
+// GHL location. The real damage was never table growth: it was burning the tenant's GHL
+// rate budget and polluting their CRM.
+
+// ── Abuse guards (two, because there are two different attacks) ──────────────
+// GUARD 1 — per-tenant volume cap. Counts captured_leads rows updated inside the window,
+// index-backed by `captured_leads_client (client_id, updated_at DESC)`. This catches the
+// damaging shape: MANY DIFFERENT phones, which grows the table and floods the tenant's CRM
+// with junk contacts.
+//
+// It does NOT catch one phone hammered — that is a single row, so the count stays at 1 no
+// matter how many requests arrive. Guard 2 exists for exactly that, because a row count can
+// never see it.
+//
+// Deliberately no GLOBAL cap. The vulnerability is per-tenant (whose GHL budget is burned),
+// and a global cap needs an `updated_at`-only scan with no index to serve it — a seq scan on
+// every public request, which becomes its own DoS surface as the table grows. Per-tenant,
+// multiplied by the tenant count, already bounds the total.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_PER_TENANT = 30;   // generous: a real gate sees single digits per minute
+// A breach logs only while the count sits in [MAX, MAX+2], so a sustained flood writes ~3
+// rows per window instead of one per request. app_errors has NO fingerprint dedupe in this
+// project (unlike BuildBridge and Framed-UP), so self-limiting here is the only thing
+// stopping an attacker from turning our own error log into the amplification.
+const RATE_LOG_CEILING = RATE_MAX_PER_TENANT + 2;
+
+// GUARD 2 — per-lead debounce, which is what actually stops one phone being hammered.
+// If this exact (tenant, phone) was captured moments ago AND this request carries nothing
+// new, the outbound GHL upsert would be a no-op write of identical data, so skip it.
+// Enrichment is explicitly preserved: the gate sends name+phone, and the later Details-open
+// capture adds email/address — that request DOES carry something new, so it always goes
+// through regardless of how recent the previous one was.
+const LEAD_DEBOUNCE_MS = 15_000;
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -57,7 +91,7 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // against the existing row so the fuller value always wins over an empty resend.
   const source = body?.source === "details" ? "details" : "gate";
   const { data: existingLead } = await sb.from("captured_leads")
-    .select("id, email, street, city, state, zip, ghl_contact_id, source")
+    .select("id, name, email, street, city, state, zip, ghl_contact_id, source, updated_at")
     .eq("client_id", clientId).eq("phone_digits", phoneDigits).maybeSingle();
   const leadRow = {
     client_id: clientId,
@@ -82,6 +116,54 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
     // though the GHL leg below may still succeed.
     await logEdgeError({ fn: "capture-lead", req, clientId, code: "local_upsert",
       message: `captured_leads upsert failed: ${leadErr.message}` });
+  }
+
+  // ── GUARD 2: per-lead debounce (the same-phone flood) ───────────────────────
+  // Computed from the row as it was BEFORE the upsert above, which is why `existingLead` is
+  // captured earlier. "Adds nothing new" is judged field by field against that snapshot: a
+  // repeat of identical name+phone is a no-op to GHL, whereas a Details capture arriving
+  // seconds later brings email/address and must not be suppressed.
+  if (existingLead?.updated_at) {
+    const sinceLast = Date.now() - Date.parse(existingLead.updated_at);
+    const addsSomething =
+      (!!email && email !== (existingLead.email || "")) ||
+      (!!street && street !== (existingLead.street || "")) ||
+      (!!city && city !== (existingLead.city || "")) ||
+      (!!state && state !== (existingLead.state || "")) ||
+      (!!zip && zip !== (existingLead.zip || "")) ||
+      (!!name && name !== (existingLead.name || "")) ||
+      (source === "details" && existingLead.source !== "details");
+    if (Number.isFinite(sinceLast) && sinceLast >= 0 && sinceLast < LEAD_DEBOUNCE_MS && !addsSomething) {
+      // No log: this is the ordinary double-fire case (a visitor re-submitting the gate, a
+      // double-click, a retry) as much as it is abuse. Logging it would be noise.
+      return json({ ok: true, captured: false, reason: "debounced" });
+    }
+  }
+
+  // ── GUARD 1: per-tenant volume cap, AFTER the local row and BEFORE the GHL leg ──
+  // Order is deliberate. A legitimate lead arriving during someone else's flood must still
+  // land in captured_leads (the tenant's own view of it), so the cap only ever suppresses
+  // the OUTBOUND GHL write — the part that costs the tenant their API budget and pollutes
+  // their CRM. And it returns ok:true like every other soft path here: the public gate must
+  // never block, so a cap breach is invisible to the visitor by design.
+  {
+    const since = new Date(Date.now() - RATE_WINDOW_MS).toISOString();
+    const { count, error: rateErr } = await sb.from("captured_leads")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId).gt("updated_at", since);
+    // A failed count must not become a free pass OR an outage: fall through and allow.
+    // Failing closed here would let one bad query silence a tenant's lead capture entirely.
+    if (!rateErr && (count ?? 0) > RATE_MAX_PER_TENANT) {
+      if ((count ?? 0) <= RATE_LOG_CEILING) {
+        await logEdgeError({
+          fn: "capture-lead", req, clientId, code: "rate_limited",
+          message: `capture-lead rate cap hit — ${count} captures in ${RATE_WINDOW_MS / 1000}s; ` +
+                   `GHL upsert skipped, lead saved locally`,
+          context: { count, limit: RATE_MAX_PER_TENANT, windowMs: RATE_WINDOW_MS },
+        });
+      }
+      return json({ ok: true, captured: false, reason: "rate_limited" });
+    }
   }
 
   // GHL creds (service-role only). If unset the lead still exists locally — skip quietly.

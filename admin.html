@@ -21,7 +21,18 @@ const { createClient } = window.supabase;
 
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// SESSION-ISOLATED on purpose. With supabase-js defaults this page shares localStorage with
+// portal.html on the same origin, so it silently adopted (and auto-refreshed) whatever portal
+// session was signed in and sent THAT user's JWT instead of the anon key. admin-catalog's gate
+// is dual-credential, so a signed-in NON-operator then hit the hard 403 that
+// `checkAdminAuth` returns for a real-but-unauthorized user and could never reach the password
+// path at all — i.e. break-glass was broken in exactly the situation you'd reach for it.
+// Also stops `detectSessionInUrl` from consuming an auth fragment that lands on /admin.
+// The page's stated model is password-only, no session (see the header above); this makes the
+// code match it.
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+});
 
 // Hide the operator "Email Sender" card for now. Flip to true to restore it — all
 // the wiring (connect/disconnect/test + the admin-catalog actions) stays in place.
