@@ -267,7 +267,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         const clientId = await assertClient(admin, payload.clientId);
         // Same columns/shape as the owner portal's own reads (and as admin-catalog's
         // get_client_portal) so DesignsTable/LeadsTable render unchanged.
-        const [designs, versions, cfg] = await Promise.all([
+        const [designs, versions, cfg, leads] = await Promise.all([
           admin.from("designs")
             .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
             .eq("client_id", clientId).order("created_at", { ascending: false }),
@@ -275,6 +275,11 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
             .select("short_code, version, created_at, selections, image_url")
             .eq("client_id", clientId).order("version", { ascending: false }),
           admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+          // Browsing leads (migration 062) so the operator's view-as Contacts matches what
+          // the tenant themselves sees. Additive: an error here must not break the portal.
+          admin.from("captured_leads")
+            .select("id, name, phone, phone_digits, email, source, created_at, updated_at")
+            .eq("client_id", clientId).order("updated_at", { ascending: false }),
         ]);
         if (designs.error) throw designs.error;
         if (versions.error) throw versions.error;
@@ -283,6 +288,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
           ok: true, clientId,
           companyName: (cfg.data && (cfg.data as any).company_name) || clientId,
           designs: designs.data || [], versions: versions.data || [],
+          capturedLeads: leads.error ? [] : (leads.data || []),
         });
       }
       default:

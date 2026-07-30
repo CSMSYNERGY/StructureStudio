@@ -919,6 +919,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     try {
       supabase.functions.invoke("capture-lead", { body: {
         clientId: C.clientId,
+        source: "details",     // vs the gate's default — "asked for prices" ranks higher
         name: String(contact.name || "").trim(),
         phone: String(contact.phone || "").trim(),
         email: String(contact.email || "").trim(),

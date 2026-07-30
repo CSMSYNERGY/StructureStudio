@@ -102,7 +102,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 <!-- The ONE shared designer module (also loaded by index.html). Publishes
      window.StructureStudio for the in-portal Designer tab; must load before the
      main block below. Keep the ?v= cache-buster in lockstep with index.html. -->
-<script src="structure-studio.component.js?v=20260729a" type="text/babel"></script>
+<script src="structure-studio.component.js?v=20260729b" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -758,10 +758,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
   const load = useCallback(async () => {
     setError(null);
     let list;
+    let browsing = [];
     if (fetchDesigns) {
       // Operator view-as: rows from operator-portal (service-role, audit-logged);
       // live status sync skipped (owner-JWT-bound) — cached statuses show.
-      try { list = (await fetchDesigns()).designs || []; }
+      try { const res = await fetchDesigns(); list = res.designs || []; browsing = res.capturedLeads || []; }
       catch (e) { setError(e.message || String(e)); setRows([]); return; }
     } else {
     const { data, error: err } = await sb
@@ -771,6 +772,15 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
     list = data || [];
+    // Browsing leads (migration 062): people who passed the public designer's gate or
+    // opened quote Details but never submitted. RLS scopes the read to this tenant.
+    // Additive — a failure here must never block the design list.
+    try {
+      const { data: cl } = await sb.from("captured_leads")
+        .select("id, name, phone, phone_digits, email, source, created_at, updated_at")
+        .eq("client_id", clientId).order("updated_at", { ascending: false });
+      browsing = cl || [];
+    } catch (_e) { /* leads are additive */ }
     // Freshen fulfillment status from GHL (read-only projection); non-fatal.
     if (list.length > 0) {
       try {
@@ -805,6 +815,23 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       const st = STATUS_LABELS[r.status] ? r.status : "sent";
       if (RANK[st] > RANK[g.topStatus]) g.topStatus = st;
     });
+    // Browsing leads join the same list, SUPPRESSED once the person has a real design —
+    // matched by normalized phone first, then email, the same identity rules the design
+    // grouping itself uses. A browsing lead who later submits simply becomes their design
+    // row; the browsing entry disappears rather than duplicating them.
+    const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
+    browsing.forEach((l) => {
+      const em = String(l.email || "").trim().toLowerCase();
+      if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
+      groups.set("lead-" + l.id, {
+        key: "lead-" + l.id, browsing: true, source: l.source,
+        name: l.name || "", email: l.email || "", phone: l.phone || "",
+        count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
+        latestCode: null, topStatus: "browsing",
+        search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
+        codes: [], acceptedCodes: [],
+      });
+    });
     setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
   }, [fetchDesigns]);
 
@@ -827,7 +854,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       case "designs":      return g.count;
       case "firstSeen":    return g.firstSeen;
       case "lastActivity": return g.lastActivity;
-      case "status":       return STATUS_RANK[g.topStatus];
+      case "status":       return g.browsing ? -1 : STATUS_RANK[g.topStatus];
       default:             return g.lastActivity;
     }
   };
@@ -924,7 +951,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
             <tbody>
               {sorted.map((g) => {
                 const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
-                const sc = STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent;
+                // Browsing leads get the brand light blue rather than a fulfillment colour —
+                // they are interest, not an order state.
+                const sc = g.browsing ? { bg: "#DBEAFF", fg: "#3D3672" } : (STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent);
                 return (
                   <React.Fragment key={g.key}>
                   <tr>
@@ -936,13 +965,15 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
                       <div>{g.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{g.phone || ""}</div>
                     </td>
-                    <td style={S.td}>{g.count}</td>
+                    <td style={S.td}>{g.browsing ? "—" : g.count}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
-                    <td style={S.td}><span style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[g.topStatus]}</span></td>
+                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed quote details" : g.browsing ? "Entered name and phone at the designer gate" : undefined}
+                      style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                      <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>
-                      {(
+                      {g.browsing && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
+                      {!g.browsing && <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>}
+                      {!g.browsing && (
                         <button type="button" onClick={() => openDetails(g)}
                           style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
                           {detailsFor === g.key ? "Hide details" : "Details"}
@@ -3547,7 +3578,7 @@ function Dashboard({ session }) {
     }
     // Backfill the real company name (a ?view= deep link seeds it with the slug).
     if (data.companyName) setViewing((cur) => (cur && cur.clientId === data.clientId && cur.companyName !== data.companyName) ? { ...cur, companyName: data.companyName } : cur);
-    return { designs: data.designs || [], versions: data.versions || [] };
+    return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [] };
   }, [viewing && viewing.clientId]);
   // GHL-subaccounts-style deep link: /portal.html?view=<clientId> (e.g. from the
   // admin console's "Open portal ↗") auto-opens that account once the operator
