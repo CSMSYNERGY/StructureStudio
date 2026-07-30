@@ -100,8 +100,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 <!-- The ONE shared designer module (also loaded by index.html). Publishes
      window.StructureStudio for the in-portal Designer tab; must load before the
-     main block below. Keep the ?v= cache-buster in lockstep with index.html. -->
-<script src="structure-studio.component.js?v=20260729b" type="text/babel"></script>
+     main block below. Keep the ?v= cache-buster in lockstep with index.html.
+
+     ROOT-ABSOLUTE, and it must stay that way. This page is now served at
+     /portal/<page>/<sub> as well as /portal.html, so a relative src resolves against
+     whatever depth the URL happens to have — at /portal/settings/colors it asked for
+     /portal/settings/structure-studio.component.js, which the /portal/* splat rewrote to
+     portal.html, so Babel was handed "<!DOCTYPE html>" and threw. The whole page rendered
+     blank. index.html keeps its relative src because it is only ever served from the root.
+     (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
+     root-absolute, which is why this was the only casualty.) -->
+<script src="/structure-studio.component.js?v=20260729b" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
