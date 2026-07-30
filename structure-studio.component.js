@@ -933,6 +933,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       } });
     } catch (_e) { /* lead capture must never break the designer */ }
   };
+  // Details NEVER auto-opens. If the form drops back to incomplete (a cleared field, the
+  // address search resetting values), the section CLOSES — so re-completing the form can
+  // never resurface it without a fresh click. Without this, an earlier open survived the
+  // re-lock and the rows reappeared "by themselves" the moment the last field was filled.
+  useEffect(() => {
+    if (detailsLocked && additionalOpen) setAdditionalOpen(false);
+  }, [detailsLocked]);
+  // The lead save keys off VISIBILITY, not the click handler: whatever path reveals the
+  // details, the contact is saved. The ref in captureLeadSilently keeps it once per load,
+  // and its customerFacing guard keeps the portal designer out entirely.
+  useEffect(() => {
+    if (additionalOpen && !detailsLocked) captureLeadSilently();
+  }, [additionalOpen, detailsLocked]);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -3406,7 +3419,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
               a shopper asks to see prices with full contact info, they are silently saved
               as a lead. The label is deliberately darker than the old #CBD5E1: a section
               customers are TOLD to unlock must not look like a disabled afterthought. */}
-          <div onClick={() => { if (detailsLocked) return; const opening = !additionalOpen; setAdditionalOpen(opening); if (opening) captureLeadSilently(); }}
+          <div onClick={() => { if (!detailsLocked) setAdditionalOpen((o) => !o); }}
             style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, cursor: detailsLocked ? "default" : "pointer", userSelect: "none" }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "#64748B", letterSpacing: 0.2 }}>Details</span>
             {detailsLocked
