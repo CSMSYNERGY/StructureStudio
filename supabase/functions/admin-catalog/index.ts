@@ -793,6 +793,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Catalog/design rows first, config last. Order respects FKs
         // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");
+        // design_versions and captured_leads were BOTH missing from this list until
+        // 2026-07-30. Neither has a foreign key to designs (verified: zero FKs on either), so
+        // nothing cascaded and both survived a tenant hard-delete — leaving that tenant's
+        // full quote history and their browsing leads, complete with customer names, phone
+        // numbers and addresses, in a database the tenant no longer exists in.
+        await wipe("design_versions");
+        await wipe("captured_leads");
         await wipe("layout_item_pricing");      // FK style_id → building_styles
         await wipe("colors");                   // standalone per-tenant palette
         await wipe("building_size_inclusions");

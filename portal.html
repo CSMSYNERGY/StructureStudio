@@ -485,6 +485,23 @@ const STATUS_RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
 // counts from one of them could disagree with the rows rendered from another. One function now.
 const normStatus = (s) => (STATUS_LABELS[s] ? s : "sent");
 
+// Unwrap a supabase-js FunctionsHttpError into the message the edge function actually sent.
+// Without this every failure reads "Edge Function returned a non-2xx status code" — the real
+// { error } body is only on error.context, the raw Response. Cloned before reading because a
+// Response body can only be consumed once; the several inline copies of this pattern still
+// scattered through the file omit that, which is latent rather than harmless.
+const fnError = async (err) => {
+  let m = (err && err.message) || "Request failed";
+  try {
+    const ctx = err && err.context;
+    if (ctx && typeof ctx.json === "function") {
+      const b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+      if (b && b.error) m = b.error;
+    }
+  } catch (_e) { /* fall back to the generic message */ }
+  return m;
+};
+
 // ─── Status filter chips (Designs + Contacts) ───
 // Carolyn, 2026-06-18: filters so a client can tell leads from customers at a glance — the
 // urgency came from Junior Barns selling three buildings in one day.
@@ -644,7 +661,76 @@ function CardHead({ title, count, desc, right, children }) {
   );
 }
 
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
+// ─── Delete a design ───
+// Carolyn, 2026-06-24: until now a deletion meant going into Supabase by hand.
+//
+// Anything past Sent has a real estimate in the tenant's GHL, so it is a billing record and
+// takes a typed confirmation (Ahsan's call: allow it, but make them type it). Sent designs
+// delete on a single confirm — they cost nothing to recreate.
+//
+// Reuses AdmOverlay (Esc-to-close, overlay-click, aria-modal) from the Admin section further
+// down the file — safe because function declarations hoist, and it means one dialog shell.
+function DeleteDesignDialog({ design, onClose, onDeleted }) {
+  const st = normStatus(design.status);
+  const needsConfirm = st !== "sent";
+  const expected = design.ghl_estimate_number ? String(design.ghl_estimate_number) : design.short_code;
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const ready = !busy && (!needsConfirm || typed.trim() === expected);
+
+  const go = async () => {
+    if (!ready) return;
+    setBusy(true); setErr(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "delete_design", shortCode: design.short_code, ...(needsConfirm ? { confirmToken: typed.trim() } : {}) },
+    });
+    if (error) { setErr(await fnError(error)); setBusy(false); return; }
+    onDeleted(data || {});
+  };
+
+  return (
+    <AdmOverlay onClose={busy ? () => {} : onClose} maxWidth={460} labelledBy="del-design-ttl">
+      <div id="del-design-ttl" style={{ fontSize: 17, fontWeight: 700, color: "#991B1B", marginBottom: 10 }}>
+        Delete this design?
+      </div>
+      <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 14 }}>
+        <strong>{(design.contact || {}).name || "This customer"}</strong>
+        {design.ghl_estimate_number ? <> · EST-{design.ghl_estimate_number}</> : null} · {STATUS_LABELS[st]}
+        <div style={{ marginTop: 8 }}>
+          Removes the design, its full version history and the saved PDFs. This cannot be undone.
+        </div>
+        {/* Stated plainly because it is the surprising part: we do not touch their CRM. Same
+            posture as the operator tenant-delete, which says the same thing. */}
+        <div style={{ marginTop: 8, color: "#64748B" }}>
+          The estimate in Synergy is <strong>not</strong> affected — delete or void it there separately.
+        </div>
+      </div>
+      {err && <div style={S.err}>{err}</div>}
+      {needsConfirm && (
+        <>
+          <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 12.5, marginBottom: 12, lineHeight: 1.5 }}>
+            This design is <strong>{STATUS_LABELS[st]}</strong> — a billing record.
+          </div>
+          <label style={S.lbl}>Type <code>{expected}</code> to confirm</label>
+          <input value={typed} onChange={(e) => setTyped(e.target.value)} disabled={busy} autoFocus
+            onKeyDown={(e) => { if (e.key === "Enter") go(); }} placeholder={expected}
+            style={{ ...S.input, marginBottom: 16 }} />
+        </>
+      )}
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        <button type="button" onClick={onClose} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+        <button type="button" onClick={go} disabled={!ready}
+          title={!ready ? `Type ${expected} to confirm` : undefined}
+          style={{ ...S.btn(ready ? "#DC2626" : "#FCA5A5", "#FFF"), cursor: ready ? "pointer" : "not-allowed" }}>
+          {busy ? "Deleting…" : "Delete design"}
+        </button>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
@@ -703,6 +789,9 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
   // narrows within it.
   const [statusFilter, setStatusFilter] = useState("all");
   const statusCounts = (rows || []).reduce((a, r) => { const k = normStatus(r.status); a[k] = (a[k] || 0) + 1; return a; }, {});
+  // Which design the delete dialog is aimed at (null = closed), plus the outcome banner.
+  const [delTarget, setDelTarget] = useState(null);
+  const [delMsg, setDelMsg] = useState(null);
 
   // Chip filter first, then the free-text search over what survives.
   const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((r) => normStatus(r.status) === statusFilter);
@@ -739,6 +828,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
       />
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
+      {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
@@ -794,6 +884,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
                       {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                      {/* Owner/admin only — a team member must not be able to destroy a
+                          customer record. The server re-checks regardless (delete_design is
+                          absent from READ_ACTIONS, so the resolver requires owner/admin). */}
+                      {isAdmin && (
+                        <button type="button" onClick={() => setDelTarget(r)} title="Delete this design"
+                          aria-label={`Delete design ${r.short_code}`}
+                          style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
+                          onMouseEnter={(e) => { e.currentTarget.style.color = "#DC2626"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.color = "#94A3B8"; }}>
+                          Delete
+                        </button>
+                      )}
                     </td>
                   </tr>
                   {isOpen && older.map((v) => {
@@ -819,6 +921,15 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null }) {
             </tbody>
           </table>
         </div>
+      )}
+      {delTarget && (
+        <DeleteDesignDialog design={delTarget} onClose={() => setDelTarget(null)}
+          onDeleted={(res) => {
+            const code = delTarget.short_code;
+            setDelTarget(null);
+            setDelMsg({ ok: `Deleted design ${code}` + (res.versionsDeleted ? ` and ${res.versionsDeleted} earlier version(s)` : "") + "." });
+            load();
+          }} />
       )}
     </div>
   );
@@ -1015,7 +1126,6 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
   // every request stamps this ref, and only the newest one is allowed to render.
   const actReqRef = useRef(0);
 
-  const fnError = async (err) => { let m = err.message; try { const c = await err.context.json(); if (c && c.error) m = c.error; } catch (_e) {} return m; };
 
   const openDetails = async (g) => {
     if (detailsFor === g.key) { setDetailsFor(null); actReqRef.current += 1; return; }
@@ -5336,7 +5446,8 @@ function Dashboard({ session }) {
             {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
             {!gateLocked && activeTab === "designs" && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
-                fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey} />
+                fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
+                isAdmin={canAdmin} />
             )}
             {!gateLocked && activeTab === "leads" && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}

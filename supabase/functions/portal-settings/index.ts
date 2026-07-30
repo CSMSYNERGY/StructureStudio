@@ -623,6 +623,94 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // so an owner can only delete their own styles. Past designs that used this style keep their
   // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
   // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
+  // ── Delete one design, its version history, and its PDFs ────────────────────
+  // Carolyn, 2026-06-24: deletions had to be done directly in Supabase. This is that control.
+  //
+  // Guarded by a typed token for anything past Sent, because those are money records: an
+  // accepted/invoiced/delivered design has a real estimate (and possibly a real invoice) in
+  // the tenant's GHL. Ahsan's call 2026-07-30 was "allow, but make them type it".
+  //
+  // THREE things have to go, and only the first is obvious:
+  //   1. the storage PDFs — read from the stored image_url columns, never reconstructed. Two
+  //      historical path shapes exist ({client}/SS-CODE.pdf and {client}/CODE-{ts}.pdf), so
+  //      building a path from the short_code would silently miss half the files.
+  //   2. design_versions — there is NO foreign key to designs (verified: zero FKs on either
+  //      table), so nothing cascades. Left behind, the rows stay readable by the tenant's own
+  //      RLS policy and by list_design_versions/load_design_version, which key on short_code —
+  //      i.e. a "deleted" design's full history would remain fetchable.
+  //   3. the designs row itself, last, so a failure above never orphans the record that lets
+  //      you find the leftovers.
+  //
+  // The GHL side is deliberately untouched — same posture as admin-catalog's delete_client
+  // ("GHL-side contacts/estimates are external and untouched"). The dialog says so.
+  if (action === "delete_design") {
+    const shortCode = String(payload.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+
+    // Scoped by BOTH client_id and short_code. A code from another tenant matches nothing and
+    // returns the same 404 as a code that never existed — no existence oracle.
+    const { data: design, error: findErr } = await admin.from("designs")
+      .select("id, short_code, status, image_url, ghl_estimate_number")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (findErr) return json({ error: findErr.message }, 500);
+    if (!design) return json({ error: "Design not found (or not yours)." }, 404);
+
+    const st = design.status && ["sent", "accepted", "invoiced", "delivered"].includes(design.status)
+      ? design.status : "sent";
+    // What the operator must retype. The estimate number is the meaningful identifier when
+    // one exists; a design can be past Sent without one, so fall back to the short code
+    // rather than asking for something that isn't on screen.
+    const needsConfirm = st !== "sent";
+    const expected = design.ghl_estimate_number ? String(design.ghl_estimate_number) : design.short_code;
+    if (needsConfirm) {
+      const given = String(payload.confirmToken ?? "").trim();
+      if (given !== expected) {
+        return json({
+          error: `This design is ${st} — a billing record. Type "${expected}" to confirm deletion.`,
+          needsConfirm: true, expected, status: st,
+        }, 409);
+      }
+    }
+
+    // 1. Version rows first — we need their image_urls, and they are the invisible leftovers.
+    const { data: versions } = await admin.from("design_versions")
+      .select("id, image_url").eq("client_id", clientId).eq("short_code", shortCode);
+
+    // 2. Storage. Derive object paths from the stored public URLs by taking everything after
+    //    the bucket segment; anything that doesn't parse is skipped rather than guessed at.
+    const BUCKET = "floor-plans";
+    const toPath = (u: unknown) => {
+      const s = typeof u === "string" ? u : "";
+      const i = s.indexOf(`/${BUCKET}/`);
+      return i === -1 ? null : decodeURIComponent(s.slice(i + BUCKET.length + 2));
+    };
+    const paths = [design.image_url, ...(versions ?? []).map((v: any) => v.image_url)]
+      .map(toPath).filter((x): x is string => !!x);
+    let filesRemoved = 0;
+    if (paths.length) {
+      // Best-effort: a storage failure must not block the row delete, or the design becomes
+      // undeletable and the tenant is stuck. Orphaned objects are unlisted (migration 042
+      // dropped the anon SELECT policy) and cost only space.
+      const rm = await admin.storage.from(BUCKET).remove([...new Set(paths)]);
+      if (!rm.error) filesRemoved = paths.length;
+    }
+
+    // 3. Versions, then the design.
+    const { count: versionsDeleted } = await admin.from("design_versions")
+      .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
+    const { error: delErr, count } = await admin.from("designs")
+      .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
+    if (delErr) return json({ error: delErr.message }, 500);
+    if (!count) return json({ error: "Design not found (or not yours)." }, 404);
+
+    // Durable: deleting a customer's design is not something we accept losing the record of.
+    // Signature is (action, rowCount, note) — the tenant is already implicit in the resolved
+    // context, so passing clientId here would silently land in rowCount.
+    await auditStrict("portal_delete_design", 1 + (versionsDeleted ?? 0),
+      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved}`);
+    return json({ ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved });
+  }
+
   if (action === "delete_style") {
     const styleId = String(payload.styleId ?? "").trim();
     if (!styleId) return json({ error: "styleId is required." }, 400);
