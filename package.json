@@ -1,0 +1,12 @@
+{
+  "name": "structurestudio-dev",
+  "private": true,
+  "description": "Dev tooling only - the product itself has NO build step (babel-standalone in the browser). These devDependencies exist solely for scripts/preflight.mjs, the pre-push correctness gate.",
+  "scripts": {
+    "preflight": "node scripts/preflight.mjs"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  }
+}
