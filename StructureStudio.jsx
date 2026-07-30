@@ -716,6 +716,15 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
 
 function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   const C = config;
+  // ── Which surface is this? THE discriminator between the two mounts of this module ──
+  //   embedded = true  → the Designer tab inside portal.html: business users building
+  //                      quotes for customers (discounts, delivery fees, full tooling).
+  //   embedded = false → the PUBLIC customer-facing page (index.html / tenant subdomains /
+  //                      the "try it" link on marketing sites): anonymous shed-shoppers.
+  // New surface differences gate on one of these two flags — never on a new prop, never on
+  // sniffing the URL. If a feature is for the business, use `embedded`; if it is lead- or
+  // customer-flavoured (contact gates, silent lead capture), use `customerFacing`.
+  const customerFacing = !embedded;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
@@ -886,6 +895,40 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   const [versionsOpen, setVersionsOpen] = useState(false);
   // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
   const [additionalOpen, setAdditionalOpen] = useState(false);
+  // Every enabled contact field filled, phone a real 10 digits — the same bar submitQuote
+  // enforces. Drives the public Details gate: a shopper sees quote details only after
+  // giving full contact info (which is what makes them a capturable lead).
+  const contactComplete = useMemo(() => {
+    const req = ["name", "email", "phone", "street", "city", "state", "zip"].filter((f) => C.contactFields.includes(f));
+    if (req.some((f) => !String(contact[f] || "").trim())) return false;
+    if (C.contactFields.includes("phone") && String(contact.phone || "").replace(/\D/g, "").length !== 10) return false;
+    return true;
+  }, [contact, C.contactFields]);
+  // The public Details section is locked until the contact form is complete. Content is
+  // ALSO gated on this (not just the click), so emptying a field after opening re-locks
+  // the details instead of leaving prices on screen behind a stale open state.
+  const detailsLocked = customerFacing && !contactComplete;
+  // Silent lead save, once per page load, the first time a shopper opens Details: they
+  // have just typed full contact info and asked to see prices — that IS a lead, even if
+  // they never press submit. Best-effort fire-and-forget (capture-lead validates and
+  // upserts into the tenant's GHL); it must never block or break the designer.
+  const leadCapturedRef = useRef(false);
+  const captureLeadSilently = () => {
+    if (!customerFacing || leadCapturedRef.current || !contactComplete) return;
+    leadCapturedRef.current = true;
+    try {
+      supabase.functions.invoke("capture-lead", { body: {
+        clientId: C.clientId,
+        name: String(contact.name || "").trim(),
+        phone: String(contact.phone || "").trim(),
+        email: String(contact.email || "").trim(),
+        street: String(contact.street || "").trim(),
+        city: String(contact.city || "").trim(),
+        state: String(contact.state || "").trim(),
+        zip: String(contact.zip || "").trim(),
+      } });
+    } catch (_e) { /* lead capture must never break the designer */ }
+  };
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -2862,6 +2905,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           )}
           <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
+          {/* Marketing teaser for shoppers trying the public designer. Deliberately NOT
+              shown in the portal — business users already see 3D Design in their nav. */}
+          {customerFacing && (
+            <button disabled title="See your building in 3D — coming soon"
+              style={{ ...S.btn("#F8FAFC", "#94A3B8"), border: "1px dashed #CBD5E1", cursor: "default", display: "inline-flex", alignItems: "center", gap: 5 }}>
+              3D
+              <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", background: "#75E6DA", color: "#0F4C46", borderRadius: 5, padding: "1.5px 5px" }}>Coming&nbsp;soon</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -3346,12 +3398,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           fee) — collapsible; relocated below the address, just above the submit bar. */}
       {!submitted && (
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
-          <div onClick={() => setAdditionalOpen((o) => !o)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", userSelect: "none" }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Details</span>
-            <span style={{ fontSize: 11, color: "#CBD5E1" }}>{additionalOpen ? "▾" : "▸"}</span>
+          {/* Public gate: Details opens only once the contact form is complete — the moment
+              a shopper asks to see prices with full contact info, they are silently saved
+              as a lead. The label is deliberately darker than the old #CBD5E1: a section
+              customers are TOLD to unlock must not look like a disabled afterthought. */}
+          <div onClick={() => { if (detailsLocked) return; const opening = !additionalOpen; setAdditionalOpen(opening); if (opening) captureLeadSilently(); }}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, cursor: detailsLocked ? "default" : "pointer", userSelect: "none" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#64748B", letterSpacing: 0.2 }}>Details</span>
+            {detailsLocked
+              ? <span style={{ fontSize: 11.5, fontWeight: 600, color: "#94A3B8", textAlign: "right" }}>Enter all your contact information to see the quote details.</span>
+              : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
           </div>
-          {additionalOpen && (() => {
+          {additionalOpen && !detailsLocked && (() => {
             // ── Invoice-style detail rows ─────────────────────────────────────────
             // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
@@ -3490,21 +3548,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
               </div>
             )}
 
-            {/* Discounts — reduce the estimate total. */}
+            {/* Discounts — reduce the estimate total. Editable ONLY in the portal: on the
+                public side a rep-applied discount renders read-only, because an editable
+                row would let a shopper reopen their share link, inflate their own discount
+                and resubmit — the estimate is rebuilt from these values. */}
             {(sel.discounts || []).length > 0 && (
               <div style={{ marginTop: 14 }}>
                 {(sel.discounts || []).map((row, idx) => (
                   <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <input type="text" value={row.description || ""} placeholder="Discount description"
-                      onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
-                    <div style={amtInputWrap}>
-                      <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
-                      <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
-                        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
-                        style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                    </div>
-                    <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
+                    {embedded ? (
+                      <input type="text" value={row.description || ""} placeholder="Discount description"
+                        onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
+                        style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
+                    ) : (
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: "#334155", padding: "6px 0", wordBreak: "break-word" }}>{row.description || "Discount"}</div>
+                    )}
+                    {embedded ? (
+                      <div style={amtInputWrap}>
+                        <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
+                        <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
+                          onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
+                          style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                      </div>
+                    ) : (
+                      <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#059669", flexShrink: 0 }}>−${Number(row.amount || 0).toFixed(2)}</div>
+                    )}
+                    {embedded
+                      ? <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
+                      : <span style={{ width: 28, flexShrink: 0 }} />}
                   </div>
                 ))}
               </div>
@@ -3518,15 +3589,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
                   <div style={{ fontSize: 10.5, color: "#94A3B8" }}>Non-taxable line on the estimate</div>
                 </div>
-                <div style={amtInputWrap}>
-                  <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
-                  <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
-                    onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                    style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                </div>
-                <button title="Remove the delivery fee"
-                  onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
-                  style={delBtn}>×</button>
+                {embedded ? (
+                  <div style={amtInputWrap}>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
+                    <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
+                      onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                      style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                  </div>
+                ) : (
+                  <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#334155", flexShrink: 0 }}>${Number(sel.deliveryFee || 0).toFixed(2)}</div>
+                )}
+                {embedded
+                  ? <button title="Remove the delivery fee"
+                      onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
+                      style={delBtn}>×</button>
+                  : <span style={{ width: 28, flexShrink: 0 }} />}
               </div>
             )}
 
@@ -3544,8 +3621,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
             {/* Add buttons — below the subtotal, invoice-footer style. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
               <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])} style={dashBtn}>+ Add Custom Option</button>
-              <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>
-              {!showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
+              {/* Business-only: a shopper must not be able to discount their own quote or
+                  invent a delivery fee. Rows already ON a reopened design still render —
+                  a rep-applied discount is part of the customer's real quote. */}
+              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>}
+              {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
             </div>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
               Custom options add charges · discounts reduce the estimate total · delivery is added as a non-taxable line.

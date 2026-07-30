@@ -30,6 +30,13 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const name = typeof body?.name === "string" ? body.name.trim().slice(0, 200) : "";
   const phoneRaw = typeof body?.phone === "string" ? body.phone.trim().slice(0, 40) : "";
   const email = typeof body?.email === "string" ? body.email.trim().slice(0, 200) : "";
+  // Optional address — sent by the designer's silent Details-open capture, where the
+  // visitor has just filled the whole contact form. All best-effort, same as email.
+  const str = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const street = str(body?.street, 200);
+  const city = str(body?.city, 100);
+  const state = str(body?.state, 60);
+  const zip = str(body?.zip, 12);
   const phoneDigits = phoneRaw.replace(/\D/g, "");
 
   // Basic validation — don't spam the CRM with empty/garbage. Not fatal: skip quietly.
@@ -62,6 +69,10 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
         name,
         phone: phoneRaw,
         ...(email ? { email } : {}),
+        ...(street ? { address1: street } : {}),
+        ...(city ? { city } : {}),
+        ...(state ? { state } : {}),
+        ...(zip ? { postalCode: zip } : {}),
         locationId,
         source: "StructureStudio Designer",
         tags: ["structurestudio-lead"],
