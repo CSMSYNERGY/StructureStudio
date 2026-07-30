@@ -34,7 +34,14 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword, type GateOutcome } from "./adminGate.ts";
 
 export type AdminIdentity =
-  | { via: "operator"; userId: string; email: string }
+  // `canWrite` mirrors app_operators.can_write (migration 056, default FALSE). It is
+  // reported here rather than enforced here, because only the caller knows whether the
+  // action it is about to run reads or writes.
+  | { via: "operator"; userId: string; email: string; canWrite: boolean; canBill: boolean }
+  // The password path has no operator row and therefore no per-operator rights. Callers
+  // MUST gate on `via === "operator"` before consulting canWrite — reading it off this
+  // variant yields undefined, and a naive `if (!identity.canWrite) 403` would lock the
+  // break-glass console out of every write while claiming the account is read-only.
   | { via: "password" };
 
 export type AdminAuthOutcome =
@@ -70,13 +77,28 @@ export async function checkAdminAuth(
       // authenticated, so a user-JWT client sees no rows for anyone.
       const { data: op, error: opErr } = await admin
         .from("app_operators")
-        .select("user_id, email")
+        // can_write / can_bill were added by migration 056 with default FALSE, and were
+        // NOT selected here until 2026-07-30 — so every JWT-authorized operator could
+        // perform every catalog write regardless. It went unnoticed because the console
+        // was iframed behind the shared password, which incidentally gated the same
+        // actions; bringing Admin in natively removes that accident, so the real check
+        // has to exist. `_shared/resolveTenant.ts:197` has always selected all four.
+        .select("user_id, email, can_write, can_bill")
         .eq("user_id", user.id)
         .maybeSingle();
       if (opErr) return { ok: false, status: 500, body: { error: opErr.message } };
 
       if (op) {
-        return { ok: true, identity: { via: "operator", userId: user.id, email: op.email || user.email || "" } };
+        return {
+          ok: true,
+          identity: {
+            via: "operator",
+            userId: user.id,
+            email: op.email || user.email || "",
+            canWrite: Boolean(op.can_write),
+            canBill: Boolean(op.can_bill),
+          },
+        };
       }
 
       // A real, signed-in, NON-operator user. Do not fall through to the password path.

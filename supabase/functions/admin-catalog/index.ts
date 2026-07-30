@@ -197,6 +197,30 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     if (!stepUp.ok) return json(stepUp.body, stepUp.status);
   }
 
+  // Per-operator rights (migration 056: can_write / can_bill, both default FALSE).
+  //
+  // Enumerated as READS rather than writes, deliberately: a new action added below and
+  // forgotten here is then denied to read-only operators rather than silently granted to
+  // them. Deny-by-default is the only safe direction for a list somebody will extend.
+  //
+  // Gated on `via === "operator"` ONLY. The password path has no operator row, so
+  // `canWrite` is undefined there and an unconditional check would 403 the standalone
+  // break-glass console out of every write while telling it the account is read-only.
+  const READ_ONLY_ACTIONS = new Set([
+    "list_clients", "get_master", "get_client_catalog", "get_email_sender",
+  ]);
+  if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
+    if (!identity.canWrite) {
+      return json({ error: "This operator account is read-only." }, 403);
+    }
+    // Money is a separate grant from configuration — 056's own words: "Adding an operator
+    // should never silently grant the ability to charge a client's card." set_billing sets
+    // the discount and the exemption that every later charge is computed from.
+    if (String(action ?? "") === "set_billing" && !identity.canBill) {
+      return json({ error: "This operator account cannot change billing." }, 403);
+    }
+  }
+
   // Successful operator-authenticated calls are recorded. Until now only FAILURES were
   // audited, which meant an authorized admin action left no trace at all.
   if (identity.via === "operator") {

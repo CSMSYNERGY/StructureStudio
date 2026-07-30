@@ -44,6 +44,15 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
   const gate = await checkAdminAuth(req, adminPassword, supabase, String(action ?? ""));
   if (!gate.ok) return json(gate.body, gate.status);
 
+  // Same per-operator rights rule as admin-catalog (migration 056). "status" only reports
+  // booleans about whether credentials exist; everything else writes a tenant's GHL
+  // credentials, which is not something a read-only operator should be able to do.
+  // Gated on `via === "operator"` only — the password path carries no operator row, so an
+  // unconditional check would break the designer's ?admin=1 panel and admin.html.
+  if (gate.identity.via === "operator" && action !== "status" && !gate.identity.canWrite) {
+    return json({ error: "This operator account is read-only." }, 403);
+  }
+
   if (!clientId || typeof clientId !== "string" || !clientId.trim()) {
     return json({ error: "clientId is required." }, 400);
   }
