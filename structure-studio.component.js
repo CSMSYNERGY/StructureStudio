@@ -933,6 +933,49 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       } });
     } catch (_e) { /* lead capture must never break the designer */ }
   };
+  // Draft-design capture (migration 063). The same Details-open moment that captures the
+  // lead also saves WHAT they designed, as a status='draft' designs row — so the portal
+  // can open a browsing lead's actual floor plan even though they never pressed submit.
+  // A later real submit reuses the same short_code (currentDesignIdRef) and save_design
+  // promotes the row to 'sent'. Silent and best-effort like the lead capture: no PDF is
+  // rendered, no URL is rewritten, nothing changes for the visitor.
+  const draftStateRef = useRef(null);  // JSON of the last draft-saved payload (skip no-op re-saves)
+  const isDraftRef = useRef(false);    // the row behind currentDesignIdRef is a draft, safe to re-save
+  const saveDraftSilently = () => {
+    if (!customerFacing || !supabase) return;
+    // Never write over a row we didn't create as a draft: someone re-opening a SUBMITTED
+    // design from a share link must not have it silently rewritten by browsing further.
+    if (currentDesignIdRef.current && !isDraftRef.current) return;
+    if (!sel.style && !sel.size && items.length === 0) return; // nothing designed yet
+    const body = {
+      p_contact: contact,
+      p_selections: sel,
+      p_paint_colors: paintColors,
+      p_items: items,
+      p_custom_options: customOptions,
+      p_ro_dimensions: roDimensions,
+      p_bldg_w: bldgW,
+      p_bldg_h: bldgH,
+    };
+    const snapshot = JSON.stringify(body);
+    if (snapshot === draftStateRef.current) return; // unchanged since the last draft save
+    const code = currentDesignIdRef.current || genShortCode();
+    (async () => {
+      try {
+        const { error } = await supabase.rpc("save_design", {
+          p_code: code,
+          p_client_id: C.clientId,
+          ...body,
+          p_image_url: null,   // drafts carry no PDF; save_design preserves any existing one
+          p_status: "draft",   // the ONLY status the RPC accepts from an anon caller
+        });
+        if (error) return;     // best-effort: a failed draft save is invisible by design
+        currentDesignIdRef.current = code;
+        isDraftRef.current = true;
+        draftStateRef.current = snapshot;
+      } catch (_e) { /* draft save must never break the designer */ }
+    })();
+  };
   // Details NEVER auto-opens. If the form drops back to incomplete (a cleared field, the
   // address search resetting values), the section CLOSES — so re-completing the form can
   // never resurface it without a fresh click. Without this, an earlier open survived the
@@ -942,9 +985,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   }, [detailsLocked]);
   // The lead save keys off VISIBILITY, not the click handler: whatever path reveals the
   // details, the contact is saved. The ref in captureLeadSilently keeps it once per load,
-  // and its customerFacing guard keeps the portal designer out entirely.
+  // and its customerFacing guard keeps the portal designer out entirely. The draft save
+  // rides the same moment: who they are (lead) and what they designed (draft) together.
   useEffect(() => {
-    if (additionalOpen && !detailsLocked) captureLeadSilently();
+    if (additionalOpen && !detailsLocked) { captureLeadSilently(); saveDraftSilently(); }
   }, [additionalOpen, detailsLocked]);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
@@ -1107,6 +1151,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       if (cancelled || error || !data) return;
       currentDesignIdRef.current = data.short_code;
       setDesignCode(data.short_code);
+      // A re-opened draft may keep draft-saving; any other status locks the row against
+      // silent rewrites (saveDraftSilently refuses non-draft rows).
+      isDraftRef.current = data.status === "draft";
       // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
       ghlContactIdRef.current = data.ghl_contact_id || null;
       ghlEstimateIdRef.current = data.ghl_estimate_id || null;
@@ -2246,6 +2293,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       const viewUrl = `${window.location.origin}${embedded ? "/" : window.location.pathname}?${shareParams.toString()}`;
       if (!embedded) window.history.replaceState({}, "", `?${shareParams.toString()}`);
       currentDesignIdRef.current = shortCode;
+      // If this code began life as a silent draft, save_design just promoted it to 'sent'
+      // — from here on it is a submitted design and draft saves must leave it alone.
+      isDraftRef.current = false;
+      draftStateRef.current = null;
       setDesignCode(shortCode);
       setViewingVersion(null);
 
@@ -3800,6 +3851,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                 setCustomOptions([]);
                 setRoDimensions({});
                 currentDesignIdRef.current = null;
+                isDraftRef.current = false;
+                draftStateRef.current = null;
                 ghlContactIdRef.current = null;
                 ghlEstimateIdRef.current = null;
                 ghlEstimateNumberRef.current = null;

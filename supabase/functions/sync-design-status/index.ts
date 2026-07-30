@@ -189,6 +189,11 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   const statuses: Record<string, string> = {};
   const updates: { short_code: string; status: string }[] = [];
   for (const d of designs ?? []) {
+    // Drafts (migration 063: a browsing lead's silently-saved design) have no estimate and
+    // no opportunity — there is nothing in GHL to derive from, and the 'sent' baseline
+    // below would otherwise promote every draft the moment the portal loads it. Their
+    // status belongs to save_design alone: a real submit is what turns draft into sent.
+    if (d.status === "draft") { statuses[d.short_code] = "draft"; continue; }
     let stage: "sent" | "accepted" | "invoiced" | "delivered" = "sent";
 
     const estStatus = d.ghl_estimate_id ? estStatusById.get(String(d.ghl_estimate_id)) : undefined;

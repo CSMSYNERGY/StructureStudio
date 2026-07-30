@@ -157,6 +157,17 @@ Adding a new item type usually means adding an entry to `layoutItems` + any new 
 
 The edge function returns GHL ids (`contactId`, `estimateId`, `estimateNumber`, `opportunityId`) which the component stores in refs — a resubmit becomes an update of the same estimate. If you rename or restructure these fields, the estimate flow breaks silently.
 
+### Draft designs (migration 063)
+
+The PUBLIC designer silently saves a browsing lead's in-progress design as a `designs` row with `status='draft'` the moment they open quote Details — the same trigger as the capture-lead call, in `saveDraftSilently` next to `captureLeadSilently`. No PDF is rendered (`image_url` null), no URL rewrite, nothing visible to the visitor. The draft's short code lands in `currentDesignIdRef`, so a later real submit **reuses the same row** and `save_design` promotes it to `'sent'`.
+
+Rules that keep this safe — do not loosen them:
+
+- `save_design`'s `p_status` accepts **only** `'draft'` (or null). It is anon-callable; letting it write `accepted`/`invoiced` would let the public internet drive billing UI (send-invoice keys off accepted).
+- A non-draft row's status is **never** changed by `save_design` with `p_status='draft'`, and a null `p_image_url` **preserves** the existing PDF — so a draft re-save can never downgrade or blank a submitted design.
+- `sync-design-status` **skips** `status='draft'` rows. Without that skip, its `'sent'` baseline would promote every draft the moment the portal loads it (there is no GHL estimate to derive from).
+- Portal: `draft` is in `STATUS_LABELS`/`STATUS_COLORS`/`STATUS_RANK` (rank −1, below sent; Contacts' browsing sort uses −2). LeadsTable's browsing-suppression means a captured lead with a draft shows as their **design row** ("Open latest" opens the actual floor plan) instead of a bare "Browsing" chip.
+
 ## Cutover checklist (✅ COMPLETED 2026-06-14 — kept for reference)
 
 1. Open the live site; confirm the console logs `[StructureStudio] multi-tenant build: config-loader + RPC data path`, that config now loads via `/rest/v1/rpc/get_config` (not `/rest/v1/client_configs`), and a `?id=` load hits `/rest/v1/rpc/load_design` in devtools Network.

@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260730a" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260730b" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -467,17 +467,21 @@ function ShareLinkCard({ clientId }) {
 
 // ─── Designs table ───
 // Fulfillment status (read-only badge). Value is a GHL-derived projection cached on
-// designs.status and refreshed by the sync-design-status edge function on load.
-const STATUS_LABELS = { sent: "Sent", accepted: "Accepted", invoiced: "Invoiced", delivered: "Delivered" };
+// designs.status and refreshed by the sync-design-status edge function on load —
+// EXCEPT 'draft' (migration 063): a browsing lead's silently-saved design, written by
+// save_design alone. It has no GHL estimate, so the sync skips it; a real submit is
+// what promotes it to 'sent'.
+const STATUS_LABELS = { draft: "Draft", sent: "Sent", accepted: "Accepted", invoiced: "Invoiced", delivered: "Delivered" };
 const STATUS_COLORS = {
+  draft:     { bg: "#F1F5F9", fg: "#475569" },
   sent:      { bg: "#EEF2FF", fg: "#3D3672" },
   accepted:  { bg: "#F0FDF4", fg: "#15803D" },
   invoiced:  { bg: "#FFFBEB", fg: "#B45309" },
   delivered: { bg: "#ECFEFF", fg: "#0E7490" },
 };
 // Fulfillment workflow order — used so a Status-column sort follows the pipeline
-// (sent → accepted → invoiced → delivered) rather than sorting alphabetically.
-const STATUS_RANK = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+// (draft → sent → accepted → invoiced → delivered) rather than sorting alphabetically.
+const STATUS_RANK = { draft: -1, sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
 
 // The one place an unrecognised/absent status becomes "sent". This expression was written out
 // by hand in seven places (search, sort, badge, and three times inside the Leads grouping),
@@ -672,7 +676,10 @@ function CardHead({ title, count, desc, right, children }) {
 // down the file — safe because function declarations hoist, and it means one dialog shell.
 function DeleteDesignDialog({ design, onClose, onDeleted }) {
   const st = normStatus(design.status);
-  const needsConfirm = st !== "sent";
+  // Drafts are even cheaper than Sent — never submitted, no estimate, no PDF — so they
+  // share the single-confirm path (matches portal-settings, which treats any status
+  // outside its billing list as "sent" for this same check).
+  const needsConfirm = st !== "sent" && st !== "draft";
   const expected = design.ghl_estimate_number ? String(design.ghl_estimate_number) : design.short_code;
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1041,7 +1048,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       const c = r.contact || {};
       const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
       let g = groups.get(key);
-      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "sent", search: "", codes: [], acceptedCodes: [] }; groups.set(key, g); }
+      // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
+      // wins the > comparison below — seeded at "sent", a draft-only contact could never
+      // display as Draft (its -1 never beats 0).
+      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [], acceptedCodes: [] }; groups.set(key, g); }
       g.count += 1;
       g.codes.push(r.short_code);                     // newest-first (list order)
       if (normStatus(r.status) === "accepted") g.acceptedCodes.push(r.short_code);
@@ -1110,7 +1120,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       case "designs":      return g.count;
       case "firstSeen":    return g.firstSeen;
       case "lastActivity": return g.lastActivity;
-      case "status":       return g.browsing ? -1 : STATUS_RANK[g.topStatus];
+      case "status":       return g.browsing ? -2 : STATUS_RANK[g.topStatus]; // browsing < draft (-1) < sent
       default:             return g.lastActivity;
     }
   };
