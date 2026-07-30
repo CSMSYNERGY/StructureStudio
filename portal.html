@@ -278,6 +278,25 @@ function ssPagePath(page, sub) {
   return base + (window.location.search || "");
 }
 
+// Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
+// (product news), and the coming-soon teaser tabs (previews, no data). Everything else is
+// admin-only.
+const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+
+// "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
+// the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
+// that array is the role escape hatch and would hand the operator console to every team
+// member. Content renders are ALSO gated (and the server re-checks regardless).
+//
+// At module scope so the router's URL-normalising effect can call it too. That effect has
+// to sit ABOVE Dashboard's early returns (tenant loading / no tenant) — a hook below them
+// changes the hook count between renders, which is React error #310 and a blank screen.
+// The comment on `designerOpened` says the same thing; this is the second time it has bitten.
+function ssClampTab(tab, isOperator, canAdmin) {
+  if (tab === "accounts" || tab === "admin") return isOperator ? tab : "designs";
+  return (!canAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab;
+}
+
 const ACCENT = "#3D3672";  // brand purple
 const S = {
   page: { minHeight: "100vh", display: "flex", flexDirection: "column" },
@@ -4769,6 +4788,33 @@ function Dashboard({ session }) {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  // Keep the address bar honest about where you actually are.
+  //
+  // MUST live up here with the other hooks. Dashboard early-returns below (tenant loading /
+  // no tenant), and a hook after those returns changes the hook count between renders —
+  // React error #310, blank screen. It recomputes the clamp via ssClampTab rather than
+  // reading `activeTab`, which is only available after those returns.
+  //
+  // Two jobs. (1) A cold load at bare /portal has no page in the path, so write the
+  // resolved one in with replaceState — no history entry, because you did not navigate.
+  // (2) If the clamp REFUSED the requested page (a team member deep-linking /portal/admin),
+  // rewrite the URL to what is really on screen. Leaving the old path up is worse than the
+  // bounce: reload and you bounce again, so the link looks half-broken.
+  //
+  // `wanted` holds the URL's request until the gates have actually resolved, so an operator
+  // whose app_operators row is still in flight is not mistaken for a refusal.
+  const canAdminForUrl = viewing ? isOperator : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl);
+  useEffect(() => {
+    if (!tenant || tenant === "none") return;          // nothing routable yet
+    const p = ssParsePath();
+    const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
+    if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
+    if (wanted.current) wanted.current = null;
+    if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
+    try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
+  }, [resolvedTab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
   // Designer tab: lazy-mount on first open, then KEEP mounted (display toggle below).
   // A conditional {activeTab==="designer" && …} unmount would discard the user's
   // in-progress design and re-fetch config on every tab switch.
@@ -4928,7 +4974,7 @@ function Dashboard({ session }) {
   const isAdmin = tenant.role === "owner" || tenant.role === "admin";
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
-  const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+
   // While VIEWING another tenant, operator status is the admin grant. isAdmin above
   // describes the operator's role in their OWN client_users row — routinely "user", or
   // absent entirely — so using it here would leave Settings dead in the viewed account,
@@ -4942,29 +4988,8 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = (tab === "accounts" || tab === "admin")
-    ? (isOperator ? tab : "designs")
-    : ((!canAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin);
 
-  // Keep the address bar honest about where you actually are.
-  //
-  // Two jobs. (1) A cold load at bare /portal has no page in the path, so write the
-  // resolved one in with replaceState — no history entry, because you did not navigate.
-  // (2) If the clamp above REFUSED the requested page (a team member deep-linking
-  // /portal/admin), rewrite the URL to what is really on screen. Leaving the old path up
-  // is worse than the bounce itself: reload it and you bounce again, and it looks like a
-  // link that half-works.
-  //
-  // `wanted` is only cleared once the gates have actually resolved, so an operator whose
-  // app_operators row is still in flight is not mistaken for a refusal on first render.
-  useEffect(() => {
-    const p = ssParsePath();
-    const gatesResolved = isOperator || canAdmin || entitlement !== null;
-    if (wanted.current && wanted.current !== activeTab && !gatesResolved) return; // still deciding
-    if (wanted.current) wanted.current = null;
-    if (p.page === activeTab && (p.sub || null) === (sub || null)) return;         // already correct
-    try { window.history.replaceState({ page: activeTab, sub }, "", ssPagePath(activeTab, sub)); } catch (_e) {}
-  }, [activeTab, sub, isOperator, canAdmin, entitlement]);
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
   // Signed-in user identity for the sidebar footer. Auth users are email+password
