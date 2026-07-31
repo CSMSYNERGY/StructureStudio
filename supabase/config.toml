@@ -82,6 +82,17 @@ verify_jwt = true
 # added 2026-07-30. Kept true so a bare unauthenticated request is still refused early.
 verify_jwt = true
 
+[functions.qbo-oauth-connect]
+# Starting an OAuth flow attaches a QuickBooks company to a tenant — an owner/admin action.
+verify_jwt = true
+
+[functions.qbo-oauth-callback]
+# ⛔ MUST STAY FALSE. Intuit redirects the user's BROWSER here with no Supabase JWT; with
+# verification on, the gateway 401s every callback before the function runs and connecting
+# QuickBooks silently becomes impossible — the exact shape of the billing-webhook outage.
+# Auth is the one-shot nonce stored on the tenant row, compared in constant time.
+verify_jwt = false
+
 # NOTE: `github-monday-bug` and `migrate-style-images` are deployed on the project but have
 # no directory in this repo, so they are deliberately absent here — a [functions] block for
 # a function the CLI cannot find is not something to invent. `github-monday-bug` runs with

@@ -1,0 +1,110 @@
+/**
+ * qbo-oauth-connect — start the QuickBooks OAuth round trip.
+ *
+ * verify_jwt = TRUE. Only a signed-in owner/admin (or a writing operator) may attach a
+ * QuickBooks company to a tenant.
+ *
+ * Returns the Intuit authorize URL; the portal then does a full `location.assign`. Not a
+ * popup: Intuit refuses to render framed, and a popup adds a blocked-popup failure mode
+ * for no benefit here (the portal is a normal top-level page, unlike BuildBridge's iframe).
+ */
+
+// deno-lint-ignore-file no-explicit-any
+import { createClient } from "jsr:@supabase/supabase-js@2";
+import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { qboOauthReady } from "../_shared/qboToken.ts";
+
+const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
+const SCOPE = "com.intuit.quickbooks.accounting";
+const STATE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Hard allowlist for the post-OAuth landing host. An open redirect here would let a
+ * crafted `returnTo` bounce a signed-in operator to an attacker's page carrying whatever
+ * the callback appends. Re-checked on the callback side too — never trust that the value
+ * that comes back is the value we issued.
+ */
+const ALLOWED_HOSTS = new Set(["structurestudio.app", "beta.structurestudio.app"]);
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" },
+  });
+
+function b64url(s: string): string {
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+
+  // Empty readActions ⇒ every action counts as a write ⇒ owner/admin or a writing
+  // operator. No extra permission code needed here.
+  const resolved = await resolveTenant(req, admin, { readActions: new Set<string>() });
+  if (!resolved.ok) return json(resolved.body, resolved.status);
+  const { ctx } = resolved;
+
+  // Read the app credentials at request time. Before they exist the whole feature is
+  // dark, and the UI shows "awaiting Intuit approval" rather than an error — this is a
+  // not-yet state, not a fault.
+  if (!qboOauthReady()) {
+    return json({
+      oauthReady: false,
+      error: "QuickBooks is not available yet — the Intuit app is still being set up.",
+      clientId: ctx.clientId,
+    }, 503);
+  }
+
+  const redirectUri = Deno.env.get("QBO_REDIRECT_URI")
+    ?? `${Deno.env.get("SUPABASE_URL")}/functions/v1/qbo-oauth-callback`;
+
+  // Where to land the browser afterwards. Validated against the allowlist; anything else
+  // silently falls back to production rather than erroring — a bad returnTo is not worth
+  // blocking a connect over.
+  let returnHost = "structurestudio.app";
+  const rawReturn = typeof ctx.payload?.returnTo === "string" ? ctx.payload.returnTo : "";
+  if (rawReturn) {
+    try {
+      const h = new URL(rawReturn.includes("://") ? rawReturn : `https://${rawReturn}`).hostname;
+      if (ALLOWED_HOSTS.has(h)) returnHost = h;
+    } catch { /* keep the default */ }
+  }
+
+  // 32 bytes of CSRF nonce. The callback matches this against the SERVER-stored copy, so
+  // the state blob itself needs no signature — it is routing data, not a credential.
+  const nonce = b64url(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+
+  const { error: saveErr } = await admin.from("client_settings").update({
+    qbo_oauth_state: nonce,
+    qbo_oauth_state_expires_at: new Date(Date.now() + STATE_TTL_MS).toISOString(),
+  }).eq("client_id", ctx.clientId);
+
+  if (saveErr) {
+    return json({ error: "Could not start the QuickBooks connection.", clientId: ctx.clientId }, 500);
+  }
+
+  await ctx.audit("qbo_oauth_start", 1, null);
+
+  const state = b64url(JSON.stringify({ cid: ctx.clientId, n: nonce, rt: returnHost }));
+  const authorizeUrl = `${AUTHORIZE_URL}?${new URLSearchParams({
+    client_id: Deno.env.get("QBO_CLIENT_ID")!,
+    response_type: "code",
+    scope: SCOPE,
+    redirect_uri: redirectUri,
+    state,
+  })}`;
+
+  // clientId is echoed as the operator view-as tripwire the portal already checks.
+  return json({ oauthReady: true, authorizeUrl, clientId: ctx.clientId });
+});
