@@ -191,8 +191,17 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
-const __ssInvoke = sb.functions.invoke.bind(sb.functions);
-sb.functions.invoke = async (name, opts) => {
+//
+// ⚠️ `sb.functions` is a GETTER in supabase-js v2 — it mints a NEW FunctionsClient on
+// every access. Assigning onto `sb.functions.invoke` therefore patches a throwaway
+// instance and silently does nothing: that is exactly what happened from 2026-07-30 to
+// 2026-07-31 — the targetClientId injection and the tripwire below never ran, and every
+// portal-settings call in operator view-as resolved the OPERATOR'S OWN tenant. The fix
+// is to mint ONE instance, wrap it, and pin it as an own data property so it shadows
+// the prototype getter (verify in a console: `sb.functions === sb.functions` → true).
+const __ssFunctions = sb.functions;
+const __ssInvoke = __ssFunctions.invoke.bind(__ssFunctions);
+__ssFunctions.invoke = async (name, opts) => {
   let injected = null;
   if (
     ssTargetClientId &&
@@ -224,6 +233,9 @@ sb.functions.invoke = async (name, opts) => {
   }
   return res;
 };
+// Pin the wrapped instance. An own data property shadows the class getter, so every
+// later `sb.functions` access returns THIS client instead of minting an unwrapped one.
+Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: true });
 
 // (ADMIN_URL is gone — the Admin tab no longer iframes /admin. admin.html and its /admin
 // redirect both REMAIN on disk as the break-glass route: if this portal will not load,
