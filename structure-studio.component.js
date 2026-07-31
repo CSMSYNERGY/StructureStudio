@@ -236,6 +236,10 @@ const FIXTURE_DOOR_COLOR_DOUBLE = "#B45309";  // matches the built-in Double Doo
 // Amber like the built-in doors, darker for a double so it reads the same as doubleDoor.
 function fixtureDoorColor(item) { return item && item.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR; }
 const FIXTURE_DOOR_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", noPalette: true, isFixtureDoor: true };
+// The single "Door" palette tool. Arming it and clicking a wall opens the door picker
+// (below) instead of placing immediately — the shopper chooses WHICH door (and its swing/
+// operation where more than one is offered) in the popup.
+const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", isDoorPicker: true };
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
   if (fx.swingIn) return "in";
@@ -304,6 +308,66 @@ function fixtureDoorCanvas(ctx, item, iw, color) {
   if (rightHinge) { ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke(); }
   else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
   ctx.setLineDash([]);
+}
+// Door placement picker modal. Opens when the "Door" tool drops on a wall: lists ALL
+// catalog doors; the shopper picks one and — only where more than one is offered — its
+// swing and operation, then places it. Self-contained (own selection state).
+function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
+  const [sel, setSel] = useState(doors.length === 1 ? doors[0] : null);
+  const [swing, setSwing] = useState(null);
+  const [operation, setOperation] = useState(null);
+  useEffect(() => {
+    if (!sel) { setSwing(null); setOperation(null); return; }
+    setSwing(fixtureInitialSwing(sel));
+    setOperation(fixtureInitialOperation(sel));
+  }, [sel]);
+  const swingOpts = sel ? [sel.swingIn && "in", sel.swingOut && "out"].filter(Boolean) : [];
+  const opOpts = sel ? [sel.opRight && "right", sel.opLeft && "left", sel.opDouble && "double", sel.opSlideUp && "slideup"].filter(Boolean) : [];
+  const OP_LABEL = { right: "Right", left: "Left", double: "Double", slideup: "Slide up" };
+  const money = (n) => "$" + Number(n).toLocaleString();
+  const chip = (key, on, label, onClick) => (
+    <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, background: on ? "#FEF3C7" : "#FFF", color: on ? "#92400E" : "#334155" }}>{label}</div>
+  );
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a door</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Pick a door to place on this wall.</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {doors.map((d) => {
+            const on = sel && sel.id === d.id;
+            return (
+              <div key={d.id} onClick={() => setSel(d)} style={{ border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {d.imageUrl ? <img src={d.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>🚪</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{d.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{d.widthIn}×{d.heightIn} in{showPricing && d.price != null ? ` · ${money(d.price)}` : ""}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {sel && swingOpts.length > 1 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Swing</div>
+            <div style={{ display: "flex", gap: 8 }}>{swingOpts.map((o) => chip(o, swing === o, o === "in" ? "In-swing" : "Out-swing", () => setSwing(o)))}</div>
+          </div>
+        )}
+        {sel && opOpts.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Operation</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{opOpts.map((o) => chip(o, operation === o, OP_LABEL[o], () => setOperation(o)))}</div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => sel && onPlace(sel, swing, operation)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place door</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // Map a positional wall to a display label (FRONT/BACK/LEFT/RIGHT)
@@ -831,8 +895,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // sniffing the URL. If a feature is for the business, use `embedded`; if it is lead- or
   // customer-flavoured (contact gates, silent lead capture), use `customerFacing`.
   const customerFacing = !embedded;
-  const fixtureTools = useMemo(() => buildFixtureTools(C.fixtures), [C.fixtures]);
-  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, ...fixtureTools, fixtureDoor: FIXTURE_DOOR_CFG };
+  const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
+  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG, ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}) };
+  const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
@@ -1537,6 +1602,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSelectedId(hit ? hit.id : null); return;
     }
     const cfg = ITEMS[activeTool]; if (!cfg) return;
+    // The single "Door" tool: don't place yet — remember the wall + click point and open the
+    // door picker, which chooses the door + swing/operation and then places it (placePickedDoor).
+    if (cfg.isDoorPicker) {
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      setDoorPick({ wall: w, ptx: pt.x, pty: pt.y });
+      setActiveTool(null); setToast(null);
+      return;
+    }
     const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
     let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
     // Wall-only items always go on a wall; if the click missed the threshold,
@@ -1668,27 +1741,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const y = Math.max(mgY + ihPx / 2, Math.min(pt.y, mgY + pH - ihPx / 2));
       ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height };
     }
-    // Catalog fixture door: snapshot its spec onto the placed item (so editing the catalog
-    // later never changes this saved design) and store it under the stable `fixtureDoor`
-    // type, with swing/operation initialised to the owner's default.
-    if (cfg.fixture) {
-      const fx = cfg.fixture;
-      ni.type = "fixtureDoor";
-      ni.fixtureItemId = fx.id;
-      ni.doorName = fx.name || "Door";
-      ni.planLabel = (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6);
-      ni.price = (fx.price != null ? fx.price : null);
-      ni.widthIn = Number(fx.widthIn) || null;
-      ni.heightIn = Number(fx.heightIn) || null;
-      ni.swing = fixtureInitialSwing(fx);
-      ni.operation = fixtureInitialOperation(fx);
-      ni.swingOpts = [fx.swingIn ? "in" : null, fx.swingOut ? "out" : null].filter(Boolean);
-      ni.opOpts = [fx.opRight ? "right" : null, fx.opLeft ? "left" : null, fx.opDouble ? "double" : null, fx.opSlideUp ? "slideup" : null].filter(Boolean);
-    }
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
   }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired]);
+
+  // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
+  // door's spec (so a later catalog edit never changes this saved design) + the shopper's
+  // swing/operation choice onto a stable `fixtureDoor` item.
+  const placePickedDoor = useCallback((fx, swing, operation) => {
+    if (!doorPick || !fx) return;
+    const widthFt = (Number(fx.widthIn) || 36) / 12;
+    const iwPx = widthFt * scale, ihPx = 0.5 * scale;
+    const sn = snapToWall(doorPick.wall, doorPick.ptx, doorPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
+    const ni = {
+      id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5,
+      fixtureItemId: fx.id, doorName: fx.name || "Door",
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+      price: (fx.price != null ? fx.price : null),
+      widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+      swing: swing || null, operation: operation || null,
+    };
+    if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
+      setToast("A door is already there — pick a different spot on the wall.");
+      setTimeout(() => setToast(null), 4000);
+      setDoorPick(null);
+      return;
+    }
+    setItems((p) => [...p, ni]);
+    setSelectedId(ni.id);
+    setDoorPick(null);
+    setToast(null);
+  }, [doorPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
@@ -2919,6 +3003,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={doorFixtures} showPricing={!!C.showPricing} onCancel={() => setDoorPick(null)} onPlace={placePickedDoor} />, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -3097,7 +3182,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 color: activeTool === key ? "#FFF" : "#334155",
                 border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
               }}>
-              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
+              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
