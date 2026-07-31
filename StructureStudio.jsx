@@ -154,13 +154,13 @@ function getNearestWall(x, y, pW, pH, mgX, mgY) {
 
 function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
   if (!ni.wall) return false;
-  const niw = nc.width * sc;
+  const niw = (ni.widthFt || nc.width) * sc;
   for (const it of existing) {
     const c = itemTypes[it.type];
     if (!c || !c.wallOnly || it.type === "window") continue;
     // Only check doors on the same wall
     if (it.wall !== ni.wall) continue;
-    const iw = c.width * sc;
+    const iw = (it.widthFt || c.width) * sc;
     // Check overlap along the wall axis
     if (ni.wall === "north" || ni.wall === "south") {
       if (Math.abs(ni.x - it.x) < (niw / 2) + (iw / 2) + 4) return true;
@@ -213,11 +213,91 @@ function noteEdgePoint(cx, cy, w, h, tx, ty) {
 // Determine which positional wall (north/south/east/west) is the FRONT
 // based on door placement. Double door wins over single door.
 function getFrontWall(items) {
-  const doubleDoors = items.filter((i) => i.type === "doubleDoor" && i.wall);
-  if (doubleDoors.length > 0) return doubleDoors[0].wall;
-  const singleDoors = items.filter((i) => i.type === "singleDoor" && i.wall);
-  if (singleDoors.length > 0) return singleDoors[0].wall;
+  // Catalog fixture doors count as doors too; a double-leaf (built-in doubleDoor, or a
+  // fixture whose operation is "double") wins over a single, same as before.
+  const doubles = items.filter((i) => i.wall && (i.type === "doubleDoor" || (i.type === "fixtureDoor" && i.operation === "double")));
+  if (doubles.length > 0) return doubles[0].wall;
+  const singles = items.filter((i) => i.wall && (i.type === "singleDoor" || i.type === "fixtureDoor"));
+  if (singles.length > 0) return singles[0].wall;
   return null;
+}
+
+// ── Fixtures catalog (Options → Doors) → placeable designer tools + rendering ──────
+// Each active catalog door (from get_fixtures) becomes a palette tool keyed `fx:<id>`
+// (wallOnly, carrying its own width in feet). Placing one creates a stable `fixtureDoor`
+// item that SNAPSHOTS the door's spec (name/width/price/swing/operation) so a later catalog
+// edit never changes a saved design. FIXTURE_DOOR_CFG is the render cfg for those placed
+// items; `noPalette` keeps it out of the tool row (only the fx: tools are shown).
+const FIXTURE_DOOR_COLOR = "#7C3AED";
+const FIXTURE_DOOR_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", noPalette: true, isFixtureDoor: true };
+function fixtureInitialSwing(fx) {
+  if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
+  if (fx.swingIn) return "in";
+  if (fx.swingOut) return "out";
+  return null;
+}
+function fixtureInitialOperation(fx) {
+  if (fx.opSlideUp) return "slideup";
+  if (fx.opDouble) return "double";
+  if (fx.opRight && fx.opLeft) return fx.opDefault || "right";
+  if (fx.opRight) return "right";
+  if (fx.opLeft) return "left";
+  return null;
+}
+function buildFixtureTools(fixtures) {
+  const out = {};
+  (Array.isArray(fixtures) ? fixtures : []).forEach((fx) => {
+    if (!fx || (fx.category && fx.category !== "door")) return;
+    const wIn = Number(fx.widthIn) || 36;
+    out[`fx:${fx.id}`] = {
+      label: fx.name || "Door", color: FIXTURE_DOOR_COLOR, icon: "🚪",
+      wallOnly: true, width: wIn / 12, height: 0.5,
+      shortLabel: (fx.name || "DOOR").toUpperCase().slice(0, 10), fixture: fx,
+    };
+  });
+  return out;
+}
+// Swing/operation-aware door glyph. `out` combines the wall side (like the built-in
+// singleDoor/doubleDoor) with the door's in/out swing (in = mirror of out). Hinge side
+// comes from operation (right/left); "double" = two leaves; "slideup" = a segmented
+// garage/roll-up panel with no arc.
+function fixtureDoorOut(item) {
+  const outBase = item.wall === "north" || item.wall === "east";
+  return item.swing === "in" ? !outBase : outBase;
+}
+function fixtureDoorSVG(item, iw, color) {
+  const stroke = color + "60", op = item.operation, out = fixtureDoorOut(item);
+  if (op === "slideup") {
+    return <g>{[-iw / 4, 0, iw / 4].map((lx, k) => <line key={k} x1={lx} y1={-5} x2={lx} y2={5} stroke="#FFF" strokeWidth={1.5} />)}</g>;
+  }
+  if (op === "double") {
+    const r = iw * 0.4, s = out ? -1 : 1;
+    return (<><path d={`M ${-iw / 2 + r} 0 A ${r} ${r} 0 0 ${out ? 0 : 1} ${-iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><path d={`M ${iw / 2 - r} 0 A ${r} ${r} 0 0 ${out ? 1 : 0} ${iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><line x1={0} y1={-5} x2={0} y2={5} stroke="#FFF" strokeWidth={1.5} /></>);
+  }
+  const r = iw * 0.8, rightHinge = op === "right", ey = out ? -r : r;
+  const sx = rightHinge ? iw / 2 - r : -iw / 2 + r, ex = rightHinge ? iw / 2 : -iw / 2;
+  const sweep = rightHinge ? (out ? 1 : 0) : (out ? 0 : 1);
+  return <path d={`M ${sx} 0 A ${r} ${r} 0 0 ${sweep} ${ex} ${ey}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" />;
+}
+function fixtureDoorCanvas(ctx, item, iw, color) {
+  const op = item.operation, out = fixtureDoorOut(item);
+  if (op === "slideup") {
+    ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
+    [-iw / 4, 0, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -5); ctx.lineTo(lx, 5); ctx.stroke(); });
+    return;
+  }
+  ctx.strokeStyle = color + "60"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+  if (op === "double") {
+    const r = iw * 0.4;
+    ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke();
+    ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
+    ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
+    return;
+  }
+  const r = iw * 0.8, rightHinge = op === "right";
+  if (rightHinge) { ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
+  ctx.setLineDash([]);
 }
 
 // Map a positional wall to a display label (FRONT/BACK/LEFT/RIGHT)
@@ -725,7 +805,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // sniffing the URL. If a feature is for the business, use `embedded`; if it is lead- or
   // customer-flavoured (contact gates, silent lead capture), use `customerFacing`.
   const customerFacing = !embedded;
-  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
+  const fixtureTools = useMemo(() => buildFixtureTools(C.fixtures), [C.fixtures]);
+  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, ...fixtureTools, fixtureDoor: FIXTURE_DOOR_CFG };
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
@@ -1561,6 +1642,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const y = Math.max(mgY + ihPx / 2, Math.min(pt.y, mgY + pH - ihPx / 2));
       ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height };
     }
+    // Catalog fixture door: snapshot its spec onto the placed item (so editing the catalog
+    // later never changes this saved design) and store it under the stable `fixtureDoor`
+    // type, with swing/operation initialised to the owner's default.
+    if (cfg.fixture) {
+      const fx = cfg.fixture;
+      ni.type = "fixtureDoor";
+      ni.fixtureItemId = fx.id;
+      ni.doorName = fx.name || "Door";
+      ni.price = (fx.price != null ? fx.price : null);
+      ni.widthIn = Number(fx.widthIn) || null;
+      ni.heightIn = Number(fx.heightIn) || null;
+      ni.swing = fixtureInitialSwing(fx);
+      ni.operation = fixtureInitialOperation(fx);
+      ni.swingOpts = [fx.swingIn ? "in" : null, fx.swingOut ? "out" : null].filter(Boolean);
+      ni.opOpts = [fx.opRight ? "right" : null, fx.opLeft ? "left" : null, fx.opDouble ? "double" : null, fx.opSlideUp ? "slideup" : null].filter(Boolean);
+    }
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
@@ -2072,6 +2169,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Right leaf: hinge at right edge of door
           ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
           ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
+        } else if (item.type === "fixtureDoor") {
+          fixtureDoorCanvas(ctx, item, iw, cfg.color);
         } else if (item.type === "window") {
           ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
           [0, -iw / 4, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -4); ctx.lineTo(lx, 4); ctx.stroke(); });
@@ -2944,7 +3043,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
-          const entries = Object.entries(ITEMS);
+          const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette);
           const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
           const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
           // Decline control for an included item: X it off (a deduction line is added on the
@@ -3314,6 +3413,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         </>
                       );
                     })()}
+                    {item.type === "fixtureDoor" && fixtureDoorSVG(item, iw, cfg.color)}
                     {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
                       if (item.type !== "roughOpening") return cfg.shortLabel;
@@ -4116,7 +4216,15 @@ export default function StructureStudio({ config: configProp = null, clientId: c
           setState({ status: "error", clientId, message: `Configuration row is incomplete (missing: ${missing.join(", ")}).` });
           return;
         }
-        setState({ status: "ready", config: { ...cfg, clientId } });
+        // Fixtures catalog (Options → Doors; windows/ramps later) — best-effort: a failure
+        // just means no catalog doors in the palette, it never blocks the designer.
+        let fixtures = [];
+        try {
+          const fxRes = await sb.rpc("get_fixtures", { p_client_id: clientId });
+          if (!cancelled && Array.isArray(fxRes.data)) fixtures = fxRes.data;
+        } catch (_e) { /* non-fatal */ }
+        if (cancelled) return;
+        setState({ status: "ready", config: { ...cfg, clientId, fixtures } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);

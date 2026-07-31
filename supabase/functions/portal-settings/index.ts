@@ -344,7 +344,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes] = await Promise.all([
       admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
@@ -354,13 +354,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
+      admin.from("fixture_items").select("id, category, name, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes]) if (r.error) return json({ error: r.error.message }, 500);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active)
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [] });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [] });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -616,6 +618,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, url: pub.publicUrl });
   }
 
+  // Upload-only: store a door photo in the 'fixtures' bucket and return its public URL (no
+  // DB write). The portal places the URL on the door row and persists it via save_doors →
+  // fixture_items.image_url — the customer-facing photo, and the future 3D source art.
+  // clientId is JWT-resolved (own tenant only). Mirrors upload_layout_image.
+  if (action === "upload_fixture_image") {
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+    const path = `${clientId}/door-${Date.now()}.${ext}`;
+    const up = await admin.storage.from("fixtures").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("fixtures").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
   // Permanently delete one of this tenant's styles. The FK cascade removes the style's
   // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
   // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
@@ -830,6 +853,62 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let deleted = 0;
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
+      if (del.error) return json({ error: del.error.message }, 500);
+      deleted = toDelete.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // Full-replace this tenant's DOORS (Options tab → Doors section, fixture_items). Takes the
+  // COMPLETE desired door list: rows with an id update, rows without insert, and any existing
+  // door absent from the list is deleted. Scoped to category='door' so windows/ramps (same
+  // table, later) are never touched. clientId is JWT-resolved (own tenant only). A swing/op
+  // "default" is only persisted when BOTH opposite options are allowed (else null), matching
+  // the editor. Mirrors save_colors.
+  if (action === "save_doors") {
+    if (!Array.isArray(payload.doors)) return json({ error: "doors[] required" }, 400);
+    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "door");
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    const keptIds = new Set<string>();
+    // "" → null (blank), otherwise a finite number, else NaN (invalid → skipped).
+    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
+    let saved = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.doors) {
+      const name = String(row?.name ?? "").trim();
+      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
+      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
+      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
+      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid height`); i++; continue; }
+      const price = numOrNull(row?.price);           // null = not-yet-priced (hidden by NULL-price contract)
+      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
+      const swingIn = row?.swingIn === true, swingOut = row?.swingOut === true;
+      const opRight = row?.opRight === true, opLeft = row?.opLeft === true;
+      const opDouble = row?.opDouble === true, opSlideUp = row?.opSlideUp === true;
+      const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
+      const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
+      const rec: Record<string, unknown> = {
+        client_id: clientId, category: "door", name,
+        width_in: w, height_in: h, price,
+        swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
+        op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
+        active: row?.active !== false,
+        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
+        updated_at: new Date().toISOString(),
+      };
+      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+      const rid = String(row?.id ?? "").trim();
+      const res = (rid && existingIds.has(rid))
+        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
+        : await admin.from("fixture_items").insert(rec);
+      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (toDelete.length) {
+      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
       if (del.error) return json({ error: del.error.message }, 500);
       deleted = toDelete.length;
     }
