@@ -606,6 +606,26 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     else nonPctSubtotal += ln.total;
   }
 
+  // Catalog fixture doors (Options → Doors): each carries its OWN snapshotted price, not a
+  // per-key rate — so they price separately from the layout items above. Identical doors
+  // (same name + price) collapse into one line with a qty. Feeds the % base like any add-on.
+  const fxGroups = {};
+  for (const it of items) {
+    if (it.type !== "fixtureDoor") continue;
+    const price = it.price != null ? Number(it.price) : 0;
+    if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+    const name = it.doorName || "Door";
+    const gk = `${name}|${price}`;
+    if (!fxGroups[gk]) fxGroups[gk] = { label: name, price, qty: 0 };
+    fxGroups[gk].qty++;
+  }
+  for (const gk in fxGroups) {
+    const g = fxGroups[gk];
+    const total = Math.round(g.price * g.qty * 100) / 100;
+    rows.push({ key: `fx:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
+    nonPctSubtotal += total;
+  }
+
   // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
   // building (NET of declined-item credits — submit-estimate bakes them into the
   // building line BEFORE the % pass) + paint/roof + all non-% add-ons + rough
@@ -2495,6 +2515,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
             ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
+            ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
+          };
+        }),
+        // Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
+        // price. submit-estimate turns each into a priced estimate line. Kept separate from
+        // itemSummary (which counts the built-in door types) so the estimate engine has the
+        // full per-door detail, not just a count.
+        doors: items.filter((i) => i.type === "fixtureDoor").map((d) => {
+          const lbl = getDisplayLabel(d.wall, frontWall);
+          return {
+            name: d.doorName || "Door",
+            widthIn: d.widthIn != null ? Number(d.widthIn) : null,
+            heightIn: d.heightIn != null ? Number(d.heightIn) : null,
+            swing: d.swing || null,
+            operation: d.operation || null,
+            price: d.price != null ? Number(d.price) : null,
+            wall: lbl ? lbl.toLowerCase() : (d.wall || null),
+            fixtureItemId: d.fixtureItemId || null,
           };
         }),
         itemSummary: {

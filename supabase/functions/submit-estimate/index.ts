@@ -28,7 +28,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -542,6 +542,31 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
   if (summary.singleDoors > 0) pushItem("Single Door", "singleDoor", "", { count: summary.singleDoors });
   if (summary.windows > 0) pushItem("Window", "window", "", { count: summary.windows });
+
+  // Catalog fixture doors (Options → Doors): each carries its OWN price, snapshotted at
+  // placement so re-pricing the catalog never shifts an already-sent estimate. Identical doors
+  // (same name + price) collapse into one line with a qty, matching the designer's live preview.
+  // Unpriced / $0 doors add no line (NULL-price contract = not charged). NOT matched against GHL
+  // products — pushed as ad-hoc lines like custom options.
+  if (Array.isArray(doors)) {
+    const dg = new Map<string, { name: string; price: number; qty: number; desc: string }>();
+    for (const d of doors) {
+      const price = d && d.price != null ? Number(d.price) : 0;
+      if (!(price > 0)) continue;
+      const name = (String(d.name || "Door").trim()) || "Door";
+      const desc = [d.widthIn && d.heightIn ? `${d.widthIn}×${d.heightIn} in` : null, d.operation ? String(d.operation) : null, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}`;
+      const g = dg.get(key) || { name, price, qty: 0, desc };
+      g.qty++; dg.set(key, g);
+    }
+    for (const g of dg.values()) {
+      targetItems.push({
+        name: g.name, qty: g.qty, amount: g.price,
+        priceId: "", productId: "", attachments: [],
+        currency: "USD", type: "one_time", description: g.desc || "",
+      });
+    }
+  }
 
   if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) {
     // ONE aggregated workbench line (total feet), so the inclusion is netted once — matching
