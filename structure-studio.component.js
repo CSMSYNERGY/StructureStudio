@@ -231,7 +231,10 @@ function getFrontWall(items) {
 // item that SNAPSHOTS the door's spec (name/width/price/swing/operation) so a later catalog
 // edit never changes a saved design. FIXTURE_DOOR_CFG is the render cfg for those placed
 // items; `noPalette` keeps it out of the tool row (only the fx: tools are shown).
-const FIXTURE_DOOR_COLOR = "#7C3AED";
+const FIXTURE_DOOR_COLOR = "#D97706";         // matches the built-in Single Door glyph
+const FIXTURE_DOOR_COLOR_DOUBLE = "#B45309";  // matches the built-in Double Door glyph
+// Amber like the built-in doors, darker for a double so it reads the same as doubleDoor.
+function fixtureDoorColor(item) { return item && item.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR; }
 const FIXTURE_DOOR_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", noPalette: true, isFixtureDoor: true };
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
@@ -1673,6 +1676,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ni.type = "fixtureDoor";
       ni.fixtureItemId = fx.id;
       ni.doorName = fx.name || "Door";
+      ni.planLabel = (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6);
       ni.price = (fx.price != null ? fx.price : null);
       ni.widthIn = Number(fx.widthIn) || null;
       ni.heightIn = Number(fx.heightIn) || null;
@@ -2166,7 +2170,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       } else if (cfg.wallOnly) {
         // Rounded rect for door/window bar (matches SVG rx=1)
         const barH = 10, barR = 1;
-        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : cfg.color;
+        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : item.type === "fixtureDoor" ? fixtureDoorColor(item) : cfg.color;
         ctx.beginPath();
         ctx.moveTo(-iw / 2 + barR, -barH / 2);
         ctx.lineTo(iw / 2 - barR, -barH / 2);
@@ -2193,7 +2197,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
           ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
         } else if (item.type === "fixtureDoor") {
-          fixtureDoorCanvas(ctx, item, iw, cfg.color);
+          fixtureDoorCanvas(ctx, item, iw, fixtureDoorColor(item));
         } else if (item.type === "window") {
           ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
           [0, -iw / 4, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -4); ctx.lineTo(lx, 4); ctx.stroke(); });
@@ -2211,6 +2215,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
         let label = cfg.shortLabel;
+        if (item.type === "fixtureDoor") label = item.planLabel || cfg.shortLabel;
         if (item.type === "roughOpening") {
           const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
           label = `RO-${idx + 1}`;
@@ -2271,6 +2276,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
     if (ddCount > 0) bullets.push(`Double Door${ddCount > 1 ? " ×" + ddCount : ""}`);
+    // Catalog fixture doors — one bullet per placed door with its full spec (name, size,
+    // swing, operation), driven by the placed items so ANY catalog door lists automatically
+    // (nothing hard-coded per door). Windows/ramps will slot in the same way later.
+    items.filter((i) => i.type === "fixtureDoor").forEach((d) => {
+      const parts = [];
+      if (d.widthIn && d.heightIn) parts.push(`${d.widthIn}×${d.heightIn} in`);
+      const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : "";
+      if (sw) parts.push(sw);
+      const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : "";
+      if (op) parts.push(op);
+      bullets.push(`${d.doorName || "Door"}${parts.length ? " — " + parts.join(", ") : ""}`);
+    });
     const winCount = items.filter((i) => i.type === "window").length;
     if (winCount > 0) bullets.push(`Window${winCount > 1 ? "s ×" + winCount : ""}`);
     items.filter((i) => i.type === "workbench").forEach((wb) => bullets.push(`${wb.widthFt}ft Workbench`));
@@ -3437,7 +3454,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {item.type === "roughOpening" ? (
                       <rect x={-iw / 2} y={-5} width={iw} height={10} fill="#FFFFFF" stroke="#000000" strokeWidth={1.5} rx={1} />
                     ) : (
-                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={cfg.color} rx={1} />
+                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={item.type === "fixtureDoor" ? fixtureDoorColor(item) : cfg.color} rx={1} />
                     )}
                     {item.type === "singleDoor" && (() => {
                       const r = iw * 0.8, out = item.wall === "north" || item.wall === "east";
@@ -3454,9 +3471,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         </>
                       );
                     })()}
-                    {item.type === "fixtureDoor" && fixtureDoorSVG(item, iw, cfg.color)}
+                    {item.type === "fixtureDoor" && fixtureDoorSVG(item, iw, fixtureDoorColor(item))}
                     {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
+                      if (item.type === "fixtureDoor") return item.planLabel || cfg.shortLabel;
                       if (item.type !== "roughOpening") return cfg.shortLabel;
                       const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
                       return `RO-${idx + 1}`;

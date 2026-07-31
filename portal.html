@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260731b" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260731d" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -1794,10 +1794,10 @@ function BillingView({ viewingLabel = null }) {
   const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
   const baseLive = !!liveFeatures["simple_layout"];
 
-  // Simple Layout is required: preselect it (monthly) until it's subscribed.
+  // Simple Layout is required: preselect it (yearly) until it's subscribed.
   useEffect(() => {
     if (data && data.configured && !baseLive && byFeature["simple_layout"] && !sel["simple_layout"]) {
-      setSel((p) => ({ ...p, simple_layout: "monthly" }));
+      setSel((p) => ({ ...p, simple_layout: "annual" }));
     }
   }, [data]);
 
@@ -1827,13 +1827,29 @@ function BillingView({ viewingLabel = null }) {
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
   // open its hosted card lightbox; the callback hands us a one-time payment token.
-  const getPaymentToken = () => new Promise((resolve, reject) => {
+  const getPaymentToken = (amountCents) => new Promise((resolve, reject) => {
     const ck = data && data.checkout;
     if (!ck) return reject(new Error("Billing is not configured yet."));
+    // Show the exact charge inside Collect.js's hosted card popup — on the lightbox
+    // header and its pay button — so the customer sees what they'll be billed BEFORE
+    // entering the card, not only after the sale posts. price/currency are display-only
+    // to Collect.js (it just tokenizes); the real charge is still the server-side sale,
+    // which independently re-checks confirmChargeCents.
+    const amt = amountCents != null ? (amountCents / 100).toFixed(2) : null;
     const start = () => {
       try {
         window.CollectJS.configure({
           variant: "lightbox",
+          ...(amt ? {
+            price: amt,
+            currency: "USD",
+            country: "US",
+            buttonText: `Pay ${fmt$(amountCents)} now`,
+            // Keep this to ONE line — Collect.js caps the lightbox height, and a
+            // two-line header pushes the pay button past the bottom edge. The renewal
+            // note already lives on the page's due-today line and the pay button.
+            instructionText: `You'll be charged ${fmt$(amountCents)} today.`,
+          } : {}),
           callback: (resp) => resp && resp.token ? resolve(resp.token) : reject(new Error("Card entry was cancelled.")),
         });
         window.CollectJS.startPaymentRequest();
@@ -1851,7 +1867,7 @@ function BillingView({ viewingLabel = null }) {
   const toggleFeature = (f) => {
     if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (f.required && !baseLive) return;   // Simple Layout stays in the cart
-    setSel((p) => { const n = { ...p }; if (n[f.feature]) delete n[f.feature]; else n[f.feature] = "monthly"; return n; });
+    setSel((p) => { const n = { ...p }; if (n[f.feature]) delete n[f.feature]; else n[f.feature] = "annual"; return n; });
   };
   const setInterval_ = (f, iv) => {
     if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
@@ -1874,7 +1890,7 @@ function BillingView({ viewingLabel = null }) {
 
 This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       } else if (!data.hasCard) {
-        body.paymentToken = await getPaymentToken();
+        body.paymentToken = await getPaymentToken(dueTodayCents);
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -1982,7 +1998,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
               const soon = f.availability !== "available";
               const iv = sel[f.feature];
               const on = !!iv;
-              const shown = f.plans[iv || "monthly"];
+              const shown = f.plans[iv || "annual"];
               const lockedBase = f.required && !baseLive;
               return (
                 <div key={f.feature} onClick={() => toggleFeature(f)}
@@ -2002,7 +2018,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                       <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
                         {["monthly", "annual"].map((k) => (
                           <button key={k} type="button" onClick={() => setInterval_(f, k)}
-                            style={{ background: (iv || "monthly") === k ? ACCENT : "transparent", color: (iv || "monthly") === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                            style={{ background: (iv || "annual") === k ? ACCENT : "transparent", color: (iv || "annual") === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
                             {k === "annual" ? "Yearly" : "Monthly"}
                           </button>
                         ))}
@@ -2628,7 +2644,7 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const doors = (data.fixtures || []).filter((f) => (f.category || "door") === "door");
     setRows(doors.map((d) => ({
-      id: d.id, name: d.name || "",
+      id: d.id, name: d.name || "", plan_label: d.plan_label || "",
       width_in: d.width_in != null ? String(d.width_in) : "",
       height_in: d.height_in != null ? String(d.height_in) : "",
       price: d.price != null ? String(d.price) : "",
@@ -2641,7 +2657,7 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", width_in: "", height_in: "", price: "", swing_in: true, swing_out: false, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", width_in: "", height_in: "", price: "", swing_in: true, swing_out: false, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
@@ -2674,7 +2690,7 @@ Anything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
       const doors = rows.map((r, i) => ({
-        id: r.id || undefined, name: r.name,
+        id: r.id || undefined, name: r.name, planLabel: r.plan_label,
         widthIn: r.width_in, heightIn: r.height_in, price: r.price,
         swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
         opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
@@ -2709,7 +2725,8 @@ Anything not shown here will be removed from their account.`)) return;
           The doors your customers can drop onto a building. Give each one a <b>name</b>, <b>size</b>, and <b>price</b>,
           then check which ways it can <b>swing</b> and <b>open</b> — the <b style={{ color: "#F59E0B" }}>★</b> marks the default
           the customer sees first (only needed when more than one is allowed; they can switch to any other you’ve checked).
-          Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view). <b>Active</b> shows/hides it.
+          Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view). The <b>Label</b> is the short initials
+          drawn on the door on the floor plan (e.g. SD, GD) — leave it blank to auto-use the name. <b>Active</b> shows/hides it.
           Click a column heading to sort. Each size is its own door — add “Steel door 36” and “Steel door 48” as two rows.
         </p>
         {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
@@ -2720,6 +2737,7 @@ Anything not shown here will be removed from their account.`)) return;
               <thead><tr>
                 <th style={S.th}>Photo</th>
                 {sortableTh("Door name", "name", (r) => (r.name || "").toLowerCase())}
+                <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
                 {sortableTh("Size (W × H in)", "size", (r) => Number(r.width_in) || 0)}
                 {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
                 <th style={S.th}>Swing</th>
@@ -2744,6 +2762,7 @@ Anything not shown here will be removed from their account.`)) return;
                       )}
                     </td>
                     <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Steel door" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
+                    <td style={S.td}><input type="text" value={r.plan_label} placeholder="SD" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
                     <td style={S.td}>
                       <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                         {numInput(i, "width_in", "W", 62)}<span style={{ color: "#94A3B8" }}>×</span>{numInput(i, "height_in", "H", 62)}
