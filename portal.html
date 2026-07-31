@@ -2595,7 +2595,13 @@ function LayoutPricing() {
 // A swing/operation ★ default only shows — and is only saved — when BOTH opposite options are
 // checked; the customer can flip to the other on the plan. Checkboxes use the portal mint.
 const DOOR_MINT = "#75E6DA";
-function DoorsView({ viewingLabel = null }) {
+function DoorsView({ viewingLabel = null, clientId = null }) {
+  // Operator "view as": scope EVERY doors call to the client on screen explicitly (its own
+  // prop), not only the ambient ssTargetClientId transport override — so a door is always
+  // read/written for the tenant shown, never silently the operator's own. This also guards
+  // the full-list-replace save: the list you see and the list you save are the same tenant.
+  // Own-portal (no viewingLabel) sends nothing → normal own-tenant path, unchanged.
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -2605,7 +2611,7 @@ function DoorsView({ viewingLabel = null }) {
   const [sort, setSort] = useState({ key: null, dir: 1 });
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const doors = (data.fixtures || []).filter((f) => (f.category || "door") === "door");
     setRows(doors.map((d) => ({
@@ -2640,7 +2646,7 @@ function DoorsView({ viewingLabel = null }) {
     setImgBusyIdx(i); setMsg(null);
     try {
       const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       setRow(i, { image_url: data.url });
       setMsg({ ok: "Photo added — click “Save doors” to apply." });
@@ -2661,7 +2667,7 @@ Anything not shown here will be removed from their account.`)) return;
         opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
         imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i,
       }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_doors", doors } });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_doors", doors }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
       const skipped = data.skipped || [];
@@ -5127,7 +5133,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
       {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
-      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} /></>)}
+      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
