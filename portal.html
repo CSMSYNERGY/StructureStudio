@@ -188,7 +188,7 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // Allow-list, not a deny-list: a function added later gets NO injection until it is named
 // here. operator-portal is deliberately absent — it passes its own explicit clientId, and
 // its list_clients is a cross-tenant listing that must never look tenant-scoped.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status"];
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 const __ssInvoke = sb.functions.invoke.bind(sb.functions);
@@ -237,7 +237,7 @@ const TAB_META = {
   leads: ["Contacts", "Everyone who has submitted a design"],
   orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
   releases: ["What's New", "Latest features and fixes"],
-  settings: ["Settings", "Structures, options, colors, branding & estimates, connection, and billing"],
+  settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
   "build-schedule": ["Build Schedule", "Track buildings from order to done — coming soon"],
   "delivery-schedule": ["Delivery Schedule", "Plan and manage deliveries — coming soon"],
@@ -5087,6 +5087,308 @@ function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
 
 // `sub`/`onSub` are supplied by Dashboard so the sub-page lives in the URL
 // (/portal/settings/colors). The internal fallback keeps the shell usable if it is ever
+// ─── QuickBooks (Settings → QuickBooks) ─────────────────────────────────────
+// Connection card + the estimate-line → QuickBooks-item mapping grid. All data flows
+// through portal-settings (qbo_status / list_item_map / save_item_map / list_qbo_items /
+// qbo_test / disconnect_qbo) and qbo-oauth-connect; tokens never reach the browser.
+//
+// The OAuth round trip lands back on /portal/settings/quickbooks?connected=… — this view
+// reads that flag once, shows a banner, and strips it from the URL so a refresh doesn't
+// re-announce a stale result.
+const QBO_KINDS = [
+  ["building", "Building", "The base building price line"],
+  ["paint", "Paint", "Paint / color upgrade lines"],
+  ["roof", "Roof", "Roof upgrade lines"],
+  ["layout_item", "Layout items", "One mapping per placeable item (doors, windows, lofts…)"],
+  ["custom_option", "Custom options", "Tenant-defined add-on options"],
+  ["discount", "Discount", "Optional — QuickBooks' built-in discount is used when unmapped"],
+  ["delivery", "Delivery", "Pushed non-taxable"],
+  ["fallback", "Fallback", "Used for any line with no mapping of its own"],
+];
+
+const QBO_REASONS = {
+  denied: "You cancelled the connection at Intuit. Nothing was changed.",
+  state: "That connection attempt expired or didn't match. Start it again from this page.",
+  exchange: "Intuit didn't accept the connection. Try again.",
+  verify: "Connected at Intuit, but QuickBooks couldn't be reached to confirm. Try again.",
+  realm_in_use: "That QuickBooks company is already connected to a different StructureStudio account.",
+  unconfigured: "QuickBooks isn't fully set up on the server yet. Tell CSM Synergy.",
+  save: "The connection couldn't be saved. Try again, and tell CSM Synergy if it persists.",
+};
+
+function QuickBooksView({ clientId, viewingLabel = null }) {
+  const [status, setStatus] = useState(null);   // qbo_status response; null = loading
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);      // connect/test/disconnect in flight
+  const [msg, setMsg] = useState(null);         // { ok } | { err } one-shot banner
+  // Mapping grid state
+  const [grid, setGrid] = useState(null);       // list_item_map response
+  const [qboItems, setQboItems] = useState(null); // null = not loaded, [] = loaded empty
+  const [itemsErr, setItemsErr] = useState(null);
+  const [draft, setDraft] = useState({});       // key(kind|itemKey|styleId) -> qboItemId
+  const [saving, setSaving] = useState(false);
+
+  // One-shot OAuth landing banner, then strip the params so refresh stays quiet.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (!p.has("connected")) return;
+    if (p.get("connected") === "1") setMsg({ ok: "QuickBooks connected. Check the company name below is the right business." });
+    else setMsg({ err: QBO_REASONS[p.get("reason")] || "The connection didn't complete. Try again." });
+    p.delete("connected"); p.delete("reason");
+    const qs = p.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+  }, []);
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "qbo_status" } });
+    if (e || (d && d.error)) { setError((e && e.message) || d.error); setStatus({}); return; }
+    setStatus(d || {});
+    if (d && d.connected && !d.broken) {
+      const g = await sb.functions.invoke("portal-settings", { body: { action: "list_item_map" } });
+      if (!g.error && g.data && !g.data.error) setGrid(g.data);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const loadQboItems = useCallback(async () => {
+    setItemsErr(null); setQboItems(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "list_qbo_items" } });
+    if (e || (d && d.error)) { setItemsErr((e && e.message) || d.error); setQboItems([]); return; }
+    setQboItems(d.items || []);
+  }, []);
+  // Fetch the QuickBooks item list once the connection is known-good.
+  useEffect(() => { if (status && status.connected && !status.broken && qboItems === null) loadQboItems(); },
+    [status, qboItems, loadQboItems]);
+
+  const connect = async () => {
+    setBusy(true); setMsg(null);
+    // Land back on THIS host (beta stays on beta). Validated server-side against a hard
+    // allowlist — anything else falls back to production.
+    const { data: d, error: e } = await sb.functions.invoke("qbo-oauth-connect", { body: { returnTo: window.location.hostname } });
+    setBusy(false);
+    if (e || (d && d.error) || !(d && d.authorizeUrl)) {
+      setMsg({ err: (d && d.error) || (e && e.message) || "Could not start the QuickBooks connection." });
+      return;
+    }
+    window.location.assign(d.authorizeUrl); // full navigation — Intuit refuses to render framed
+  };
+
+  const test = async () => {
+    setBusy(true); setMsg(null);
+    const { data: d } = await sb.functions.invoke("portal-settings", { body: { action: "qbo_test" } });
+    setBusy(false);
+    if (d && d.ok) setMsg({ ok: `QuickBooks answered${d.companyName ? ` — connected to ${d.companyName}` : ""}.` });
+    else setMsg({ err: (d && d.error) || "Could not reach QuickBooks." });
+    if (d && d.broken) load();
+  };
+
+  const disconnect = async () => {
+    if (!window.confirm("Disconnect QuickBooks?\n\nSyncing stops immediately. Your item mappings are kept, so reconnecting the same company later picks up where you left off.")) return;
+    setBusy(true); setMsg(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "disconnect_qbo" } });
+    setBusy(false);
+    if (e || (d && d.error)) { setMsg({ err: (d && d.error) || e.message }); return; }
+    setMsg({ ok: "QuickBooks disconnected. Your mappings were kept." });
+    setGrid(null); setQboItems(null); setDraft({});
+    load();
+  };
+
+  const kFor = (kind, itemKey, styleId) => `${kind}|${itemKey || ""}|${styleId || ""}`;
+  const mappedId = (kind, itemKey, styleId) => {
+    const k = kFor(kind, itemKey, styleId);
+    if (Object.prototype.hasOwnProperty.call(draft, k)) return draft[k];
+    const row = (grid && grid.mappings || []).find((m) =>
+      m.line_kind === kind && (m.item_key || "") === (itemKey || "") && (m.style_id || "") === (styleId || ""));
+    return row ? row.qbo_item_id : "";
+  };
+  const setMapped = (kind, itemKey, styleId, v) => setDraft((p) => ({ ...p, [kFor(kind, itemKey, styleId)]: v }));
+
+  const saveGrid = async () => {
+    if (!grid) return;
+    setSaving(true); setMsg(null);
+    // Post the FULL grid — server-side validation decides row by row. Name captured from
+    // the loaded item list so the grid can label a mapping even if QuickBooks is briefly
+    // unreachable next load.
+    const nameOf = (id) => { const it = (qboItems || []).find((i) => i.id === id); return it ? it.name : null; };
+    const rows = [];
+    const pushRow = (kind, itemKey, styleId) => {
+      const k = kFor(kind, itemKey, styleId);
+      if (!Object.prototype.hasOwnProperty.call(draft, k)) return; // untouched
+      rows.push({ lineKind: kind, itemKey: itemKey || "", styleId: styleId || null, qboItemId: draft[k] || "", qboItemName: nameOf(draft[k]) });
+    };
+    QBO_KINDS.forEach(([kind]) => {
+      if (kind === "layout_item") (grid.layoutItems || []).forEach((li) => pushRow(kind, li.item_key, null));
+      else pushRow(kind, "", null);
+    });
+    // Style overrides for the building line.
+    (grid.styles || []).forEach((s) => pushRow("building", "", s.id));
+    if (!rows.length) { setSaving(false); setMsg({ ok: "Nothing to save." }); return; }
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "save_item_map", rows } });
+    setSaving(false);
+    if (e || (d && d.error)) { setMsg({ err: (d && d.error) || e.message }); return; }
+    const parts = [];
+    if (d.saved) parts.push(`${d.saved} saved`);
+    if (d.deleted) parts.push(`${d.deleted} removed`);
+    if (d.skipped && d.skipped.length) parts.push(`${d.skipped.length} skipped`);
+    setMsg({ ok: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}.` });
+    setDraft({});
+    const g = await sb.functions.invoke("portal-settings", { body: { action: "list_item_map" } });
+    if (!g.error && g.data && !g.data.error) setGrid(g.data);
+  };
+
+  // Grouped <select> of QuickBooks items; keeps a saved-but-vanished id selectable so a
+  // transient QuickBooks outage can't blank a stored mapping on save (the stage-dropdown
+  // idiom used across Settings).
+  const ItemSelect = ({ kind, itemKey, styleId, placeholder }) => {
+    const val = mappedId(kind, itemKey, styleId);
+    const items = qboItems || [];
+    const byType = {};
+    items.forEach((i) => { (byType[i.type || "Other"] = byType[i.type || "Other"] || []).push(i); });
+    const stale = val && !items.some((i) => i.id === val);
+    const savedRow = stale ? (grid && grid.mappings || []).find((m) => m.qbo_item_id === val) : null;
+    return (
+      <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
+        style={{ ...S.input, maxWidth: 340 }}>
+        <option value="">{placeholder || "— not mapped —"}</option>
+        {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
+        {Object.keys(byType).sort().map((t) => (
+          <optgroup key={t} label={t}>
+            {byType[t].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+          </optgroup>
+        ))}
+      </select>
+    );
+  };
+
+  if (status === null) return <div style={{ padding: 24, color: "#64748B", fontSize: 13 }}>Loading QuickBooks…</div>;
+
+  const connected = !!status.connected;
+  const broken = !!status.broken;
+  const ready = status.oauthReady !== false;
+  const dirty = Object.keys(draft).length > 0;
+
+  return (
+    <div>
+      {error && <div style={S.err}>{error}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+
+      {/* ── Card 1: Connection ── */}
+      <div style={S.card}>
+        <div style={S.h2}>QuickBooks connection</div>
+        {!connected && !ready && (
+          <div>
+            <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 8, padding: "10px 14px", color: "#1D4ED8", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+              QuickBooks is almost here — we're waiting on Intuit's approval. The button below lights up automatically when it lands.
+            </div>
+            <button disabled style={{ ...S.btn("#CBD5E1", "#64748B"), cursor: "not-allowed" }}>Connect to QuickBooks</button>
+          </div>
+        )}
+        {!connected && ready && (
+          <div>
+            <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>
+              Intuit opens in this tab — sign in and approve access there, and you'll land right back
+              here. Your QuickBooks password is never seen or stored by StructureStudio.
+            </p>
+            <button onClick={connect} disabled={busy} style={S.btn(ACCENT, "#FFF")}>
+              {busy ? "Starting…" : "Connect to QuickBooks"}
+            </button>
+          </div>
+        )}
+        {connected && (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ width: 10, height: 10, borderRadius: 5, background: broken ? "#DC2626" : "#16A34A", flexShrink: 0 }} />
+              <div style={{ minWidth: 0, flex: "1 1 260px" }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: broken ? "#DC2626" : "#1E293B" }}>
+                  {broken ? "Action needed — reconnect QuickBooks" : `Connected to ${status.companyName || "QuickBooks"}`}
+                </div>
+                <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                  {status.companyName ? `${status.companyName} · ` : ""}Company {status.realmIdMasked || "—"}
+                  {status.connectedAt ? ` · connected ${fmtDate(status.connectedAt)}` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <button onClick={test} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>{busy ? "…" : "Test"}</button>
+                <button onClick={disconnect} disabled={busy} style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA" }}>Disconnect</button>
+              </div>
+            </div>
+            {broken && (
+              <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 14px", marginTop: 12 }}>
+                <div style={{ fontSize: 13, color: "#92400E", fontWeight: 600 }}>{status.brokenReason || "QuickBooks refused the saved connection."}</div>
+                <button onClick={connect} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8 }}>
+                  {busy ? "Starting…" : "Reconnect QuickBooks"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Card 2: Item mappings ── */}
+      <div style={{ ...S.card, opacity: connected && !broken ? 1 : 0.55 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <div style={S.h2}>Invoice item mappings</div>
+          {connected && !broken && (
+            <button onClick={loadQboItems} title="Reload the product/service list from QuickBooks"
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh items</button>
+          )}
+        </div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 14 }}>
+          Which QuickBooks product or service each line of an estimate is billed as when an invoice
+          is pushed to QuickBooks. Lines without a mapping fall back to the Fallback item; if that's
+          not set either, the push is skipped for that invoice.
+        </p>
+        {!connected && <p style={{ fontSize: 13, color: "#64748B" }}>Connect QuickBooks above to set up mappings.</p>}
+        {connected && !broken && grid && (
+          <div>
+            {itemsErr && <div style={S.err}>{itemsErr}</div>}
+            {qboItems === null && !itemsErr && <p style={{ fontSize: 12, color: "#64748B" }}>Loading products &amp; services from QuickBooks…</p>}
+            {QBO_KINDS.map(([kind, label, hint]) => (
+              <div key={kind} style={{ padding: "10px 0", borderBottom: "1px solid #F1F5F9" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{label}</div>
+                <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 6 }}>{hint}</div>
+                {kind === "layout_item" ? (
+                  (grid.layoutItems || []).length
+                    ? (grid.layoutItems || []).map((li) => (
+                        <div key={li.item_key} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 600, color: "#475569", minWidth: 140 }}>{li.label || li.item_key}</span>
+                          <ItemSelect kind="layout_item" itemKey={li.item_key} styleId={null} />
+                        </div>
+                      ))
+                    : <p style={{ fontSize: 12, color: "#94A3B8" }}>No active layout items.</p>
+                ) : kind === "building" ? (
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 600, color: "#475569", minWidth: 140 }}>Default (all styles)</span>
+                      <ItemSelect kind="building" itemKey="" styleId={null} />
+                    </div>
+                    {(grid.styles || []).map((s) => (
+                      <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "#94A3B8", minWidth: 140 }}>{s.label}</span>
+                        <ItemSelect kind="building" itemKey="" styleId={s.id} placeholder="— use default —" />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <ItemSelect kind={kind} itemKey="" styleId={null} />
+                )}
+              </div>
+            ))}
+            <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
+              <button onClick={saveGrid} disabled={saving || !dirty} style={S.btn(dirty ? ACCENT : "#CBD5E1", "#FFF")}>
+                {saving ? "Saving…" : "Save mappings"}
+              </button>
+              {dirty && <span style={{ fontSize: 12, color: "#64748B" }}>Unsaved changes</span>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // mounted without them.
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null }) {
   const [subState, setSubState] = useState("structures");
@@ -5097,6 +5399,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["colors", "Colors", "Paint, shingle, and metal palettes"],
     ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
     ["connection", "Connection", "Synergy/GHL credentials and pipeline mapping"],
+    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ["billing", "Billing", "Your StructureStudio subscription"],
   ];
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
@@ -5137,6 +5440,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
+      {sub === "quickbooks" && <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );

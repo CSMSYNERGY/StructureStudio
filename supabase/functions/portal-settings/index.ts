@@ -2,10 +2,11 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog } from "../_shared/logError.ts";
+import { qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
 // operator with can_write). Hoisted above the handler so the resolver can consult it.
-const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile"]);
+const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile", "qbo_status"]);
 // Self-service: a WRITE any role may make, because it only ever touches the caller's own
 // client_users row (scoped to ctx.userId below, never to anything from the body). Kept out of
 // READ_ACTIONS on purpose — mislabelling a write as a read would make the permission gate
@@ -1003,6 +1004,203 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   //     RE-SENDS the stored invoice id instead of converting again (no orphaned invoice);
   //   * the userId the send endpoint requires is resolved BEFORE converting, so a missing
   //     user fails fast instead of after the estimate has already been flipped.
+  // ── QuickBooks Online ─────────────────────────────────────────────────────────────
+  // Connection status + item-mapping grid. Deliberately its OWN select rather than a
+  // widening of the "status" action's hand-enumerated list — QuickBooks state changes on
+  // a different cadence and the existing card stays untouched.
+
+  if (action === "qbo_status") {
+    const { data, error } = await admin
+      .from("client_settings")
+      .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at")
+      .eq("client_id", clientId)
+      .maybeSingle();
+    if (error) return json({ error: error.message }, 500);
+
+    const connected = !!data?.qbo_realm_id && !!data?.qbo_connected_at;
+    const { count } = await admin
+      .from("qbo_item_map")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId);
+
+    // Never tokens, never the full realm id. The company NAME is the human handle.
+    return json({
+      clientId, // operator view-as tripwire
+      oauthReady: qboOauthReady(),
+      connected,
+      companyName: data?.qbo_company_name ?? null,
+      realmIdMasked: maskId(data?.qbo_realm_id ?? null),
+      connectedAt: data?.qbo_connected_at ?? null,
+      broken: connected && !!data?.qbo_refresh_error,
+      brokenReason: data?.qbo_refresh_error ?? null,
+      refreshTokenExpiresAt: data?.qbo_refresh_token_expires_at ?? null,
+      mappedCount: count ?? 0,
+    });
+  }
+
+  if (action === "list_item_map") {
+    const [maps, styles, items] = await Promise.all([
+      admin.from("qbo_item_map")
+        .select("id, line_kind, item_key, style_id, qbo_item_id, qbo_item_name")
+        .eq("client_id", clientId),
+      admin.from("building_styles")
+        .select("id, label, active").eq("client_id", clientId).eq("active", true),
+      admin.from("client_layout_items")
+        .select("item_key, label, active").eq("client_id", clientId).eq("active", true),
+    ]);
+    if (maps.error) return json({ error: maps.error.message }, 500);
+    return json({
+      clientId,
+      mappings: maps.data ?? [],
+      styles: styles.data ?? [],
+      layoutItems: items.data ?? [],
+    });
+  }
+
+  if (action === "save_item_map") {
+    // rows: [{ lineKind, itemKey?, styleId?, qboItemId, qboItemName? }]
+    // Blank qboItemId = delete that mapping. MANUAL upsert, not PostgREST onConflict:
+    // the table's uniqueness lives in two partial indexes, which onConflict cannot
+    // infer (same documented reason as save_layout_pricing above).
+    if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
+
+    const KINDS = new Set(["building", "paint", "roof", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
+
+    // Validate against the tenant's OWN catalog — an item key or style id from another
+    // tenant must not be writable here.
+    const [itemsRes, stylesRes, exRes] = await Promise.all([
+      admin.from("client_layout_items").select("item_key").eq("client_id", clientId).eq("active", true),
+      admin.from("building_styles").select("id").eq("client_id", clientId),
+      admin.from("qbo_item_map").select("id, line_kind, item_key, style_id").eq("client_id", clientId),
+    ]);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const validKeys = new Set((itemsRes.data ?? []).map((i: any) => i.item_key));
+    const validStyles = new Set((stylesRes.data ?? []).map((s: any) => s.id));
+    const keyOf = (k: string, ik: string, sid: string | null) => `${k}|${ik}|${sid ?? ""}`;
+    const idByKey = new Map<string, string>();
+    for (const r of exRes.data ?? []) idByKey.set(keyOf(r.line_kind, r.item_key, r.style_id), r.id);
+
+    let saved = 0, deleted = 0;
+    const skipped: string[] = [];
+    for (const row of payload.rows) {
+      const lineKind = String(row?.lineKind ?? "").trim();
+      const itemKey = String(row?.itemKey ?? "").trim();
+      const styleId = row?.styleId ? String(row.styleId) : null;
+      const qboItemId = String(row?.qboItemId ?? "").trim();
+      const qboItemName = String(row?.qboItemName ?? "").trim() || null;
+
+      if (!KINDS.has(lineKind)) { skipped.push(`${lineKind || "(blank)"}: unknown line kind`); continue; }
+      if ((lineKind === "layout_item") !== (itemKey !== "")) { skipped.push(`${lineKind}: item key ${itemKey ? "not allowed" : "required"}`); continue; }
+      if (itemKey && !validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
+      if (styleId && !validStyles.has(styleId)) { skipped.push(`${lineKind}: unknown style`); continue; }
+      if (styleId && !(lineKind === "building" || lineKind === "layout_item")) { skipped.push(`${lineKind}: style override not supported`); continue; }
+
+      const existingId = idByKey.get(keyOf(lineKind, itemKey, styleId));
+      if (!qboItemId) {
+        if (existingId) {
+          const del = await admin.from("qbo_item_map").delete().eq("id", existingId);
+          if (del.error) { skipped.push(`${lineKind}: ${del.error.message}`); continue; }
+          deleted++;
+        }
+        continue;
+      }
+      const res = existingId
+        ? await admin.from("qbo_item_map")
+            .update({ qbo_item_id: qboItemId, qbo_item_name: qboItemName, updated_at: new Date().toISOString() })
+            .eq("id", existingId)
+        : await admin.from("qbo_item_map")
+            .insert({ client_id: clientId, line_kind: lineKind, item_key: itemKey, style_id: styleId, qbo_item_id: qboItemId, qbo_item_name: qboItemName });
+      if (res.error) { skipped.push(`${lineKind}: ${res.error.message}`); continue; }
+      saved++;
+    }
+
+    await audit("qbo_save_item_map", saved + deleted, skipped.length ? `${skipped.length} skipped` : null);
+    return json({ ok: true, saved, deleted, skipped, clientId });
+  }
+
+  if (action === "list_qbo_items") {
+    // Server-side QBO query; the token never leaves this function (the
+    // list_ghl_pipelines doctrine). Fed to the mapping grid's dropdowns.
+    const { data: cs } = await admin.from("client_settings")
+      .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
+    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+    try {
+      const q = encodeURIComponent("select Id, Name, Type, Active from Item where Active = true maxresults 1000");
+      const body = await qboFetch(admin, clientId, cs.qbo_realm_id, `/query?query=${q}&minorversion=75`);
+      const items = (body?.QueryResponse?.Item ?? []).map((i: any) => ({
+        id: String(i.Id), name: i.Name ?? String(i.Id), type: i.Type ?? "",
+      }));
+      return json({ items, clientId });
+    } catch (e) {
+      if (e instanceof QboBroken) return json({ error: "QuickBooks needs to be reconnected.", broken: true }, 409);
+      if (e instanceof QboNotConnected) return json({ error: "QuickBooks is not connected." }, 400);
+      return json({ error: "Could not load items from QuickBooks. Try again shortly." }, 502);
+    }
+  }
+
+  if (action === "qbo_test") {
+    // On-demand probe via CompanyInfo THROUGH the token helper, so an expired access
+    // token exercises the refresh path — which is exactly what a "Test" should prove.
+    const { data: cs } = await admin.from("client_settings")
+      .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
+    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+    try {
+      const body = await qboFetch(admin, clientId, cs.qbo_realm_id,
+        `/companyinfo/${cs.qbo_realm_id}?minorversion=75`);
+      const name = body?.CompanyInfo?.CompanyName ?? null;
+      if (name) {
+        // Keep the stored name current — it may have been edited in QuickBooks.
+        await admin.from("client_settings")
+          .update({ qbo_company_name: name }).eq("client_id", clientId);
+      }
+      return json({ ok: true, companyName: name, clientId });
+    } catch (e) {
+      if (e instanceof QboBroken) return json({ ok: false, broken: true, error: "QuickBooks refused the connection — reconnect to restore it.", clientId }, 200);
+      return json({ ok: false, error: "Could not reach QuickBooks. Try again shortly.", clientId }, 200);
+    }
+  }
+
+  if (action === "disconnect_qbo") {
+    const { data: cs } = await admin.from("client_settings")
+      .select("qbo_realm_id, qbo_refresh_token").eq("client_id", clientId).maybeSingle();
+    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+
+    // Best-effort revoke at Intuit — a failure here must not block the disconnect.
+    const id = Deno.env.get("QBO_CLIENT_ID"), secret = Deno.env.get("QBO_CLIENT_SECRET");
+    if (id && secret && cs.qbo_refresh_token) {
+      await fetch("https://developer.api.intuit.com/v2/oauth2/tokens/revoke", {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`${id}:${secret}`)}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({ token: cs.qbo_refresh_token }),
+      }).catch(() => {});
+    }
+
+    // KEEP qbo_realm_id (tombstone) and KEEP qbo_item_map: reconnecting the SAME company
+    // must not lose mapping work — the callback only wipes the map when the realm CHANGES.
+    // Side effect of the tombstone + unique index: this company cannot be attached to a
+    // DIFFERENT tenant while the tombstone stands; moving a company between tenants means
+    // clearing qbo_realm_id here first. That friction is intentional.
+    const { error } = await admin.from("client_settings").update({
+      qbo_access_token: null,
+      qbo_access_token_expires_at: null,
+      qbo_refresh_token: null,
+      qbo_refresh_token_expires_at: null,
+      qbo_connected_at: null,
+      qbo_refresh_error: null,
+      qbo_refreshing_at: null,
+      qbo_oauth_state: null,
+      qbo_oauth_state_expires_at: null,
+    }).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+
+    await auditStrict("qbo_disconnect", 1, `realm kept as tombstone`);
+    return json({ ok: true, clientId });
+  }
+
   if (action === "send_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
