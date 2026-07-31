@@ -714,7 +714,7 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   );
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -1130,6 +1130,76 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     prevSizeRef.current = sel.size;
   }, [sel.size]);
 
+  // ─── Load a saved design by short code ───
+  // Shared by the public ?id= URL path and the portal's openDesign prop below — the two
+  // must hydrate identically (GHL refs, draft flag, optional version snapshot, id counter).
+  const loadDesignByCode = async (id, vParam, isCancelled = () => false) => {
+    // Capability RPC: returns the one row matching the code (or nothing).
+    // Direct table reads are blocked for the anon key after cutover.
+    const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
+    const data = Array.isArray(rows) ? rows[0] : rows;
+    if (isCancelled() || error || !data) return;
+    // The persistent portal designer can be sitting on the submit-success screen when an
+    // Open request arrives — without this the OLD design's success screen would keep
+    // covering the newly loaded one. No-op on the public ?id= path (fresh mount, false).
+    setSubmitted(false);
+    setSubmitError(null);
+    currentDesignIdRef.current = data.short_code;
+    setDesignCode(data.short_code);
+    // A re-opened draft may keep draft-saving; any other status locks the row against
+    // silent rewrites (saveDraftSilently refuses non-draft rows). Embedded mounts never
+    // draft-save at all (customerFacing guard), so there this flag is inert.
+    isDraftRef.current = data.status === "draft";
+    // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
+    ghlContactIdRef.current = data.ghl_contact_id || null;
+    ghlEstimateIdRef.current = data.ghl_estimate_id || null;
+    ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
+    setHasExistingEstimate(!!data.ghl_estimate_id);
+
+    // Optionally open a specific saved version for review/resubmit. The design DATA
+    // comes from that version's snapshot; the GHL refs above stay from the current
+    // row so a resubmit updates the same one estimate rather than creating a new one.
+    let design = data;
+    if (Number.isFinite(vParam) && vParam > 0) {
+      const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
+      const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+      if (!isCancelled() && vrow) design = vrow;
+    }
+    if (isCancelled()) return;
+    setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
+
+    setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+    // Pre-set prevSizeRef to what sel.size is ABOUT to become, so the size effect doesn't
+    // treat this load as a user size-change and wipe the items set below (same guard
+    // openVersion uses). "" (not the old size) because sel is REBUILT below, not merged.
+    prevSizeRef.current = (design.selections || {}).size || "";
+    // Rebuild sel from pristine defaults rather than merging over the persistent portal
+    // designer's current selections: a design saved before an option existed (e.g. rows
+    // from before roofType/roofColor shipped) must not inherit the previously opened
+    // design's values for those keys. Mirrors the sel useState initializer.
+    setSel(() => {
+      const base = { style: "", size: "", roofType: "", roofColor: "" };
+      C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
+      return { ...base, ...(design.selections || {}) };
+    });
+    setPaintColors(design.paint_colors || { body: "", trim: "" });
+    setPaintCustom({ body: false, trim: false });
+    setCustomOptions(design.custom_options || []);
+    setRoDimensions(design.ro_dimensions || {});
+    // Items must be set after sel.size has propagated; the prevSizeRef guard
+    // above keeps the size effect from wiping them.
+    const loadedItems = Array.isArray(design.items) ? design.items : [];
+    setItems(loadedItems);
+    // The persistent portal mount can carry a selection/note-edit from the PREVIOUS
+    // design; item ids are small integers that collide across designs, so a stale
+    // selectedId would put the Delete/Rotate toolbar on an arbitrary item of this one.
+    setSelectedId(null);
+    setEditingNoteId(null);
+    // Keep the global id counter ahead of any restored ids so the next placement can't
+    // reuse an existing id (which collided in select/drag/delete/resize).
+    idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
+  };
+
   // ─── Load saved design from ?id=SS-XXXXXX on the URL ───
   useEffect(() => {
     if (!supabase) return;
@@ -1140,53 +1210,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     const id = params.get("id");
     if (!id) return;
     let cancelled = false;
-    (async () => {
-      // Capability RPC: returns the one row matching the code (or nothing).
-      // Direct table reads are blocked for the anon key after cutover.
-      const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
-      const data = Array.isArray(rows) ? rows[0] : rows;
-      if (cancelled || error || !data) return;
-      currentDesignIdRef.current = data.short_code;
-      setDesignCode(data.short_code);
-      // A re-opened draft may keep draft-saving; any other status locks the row against
-      // silent rewrites (saveDraftSilently refuses non-draft rows).
-      isDraftRef.current = data.status === "draft";
-      // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
-      ghlContactIdRef.current = data.ghl_contact_id || null;
-      ghlEstimateIdRef.current = data.ghl_estimate_id || null;
-      ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
-      setHasExistingEstimate(!!data.ghl_estimate_id);
-
-      // Optionally open a specific saved version (?v=N) for review/resubmit. The design
-      // DATA comes from that version's snapshot; the GHL refs above stay from the current
-      // row so a resubmit updates the same one estimate rather than creating a new one.
-      let design = data;
-      const vParam = parseInt(params.get("v") || "", 10);
-      if (Number.isFinite(vParam) && vParam > 0) {
-        const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
-        const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
-        if (!cancelled && vrow) design = vrow;
-      }
-      if (cancelled) return;
-      setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
-
-      setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
-      setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
-      setPaintColors(design.paint_colors || { body: "", trim: "" });
-      setPaintCustom({ body: false, trim: false });
-      setCustomOptions(design.custom_options || []);
-      setRoDimensions(design.ro_dimensions || {});
-      // Items must be set after sel.size has propagated; the prevSizeRef guard
-      // above keeps the size effect from wiping them.
-      const loadedItems = Array.isArray(design.items) ? design.items : [];
-      setItems(loadedItems);
-      // Keep the global id counter ahead of any restored ids so the next placement can't
-      // reuse an existing id (which collided in select/drag/delete/resize).
-      idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
-    })();
+    loadDesignByCode(id, parseInt(params.get("v") || "", 10), () => cancelled);
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, embedded]);
+
+  // ─── Open a design on demand (portal Designer tab) ───
+  // The portal's Designs/Contacts "Open" buttons hand the persistent embedded designer an
+  // { code, version } request instead of linking to the public page. Business users must
+  // NEVER review a customer's design on the public page: it silently captures leads and
+  // saves drafts (capture-lead / saveDraftSilently), so staff browsing there would corrupt
+  // the very activity Contacts reports. Embedded-only; the public page keeps its ?id= path.
+  // Each click sends a fresh object (identity change re-fires this even for the same code).
+  useEffect(() => {
+    if (!embedded || !supabase || !openDesign || !openDesign.code) return;
+    // The persistent Designer tab may hold in-progress work — hand-built, or a previously
+    // opened design mid-edit. The old public links opened a NEW tab and could never
+    // destroy it; this in-place load can, so it asks first (the same courtesy the
+    // portal's openAccount extends before its remount discards the designer).
+    if (items.length > 0 || sel.style || sel.size) {
+      if (!window.confirm("Opening this design will replace what's currently in the Designer tab. Continue?")) return;
+    }
+    let cancelled = false;
+    loadDesignByCode(String(openDesign.code), Number(openDesign.version) || null, () => cancelled);
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase, embedded, openDesign]);
 
   // On the submit-success screen, load every version of this design (this estimate) so the
   // customer/rep can see and reopen all designs on the estimate. Capability read by code.
@@ -3465,14 +3514,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
           {/* Public gate: Details opens only once the contact form is complete — the moment
               a shopper asks to see prices with full contact info, they are silently saved
-              as a lead. The label is deliberately darker than the old #CBD5E1: a section
-              customers are TOLD to unlock must not look like a disabled afterthought. */}
+              as a lead (and their design as a draft). Customer-facing this is a REAL bar
+              in the tenant's accent: it is the page's "see your price" affordance and the
+              capture moment, so it must not read as a footnote — and it keeps a right-side
+              label in EVERY state (locked explains how to unlock, unlocked invites the
+              click; an empty right side made the bar look broken the moment the form was
+              completed). Embedded keeps the quiet header business users know. */}
           <div onClick={() => { if (!detailsLocked) setAdditionalOpen((o) => !o); }}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, cursor: detailsLocked ? "default" : "pointer", userSelect: "none" }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: "#64748B", letterSpacing: 0.2 }}>Details</span>
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+              cursor: detailsLocked ? "default" : "pointer", userSelect: "none",
+              ...(customerFacing ? {
+                background: detailsLocked ? "#F8FAFC" : `${accent}14`,
+                border: `1.5px solid ${detailsLocked ? "#E2E8F0" : accent}`,
+                borderRadius: 10, padding: "12px 16px",
+              } : {}),
+            }}>
+            <span style={{ fontSize: customerFacing ? 13.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? accent : "#64748B", letterSpacing: 0.2 }}>Details</span>
             {detailsLocked
-              ? <span style={{ fontSize: 11.5, fontWeight: 600, color: "#94A3B8", textAlign: "right" }}>Enter all your contact information to see the quote details.</span>
-              : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
+              ? <span style={{ fontSize: customerFacing ? 12.5 : 11.5, fontWeight: 600, color: customerFacing ? "#64748B" : "#94A3B8", textAlign: "right" }}>🔒 Enter all your contact information to see the quote details.</span>
+              : customerFacing
+                ? <span style={{ fontSize: 12.5, fontWeight: 800, color: accent, textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
+                : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
           </div>
           {additionalOpen && !detailsLocked && (() => {
             // ── Invoice-style detail rows ─────────────────────────────────────────
@@ -3956,7 +4019,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null }) {
+export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -4076,5 +4139,5 @@ export default function StructureStudio({ config: configProp = null, clientId: c
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} /></DesignerErrorBoundary>;
 }

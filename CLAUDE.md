@@ -167,6 +167,7 @@ Rules that keep this safe — do not loosen them:
 - A non-draft row's status is **never** changed by `save_design` with `p_status='draft'`, and a null `p_image_url` **preserves** the existing PDF — so a draft re-save can never downgrade or blank a submitted design.
 - `sync-design-status` **skips** `status='draft'` rows. Without that skip, its `'sent'` baseline would promote every draft the moment the portal loads it (there is no GHL estimate to derive from).
 - Portal: `draft` is in `STATUS_LABELS`/`STATUS_COLORS`/`STATUS_RANK` (rank −1, below sent; Contacts' browsing sort uses −2). LeadsTable's browsing-suppression means a captured lead with a draft shows as their **design row** ("Open latest" opens the actual floor plan) instead of a bare "Browsing" chip.
+- Portal "Open"/"Open latest" buttons load the design **inside the portal designer** (an `openDesign={clientId, code, version, n}` prop threaded Dashboard → DesignerTab → StructureStudio; the component's embedded-only loader effect consumes it). They must NEVER link to the public `?id=` page — signed-in staff browsing there fires capture-lead/draft saves and corrupts the tenant's Contacts activity. The public page keeps its `?id=` URL path (that one is for customers).
 
 ## Cutover checklist (✅ COMPLETED 2026-06-14 — kept for reference)
 

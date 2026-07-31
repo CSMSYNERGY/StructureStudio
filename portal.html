@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260730b" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260730c" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -737,7 +737,7 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
   );
 }
 
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, onOpenDesign = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
@@ -863,11 +863,9 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
             <tbody>
               {sorted.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
-                const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(r.short_code)}`;
                 const vs = vmap[r.short_code] || [];       // newest first
                 const older = vs.slice(1);                  // everything below the latest
                 const isOpen = !!expanded[r.short_code];
-                const verUrl = (v) => `${openUrl}&v=${v}`;
                 return (
                   <React.Fragment key={r.short_code}>
                   <tr>
@@ -889,7 +887,11 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
                     <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>; })()}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                      <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                      {/* Opens IN THE PORTAL designer — never the public page, which now
+                          silently captures leads and saves drafts; staff browsing a
+                          customer's design there would corrupt that activity. */}
+                      <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
                       {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
                       {/* Owner/admin only — a team member must not be able to destroy a
                           customer record. The server re-checks regardless (delete_design is
@@ -916,7 +918,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <td style={S.td}></td>
                         <td style={S.td}></td>
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                          <a href={verUrl(v.version)} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none", marginRight: 10 }}>Open</a>
+                          <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code, v.version)}
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
                           {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
                         </td>
                       </tr>
@@ -1001,7 +1004,7 @@ function buildContactTimeline(act) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLabel = null }) {
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
@@ -1225,7 +1228,6 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
             </tr></thead>
             <tbody>
               {sorted.map((g) => {
-                const openUrl = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(g.latestCode)}`;
                 // Browsing leads get the brand light blue rather than a fulfillment colour —
                 // they are interest, not an order state.
                 const sc = g.browsing ? { bg: "#DBEAFF", fg: "#3D3672" } : (STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent);
@@ -1247,7 +1249,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
                       style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {g.browsing && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
-                      {!g.browsing && <a href={openUrl} target="_blank" rel="noopener" style={{ color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>}
+                      {/* In-portal open — same rule as DesignsTable: never the public page. */}
+                      {!g.browsing && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open latest</button>}
                       {!g.browsing && (
                         <button type="button" onClick={() => openDetails(g)}
                           style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
@@ -3395,14 +3399,14 @@ function ComingSoon({ icon, title, blurb, bullets }) {
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
 // — the loader then skips URL parsing entirely and can never hit its bare-root
 // /portal.html redirect (which would loop the portal).
-function DesignerTab({ clientId, onSaved }) {
+function DesignerTab({ clientId, onSaved, openDesign = null }) {
   const SS = window.StructureStudio;
   if (!SS) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
   }
   return (
     <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
-      <SS clientId={clientId} embedded onSaved={onSaved} />
+      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} />
     </div>
   );
 }
@@ -5003,6 +5007,12 @@ function Dashboard({ session }) {
   useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
+  // "Open in the portal designer" request ({clientId, code, version, n}) set by the
+  // Designs/Contacts Open buttons. Tenant-tagged so a stale request survives a view-as
+  // switch harmlessly (filtered at the DesignerTab mount, never hydrating the wrong
+  // tenant's designer); `n` gives every click a fresh identity so re-opening the same
+  // design re-fires the component's loader effect.
+  const [openDesign, setOpenDesign] = useState(null);
   // Bumped when the feedback widget files something, so My Submissions + its tab
   // count pick it up without a page reload.
   const [feedbackKey, setFeedbackKey] = useState(0);
@@ -5097,6 +5107,10 @@ function Dashboard({ session }) {
   const openAccount = (c) => {
     // Switching account remounts the Designer, discarding anything in progress.
     if (designerOpened && !window.confirm("Opening another account will discard the design you have open in the Designer tab. Continue?")) return;
+    // A consumed Open request must not survive the switch: the remounted DesignerTab
+    // would replay it on mount and silently rehydrate that customer's design (with its
+    // live GHL estimate refs) into what the operator expects to be a blank designer.
+    setOpenDesign(null);
     ssTargetClientId = c.clientId;              // same tick as the click, before the re-render
     setViewing(c); setTab("designs"); setSub(null);
     // replaceState, not navigate(): entering an account is not a page change, and the path
@@ -5104,6 +5118,7 @@ function Dashboard({ session }) {
     try { window.history.replaceState({ page: "designs", sub: null }, "", "/portal/designs?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
   };
   const exitAccount = () => {
+    setOpenDesign(null);                        // same replay guard as openAccount
     ssTargetClientId = null;
     setViewing(null); setTab("accounts"); setSub(null);
     try { window.history.replaceState({ page: "accounts", sub: null }, "", "/portal/accounts"); } catch (_e) {}
@@ -5190,6 +5205,14 @@ function Dashboard({ session }) {
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions.
   const effClientId = viewing ? viewing.clientId : tenant.clientId;
+  // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
+  // that tab. Never a link to the public page: it silently captures leads and saves
+  // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
+  // there would corrupt the very activity Contacts reports.
+  const openInDesigner = (code, version = null) => {
+    setOpenDesign({ clientId: effClientId, code, version, n: Date.now() });
+    navigate("designer");
+  };
 
   // "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
@@ -5418,7 +5441,8 @@ function Dashboard({ session }) {
               max-width would box the designer in); hidden, never unmounted, off-tab. */}
           {designerOpened && !gateLocked && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
-              <DesignerTab key={"d-" + effClientId} clientId={effClientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)} />
+              <DesignerTab key={"d-" + effClientId} clientId={effClientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
+                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} />
             </div>
           )}
           <div className="ss-inner">
@@ -5479,12 +5503,13 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "designs" && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={canAdmin} />
+                isAdmin={canAdmin} onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "leads" && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount}
