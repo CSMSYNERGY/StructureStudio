@@ -1064,7 +1064,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // infer (same documented reason as save_layout_pricing above).
     if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
 
-    const KINDS = new Set(["building", "paint", "roof", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
+    const KINDS = new Set(["building", "paint", "roof", "door", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
 
     // Validate against the tenant's OWN catalog — an item key or style id from another
     // tenant must not be writable here.

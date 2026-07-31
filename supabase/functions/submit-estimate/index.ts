@@ -200,6 +200,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const summary = itemSummary || {};
   const targetItems: any[] = [];
 
+  // ── Line provenance (QuickBooks push, migration 066) ────────────────────────────
+  // Which catalog concept produced each line, recorded as it is built — it is not
+  // recoverable afterwards (a line's name is tenant-authored text). Kept in a SIDE map
+  // rather than on the line objects, so nothing foreign can leak into the GHL payload.
+  // Serialized into designs.estimate_lines at step 11, AFTER pct_estimate_total
+  // resolution and credit baking have finalized the amounts (both mutate in place).
+  // A line no site tagged serializes as kind "fallback" — the push's safety net.
+  const lineProv = new Map<any, { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean }>();
+  const tagLine = <T,>(line: T, p: { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean }): T => {
+    lineProv.set(line, p);
+    return line;
+  };
+
   // Per-line product image (the "image inside the app" the owner uploaded → shown on the
   // estimate line). Images live in this tenant's public 'branding' bucket; only attach a URL
   // under that tenant prefix so a tampered catalog row can't graft an arbitrary link onto the
@@ -311,7 +324,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     type: "one_time",
     description: "",   // size lives in the name; filled with the credit breakdown only when items are declined
   };
-  targetItems.push(buildingLine);
+  targetItems.push(tagLine(buildingLine, { kind: "building" }));
 
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
   // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
@@ -392,13 +405,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // Fully covered by the inclusion → a $0 line so the customer sees it's part of the building
     // at no charge (never a positive charge for an included item).
     if (includedQty > 0 && chargeable <= 0) {
-      targetItems.push({
+      targetItems.push(tagLine({
         name: `${searches[0]} (included)`, qty: placed, amount: 0,
         priceId: "", productId: "",
         attachments: lp ? imgAttachments(lp.imageUrl) : [],
         currency: "USD", type: "one_time",
         description: description || "Included with this size",
-      });
+      }, { kind: "layout_item", itemKey: itemKey || "" }));
       // Under-placement credit: an AREA item placed SMALLER than its included quantity (e.g. a
       // 32 sq ft loft when 48 is included) credits the shortfall, baked into the building line like
       // a declined item. Scoped to sqft_option to stay in lock-step with the designer (lineal_ft /
@@ -455,7 +468,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: desc,
     };
-    targetItems.push(item);
+    targetItems.push(tagLine(item, { kind: "layout_item", itemKey: itemKey || "" }));
     if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
 
@@ -505,10 +518,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         }
       } catch { /* colors lookup failed → still emit the line at $0 */ }
     }
-    targetItems.push({
+    targetItems.push(tagLine({
       name: "Paint Colors", qty: 1, amount: paintAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: paintDesc,
-    });
+    }, { kind: "paint" }));
   }
 
   // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
@@ -533,10 +546,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         } catch { /* colors lookup failed → still emit the line at $0 */ }
       }
     }
-    targetItems.push({
+    targetItems.push(tagLine({
       name: "Roof", qty: 1, amount: roofAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: roofDesc,
-    });
+    }, { kind: "roof" }));
   }
 
   if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
@@ -560,11 +573,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       g.qty++; dg.set(key, g);
     }
     for (const g of dg.values()) {
-      targetItems.push({
+      // Fixtures-catalog doors (2026-07-30) — their own line kind: they are neither a
+      // layout_item (no layout_item_pricing row) nor a custom option (catalog-priced).
+      targetItems.push(tagLine({
         name: g.name, qty: g.qty, amount: g.price,
         priceId: "", productId: "", attachments: [],
         currency: "USD", type: "one_time", description: g.desc || "",
-      });
+      }, { kind: "door" }));
     }
   }
 
@@ -599,7 +614,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (Array.isArray(roughOpenings)) {
     const roRate = layoutRates.get("roughOpening")?.rate || 0;
     roughOpenings.forEach((ro: any) => {
-      targetItems.push({
+      targetItems.push(tagLine({
         name: ro.name || "Rough Opening",
         qty: ro.qty || 1,
         amount: roRate,
@@ -609,7 +624,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         currency: "USD",
         type: "one_time",
         description: ro.dimensions ? String(ro.dimensions) : "",
-      });
+      }, { kind: "layout_item", itemKey: "roughOpening" }));
     });
   }
 
@@ -623,11 +638,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
       if (rawAmt < 0) return;   // reductions use the Discount button, not custom options
       const qty = co.qty ? Math.abs(Number(co.qty)) || 1 : 1;
-      targetItems.push({
+      targetItems.push(tagLine({
         name, qty, amount: rawAmt,
         priceId: "", productId: "", attachments: [],
         currency: "USD", type: "one_time", description: "",
-      });
+      }, { kind: "custom_option" }));
     });
   }
 
@@ -706,12 +721,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (amt <= 0) return;
       discountTotal += amt;
       const desc = String(d?.description ?? "").trim();
-      targetItems.push({
+      // Display-only $0 marker; the money moves in the invoice-level discount, which the
+      // provenance records once as a synthetic top-level entry — so this line is skipped.
+      targetItems.push(tagLine({
         name: desc ? `Discount — ${desc}` : "Discount",
         qty: 1, amount: 0, priceId: "", productId: "", attachments: [],
         currency: "USD", type: "one_time",
         description: `−$${amt.toFixed(2)} (applied as a discount below)`,
-      });
+      }, { kind: "discount", skip: true }));
     });
   }
 
@@ -739,7 +756,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // omitted entirely when 0/blank.
   const deliveryAmt = Number(deliveryFee) || 0;
   if (deliveryAmt > 0) {
-    targetItems.push({
+    targetItems.push(tagLine({
       name: "Delivery",
       qty: 1,
       amount: deliveryAmt,
@@ -750,7 +767,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: "Delivery fee (non-taxable)",
       automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
-    });
+    }, { kind: "delivery", nonTaxable: true }));
   }
 
   // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
@@ -1018,7 +1035,31 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     console.warn("Estimate send error:", (e as Error).message);
   }
 
-  // 11. Persist GHL IDs
+  // 11. Persist GHL IDs + the line provenance snapshot.
+  //
+  // Serialized HERE — after pct_estimate_total resolution, credit baking, and the
+  // discount clamp — so every amount is the FINAL number that went to GHL. The style id
+  // is stored once at the top level (every building/layout line shares it) and the
+  // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
+  const estimateLines = {
+    version: 1,
+    styleId: styleRowId,
+    discount: totalDiscount > 0 ? totalDiscount : 0,
+    lines: targetItems
+      .filter((li) => !lineProv.get(li)?.skip)
+      .map((li) => {
+        const p = lineProv.get(li);
+        return {
+          kind: p?.kind ?? "fallback",
+          itemKey: p?.itemKey ?? "",
+          name: String(li.name ?? ""),
+          qty: Number(li.qty) || 0,
+          amount: Number(li.amount) || 0,
+          nonTaxable: !!p?.nonTaxable,
+        };
+      }),
+  };
+
   await supabase
     .from("designs")
     .update({
@@ -1026,6 +1067,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       ghl_estimate_id: estimateId,
       ghl_estimate_number: estimateNumber || existingDesign.ghl_estimate_number || null,
       ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
+      estimate_lines: estimateLines,
       updated_at: new Date().toISOString(),
     })
     .eq("short_code", designId);
