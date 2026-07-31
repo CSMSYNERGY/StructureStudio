@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
+import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
 // operator with can_write). Hoisted above the handler so the resolver can consult it.
@@ -1305,6 +1306,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
     let invoiceId = resendInvoiceId;
     let invoiceNumber: string | null = resendInvoiceNumber;
+    let ghlInvoiceTotal: number | null = null; // for the QBO push's mismatch note only
 
     if (!invoiceId) {
       // ── 2. Read the live estimate: must be accepted (and not already invoiced). ──
@@ -1359,6 +1361,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const invoice = convRes.body?.invoice ?? convRes.body ?? {};
       invoiceId = String(invoice?._id ?? invoice?.id ?? "");
       invoiceNumber = invoice?.invoiceNumber != null ? String(invoice.invoiceNumber) : null;
+      ghlInvoiceTotal = Number.isFinite(Number(invoice?.total)) ? Number(invoice.total) : null;
       if (!invoiceId) {
         await setClaim({ status: "failed", error: "no invoice id returned" });
         return json({ error: "Synergy/GHL did not return an invoice id." }, 502);
@@ -1410,7 +1413,46 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // the money has already moved, so failing the response now would only mislead.
     if (operator) audit("operator_send_invoice_result", null, `short_code=${shortCode} invoice=${invoiceNumber ?? invoiceId}`);
 
+    // ── 7. QuickBooks push — bookkeeping, strictly after the money moved. ──
+    // pushQboInvoice never throws and never touches this response; every outcome lands
+    // on the invoice_sends row (qbo_* columns). Dark unless the tenant is connected AND
+    // the design has an estimate_lines snapshot, so this is a no-op for everyone today.
+    await pushQboInvoice(admin, clientId, {
+      shortCode,
+      docNumber: invoiceNumber,
+      ghlTotal: ghlInvoiceTotal,
+    });
+
     return json({ ok: true, invoiceId, invoiceNumber, sent: true });
+  }
+
+  if (action === "retry_qbo_push") {
+    // Re-run the QuickBooks push for an invoice that was sent but never landed in the
+    // books (typically: mappings were incomplete at send time and the push aborted).
+    // Owner/admin by omission from READ_ACTIONS.
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+
+    const { data: row } = await admin.from("invoice_sends")
+      .select("status, invoice_number, qbo_invoice_id")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (!row) return json({ error: "No invoice has been sent for this design." }, 404);
+    if (row.status !== "sent") return json({ error: "The invoice email hasn't gone out yet — retry that first." }, 400);
+    if (row.qbo_invoice_id) return json({ ok: true, alreadyPushed: true, qboInvoiceId: row.qbo_invoice_id, clientId });
+
+    await pushQboInvoice(admin, clientId, { shortCode, docNumber: row.invoice_number ?? null });
+
+    const { data: after } = await admin.from("invoice_sends")
+      .select("qbo_invoice_id, qbo_doc_number, qbo_error")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    await audit("qbo_retry_push", 1, after?.qbo_invoice_id ? `pushed ${after.qbo_doc_number ?? ""}` : (after?.qbo_error ?? null));
+    return json({
+      ok: !!after?.qbo_invoice_id,
+      qboInvoiceId: after?.qbo_invoice_id ?? null,
+      qboDocNumber: after?.qbo_doc_number ?? null,
+      error: after?.qbo_invoice_id ? null : (after?.qbo_error ?? "The push did not complete."),
+      clientId,
+    });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
