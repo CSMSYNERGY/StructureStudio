@@ -3530,11 +3530,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 borderRadius: 10, padding: "12px 16px",
               } : {}),
             }}>
-            <span style={{ fontSize: customerFacing ? 13.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? accent : "#64748B", letterSpacing: 0.2 }}>Details</span>
+            {/* Text is dark slate, NOT accent-colored: the accent is tenant-configured and
+                can be light (structure-studio's mint #75E6DA was unreadable as text on
+                white). The accent brands the bar through its border and tint instead —
+                the same reason the submit button puts white text ON the accent. */}
+            <span style={{ fontSize: customerFacing ? 13.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? "#1E293B" : "#64748B", letterSpacing: 0.2 }}>Details</span>
             {detailsLocked
               ? <span style={{ fontSize: customerFacing ? 12.5 : 11.5, fontWeight: 600, color: customerFacing ? "#64748B" : "#94A3B8", textAlign: "right" }}>🔒 Enter all your contact information to see the quote details.</span>
               : customerFacing
-                ? <span style={{ fontSize: 12.5, fontWeight: 800, color: accent, textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
+                ? <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
                 : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
           </div>
           {additionalOpen && !detailsLocked && (() => {

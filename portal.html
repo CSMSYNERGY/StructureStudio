@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260730c" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260730d" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -2587,6 +2587,192 @@ function LayoutPricing() {
   );
 }
 
+// ─── Doors (Options tab → its own section, like Colors) ───
+// The Fixtures catalog, doors first (fixture_items where category='door'). One flat row per
+// door — its own size + price + swing/operation + photo — mirroring the Colors sections.
+// Loads/saves via portal-settings (catalog / save_doors / upload_fixture_image); full-list
+// replace on save (server deletes any door not in the payload, scoped to category='door').
+// A swing/operation ★ default only shows — and is only saved — when BOTH opposite options are
+// checked; the customer can flip to the other on the plan. Checkboxes use the portal mint.
+const DOOR_MINT = "#75E6DA";
+function DoorsView({ viewingLabel = null }) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [imgBusyIdx, setImgBusyIdx] = useState(null);   // row index currently uploading a photo
+  const [imgFileKey, setImgFileKey] = useState(0);      // resets the hidden file inputs after a pick
+  const [sort, setSort] = useState({ key: null, dir: 1 });
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    const doors = (data.fixtures || []).filter((f) => (f.category || "door") === "door");
+    setRows(doors.map((d) => ({
+      id: d.id, name: d.name || "",
+      width_in: d.width_in != null ? String(d.width_in) : "",
+      height_in: d.height_in != null ? String(d.height_in) : "",
+      price: d.price != null ? String(d.price) : "",
+      swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
+      op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
+      image_url: d.image_url || null, active: d.active !== false,
+    })));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", width_in: "", height_in: "", price: "", swing_in: true, swing_out: false, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
+
+  // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
+  const sortBy = (key, getVal) => setSort((s) => {
+    const dir = s.key === key ? -s.dir : 1;
+    setRows((rs) => rs.map((r) => r).sort((a, b) => { const av = getVal(a), bv = getVal(b); return (av < bv ? -1 : av > bv ? 1 : 0) * dir; }));
+    return { key, dir };
+  });
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onRowImg = async (i, file) => {
+    if (!file) return;
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    setImgBusyIdx(i); setMsg(null);
+    try {
+      const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRow(i, { image_url: data.url });
+      setMsg({ ok: "Photo added — click “Save doors” to apply." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
+  };
+
+  const save = async () => {
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE door list with these ${rows.length} door(s)?
+
+Anything not shown here will be removed from their account.`)) return;
+    setBusy(true); setMsg(null);
+    try {
+      const doors = rows.map((r, i) => ({
+        id: r.id || undefined, name: r.name,
+        widthIn: r.width_in, heightIn: r.height_in, price: r.price,
+        swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
+        opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
+        imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_doors", doors } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} door(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
+  const optLbl = { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "#334155", cursor: "pointer" };
+  const cbx = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setRow(i, { [field]: e.target.checked })} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
+  const star = (on, onClick) => <span onClick={onClick} title="Default the customer sees first" style={{ cursor: "pointer", color: on ? "#F59E0B" : "#CBD5E1", fontSize: 15 }}>★</span>;
+  const numInput = (i, field, ph, w) => <input type="number" min="0" step="any" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value })} style={{ ...S.input, width: w, minWidth: 0 }} />;
+  const caret = (key) => sort.key === key ? (sort.dir > 0 ? " ▲" : " ▼") : "";
+  const sortableTh = (label, key, getVal) => <th style={{ ...S.th, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => sortBy(key, getVal)}>{label}{caret(key)}</th>;
+
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Doors</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          The doors your customers can drop onto a building. Give each one a <b>name</b>, <b>size</b>, and <b>price</b>,
+          then check which ways it can <b>swing</b> and <b>open</b> — the <b style={{ color: "#F59E0B" }}>★</b> marks the default
+          the customer sees first (only needed when more than one is allowed; they can switch to any other you’ve checked).
+          Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view). <b>Active</b> shows/hides it.
+          Click a column heading to sort. Each size is its own door — add “Steel door 36” and “Steel door 48” as two rows.
+        </p>
+        {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No doors yet — click <b>Add door</b> below to create your first one.</div>
+        ) : (
+          <div style={{ overflowX: "auto", marginBottom: 14 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={S.th}>Photo</th>
+                {sortableTh("Door name", "name", (r) => (r.name || "").toLowerCase())}
+                {sortableTh("Size (W × H in)", "size", (r) => Number(r.width_in) || 0)}
+                {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
+                <th style={S.th}>Swing</th>
+                <th style={S.th}>Operation</th>
+                {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
+                <th style={S.th}></th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.id || `new-${i}`}>
+                    <td style={S.td}>
+                      {r.image_url ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <img src={r.image_url} alt="" style={thumb} />
+                          <button onClick={() => setRow(i, { image_url: null })} disabled={busy || imgBusyIdx === i} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
+                        </div>
+                      ) : (
+                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyIdx === i ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>
+                          {imgBusyIdx === i ? "Uploading…" : "Add image"}
+                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyIdx === i} style={{ display: "none" }} onChange={(e) => onRowImg(i, e.target.files && e.target.files[0])} />
+                        </label>
+                      )}
+                    </td>
+                    <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Steel door" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
+                    <td style={S.td}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        {numInput(i, "width_in", "W", 62)}<span style={{ color: "#94A3B8" }}>×</span>{numInput(i, "height_in", "H", 62)}
+                      </div>
+                    </td>
+                    <td style={S.td}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
+                    </td>
+                    <td style={S.td}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_in")} In</label>{r.swing_in && r.swing_out && star(r.swing_default === "in", () => setRow(i, { swing_default: "in" }))}</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_out")} Out</label>{r.swing_in && r.swing_out && star(r.swing_default === "out", () => setRow(i, { swing_default: "out" }))}</span>
+                      </div>
+                    </td>
+                    <td style={S.td}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
+                        <label style={optLbl}>{cbx(i, "op_double")} Double</label>
+                        <label style={optLbl}>{cbx(i, "op_slideup")} Slide up</label>
+                      </div>
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
+                    <td style={{ ...S.td, textAlign: "center" }}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add door</button>
+          <div style={{ flex: 1 }} />
+          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save doors"}</button>
+        </div>
+        {msg && msg.skipped && msg.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} door(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ─── Colors (paint palette) ───
 // Common shed/barn paint colours for the one-click "quick add" library. Hexes are
 // APPROXIMATE — for on-screen recognition only; only the NAME is saved as the colour
@@ -4941,7 +5127,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
       {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
-      {sub === "options" && <LayoutPricing />}
+      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
