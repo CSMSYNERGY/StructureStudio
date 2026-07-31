@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
-import { withErrorLog } from "../_shared/logError.ts";
+import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
@@ -45,6 +45,60 @@ function json(body: unknown, status = 200) {
 function maskId(v: string | null): string | null {
   if (!v) return null;
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
+}
+
+// ── floor-plans object keys ─────────────────────────────────────────────────────
+// delete_design hands object keys to a SERVICE-ROLE remove(), which bypasses storage RLS,
+// and the only record of which file belongs to which design is designs/design_versions
+// .image_url — a column the anon-callable save_design RPC writes verbatim. So a stored URL
+// is untrusted input: it may say WHICH of this design's objects to remove, never WHOSE.
+const FLOOR_PLANS = "floor-plans";
+const OBJECT_PATH = `/storage/v1/object/public/${FLOOR_PLANS}/`;
+
+// The only tails our uploader has ever produced: none (the pre-2026-06-15 `<code>.pdf`
+// shape) or submitQuote's `-${Date.now()}` suffix.
+const KEY_TAIL = /^(-[0-9]+)?\.(pdf|png)$/;
+
+// The bucket-root era — slash-less object names, before per-tenant prefixes. It is CLOSED:
+// the newest row referencing one was created 2026-06-12, the first prefixed row 2026-06-15,
+// and migration 031's storage INSERT policy now requires a "<slug>/" prefix, so no new root
+// object can be created. The date therefore records finished history, not policy. Only a
+// design row from that era may name a root object; a row with no parseable created_at is
+// treated as newer, which is the safe direction.
+const LEGACY_ROOT_ERA_END = Date.parse("2026-06-14T00:00:00Z");
+
+/** Object key from a stored public URL, or null if it is not one of our floor-plan URLs. */
+function floorPlanKey(u: unknown): string | null {
+  if (typeof u !== "string" || !u) return null;
+  let path: string;
+  try { path = new URL(u.trim()).pathname; } catch { return null; } // not a URL at all
+  if (!path.startsWith(OBJECT_PATH)) return null;
+  const key = path.slice(OBJECT_PATH.length);
+  // Percent-escapes are REJECTED, never decoded: decodeURIComponent throws on a lone "%",
+  // withErrorLog would turn that into a 500, and the design would become undeletable.
+  // Nothing legitimate needs them — the code alphabet is [A-HJ-NP-Z2-9] and the tail is
+  // digits. new URL() has already resolved any "../" and dropped query/fragment.
+  // Only the PATH is pinned, deliberately not the host: the key is checked against
+  // server-derived values below, so an off-host URL can still only name this design's own
+  // object, whereas anchoring on SUPABASE_URL would reject every row under
+  // `functions serve` or behind a future storage CDN and silently orphan every file.
+  return key && key.length <= 300 && !key.includes("%") ? key : null;
+}
+
+/** Could THIS design's own uploads have produced `key`? Both inputs are server-resolved and
+ *  neither is ever read from the request body. shortCode comes from the matched row, and
+ *  designs.short_code is globally UNIQUE (designs_short_code_key), so it names at most one
+ *  design anywhere — that uniqueness IS the authorization test here, not the date gate above.
+ *  clientId is the resolved tenant slug: straight from client_users on the ordinary
+ *  owner/admin path, assertClient-validated only on the operator-override path. So it is NOT
+ *  shape-guaranteed here and must not need to be — plain string ops only, and no RegExp is
+ *  ever built from either value, which is what keeps this correct whatever a slug contains. */
+function isOwnFloorPlanKey(key: string, clientId: string, shortCode: string, legacyOk: boolean): boolean {
+  let name = key;
+  if (key.startsWith(`${clientId}/`)) name = key.slice(clientId.length + 1);
+  // Another tenant's prefix, or a root object this row is too new to have created.
+  else if (key.includes("/") || !legacyOk) return false;
+  return name.startsWith(shortCode) && KEY_TAIL.test(name.slice(shortCode.length));
 }
 
 // Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
@@ -656,9 +710,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // the tenant's GHL. Ahsan's call 2026-07-30 was "allow, but make them type it".
   //
   // THREE things have to go, and only the first is obvious:
-  //   1. the storage PDFs — read from the stored image_url columns, never reconstructed. Two
-  //      historical path shapes exist ({client}/SS-CODE.pdf and {client}/CODE-{ts}.pdf), so
-  //      building a path from the short_code would silently miss half the files.
+  //   1. the storage PDFs — the stored image_url columns say WHICH objects, but never get to
+  //      say whose: every derived key must match a name this design's own uploads could have
+  //      produced (see isOwnFloorPlanKey). The filename cannot simply be rebuilt from the
+  //      short_code — three historical shapes exist and the current one carries a Date.now()
+  //      suffix — but all three are DERIVABLE from (client_id, short_code), which is what
+  //      makes validating them possible where reconstructing them is not.
   //   2. design_versions — there is NO foreign key to designs (verified: zero FKs on either
   //      table), so nothing cascades. Left behind, the rows stay readable by the tenant's own
   //      RLS policy and by list_design_versions/load_design_version, which key on short_code —
@@ -675,7 +732,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // Scoped by BOTH client_id and short_code. A code from another tenant matches nothing and
     // returns the same 404 as a code that never existed — no existence oracle.
     const { data: design, error: findErr } = await admin.from("designs")
-      .select("id, short_code, status, image_url, ghl_estimate_number")
+      .select("id, short_code, status, image_url, ghl_estimate_number, created_at")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (findErr) return json({ error: findErr.message }, 500);
     if (!design) return json({ error: "Design not found (or not yours)." }, 404);
@@ -698,26 +755,47 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
 
     // 1. Version rows first — we need their image_urls, and they are the invisible leftovers.
-    const { data: versions } = await admin.from("design_versions")
+    //    A failed read is a 500, not a shrug: carrying on would delete the rows at step 3 with
+    //    every version PDF unaccounted for. The action is idempotent, so a retry is free and
+    //    strictly better than an orphan nobody can trace.
+    const { data: versions, error: verErr } = await admin.from("design_versions")
       .select("id, image_url").eq("client_id", clientId).eq("short_code", shortCode);
+    if (verErr) return json({ error: verErr.message }, 500);
 
-    // 2. Storage. Derive object paths from the stored public URLs by taking everything after
-    //    the bucket segment; anything that doesn't parse is skipped rather than guessed at.
-    const BUCKET = "floor-plans";
-    const toPath = (u: unknown) => {
-      const s = typeof u === "string" ? u : "";
-      const i = s.indexOf(`/${BUCKET}/`);
-      return i === -1 ? null : decodeURIComponent(s.slice(i + BUCKET.length + 2));
-    };
-    const paths = [design.image_url, ...(versions ?? []).map((v: any) => v.image_url)]
-      .map(toPath).filter((x): x is string => !!x);
+    // 2. Storage. Every candidate key must be one THIS design could have produced — under
+    //    this tenant's prefix and carrying this design's globally-unique short_code. That
+    //    reduces image_url from a path to a yes/no, so no value a caller can store selects
+    //    another tenant's file, or another design's file within this tenant. Keys that fail
+    //    the test are kept and counted, never guessed at.
+    const createdAt = Date.parse(String(design.created_at ?? ""));
+    const legacyOk = Number.isFinite(createdAt) && createdAt < LEGACY_ROOT_ERA_END;
+    const keys = new Set<string>();    // ours — safe to remove
+    const kept = new Set<string>();    // distinct stored values we declined to act on
+    const foreign = new Set<string>(); // …and the namespaces they named, for triage
+    for (const u of [design.image_url, ...(versions ?? []).map((v: any) => v.image_url)]) {
+      if (!u) continue; // drafts carry no PDF
+      const key = floorPlanKey(u);
+      if (key && isOwnFloorPlanKey(key, clientId, design.short_code, legacyOk)) { keys.add(key); continue; }
+      kept.add(String(u).slice(0, 300));
+      // Only the namespace, and only if it is slug-SHAPED: a real cross-tenant plant names a
+      // real slug. Anything else is caller-authored free text, and app_errors is shapes and
+      // counts — not a place to let a caller choose what an operator reads.
+      const slash = key ? key.indexOf("/") : -1;
+      if (key && slash > 0 && !key.startsWith(`${clientId}/`)) {
+        const ns = key.slice(0, slash);
+        foreign.add(/^[a-z0-9][a-z0-9-]{0,63}$/.test(ns) ? ns : "(non-slug)");
+      }
+    }
     let filesRemoved = 0;
-    if (paths.length) {
+    if (keys.size) {
       // Best-effort: a storage failure must not block the row delete, or the design becomes
       // undeletable and the tenant is stuck. Orphaned objects are unlisted (migration 042
-      // dropped the anon SELECT policy) and cost only space.
-      const rm = await admin.storage.from(BUCKET).remove([...new Set(paths)]);
-      if (!rm.error) filesRemoved = paths.length;
+      // dropped the anon SELECT policy) and cost only space. Refusing a key is best-effort
+      // for the same reason — it must never turn into an error the tenant cannot clear.
+      const rm = await admin.storage.from(FLOOR_PLANS).remove([...keys]);
+      // What storage actually removed. remove() does not error on a key that isn't there, and
+      // the old count was the pre-dedupe request length, so it over-reported both ways.
+      filesRemoved = rm.error ? 0 : (rm.data?.length ?? 0);
     }
 
     // 3. Versions, then the design.
@@ -732,8 +810,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // Signature is (action, rowCount, note) — the tenant is already implicit in the resolved
     // context, so passing clientId here would silently land in rowCount.
     await auditStrict("portal_delete_design", 1 + (versionsDeleted ?? 0),
-      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved}`);
-    return json({ ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved });
+      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${kept.size}`);
+    // A stored URL naming something this design could not have produced is not something a
+    // tenant does by accident, so it gets a durable row rather than a substring in a note
+    // nobody greps. Counts and namespace slugs only — never the URL itself, and never any
+    // customer data (the app_errors doctrine).
+    if (kept.size) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "delete_design_key_refused",
+        message: `delete_design kept ${kept.size} unrecognised object key(s)`,
+        context: { shortCode, refused: kept.size, namespaces: [...foreign].slice(0, 5) },
+      });
+    }
+    return json({ ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: kept.size });
   }
 
   if (action === "delete_style") {
