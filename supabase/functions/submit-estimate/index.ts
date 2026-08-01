@@ -565,6 +565,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Unpriced / $0 doors add no line (NULL-price contract = not charged). NOT matched against GHL
   // products — pushed as ad-hoc lines like custom options.
   if (Array.isArray(doors)) {
+    // Sizes are stored in inches; show them as feet/inches on the estimate line.
+    const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
     // Each door's photo + "show on estimate" flag, read live from the catalog by fixtureItemId,
     // so a door's line attaches its photo only when the owner has that toggle on.
     const doorIds = [...new Set(doors.map((d: any) => d && d.fixtureItemId).filter(Boolean))];
@@ -578,7 +580,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const price = d && d.price != null ? Number(d.price) : 0;
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";
-      const desc = [d.widthIn && d.heightIn ? `${d.widthIn}×${d.heightIn} in` : null, d.operation ? String(d.operation) : null, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
+      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, d.operation ? String(d.operation) : null, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
       const key = `${name}|${price}`;
       const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
       g.qty++; dg.set(key, g);

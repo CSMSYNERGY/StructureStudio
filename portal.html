@@ -2624,6 +2624,28 @@ function LayoutPricing() {
 // A swing/operation ★ default only shows — and is only saved — when BOTH opposite options are
 // checked; the customer can flip to the other on the plan. Checkboxes use the portal mint.
 const DOOR_MINT = "#75E6DA";
+// Door sizes are entered as feet/inches ( 8'  ·  6'3"  ·  36" ) but stored as inches. No
+// spaces allowed, so the width/height parse cleanly. parseFtIn -> inches (number), NaN if
+// unparseable, null if blank. fmtFtIn -> the display string.
+function parseFtIn(s) {
+  const t = String(s == null ? "" : s).trim();
+  if (t === "") return null;
+  if (/\s/.test(t)) return NaN;
+  let m = t.match(/^(\d+(?:\.\d+)?)'(\d+(?:\.\d+)?)?"?$/);   // feet, optional inches
+  if (m) return parseFloat(m[1]) * 12 + (m[2] ? parseFloat(m[2]) : 0);
+  m = t.match(/^(\d+(?:\.\d+)?)"?$/);                        // inches (bare or with ")
+  if (m) return parseFloat(m[1]);
+  return NaN;
+}
+function fmtFtIn(inches) {
+  const n = Number(inches);
+  if (!isFinite(n) || n <= 0) return "";
+  const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100;
+  if (ft === 0) return inch + '"';
+  if (inch === 0) return ft + "'";
+  return ft + "'" + inch + '"';
+}
+function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number" && isFinite(v)) ? v : ""; }
 function DoorsView({ viewingLabel = null, clientId = null }) {
   // Operator "view as": scope EVERY doors call to the client on screen explicitly (its own
   // prop), not only the ambient ssTargetClientId transport override — so a door is always
@@ -2645,8 +2667,8 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
     const doors = (data.fixtures || []).filter((f) => (f.category || "door") === "door");
     setRows(doors.map((d) => ({
       id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
-      width_in: d.width_in != null ? String(d.width_in) : "",
-      height_in: d.height_in != null ? String(d.height_in) : "",
+      width_in: d.width_in != null ? fmtFtIn(d.width_in) : "",
+      height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
       price: d.price != null ? String(d.price) : "",
       swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
       op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
@@ -2691,7 +2713,7 @@ Anything not shown here will be removed from their account.`)) return;
     try {
       const doors = rows.map((r, i) => ({
         id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
-        widthIn: r.width_in, heightIn: r.height_in, price: r.price,
+        widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
         swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
         opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
         imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i,
@@ -2721,6 +2743,8 @@ Anything not shown here will be removed from their account.`)) return;
   const opChk = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setOp(i, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
   const star = (on, onClick) => <span onClick={onClick} title="Default the customer sees first" style={{ cursor: "pointer", color: on ? "#F59E0B" : "#CBD5E1", fontSize: 15 }}>★</span>;
   const numInput = (i, field, ph, w) => <input type="number" min="0" step="any" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value })} style={{ ...S.input, width: w, minWidth: 0 }} />;
+  // Feet/inches text field (8' · 6'3" · 36"). Stored/sent as inches; no spaces.
+  const sizeInput = (i, field, ph, w) => <input type="text" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: w, minWidth: 0, textAlign: "center" }} />;
   const caret = (key) => sort.key === key ? (sort.dir > 0 ? " ▲" : " ▼") : "";
   const sortableTh = (label, key, getVal) => <th style={{ ...S.th, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => sortBy(key, getVal)}>{label}{caret(key)}</th>;
 
@@ -2731,13 +2755,14 @@ Anything not shown here will be removed from their account.`)) return;
       <div style={S.card}>
         <div style={S.h2}>Doors</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          The doors your customers can drop onto a building. Give each one a <b>name</b>, <b>size</b>, and <b>price</b>,
+          The doors your customers can drop onto a building. Give each one a <b>Style</b> name, <b>size</b>, and <b>price</b>,
           then check which ways it can <b>swing</b> and <b>open</b> — the <b style={{ color: "#F59E0B" }}>★</b> marks the default
           the customer sees first (only needed when more than one is allowed; they can switch to any other you’ve checked).
           Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view) — tick <b>On estimate</b> to also attach
           that photo to the door's line on the customer's estimate. The <b>Label</b> is the short initials
           drawn on the door on the floor plan (e.g. SD, GD) — leave it blank to auto-use the name. <b>Active</b> shows/hides it.
-          Click a column heading to sort. Each size is its own door — add “Steel door 36” and “Steel door 48” as two rows.
+          Click a column heading to sort. Enter sizes in feet/inches — <b>8'</b>, <b>6'3"</b>, or <b>36"</b> (no spaces).
+          Rows that share the EXACT same <b>Style</b> name are one style: on the plan the customer picks the style, then its size.
         </p>
         {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No doors yet — click <b>Add door</b> below to create your first one.</div>
@@ -2747,9 +2772,9 @@ Anything not shown here will be removed from their account.`)) return;
               <thead><tr>
                 <th style={S.th}>Photo</th>
                 <th style={S.th}>On estimate</th>
-                {sortableTh("Door name", "name", (r) => (r.name || "").toLowerCase())}
+                {sortableTh("Style", "name", (r) => (r.name || "").toLowerCase())}
                 <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
-                {sortableTh("Size (W × H in)", "size", (r) => Number(r.width_in) || 0)}
+                {sortableTh("Size (W × H)", "size", (r) => parseFtIn(r.width_in) || 0)}
                 {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
                 <th style={S.th}>Swing</th>
                 <th style={S.th}>Operation</th>
@@ -2777,7 +2802,7 @@ Anything not shown here will be removed from their account.`)) return;
                     <td style={S.td}><input type="text" value={r.plan_label} placeholder="SD" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
                     <td style={S.td}>
                       <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        {numInput(i, "width_in", "W", 62)}<span style={{ color: "#94A3B8" }}>×</span>{numInput(i, "height_in", "H", 62)}
+                        {sizeInput(i, "width_in", '36"', 64)}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", '80"', 64)}
                       </div>
                     </td>
                     <td style={S.td}>

@@ -309,11 +309,30 @@ function fixtureDoorCanvas(ctx, item, iw, color) {
   else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
   ctx.setLineDash([]);
 }
-// Door placement picker modal. Opens when the "Door" tool drops on a wall: lists ALL
-// catalog doors; the shopper picks one and — only where more than one is offered — its
-// swing and operation, then places it. Self-contained (own selection state).
+// Door sizes are stored in inches; show them as feet/inches on the plan + in the picker.
+function fmtFtIn(inches) {
+  const n = Number(inches);
+  if (!isFinite(n) || n <= 0) return "";
+  const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100;
+  if (ft === 0) return inch + '"';
+  if (inch === 0) return ft + "'";
+  return ft + "'" + inch + '"';
+}
+// Door placement picker. Doors are grouped by STYLE (exact name): one card per style; picking a
+// style with more than one size reveals a size chooser, then swing/operation where more than one
+// is offered, then place.
 function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
-  const [sel, setSel] = useState(doors.length === 1 ? doors[0] : null);
+  const styles = useMemo(() => {
+    const m = new Map();
+    doors.forEach((d) => {
+      const k = d.name || "Door";
+      if (!m.has(k)) m.set(k, { name: k, imageUrl: d.imageUrl || null, sizes: [] });
+      const g = m.get(k); g.sizes.push(d); if (!g.imageUrl && d.imageUrl) g.imageUrl = d.imageUrl;
+    });
+    return [...m.values()];
+  }, [doors]);
+  const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
   const [swing, setSwing] = useState(null);
   const [operation, setOperation] = useState(null);
   useEffect(() => {
@@ -321,6 +340,7 @@ function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
     setSwing(fixtureInitialSwing(sel));
     setOperation(fixtureInitialOperation(sel));
   }, [sel]);
+  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const swingOpts = sel ? [sel.swingIn && "in", sel.swingOut && "out"].filter(Boolean) : [];
   const opOpts = sel ? [sel.opRight && "right", sel.opLeft && "left", sel.opDouble && "double", sel.opSlideUp && "slideup"].filter(Boolean) : [];
   const OP_LABEL = { right: "Right", left: "Left", double: "Double", slideup: "Slide up" };
@@ -333,22 +353,30 @@ function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
         <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a door</div>
-        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Pick a door to place on this wall.</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>{style && style.sizes.length > 1 ? "Pick a size." : "Pick a door to place on this wall."}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
-          {doors.map((d) => {
-            const on = sel && sel.id === d.id;
+          {styles.map((st) => {
+            const on = style && style.name === st.name;
+            const one = st.sizes.length === 1 ? st.sizes[0] : null;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
             return (
-              <div key={d.id} onClick={() => setSel(d)} style={{ border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
-                {d.imageUrl ? <img src={d.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+              <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
                   : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>🚪</div>}
                 <div style={{ padding: "8px 10px" }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{d.name}</div>
-                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{d.widthIn}×{d.heightIn} in{showPricing && d.price != null ? ` · ${money(d.price)}` : ""}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{st.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{sub}</div>
                 </div>
               </div>
             );
           })}
         </div>
+        {style && style.sizes.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+          </div>
+        )}
         {sel && swingOpts.length > 1 && (
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Swing</div>
@@ -2378,7 +2406,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // (nothing hard-coded per door). Windows/ramps will slot in the same way later.
     items.filter((i) => i.type === "fixtureDoor").forEach((d) => {
       const parts = [];
-      if (d.widthIn && d.heightIn) parts.push(`${d.widthIn}×${d.heightIn} in`);
+      if (d.widthIn && d.heightIn) parts.push(`${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}`);
       const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : "";
       if (sw) parts.push(sw);
       const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : "";
