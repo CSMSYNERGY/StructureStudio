@@ -28,7 +28,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -49,7 +49,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -615,8 +615,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // uses the loft count, per-area (sqft_option) uses total loft sqft.
     pushItem(["Loft", "Loft Kit", "Loft Storage"], "loft", "", { count: summary.lofts, optionSqft: Number(summary.loftSqft) || 0 });
   }
-  // Ramp is priced "each" — bill per ramp (one per door). Accept a numeric count from the
-  // current frontend, or the legacy "yes"/"no" string from an older cached build.
+  // rampCount = total ramps placed (any shape). Kept for the declined-item guard below; the
+  // actual line-pricing is done from the ramps[] schedule when present.
   const rampCount = (() => {
     const v = summary.ramp;
     if (typeof v === "number") return v > 0 ? v : 0;
@@ -625,7 +625,72 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const n = parseInt(s, 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
   })();
-  if (rampCount > 0) pushItem("Ramp", "ramp", "", { count: rampCount });
+  // Ramps (2026-08-01). Two shapes, both from the ramps[] schedule:
+  //  • CUSTOM ramp — a catalog style carrying its OWN snapshot price (like a fixture door):
+  //    grouped by style+price into one line each, photo attached from fixture_items.
+  //  • SIMPLE ramp — the built-in ramp, priced from the tenant's single ramp price on
+  //    client_settings: "each" per ramp, or "per_ft" × the attached door's width (doorWidthFt).
+  // Legacy builds that don't send ramps[] fall back to the old layout_item_pricing "ramp" rate.
+  if (Array.isArray(ramps) && ramps.length) {
+    const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
+    const sizeStr = (r: any) => (r && r.widthIn && r.heightIn) ? `${fmtFtIn(r.widthIn)}×${fmtFtIn(r.heightIn)}` : "";
+    const customRamps = ramps.filter((r: any) => r && r.price != null);
+    const simpleRamps = ramps.filter((r: any) => !r || r.price == null);
+    // --- custom ramps: priced by snapshot, grouped by style+price ---
+    if (customRamps.length) {
+      const rampIds = [...new Set(customRamps.map((r: any) => r && r.fixtureItemId).filter(Boolean))];
+      const rImg = new Map<string, { url: string | null; show: boolean }>();
+      if (rampIds.length) {
+        const rr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", rampIds);
+        for (const r of rr.data ?? []) rImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+      }
+      const rg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+      for (const r of customRamps) {
+        const price = r && r.price != null ? Number(r.price) : 0;
+        if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+        const name = (String(r.name || "Ramp").trim()) || "Ramp";
+        const desc = [sizeStr(r), r.wall ? `${r.wall} wall` : null].filter(Boolean).join(" · ");
+        const key = `${name}|${price}`;
+        const g = rg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (r.fixtureItemId || null) };
+        g.qty++; rg.set(key, g);
+      }
+      for (const g of rg.values()) {
+        const im = g.fixtureItemId ? rImg.get(String(g.fixtureItemId)) : null;
+        targetItems.push(tagLine({
+          name: g.name, qty: g.qty, amount: g.price,
+          priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
+          currency: "USD", type: "one_time", description: g.desc || "",
+        }, { kind: "ramp" }));
+      }
+    }
+    // --- simple ramps: priced from the tenant's single ramp price ---
+    if (simpleRamps.length) {
+      const rampPrice = Number(settings.ramp_price) || 0;
+      const perFt = String(settings.ramp_price_method || "each") === "per_ft";
+      const showImg = settings.ramp_show_image !== false;
+      const atts = (showImg && settings.ramp_image_url) ? imgAttachments(settings.ramp_image_url) : [];
+      if (rampPrice > 0) {
+        if (perFt) {
+          let totalFt = 0;
+          for (const r of simpleRamps) totalFt += Number(r && r.doorWidthFt) || 0;
+          totalFt = Math.round(totalFt * 100) / 100;
+          if (totalFt > 0) targetItems.push(tagLine({
+            name: "Ramp", qty: totalFt, amount: rampPrice,
+            priceId: "", productId: "", attachments: atts,
+            currency: "USD", type: "one_time", description: `${simpleRamps.length} ramp${simpleRamps.length > 1 ? "s" : ""} · priced per ft of door width`,
+          }, { kind: "ramp" }));
+        } else {
+          targetItems.push(tagLine({
+            name: "Ramp", qty: simpleRamps.length, amount: rampPrice,
+            priceId: "", productId: "", attachments: atts,
+            currency: "USD", type: "one_time", description: "",
+          }, { kind: "ramp" }));
+        }
+      }
+    }
+  } else if (rampCount > 0) {
+    pushItem("Ramp", "ramp", "", { count: rampCount });
+  }
 
   // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
   // owner can charge their own price; no hardcoded amount). One line per placed RO at that

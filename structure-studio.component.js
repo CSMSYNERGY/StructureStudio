@@ -651,17 +651,21 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const buildingPerimeter = 2 * (bW + bL);
   const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
 
-  // Roll placed items into counts + per-measure quantities. Ramp is priced "each" like
-  // doors/windows — its qty is the number of ramps placed (one per door).
-  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0, ramps = 0;
+  // Roll placed items into counts + per-measure quantities. Ramps split two ways: CUSTOM ramps
+  // (a catalog style with a snapshot price) price like fixture doors; SIMPLE ramps (the built-in
+  // ramp) price from the tenant's single ramp price when set, else the legacy layout "ramp" rate.
+  const rampSettings = C.rampSettings || null;
+  const rampSimplePriced = !!(rampSettings && rampSettings.price != null);
+  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0;
   const workbenchFt = [];
+  const customRamps = [], simpleRamps = [];
   for (const it of items) {
     if (it.type === "singleDoor") singleDoors++;
     else if (it.type === "doubleDoor") doubleDoors++;
     else if (it.type === "window") windows++;
     else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
     else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
-    else if (it.type === "ramp") ramps++;
+    else if (it.type === "ramp") { if (it.fixtureItemId && it.price != null) customRamps.push(it); else simpleRamps.push(it); }
   }
   loftSqft = Math.round(loftSqft);
   const totalWorkbenchFt = workbenchFt.reduce((s, f) => s + f, 0);
@@ -671,7 +675,9 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     window:     { count: windows },
     workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
     loft:       { count: lofts, optionSqft: loftSqft },
-    ramp:       { count: ramps },
+    // Legacy layout "ramp" row applies only to simple ramps that AREN'T priced by the new ramp
+    // settings — otherwise ramps price below (custom by snapshot, simple by ramp settings).
+    ramp:       { count: rampSimplePriced ? 0 : simpleRamps.length },
   };
 
   const lineFor = (rate, method, m) => {
@@ -749,6 +755,48 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const total = Math.round(g.price * g.qty * 100) / 100;
     rows.push({ key: `fx:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
     nonPctSubtotal += total;
+  }
+
+  // Catalog ramps (Options → Ramps). Custom ramps carry their own snapshot price (grouped by
+  // style like doors); simple ramps price from the tenant's single ramp price — "each" per ramp,
+  // or "per_ft" × the attached door's width. Both feed the % base like any add-on.
+  const rampGroups = {};
+  for (const it of customRamps) {
+    const price = it.price != null ? Number(it.price) : 0;
+    if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+    const name = it.rampName || "Ramp";
+    const gk = `${name}|${price}`;
+    if (!rampGroups[gk]) rampGroups[gk] = { label: name, price, qty: 0 };
+    rampGroups[gk].qty++;
+  }
+  for (const gk in rampGroups) {
+    const g = rampGroups[gk];
+    const total = Math.round(g.price * g.qty * 100) / 100;
+    rows.push({ key: `ramp:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
+    nonPctSubtotal += total;
+  }
+  if (rampSimplePriced && simpleRamps.length) {
+    const rampPrice = Number(rampSettings.price) || 0;
+    const perFt = rampSettings.method === "per_ft";
+    if (rampPrice > 0) {
+      if (perFt) {
+        // Price per foot of the attached door's width. fixture doors carry their real width
+        // (widthIn); built-in doors fall back to the ramp's stored widthFt.
+        let totalFt = 0;
+        for (const r of simpleRamps) {
+          const door = items.find((d) => d.id === r.snapDoorId);
+          let dw = Number(r.widthFt) || 0;
+          if (door && door.type === "fixtureDoor" && door.widthIn) dw = Number(door.widthIn) / 12;
+          totalFt += dw;
+        }
+        totalFt = Math.round(totalFt * 100) / 100;
+        if (totalFt > 0) { const total = Math.round(rampPrice * totalFt * 100) / 100; rows.push({ key: "ramp:simple", label: "Ramp", qty: totalFt, unit: fmtMoney2(rampPrice) + " / ft", total, method: "lineal_ft" }); nonPctSubtotal += total; }
+      } else {
+        const total = Math.round(rampPrice * simpleRamps.length * 100) / 100;
+        rows.push({ key: "ramp:simple", label: "Ramp", qty: simpleRamps.length, unit: fmtMoney2(rampPrice) + " each", total, method: "each" });
+        nonPctSubtotal += total;
+      }
+    }
   }
 
   // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
@@ -2870,6 +2918,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
             ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
             ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
+            ...(item.type === "ramp" ? { name: item.rampName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
           };
         }),
         // Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
@@ -2887,6 +2936,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             price: d.price != null ? Number(d.price) : null,
             wall: lbl ? lbl.toLowerCase() : (d.wall || null),
             fixtureItemId: d.fixtureItemId || null,
+          };
+        }),
+        // Ramp schedule: one row per placed ramp. Custom ramps carry their snapshot price; simple
+        // ramps leave price null and submit-estimate prices them from the tenant's ramp settings
+        // (each, or per_ft × the attached door width, passed here as doorWidthFt).
+        ramps: items.filter((i) => i.type === "ramp").map((r) => {
+          const door = items.find((d) => d.id === r.snapDoorId);
+          let doorWidthFt = r.widthFt != null ? Number(r.widthFt) : null;
+          if (door && door.type === "fixtureDoor" && door.widthIn) doorWidthFt = Number(door.widthIn) / 12;
+          const lbl = getDisplayLabel(r.wall, frontWall);
+          return {
+            name: r.rampName || null,
+            widthIn: r.widthIn != null ? Number(r.widthIn) : null,
+            heightIn: r.heightIn != null ? Number(r.heightIn) : null,
+            price: r.price != null ? Number(r.price) : null,
+            doorWidthFt: doorWidthFt != null ? Math.round(doorWidthFt * 100) / 100 : null,
+            wall: lbl ? lbl.toLowerCase() : (r.wall || null),
+            fixtureItemId: r.fixtureItemId || null,
           };
         }),
         itemSummary: {
