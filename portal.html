@@ -2644,7 +2644,7 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const doors = (data.fixtures || []).filter((f) => (f.category || "door") === "door");
     setRows(doors.map((d) => ({
-      id: d.id, name: d.name || "", plan_label: d.plan_label || "",
+      id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
       width_in: d.width_in != null ? String(d.width_in) : "",
       height_in: d.height_in != null ? String(d.height_in) : "",
       price: d.price != null ? String(d.price) : "",
@@ -2657,7 +2657,7 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
@@ -2690,7 +2690,7 @@ Anything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
       const doors = rows.map((r, i) => ({
-        id: r.id || undefined, name: r.name, planLabel: r.plan_label,
+        id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
         widthIn: r.width_in, heightIn: r.height_in, price: r.price,
         swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
         opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
@@ -2734,7 +2734,8 @@ Anything not shown here will be removed from their account.`)) return;
           The doors your customers can drop onto a building. Give each one a <b>name</b>, <b>size</b>, and <b>price</b>,
           then check which ways it can <b>swing</b> and <b>open</b> — the <b style={{ color: "#F59E0B" }}>★</b> marks the default
           the customer sees first (only needed when more than one is allowed; they can switch to any other you’ve checked).
-          Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view). The <b>Label</b> is the short initials
+          Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view) — tick <b>On estimate</b> to also attach
+          that photo to the door's line on the customer's estimate. The <b>Label</b> is the short initials
           drawn on the door on the floor plan (e.g. SD, GD) — leave it blank to auto-use the name. <b>Active</b> shows/hides it.
           Click a column heading to sort. Each size is its own door — add “Steel door 36” and “Steel door 48” as two rows.
         </p>
@@ -2745,6 +2746,7 @@ Anything not shown here will be removed from their account.`)) return;
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
                 <th style={S.th}>Photo</th>
+                <th style={S.th}>On estimate</th>
                 {sortableTh("Door name", "name", (r) => (r.name || "").toLowerCase())}
                 <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
                 {sortableTh("Size (W × H in)", "size", (r) => Number(r.width_in) || 0)}
@@ -2770,6 +2772,7 @@ Anything not shown here will be removed from their account.`)) return;
                         </label>
                       )}
                     </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "show_image_on_estimate")}</td>
                     <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Steel door" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
                     <td style={S.td}><input type="text" value={r.plan_label} placeholder="SD" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
                     <td style={S.td}>

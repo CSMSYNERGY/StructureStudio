@@ -411,7 +411,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
@@ -982,6 +982,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const rec: Record<string, unknown> = {
         client_id: clientId, category: "door", name,
         plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
+        show_image_on_estimate: row?.showImageOnEstimate !== false,
         width_in: w, height_in: h, price,
         swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
         op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,

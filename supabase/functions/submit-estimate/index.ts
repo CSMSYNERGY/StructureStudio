@@ -218,12 +218,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // under that tenant prefix so a tampered catalog row can't graft an arbitrary link onto the
   // branded estimate. GHL renders a line item's attachments as the product photo.
   const brandingPrefix = `${supabaseUrl}/storage/v1/object/public/branding/${clientId}/`;
+  // Door photos live in the 'fixtures' bucket; styles/layout images in 'branding'. Both are
+  // tenant-scoped under {clientId}/, which is the guard that matters.
+  const fixturesPrefix = `${supabaseUrl}/storage/v1/object/public/fixtures/${clientId}/`;
   // GHL line-item attachments are an array of plain image-URL STRINGS (proven by the working
   // n8n payload: `attachments: [imageUrl]`). An array of objects is rejected. Only attach a
-  // URL under this tenant's branding prefix so a tampered catalog row can't inject a link.
+  // URL under this tenant's own storage prefix so a tampered catalog row can't inject a link.
   const imgAttachments = (url: unknown): string[] => {
     const u = String(url || "");
-    if (!u || !u.startsWith(brandingPrefix)) return [];
+    if (!u || !(u.startsWith(brandingPrefix) || u.startsWith(fixturesPrefix))) return [];
     return [u];
   };
 
@@ -562,22 +565,31 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Unpriced / $0 doors add no line (NULL-price contract = not charged). NOT matched against GHL
   // products — pushed as ad-hoc lines like custom options.
   if (Array.isArray(doors)) {
-    const dg = new Map<string, { name: string; price: number; qty: number; desc: string }>();
+    // Each door's photo + "show on estimate" flag, read live from the catalog by fixtureItemId,
+    // so a door's line attaches its photo only when the owner has that toggle on.
+    const doorIds = [...new Set(doors.map((d: any) => d && d.fixtureItemId).filter(Boolean))];
+    const fxImg = new Map<string, { url: string | null; show: boolean }>();
+    if (doorIds.length) {
+      const fr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
+      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+    }
+    const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const d of doors) {
       const price = d && d.price != null ? Number(d.price) : 0;
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";
       const desc = [d.widthIn && d.heightIn ? `${d.widthIn}×${d.heightIn} in` : null, d.operation ? String(d.operation) : null, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
       const key = `${name}|${price}`;
-      const g = dg.get(key) || { name, price, qty: 0, desc };
+      const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
       g.qty++; dg.set(key, g);
     }
     for (const g of dg.values()) {
       // Fixtures-catalog doors (2026-07-30) — their own line kind: they are neither a
       // layout_item (no layout_item_pricing row) nor a custom option (catalog-priced).
+      const im = g.fixtureItemId ? fxImg.get(String(g.fixtureItemId)) : null;
       targetItems.push(tagLine({
         name: g.name, qty: g.qty, amount: g.price,
-        priceId: "", productId: "", attachments: [],
+        priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
         currency: "USD", type: "one_time", description: g.desc || "",
       }, { kind: "door" }));
     }
