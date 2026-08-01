@@ -721,7 +721,11 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
     if (!ready) return;
     setBusy(true); setErr(null);
     const { data, error } = await sb.functions.invoke("portal-settings", {
-      body: { action: "delete_design", shortCode: design.short_code, ...(needsConfirm ? { confirmToken: typed.trim() } : {}) },
+      // deleteEstimate is explicit because the server refuses to touch the CRM without
+      // it — this page's dialog is what tells the operator the estimate goes too, and the
+      // previous build's dialog promised the opposite. The flag is how the server knows
+      // which promise the operator actually read.
+      body: { action: "delete_design", shortCode: design.short_code, deleteEstimate: true, ...(needsConfirm ? { confirmToken: typed.trim() } : {}) },
     });
     if (error) { setErr(await fnError(error)); setBusy(false); return; }
     onDeleted(data || {});
@@ -738,11 +742,27 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
         <div style={{ marginTop: 8 }}>
           Removes the design, its full version history and the saved PDFs. This cannot be undone.
         </div>
-        {/* Stated plainly because it is the surprising part: we do not touch their CRM. Same
-            posture as the operator tenant-delete, which says the same thing. */}
-        <div style={{ marginTop: 8, color: "#64748B" }}>
-          The estimate in Synergy is <strong>not</strong> affected — delete or void it there separately.
-        </div>
+        {/* The CRM half, stated plainly, because it is the part that reaches outside this
+            app. Three genuinely different outcomes, so this says which one applies to THIS
+            design rather than one sentence that is wrong two-thirds of the time. The server
+            decides for real (it checks the invoice ledger, not just the cached status). */}
+        {design.ghl_estimate_number ? (
+          (st === "invoiced" || st === "delivered") ? (
+            <div style={{ marginTop: 8, color: "#92400E" }}>
+              EST-{design.ghl_estimate_number} is <strong>kept</strong> in your CRM — an invoice was created from it.
+              Void that invoice there if you want the estimate gone too.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, color: "#64748B" }}>
+              EST-{design.ghl_estimate_number} is <strong>also deleted</strong> from your CRM. The customer and their
+              opportunity stay — only the estimate goes.
+            </div>
+          )
+        ) : (
+          <div style={{ marginTop: 8, color: "#64748B" }}>
+            No estimate has been created in your CRM for this design.
+          </div>
+        )}
       </div>
       {err && <div style={S.err}>{err}</div>}
       {needsConfirm && (
@@ -1014,7 +1034,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           onDeleted={(res) => {
             const code = delTarget.short_code;
             setDelTarget(null);
-            setDelMsg({ ok: `Deleted design ${code}` + (res.versionsDeleted ? ` and ${res.versionsDeleted} earlier version(s)` : "") + "." });
+            const base = `Deleted design ${code}` + (res.versionsDeleted ? ` and ${res.versionsDeleted} earlier version(s)` : "");
+            // The CRM half is reported separately because it is the half that can partly fail
+            // while the design itself is gone — a bare "Deleted." would hide a leftover
+            // estimate in someone else's system.
+            const est = res.estimateNumber ? `EST-${res.estimateNumber}` : "its estimate";
+            if (res.estimate === "failed") {
+              setDelMsg({ err: `${base}, but ${est} could NOT be removed from your CRM (${res.estimateError || "unknown error"}). Delete it there by hand — support has a record.` });
+            } else if (res.estimate === "skipped_invoiced") {
+              setDelMsg({ ok: `${base}. ${est} was left in your CRM because an invoice was created from it — void that invoice there if you also want the estimate gone.` });
+            } else if (res.estimate === "deleted") {
+              setDelMsg({ ok: `${base}, along with ${est} in your CRM.` });
+            } else {
+              setDelMsg({ ok: `${base}.` });
+            }
             load();
           }} />
       )}
@@ -1342,7 +1375,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                                 </div>
                               ))}
                               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8 }}>
-                                Tracks design submissions &amp; changes (version history) and estimate events from Synergy/GHL (sent · opened · accepted · invoiced). Pre-submit click tracking in the designer is on the roadmap.
+                                Tracks design submissions &amp; changes (version history) and estimate events from your CRM (sent · opened · accepted · invoiced). Pre-submit click tracking in the designer is on the roadmap.
                               </div>
                             </div>
                           );
@@ -1380,7 +1413,7 @@ function SettingsView({ section }) {
   const [ghlApiKey, setGhlApiKey] = useState("");
   const [ghlBusy, setGhlBusy] = useState(false);
   const [ghlMsg, setGhlMsg] = useState(null);   // { ok } | { err }
-  // Synergy/GHL pipelines + stages for the (post-connect) dropdowns. Fetched via
+  // CRM (GoHighLevel) pipelines + stages for the (post-connect) dropdowns. Fetched via
   // the edge fn using the stored key — the browser never holds it.
   const [pipelines, setPipelines] = useState([]);   // [{id,name,stages:[{id,name}]}]
   const [pipesBusy, setPipesBusy] = useState(false);   // loading pipelines
@@ -1519,7 +1552,7 @@ function SettingsView({ section }) {
     loadPipelines();   // now connected → load pipelines/stages for the dropdowns
   };
 
-  // Fetch this tenant's Synergy/GHL pipelines + stages (server-side, using the
+  // Fetch this tenant's CRM (GoHighLevel) pipelines + stages (server-side, using the
   // stored key) to populate the dropdowns. Re-run by the "Refresh" button.
   const loadPipelines = async () => {
     setPipesBusy(true); setPipesMsg(null);
@@ -1603,31 +1636,31 @@ function SettingsView({ section }) {
 
       {show("connection") && (<>
       <div style={S.card}>
-        <div style={S.h2}>Synergy/GHL Connection</div>
+        <div style={S.h2}>CRM Connection</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected yet. Estimates can't be sent until a Synergy/GHL Location ID and API key are saved.</>}
+            : <>Not connected yet. Estimates can't be sent until your CRM Location ID and API key are saved.</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-          <div><span style={S.lbl}>Synergy/GHL Location ID</span>
+          <div><span style={S.lbl}>CRM Location ID</span>
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
-          <div><span style={S.lbl}>Synergy/GHL API Key</span>
+          <div><span style={S.lbl}>CRM API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against Synergy/GHL and saves only if they work. Once connected, choose your pipeline &amp; stages below.</div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against your CRM and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
       </div>
 
       {status && status.configured && (
         <div style={S.card}>
           <div style={S.h2}>Pipeline &amp; Stages</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
-            Map each fulfillment stage to a Synergy/GHL pipeline stage. StructureStudio places a new deal at your
+            Map each fulfillment stage to a pipeline stage in your CRM. StructureStudio places a new deal at your
             <b> "Send Quote"</b> stage; then the badge in your Contacts list advances <b>Quote Accepted → Invoiced →
-            Delivered</b> as you move that opportunity into the matching stage in Synergy/GHL. Each stage can live
+            Delivered</b> as you move that opportunity into the matching stage in your CRM. Each stage can live
             in a <b>different pipeline</b> (e.g. Send Quote in "Building", Invoiced/Delivered in "Invoiced"). All
             optional — leave any blank to skip that stage.
           </p>
@@ -1635,7 +1668,7 @@ function SettingsView({ section }) {
           {pipesMsg && pipesMsg.ok && <div style={S.okMsg}>{pipesMsg.ok}</div>}
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
             <button type="button" onClick={loadPipelines} disabled={pipesBusy} style={{ ...S.btn("#FFFFFF", ACCENT), border: `1px solid ${ACCENT}`, opacity: pipesBusy ? 0.6 : 1 }}>
-              {pipesBusy ? "Refreshing…" : "↻ Refresh from Synergy/GHL"}
+              {pipesBusy ? "Refreshing…" : "↻ Refresh from CRM"}
             </button>
             <span style={{ fontSize: 11, color: "#94A3B8" }}>Pulls the latest pipelines &amp; stages from your connected account.</span>
           </div>
@@ -2125,7 +2158,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           )}
 
           <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 14 }}>
-            StructureStudio integrates with your CRM through Synergy/GHL — CRM setup is available for an additional fee.
+            StructureStudio integrates with your CRM — CRM setup is available for an additional fee.
             Card details are entered in a secure form served by the payment gateway; they never pass through StructureStudio.
           </p>
         </div>
@@ -2394,7 +2427,7 @@ function PricingCsv({ viewingLabel = null }) {
                       ? <img src={s.image_url} alt="" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
-                    <label title="Attach this style's photo to the Synergy/GHL estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                    <label title="Attach this style's photo to the CRM estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
                     </label>
@@ -2579,7 +2612,7 @@ function LayoutPricing() {
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
           <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
           <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
-          These rates are used on estimates when you don’t price through Synergy/GHL products. Building sizes are priced on the <b>Structures</b> tab.
+          These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Structures</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
@@ -5503,7 +5536,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["options", "Options", "Add-on items and rates"],
     ["colors", "Colors", "Paint, shingle, and metal palettes"],
     ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
-    ["connection", "Connection", "Synergy/GHL credentials and pipeline mapping"],
+    ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ["billing", "Billing", "Your StructureStudio subscription"],
   ];
@@ -5520,7 +5553,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>Settings</div>
-            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>Everything that configures your business — structures, options, colors, branding &amp; estimate details, your Synergy/GHL connection, and billing.</div>
+            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>Everything that configures your business — structures, options, colors, branding &amp; estimate details, your CRM connection, and billing.</div>
           </div>
         </div>
       </div>

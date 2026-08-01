@@ -561,7 +561,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const locationId = cur?.ghl_location_id ?? "";
     const apiKey = cur?.ghl_api_key ?? "";
     if (!locationId || !apiKey) {
-      return json({ error: "Connect Synergy/GHL first (save a Location ID + API key), then load pipelines." }, 400);
+      return json({ error: "Connect your CRM first (save a Location ID + API key), then load pipelines." }, 400);
     }
     const ghlHeaders = {
       "Version": "2021-07-28",
@@ -723,8 +723,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   //   3. the designs row itself, last, so a failure above never orphans the record that lets
   //      you find the leftovers.
   //
-  // The GHL side is deliberately untouched — same posture as admin-catalog's delete_client
-  // ("GHL-side contacts/estimates are external and untouched"). The dialog says so.
+  // …and since 2026-08-01, a FOURTH: the estimate in the tenant's CRM. Carolyn, 2026-07-31 —
+  // deleting a design left its estimate behind, so the two systems disagreed about what
+  // exists. It is attempted BEFORE the rows go, because `ghl_estimate_id` lives on the row
+  // being deleted: run it after and a failure is unretryable, having thrown away the only
+  // pointer to the thing left behind. The contact and opportunity are still untouched — they
+  // outlive any single design (a repeat customer has several) and are not ours to remove.
   if (action === "delete_design") {
     const shortCode = String(payload.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
@@ -732,7 +736,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // Scoped by BOTH client_id and short_code. A code from another tenant matches nothing and
     // returns the same 404 as a code that never existed — no existence oracle.
     const { data: design, error: findErr } = await admin.from("designs")
-      .select("id, short_code, status, image_url, ghl_estimate_number, created_at")
+      .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (findErr) return json({ error: findErr.message }, 500);
     if (!design) return json({ error: "Design not found (or not yours)." }, 404);
@@ -798,7 +802,69 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       filesRemoved = rm.error ? 0 : (rm.data?.length ?? 0);
     }
 
-    // 3. Versions, then the design. The version delete failing is NOT ignorable: deleting the
+    // 3. The estimate in the tenant's CRM. GHL exposes DELETE /invoices/estimate/:id; altId +
+    //    altType scope it to the sub-account, the same pair every other estimate call in this
+    //    file already sends. Two rules here, both deliberate:
+    //
+    //    (a) NEVER once an invoice exists. Converting an estimate marks it invoiced, and that
+    //        invoice is the record behind money that may already have been collected —
+    //        deleting its estimate would leave an invoice whose origin no longer exists, which
+    //        is a worse inconsistency than the one this closes. Those report `skipped_invoiced`
+    //        and the dialog tells the operator to void the invoice in the CRM first. The check
+    //        reads invoice_sends rather than trusting `status` alone, because status is a
+    //        cached projection that sync-design-status can downgrade on a GHL blip — the
+    //        claim ledger is the durable fact that an invoice was created.
+    //    (b) BEST-EFFORT, exactly like storage. A tenant's key may predate this feature and
+    //        lack the estimates scope; a 401/403/5xx must never make the design undeletable
+    //        and strand the local rows. The outcome is returned, audited, and (on failure)
+    //        logged — never thrown.
+    //    (c) OPT-IN PER REQUEST. The caller must send `deleteEstimate: true`. This is a
+    //        compatibility gate, not a preference: this function serves beta AND production
+    //        portal.html at the same time, and production keeps serving the previous build
+    //        until the Monday promotion. That older dialog tells the operator in as many
+    //        words that the estimate is NOT affected — so changing the behaviour underneath
+    //        it would delete records in a client's CRM that they were just promised would
+    //        survive. Old page ⇒ no flag ⇒ old behaviour, exactly.
+    let estimate: "none" | "deleted" | "skipped_invoiced" | "not_connected" | "failed" = "none";
+    let estimateError: string | null = null;
+    if (design.ghl_estimate_id && payload.deleteEstimate === true) {
+      const { data: inv } = await admin.from("invoice_sends")
+        .select("invoice_id").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+      if (inv?.invoice_id || st === "invoiced" || st === "delivered") {
+        estimate = "skipped_invoiced";
+      } else {
+        const { data: creds } = await admin.from("client_settings")
+          .select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
+        if (!creds?.ghl_location_id || !creds?.ghl_api_key) {
+          estimate = "not_connected";
+        } else {
+          try {
+            const r = await fetch(
+              `https://services.leadconnectorhq.com/invoices/estimate/${encodeURIComponent(String(design.ghl_estimate_id))}` +
+                `?altId=${encodeURIComponent(creds.ghl_location_id)}&altType=location`,
+              {
+                method: "DELETE",
+                headers: {
+                  Authorization: `Bearer ${creds.ghl_api_key}`,
+                  Version: "2021-07-28",
+                  Accept: "application/json",
+                },
+              },
+            );
+            // 404 is the desired end state reached by another route (already deleted in the
+            // CRM, or a half-finished earlier attempt), so it counts as done rather than as an
+            // error the operator has to interpret. That is also what makes a retry safe.
+            estimate = (r.ok || r.status === 404) ? "deleted" : "failed";
+            if (estimate === "failed") estimateError = `CRM returned ${r.status}`;
+          } catch (e) {
+            estimate = "failed";
+            estimateError = (e as Error)?.message || "network error";
+          }
+        }
+      }
+    }
+
+    // 4. Versions, then the design. The version delete failing is NOT ignorable: deleting the
     //    designs row anyway would strand those version rows, and list_design_versions is
     //    SECURITY DEFINER, granted to anon, and keyed on short_code ALONE — so a stranded row's
     //    contact jsonb stays fetchable by a code that is already sitting in sent customer email,
@@ -816,7 +882,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // Signature is (action, rowCount, note) — the tenant is already implicit in the resolved
     // context, so passing clientId here would silently land in rowCount.
     await auditStrict("portal_delete_design", 1 + (versionsDeleted ?? 0),
-      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${kept.size}`);
+      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${kept.size} estimate=${estimate}`);
+    // A CRM estimate we could not remove is a real leftover in someone else's system, and the
+    // row that pointed at it is now gone — so it goes in error_events, where support can find
+    // it, rather than living only in a banner the operator dismisses. The estimate id is the
+    // whole point of the record: without it nobody can finish the job by hand.
+    if (estimate === "failed") {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "delete_design_estimate_failed",
+        message: `CRM estimate delete failed: ${estimateError ?? "unknown"}`,
+        context: { shortCode, estimateId: String(design.ghl_estimate_id ?? ""), status: st },
+      });
+    }
     // A stored URL naming something this design could not have produced is not something a
     // tenant does by accident, so it gets a durable row rather than a substring in a note
     // nobody greps. Counts and namespace slugs only — never the URL itself, and never any
@@ -828,7 +905,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         context: { shortCode, refused: kept.size, namespaces: [...foreign].slice(0, 5) },
       });
     }
-    return json({ ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: kept.size });
+    return json({
+      ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: kept.size,
+      estimate, estimateNumber: design.ghl_estimate_number ?? null, estimateError,
+    });
   }
 
   if (action === "delete_style") {
@@ -1336,7 +1416,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return json({ error: curErr.message }, 500);
     if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
-      return json({ error: "Connect Synergy/GHL first (Settings → Connection)." }, 400);
+      return json({ error: "Connect your CRM first (Settings → CRM Connection)." }, 400);
     }
     const locationId = cur.ghl_location_id;
     const ghlHeaders = {
@@ -1391,7 +1471,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         resendInvoiceId = prior.invoice_id ? String(prior.invoice_id) : null;
         resendInvoiceNumber = prior.invoice_number ? String(prior.invoice_number) : null;
         resendSenderUserId = prior.sender_user_id ? String(prior.sender_user_id) : null;
-        if (!resendInvoiceId) return json({ error: "An invoice was created in Synergy/GHL for this design but its id wasn't recorded — send it from Synergy/GHL." }, 409);
+        if (!resendInvoiceId) return json({ error: "An invoice was created in your CRM for this design but its id wasn't recorded — send it from your CRM." }, 409);
       } else if (st === "claimed") {
         const age = Date.now() - new Date(String(prior.updated_at)).getTime();
         if (age < STALE_CLAIM_MS) {
@@ -1413,7 +1493,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         const r = await ghl(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
         if (!r.ok) {
           await setClaim({ status: "failed", error: `estimate list ${r.status}` });
-          return json({ error: `Could not read estimates from Synergy/GHL (${r.status || r.netErr}).` }, 502);
+          return json({ error: `Could not read estimates from your CRM (${r.status || r.netErr}).` }, 502);
         }
         const arr: any[] = Array.isArray(r.body?.estimates) ? r.body.estimates : [];
         est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
@@ -1421,12 +1501,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
       if (!est) {
         await setClaim({ status: "failed", error: "estimate not found" });
-        return json({ error: "The estimate could not be found in Synergy/GHL." }, 404);
+        return json({ error: "The estimate could not be found in your CRM." }, 404);
       }
       const estStatus = String(est?.estimateStatus ?? "").toLowerCase();
       if (estStatus === "invoiced") {
         await setClaim({ status: "failed", error: "already invoiced in GHL" });
-        return json({ error: "This estimate was already invoiced in Synergy/GHL — send that invoice from there." }, 400);
+        return json({ error: "This estimate was already invoiced in your CRM — send that invoice from there." }, 400);
       }
       if (estStatus !== "accepted") {
         await setClaim({ status: "failed", error: `estimate status ${estStatus || "sent"}` });
@@ -1443,7 +1523,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!userId) {
         // Fail fast: converting first would leave an un-sendable invoice behind.
         await setClaim({ status: "failed", error: "no GHL user to send as" });
-        return json({ error: "Synergy/GHL has no user to send the invoice as — add a user to that sub-account, then try again. (Nothing was invoiced.)" }, 400);
+        return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then try again. (Nothing was invoiced.)" }, 400);
       }
 
       // ── 4. Convert estimate → invoice (IRREVERSIBLE: marks the estimate invoiced). ──
@@ -1461,7 +1541,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       ghlInvoiceTotal = Number.isFinite(Number(invoice?.total)) ? Number(invoice.total) : null;
       if (!invoiceId) {
         await setClaim({ status: "failed", error: "no invoice id returned" });
-        return json({ error: "Synergy/GHL did not return an invoice id." }, 502);
+        return json({ error: "Your CRM did not return an invoice id." }, 502);
       }
       // Record it IMMEDIATELY: from here on the invoice exists in GHL, so even if the
       // email fails (or this function dies) the retry re-sends instead of converting.
@@ -1475,7 +1555,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!sendRes.ok) {
         await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
         return json({
-          error: `Invoice ${invoiceNumber ?? ""} was created in Synergy/GHL but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice again to retry the email — it will NOT create a second invoice.`,
+          error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
           invoiceId, invoiceNumber, created: true, sent: false,
         }, 502);
       }
@@ -1489,7 +1569,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         userId = String(users[0]?.id ?? "");
       }
       if (!userId) {
-        return json({ error: "Synergy/GHL has no user to send the invoice as — add a user to that sub-account, then retry." }, 400);
+        return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then retry." }, 400);
       }
       const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
         method: "POST", headers: ghlHeaders,
@@ -1497,7 +1577,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       });
       if (!sendRes.ok) {
         await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
-        return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from Synergy/GHL.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+        return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
       }
     }
 
