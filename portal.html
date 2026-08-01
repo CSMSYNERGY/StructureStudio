@@ -5299,6 +5299,10 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   const [draft, setDraft] = useState({});       // key(kind|itemKey|styleId) -> qboItemId
   const [saving, setSaving] = useState(false);
 
+  // Reason from a FAILED OAuth landing, kept so `load` can reconcile it against server truth.
+  // A ref, not state: it must be readable inside the []-dep `load` without re-creating it.
+  const landFailRef = useRef(null);
+
   // One-shot OAuth landing banner, then strip the params so refresh stays quiet.
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -5307,7 +5311,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     // the reason rather than the cheerful default, or the caveat is lost.
     if (p.get("connected") === "1" && p.get("reason") && QBO_REASONS[p.get("reason")]) setMsg({ err: QBO_REASONS[p.get("reason")] });
     else if (p.get("connected") === "1") setMsg({ ok: "QuickBooks connected. Check the company name below is the right business." });
-    else setMsg({ err: QBO_REASONS[p.get("reason")] || "The connection didn't complete. Try again." });
+    else { landFailRef.current = p.get("reason") || ""; setMsg({ err: QBO_REASONS[p.get("reason")] || "The connection didn't complete. Try again." }); }
     p.delete("connected"); p.delete("reason");
     const qs = p.toString();
     window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
@@ -5318,6 +5322,16 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "qbo_status" } });
     if (e || (d && d.error)) { setError((e && e.message) || d.error); setStatus({}); return; }
     setStatus(d || {});
+    // The landing banner reports on ONE callback hit; qbo_status reports the tenant's actual state.
+    // When they disagree the server wins, or a stale failure sits above a green "Connected" card and
+    // reads as a broken connect. `state` specifically: the nonce is one-shot and burned on first
+    // match, so a callback that runs twice ALWAYS fails the second time — the first hit is the one
+    // that connected us. Scoped to `state` on purpose: `realm_in_use` and `denied` stay visible,
+    // because those describe an attempt whose outcome still matters even while connected.
+    if (landFailRef.current === "state" && d && d.connected && !d.broken) {
+      landFailRef.current = null;
+      setMsg((m) => (m && m.err === QBO_REASONS.state ? null : m));  // never clobber a newer message
+    }
     if (d && d.connected && !d.broken) {
       const g = await sb.functions.invoke("portal-settings", { body: { action: "list_item_map" } });
       if (!g.error && g.data && !g.data.error) setGrid(g.data);
