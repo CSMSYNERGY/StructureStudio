@@ -206,6 +206,23 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         // FAILED in billing_webhook_events with the offending string, so it is
         // discoverable and Deposyt's retries will apply the mapping once it is added.
         const next = norm(status);
+        // ABSENT and UNKNOWN are different things, and conflating them was a retry-storm waiting
+        // to happen. norm() returns null for both: for a status string we do not recognise (which
+        // SHOULD fail loudly, so the mapping gets added) and for no status field at all — and
+        // every one of the six live NMI subscription payloads carries NO status field. So the
+        // first benign update event (a card swap, a gateway-side amount edit) would have 422'd on
+        // every hourly redelivery until NMI gave up, filling app_errors and leaving a permanently
+        // 'failed' event indistinguishable at triage time from a real defect. An update that
+        // carries no status simply is not a status change: apply what it does carry and accept it.
+        if (status == null || String(status).trim() === "") {
+          const { error: peErr, count } = await admin.from("billing_subscriptions")
+            .update({ current_period_end: periodEnd ?? undefined, updated_at: new Date().toISOString() },
+                    { count: "exact" })
+            .eq("id", subId);
+          if (peErr) throw new Error(peErr.message);
+          if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+          break;
+        }
         if (!next) {
           console.warn(`[billing-webhook] UNMAPPED status "${status}" on ${eventType}`);
           const { error: peErr } = await admin.from("billing_subscriptions").update({
@@ -228,27 +245,44 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         } else {
           pastDuePatch = { past_due_since: null };
         }
-        const { error } = await admin.from("billing_subscriptions").update({
+        // A 0-row match is NOT success — see the note on the delete case below.
+        const { error, count } = await admin.from("billing_subscriptions").update({
           status: next,
           current_period_end: periodEnd ?? undefined,
           updated_at: new Date().toISOString(),
           ...pastDuePatch,
-        }).eq("id", subId);
+        }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
+        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
         break;
       }
       case "recurring.subscription.delete": {
-        const { error } = await admin.from("billing_subscriptions").update({
+        // COUNT THE ROWS. A PostgREST update matching zero rows returns no error, so this used to
+        // no-op and then mark the event 'processed' — which quietly broke the anti-resurrection
+        // guard on `add` (line ~188: `if (existingSub?.status !== "cancelled")` only protects when
+        // the cancelled row EXISTS). Event reordering is real on this gateway: on 2026-07-29 a
+        // delete processed at 02:46:45 while its own add, stuck in the 422 retry loop, only landed
+        // at 03:30:30. Order survived that time solely because portal-billing had pre-created the
+        // row — but a subscription created directly in the gateway (the exact case the order_id
+        // fallback exists to support) has no pre-created row, so the delete vanished and the
+        // retried add then wrote status 'active' with nothing ever correcting it: the mirror says
+        // active forever and nobody is paying. Throwing instead leaves the event FAILED and lets
+        // the gateway redeliver after the add has created the row, which is the correct order.
+        const { error, count } = await admin.from("billing_subscriptions").update({
           status: "cancelled", canceled_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-        }).eq("id", subId);
+        }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
+        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
         break;
       }
       case "recurring.subscription.pause": {
-        const { error } = await admin.from("billing_subscriptions").update({
+        // Same 0-row reasoning as delete: a swallowed pause loses a past_due/paused signal, so the
+        // grace clock never starts and no failure is recorded anywhere.
+        const { error, count } = await admin.from("billing_subscriptions").update({
           status: "paused", updated_at: new Date().toISOString(),
-        }).eq("id", subId);
+        }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
+        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
         break;
       }
       default:

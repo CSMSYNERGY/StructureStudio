@@ -150,10 +150,16 @@ Deno.serve(async (req) => {
   // Item ids are per-company. Silently keeping them would bill lines against whatever
   // happens to share that id in the new books — a wrong-but-plausible invoice, which is
   // worse than an obviously missing mapping.
+  // ORDER MATTERS: the wipe happens AFTER the save below succeeds, never before it.
+  // The save has an EXPECTED failure mode that this function already handles — the realm unique
+  // index ("realm_in_use", this QuickBooks company is attached to another tenant) — and it can
+  // also fail transiently. Wiping first meant that on any such failure the connection was
+  // unchanged (still pointing at the old realm, old tokens, old company name) while the tenant's
+  // entire hand-built item map was already gone and not restored. The owner saw the working old
+  // connection in the UI, then every later Send invoice aborted with "unmapped: …" on every line,
+  // with nothing indicating that a FAILED connect attempt had destroyed the mapping.
   const previousRealm = row?.qbo_realm_id ?? null;
-  if (previousRealm && previousRealm !== realmId) {
-    await admin.from("qbo_item_map").delete().eq("client_id", cid);
-  }
+  const realmChanged = Boolean(previousRealm && previousRealm !== realmId);
 
   const now = Date.now();
   const { error: saveErr } = await admin.from("client_settings").update({
@@ -178,6 +184,17 @@ Deno.serve(async (req) => {
       ? "realm_in_use"
       : "save";
     return land(host, { connected: "0", reason });
+  }
+
+  // The connection is now definitively pointing at the new company, so the old company's item ids
+  // are definitively wrong. Item ids are per-company: silently keeping them would bill lines
+  // against whatever happens to share that id in the new books — a wrong-but-plausible invoice,
+  // which is worse than an obviously missing mapping. Only reached once the save above committed.
+  if (realmChanged) {
+    const { error: mapErr } = await admin.from("qbo_item_map").delete().eq("client_id", cid);
+    // A failure here leaves stale ids against a live new connection, which is the dangerous
+    // direction — surface it rather than letting the first invoice discover it.
+    if (mapErr) return land(host, { connected: "1", reason: "item_map_stale" });
   }
 
   await admin.from("admin_audit").insert({

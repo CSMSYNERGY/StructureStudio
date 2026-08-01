@@ -85,10 +85,19 @@ Deno.serve(async (req) => {
   // the state blob itself needs no signature — it is routing data, not a credential.
   const nonce = b64url(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 
-  const { error: saveErr } = await admin.from("client_settings").update({
+  // UPSERT, not update. PostgREST reports NO error when an UPDATE matches zero rows, so with an
+  // update this returned {oauthReady:true, authorizeUrl} having stored nothing at all — and
+  // admin-catalog's create_client only inserts a client_settings row when the tenant is
+  // billing-exempt or discounted ("A normal new client gets no row here"), while portal-billing's
+  // subscribe never creates one. So a normal billable tenant who opened Settings → QuickBooks
+  // before ever saving the Connection tab got a working Intuit authorize URL, authorised the right
+  // company, and landed back on connected=0&reason=state — every time, with no server-side error
+  // anywhere, and nothing hinting that the fix was to save an unrelated form first.
+  const { error: saveErr } = await admin.from("client_settings").upsert({
+    client_id: ctx.clientId,
     qbo_oauth_state: nonce,
     qbo_oauth_state_expires_at: new Date(Date.now() + STATE_TTL_MS).toISOString(),
-  }).eq("client_id", ctx.clientId);
+  }, { onConflict: "client_id" });
 
   if (saveErr) {
     return json({ error: "Could not start the QuickBooks connection.", clientId: ctx.clientId }, 500);
