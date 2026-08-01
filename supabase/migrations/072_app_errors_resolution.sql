@@ -38,9 +38,12 @@ comment on column public.app_errors.resolution_note is
 -- distinguishable, so the note says so rather than asserting a single cause for all of them.
 -- resolved_at is deliberately left NULL — inventing a timestamp would be worse than admitting the
 -- column started empty.
+-- The pointer is deliberately generic: this repo is PUBLIC, so it names neither the internal
+-- document nor anything that identifies a tenant. The StructureStudio work log in the team vault
+-- is the single place that triage history lives, which is enough to find the reasoning.
 update public.app_errors
-   set resolution_note = 'Closed 2026-08-01 in the post-audit wash. Per-class reasoning is in the '
-                      || 'vault note "StructureStudio Bug Audit 2026-07-31", appendix A1. A few rows '
-                      || 'were already resolved before that wash and are not distinguished here.'
+   set resolution_note = 'Closed 2026-08-01 in a triage pass; per-class reasoning is recorded in the '
+                      || 'StructureStudio work log. A few rows were already resolved beforehand and '
+                      || 'are not distinguished here.'
  where resolved = true
    and resolution_note is null;
