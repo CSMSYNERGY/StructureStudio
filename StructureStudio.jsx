@@ -258,6 +258,12 @@ const FIXTURE_DOOR_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: t
 // (below) instead of placing immediately — the shopper chooses WHICH door (and its swing/
 // operation where more than one is offered) in the popup.
 const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", isDoorPicker: true };
+// Custom ramps (custom mode). The "Ramp" tool attaches to a door (doorSnap) and opens the ramp
+// picker. A placed custom ramp is a normal type:"ramp" item — so it reuses ALL the existing ramp
+// machinery (render, door-snap follow, delete-cascade, z-order) — but carries the chosen style's
+// own width/length + a priced snapshot (vs the simple built-in ramp which takes the door's width).
+const FIXTURE_RAMP_COLOR = "#0284C7";
+const RAMP_PICKER_CFG = { label: "Ramp", color: FIXTURE_RAMP_COLOR, icon: "⬛", doorSnap: true, width: 3, height: 2, shortLabel: "RAMP", isRampPicker: true };
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
   if (fx.swingIn) return "in";
@@ -943,6 +949,63 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   );
 }
 
+// Ramp placement picker (custom mode). Like DoorPicker but no swing/operation: pick a ramp
+// STYLE (exact name), then its size, then place it on the door the tool was dropped near.
+function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
+  const styles = useMemo(() => {
+    const m = new Map();
+    ramps.forEach((d) => {
+      const k = d.name || "Ramp";
+      if (!m.has(k)) m.set(k, { name: k, imageUrl: d.imageUrl || null, sizes: [] });
+      const g = m.get(k); g.sizes.push(d); if (!g.imageUrl && d.imageUrl) g.imageUrl = d.imageUrl;
+    });
+    return [...m.values()];
+  }, [ramps]);
+  const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
+  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const money = (n) => "$" + Number(n).toLocaleString();
+  const chip = (key, on, label, onClick) => (
+    <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_RAMP_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>{label}</div>
+  );
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a ramp</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>{style && style.sizes.length > 1 ? "Pick a size." : "Pick a ramp for this door."}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {styles.map((st) => {
+            const on = style && style.name === st.name;
+            const one = st.sizes.length === 1 ? st.sizes[0] : null;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            return (
+              <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_RAMP_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>⬛</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{st.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{sub}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {style && style.sizes.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => sel && onPlace(sel)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_RAMP_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place ramp</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -955,8 +1018,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // customer-flavoured (contact gates, silent lead capture), use `customerFacing`.
   const customerFacing = !embedded;
   const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
-  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG, ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}) };
+  const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
+  // Custom ramp mode: show the ramp picker + hide the built-in ramp TOOL (placed built-in ramps
+  // still render). Simple mode leaves the built-in ramp exactly as-is.
+  const rampCustom = ((C.rampSettings && C.rampSettings.mode) === "custom") && rampFixtures.length > 0;
+  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
+    ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
+    ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
+    ...(rampCustom && C.layoutItems && C.layoutItems.ramp ? { ramp: { ...C.layoutItems.ramp, noPalette: true } } : {}) };
   const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
+  const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
@@ -1734,6 +1805,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setTimeout(() => setToast(null), 5000);
         return;
       }
+      // Custom ramp: open the picker for THIS door — placePickedRamp creates the ramp item.
+      if (cfg.isRampPicker) { setRampPick({ door: closest }); setActiveTool(null); setToast(null); return; }
       const doorCfg = ITEMS[closest.type];
       const doorW = doorCfg ? doorCfg.width : 3;
       const rampDepth = RAMP_SPACE_FT; // visual ramp depth in feet
@@ -1852,6 +1925,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setDoorPick(null);
     setToast(null);
   }, [doorPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
+
+  // Place the ramp style chosen in the picker on the door the ramp tool was dropped near.
+  // A custom ramp is a normal type:"ramp" item (reuses render/follow/delete/z-order) carrying
+  // the style's own width/length + a priced snapshot; positioned outside the door's wall like
+  // the built-in ramp.
+  const placePickedRamp = useCallback((fx) => {
+    if (!rampPick || !fx) return;
+    const door = rampPick.door;
+    const widthFt = (Number(fx.widthIn) || 36) / 12;
+    const rampDepth = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;   // style length = run out from the door
+    const rampDepthPx = rampDepth * scale;
+    let rx, ry, rot;
+    if (door.wall === "north") { rx = door.x; ry = mgY - rampDepthPx / 2; rot = 0; }
+    else if (door.wall === "south") { rx = door.x; ry = mgY + pH + rampDepthPx / 2; rot = 0; }
+    else if (door.wall === "west") { rx = mgX - rampDepthPx / 2; ry = door.y; rot = 90; }
+    else if (door.wall === "east") { rx = mgX + pW + rampDepthPx / 2; ry = door.y; rot = 90; }
+    else { setRampPick(null); return; }
+    const ni = {
+      id: idCounter++, type: "ramp", x: rx, y: ry, rotation: rot, wall: door.wall,
+      widthFt, heightFt: rampDepth, snapDoorId: door.id,
+      fixtureItemId: fx.id, rampName: fx.name || "Ramp",
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+      price: (fx.price != null ? fx.price : null),
+      widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+    };
+    setItems((p) => [...p, ni]);
+    setSelectedId(ni.id);
+    setRampPick(null);
+    setToast(null);
+  }, [rampPick, mgX, mgY, pW, pH, scale, RAMP_SPACE_FT]);
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
@@ -2439,7 +2542,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
       if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
-      else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText("RAMP", -iw / 2 + 5, 4); }
+      else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText(item.planLabel || "RAMP", -iw / 2 + 5, 4); }
       else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
@@ -3149,6 +3252,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
       {doorPick && createPortal(<DoorPicker doors={doorFixtures} showPricing={!!C.showPricing} onCancel={() => setDoorPick(null)} onPlace={placePickedDoor} />, document.body)}
+      {rampPick && createPortal(<RampPicker ramps={rampFixtures} showPricing={!!C.showPricing} onCancel={() => setRampPick(null)} onPlace={placePickedRamp} />, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -3735,7 +3839,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <>
                     <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + (item.type === "ramp" ? "12" : "30")} stroke={cfg.color + (item.type === "ramp" ? "80" : "FF")} strokeWidth={item.type === "ramp" ? 1.5 : 2} rx={2} />
                     {item.type === "ramp" ? (
-                      <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">RAMP</text>
+                      <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">{item.planLabel || "RAMP"}</text>
                     ) : isWB ? (
                       <>
                         <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
