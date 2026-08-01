@@ -2230,7 +2230,66 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
   const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); setEditingNoteId(null); } };
-  const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
+  // Rotate the selection.
+  //
+  // Lofts are handled by SWAPPING widthFt/heightFt rather than by setting a rotation angle, and
+  // that is the whole fix for the rotated-loft class of bug. Both renderers honour `rotation` (SVG
+  // transform, canvas ctx.rotate) and the hit test swaps the bbox for 90/270 — but EVERY piece of
+  // loft geometry ignored it: the loft-vs-loft overlap checks, the resize clamps, the drag
+  // containment clamp (halfW/halfH from the UNROTATED widthFt/heightFt) and checkLoftAttached /
+  // the unattachedLofts banner. So one click on Rotate could leave a 10x4 loft rendering as 4x10,
+  // sticking 3ft outside the north wall with no warning, visually overlapping another loft, and
+  // reporting attached/unattached wrongly — and that geometry is what gets rasterized into the PDF
+  // the customer signs against and the shop builds from.
+  //
+  // A loft is an axis-aligned resizable rectangle, so a 90-degree turn IS a width/height swap;
+  // expressing it that way keeps `rotation` at 0 and leaves every invariant above valid as
+  // written, instead of teaching six separate places about rotation. The swap is validated exactly
+  // like a drag: clamp the centre back inside the building, then refuse if the new footprint would
+  // overlap another loft or no longer fit.
+  //
+  // doorSnap items (ramps) are excluded too: a ramp's position and rotation are DERIVED from the
+  // door it is attached to, and it deliberately cannot be dragged — rotating it only desynced it
+  // from its door.
+  const rotSel = () => {
+    if (!selectedId) return;
+    const sel = items.find((i) => i.id === selectedId);
+    if (!sel) return;
+    const c = ITEMS[sel.type];
+    if (c && (c.wallOnly || c.wallSnap || c.lineType || c.doorSnap)) return;
+
+    if (sel.type === "loft") {
+      const curW = sel.widthFt || c.width, curH = sel.heightFt || c.height;
+      const newW = curH, newH = curW;
+      if (newW > bldgW || newH > bldgH) {
+        setToast("Turning this loft won't fit inside the building. Resize it first.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+      const halfW = newW / 2, halfH = newH / 2;
+      let cxFt = (sel.x - mgX) / scale, cyFt = (sel.y - mgY) / scale;
+      cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
+      cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+      const fL = cxFt - halfW, fR = cxFt + halfW, fT = cyFt - halfH, fB = cyFt + halfH;
+      for (const o of items) {
+        if (o.id === sel.id || o.type !== "loft") continue;
+        const oW = (o.widthFt || c.width) / 2, oH = (o.heightFt || c.height) / 2;
+        const oCx = (o.x - mgX) / scale, oCy = (o.y - mgY) / scale;
+        if (fL < oCx + oW - 0.1 && fR > oCx - oW + 0.1 && fT < oCy + oH - 0.1 && fB > oCy - oH + 0.1) {
+          setToast("Turning this loft would overlap another loft. Move one of them first.");
+          setTimeout(() => setToast(null), 4000);
+          return;
+        }
+      }
+      setItems((p) => p.map((i) => i.id !== selectedId ? i : {
+        ...i, widthFt: newW, heightFt: newH, rotation: 0,
+        x: mgX + cxFt * scale, y: mgY + cyFt * scale,
+      }));
+      return;
+    }
+
+    setItems((p) => p.map((i) => i.id !== selectedId ? i : { ...i, rotation: ((i.rotation || 0) + 90) % 360 }));
+  };
   const clearAll = () => { setItems([]); setSelectedId(null); setEditingNoteId(null); };
 
   // ─── EXPORT RENDERING (shared by Export modal, PDF, and submit) ───
