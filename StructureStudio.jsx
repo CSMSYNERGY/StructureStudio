@@ -171,6 +171,27 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
   return false;
 }
 
+// Does a wall-mounted item (door / window / rough opening) at `sn` overlap a WORKBENCH on the
+// same wall? checkDoorCollision above deliberately only compares wallOnly items to each other, and
+// a workbench is wallSnap, so it is skipped there — which meant the invariant was enforced in one
+// direction only: dragging a workbench into a door showed "A door is blocking this wall!", while
+// dragging the DOOR onto the workbench silently succeeded and produced exactly the layout that
+// toast exists to prevent, rasterized into the PDF and sent to the shop. Same math as the
+// workbench-side check, read from the other side.
+function checkWorkbenchOverlap(sn, widthFtPx, existing, itemTypes, sc) {
+  if (!sn.wall) return false;
+  const isH = sn.wall === "north" || sn.wall === "south";
+  const candPos = isH ? sn.x : sn.y;
+  const candHalf = widthFtPx / 2;
+  for (const ob of existing) {
+    if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
+    const obHalf = ((ob.widthFt || (itemTypes[ob.type] && itemTypes[ob.type].width)) * sc) / 2;
+    const obPos = isH ? ob.x : ob.y;
+    if (Math.abs(candPos - obPos) < candHalf + obHalf - 2) return true;
+  }
+  return false;
+}
+
 function parseSize(s) {
   if (!s) return null;
   const m = s.match(/(\d+)\s*[x×✕]\s*(\d+)/i); // accept Unicode ×/✕ size labels too, not just ASCII x — else the building silently stays at the default size (audit #F2)
@@ -1690,7 +1711,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
     // Door-snap items (ramp): find nearest door and snap to its outside
     if (cfg.doorSnap) {
-      const doors = items.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor");
+      // fixtureDoor counts as a door here. It is the item type EVERY catalog door placement
+      // creates, and it is treated as a door everywhere else — getFrontWall, checkDoorCollision via
+      // wallOnly, the payload doors[] schedule — but the ramp tool filtered it out, so a shopper who
+      // placed the tenant's own catalog door (a slide-up or garage door, the most natural ramp
+      // companion) got "Place a door first, then add a ramp to it." with a door plainly on the plan.
+      // Catalog doors are live: fixture_items has active category='door' rows today.
+      const doors = items.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor");
       if (doors.length === 0) {
         setToast("Place a door first, then add a ramp to it.");
         setTimeout(() => setToast(null), 5000);
@@ -1773,6 +1800,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH };
     } else if (wall) {
       const sn = snapToWall(wall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
+      // Placing a door/window/RO had NO overlap check at all, so one could be click-placed straight
+      // on top of another door, or onto a workbench’s wall span. Both checks now run here, matching
+      // the wallSnap (workbench) branch, so the invariant holds whichever item is the one moving.
+      const cand = { id: -1, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+      if (checkDoorCollision(cand, cfg, items, ITEMS, scale)) {
+        setToast("Something is already on that spot. Pick a clear part of the wall.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+      if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+        setToast("A workbench is on that wall — place this somewhere else on the wall.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
       ni = { id: idCounter++, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
     } else {
       const x = Math.max(mgX + iwPx / 2, Math.min(pt.x, mgX + pW - iwPx / 2));
@@ -2047,6 +2088,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         if (sn.wall === "east")  return { ...rmp, x: mgX + pW + rampDepthPx / 2, y: sn.y, rotation: 90, wall: "east" };
         return rmp;
       };
+      // Refuse the move rather than commit an overlap — same posture as the workbench branch
+      // below, which simply returns. Without this, dragging a door onto another door or onto a
+      // workbench silently succeeded, producing the exact layout the workbench-side toast prevents.
+      const dOthers = items.filter((i) => i.id !== dragging.id);
+      const dCand = { ...it, ...sn, widthFt: iWidthFt };
+      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) return;
+      if (checkWorkbenchOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale)) return;
       setItems((p) => p.map((i) =>
         i.id === dragging.id ? { ...i, ...sn }
         : (i.type === "ramp" && i.snapDoorId === dragging.id ? relocRamp(i) : i)
