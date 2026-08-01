@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260801d" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260801e" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -4011,6 +4011,436 @@ function OrdersPreview() {
   );
 }
 
+// ─── Orders & payments ───
+// An order appears automatically once a design's status reaches accepted (the
+// designs_ensure_order trigger, migration 053). This view is the money view:
+// what each job is worth, what's been collected, and what's still owed.
+//
+// Phase 1 is RECORD-ONLY — cash / check / card-taken-elsewhere. Nothing is charged
+// here, so no payment gateway is involved; balances are still real. Card charging
+// drops in later on the same payments table (its gateway_* columns are already there).
+//
+// Totals come from the GHL estimate via sync-design-status (GHL applies tax, so our
+// pre-tax subtotal is not a safe substitute). When GHL hasn't given us one, the total
+// reads "Set total" and the owner types it — we never show a guessed number.
+const money = (cents) => cents == null ? "—" : "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Dollars → cents. Returns NaN for anything without a digit: Number("") is 0, so a
+// blank or junk field would otherwise read as a legitimate $0.00 and get saved.
+const centsFrom = (txt) => {
+  const s = String(txt == null ? "" : txt);
+  if (!/\d/.test(s)) return NaN;
+  const n = Number(s.replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(n) ? Math.round(n * 100) : NaN;
+};
+// Today in the LOCAL calendar (en-CA renders YYYY-MM-DD). Not toISOString(), which is
+// UTC — that files an evening payment under tomorrow's date for every US timezone.
+const todayLocal = () => new Date().toLocaleDateString("en-CA");
+const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["ach", "Bank / ACH"], ["other", "Other"]];
+
+function OrdersView({ clientId }) {
+  const [rows, setRows] = useState(null);   // null = loading; [{order, design, paid}]
+  const [error, setError] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data: ords, error: oErr } = await sb
+      .from("orders").select("*").eq("client_id", clientId).order("ordered_at", { ascending: false }).limit(2000);
+    if (oErr) { setError(oErr.message); setRows([]); return; }
+    const list = ords || [];
+    const codes = list.map((o) => o.short_code).filter(Boolean);
+    // designs + payments are separate reads: orders.short_code is a soft link (a
+    // future manual order has none), so there's no FK for PostgREST to embed.
+    const [{ data: dsn }, { data: pays }] = await Promise.all([
+      codes.length
+        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number").in("short_code", codes).limit(2000)
+        : Promise.resolve({ data: [] }),
+      // ALL payments, voided included — voided rows stay visible in the history (the
+      // void dialog promises exactly that); they're excluded from the math below, not
+      // from the fetch. Explicit limits so a large tenant fails loudly in testing
+      // rather than silently truncating and understating what a customer still owes.
+      sb.from("payments").select("*").eq("client_id", clientId).order("received_at", { ascending: false }).limit(5000),
+    ]);
+    const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
+    const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
+    setRows(list.map((o) => {
+      const ps = payByOrder[o.id] || [];
+      return {
+        o, d: byCode[o.short_code] || null, pays: ps,
+        paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
+      };
+    }));
+  }, [clientId]);
+
+  // Pull fresh totals + externally-collected payments from GHL, then re-read.
+  // Kept separate from load(): recording a payment re-reads the tables (instant),
+  // while this hits the GHL API and only runs on mount and on Refresh.
+  const [syncing, setSyncing] = useState(false);
+  const syncFromGhl = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const { data: ords } = await sb.from("orders").select("short_code").eq("client_id", clientId).limit(2000);
+      const codes = (ords || []).map((o) => o.short_code).filter(Boolean);
+      if (codes.length) await sb.functions.invoke("sync-design-status", { body: { shortCodes: codes } });
+    } catch (_e) { /* non-fatal: the tables still render what we already have */ }
+    setSyncing(false);
+    await load();
+  }, [clientId, load]);
+
+  const didSync = useRef(false);
+  useEffect(() => {
+    load();
+    if (!didSync.current) { didSync.current = true; syncFromGhl(); }
+  }, [load, syncFromGhl]);
+
+  const nameOf = (r) => ((r.d && r.d.contact && r.d.contact.name) || "—");
+  const bldgOf = (r) => {
+    const sel = (r.d && r.d.selections) || {};
+    return [titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—";
+  };
+  const balOf = (r) => (r.o.total_cents == null ? null : r.o.total_cents - r.paid);
+  const stateOf = (r) => {
+    const bal = balOf(r);
+    if (bal == null) return { key: "nototal", label: "Needs total", bg: "#F1F5F9", fg: "#475569" };
+    // Collected more than the total — say so plainly instead of "Paid in full",
+    // which would hide that a refund/credit is owed back to the customer.
+    if (bal < 0) return { key: "over", label: "Overpaid", bg: "#FFEDD5", fg: "#9A3412" };
+    if (bal === 0) return { key: "paid", label: "Paid in full", bg: "#DCFCE7", fg: "#166534" };
+    if (r.paid > 0) return { key: "partial", label: "Partially paid", bg: "#DBEAFE", fg: "#1E40AF" };
+    // Nothing collected yet — and these are two different jobs. A quote the customer
+    // accepted but nobody has billed is the OWNER's move; an invoice that's out and
+    // unpaid is the CUSTOMER's. Lumping both under "Unpaid" hides the follow-up.
+    return ((r.d && r.d.status) === "accepted")
+      ? { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" }
+      : { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
+  };
+
+  const all = rows || [];
+  const shown = all.filter((r) => {
+    if (filter !== "all" && stateOf(r).key !== filter) return false;
+    const extra = [nameOf(r), bldgOf(r), "#" + r.o.order_no, r.o.short_code,
+      (r.d && r.d.ghl_estimate_number) ? "EST-" + r.d.ghl_estimate_number : "", stateOf(r).label, fmtDate(r.o.ordered_at)].join(" ");
+    return rowMatchesQuery(r.o, query, extra);
+  });
+  const openRow = openId ? all.find((r) => r.o.id === openId) : null;
+
+  // Summary tiles — only orders with a known total can contribute to money figures.
+  const withTotal = all.filter((r) => r.o.total_cents != null);
+  const openBalance = withTotal.reduce((s, r) => s + Math.max(0, balOf(r)), 0);
+  const collected = all.reduce((s, r) => s + r.paid, 0);
+  // Voided rows are fetched (they stay visible in the history) but must not be counted.
+  const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
+  const needsInvoice = all.filter((r) => stateOf(r).key === "needsinvoice").length;
+  const awaitingCount = all.filter((r) => stateOf(r).key === "awaiting").length;
+  const needsTotal = all.filter((r) => r.o.total_cents == null).length;
+
+  if (error) return <div style={S.err}>Couldn't load orders: {error}</div>;
+  if (rows === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading orders…</div>;
+
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} />;
+
+  const tile = (label, value, note, accent) => (
+    <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 23, fontWeight: 800, marginTop: 5, fontVariantNumeric: "tabular-nums", letterSpacing: -0.5 }}>{value}</div>
+      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>{note}</div>
+    </div>
+  );
+  const chip = (id, label) => (
+    <button key={id} type="button" onClick={() => setFilter(id)}
+      style={{ background: filter === id ? ACCENT : "#F1F5F9", border: `1px solid ${filter === id ? ACCENT : "#E2E8F0"}`, color: filter === id ? "#FFF" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 20, padding: "6px 13px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
+        {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
+        {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
+        {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
+        {tile("Awaiting payment", String(awaitingCount), "invoiced, nothing collected", "#9F1239")}
+        {needsTotal > 0 && tile("Needs a total", String(needsTotal), "set it on the order", null)}
+      </div>
+
+      <div style={S.card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders {rows ? (query || filter !== "all" ? `(${shown.length} of ${all.length})` : `(${all.length})`) : ""}</div>
+          {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}{chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
+          {needsTotal > 0 && chip("nototal", "Needs total")}
+          {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
+          <div style={{ marginLeft: "auto", minWidth: 240, flex: "0 1 300px" }}>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search orders — name, building, order #…" />
+          </div>
+          <button onClick={syncFromGhl} disabled={syncing} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", opacity: syncing ? 0.6 : 1 }}>{syncing ? "Syncing…" : "↻ Refresh"}</button>
+        </div>
+
+        {all.length === 0 && (
+          <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+            No orders yet. An order appears here automatically as soon as a customer accepts their quote.
+          </p>
+        )}
+        {all.length > 0 && shown.length === 0 && (
+          <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No orders match this filter.</p>
+        )}
+        {shown.length > 0 && (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={S.th}>Order</th><th style={S.th}>Customer</th><th style={S.th}>Building</th><th style={S.th}>Ordered</th>
+                <th style={{ ...S.th, textAlign: "right" }}>Total</th><th style={{ ...S.th, textAlign: "right" }}>Paid</th>
+                <th style={{ ...S.th, textAlign: "right" }}>Balance</th><th style={S.th}>Status</th><th style={S.th}></th>
+              </tr></thead>
+              <tbody>
+                {shown.map((r) => {
+                  const st = stateOf(r); const bal = balOf(r);
+                  const numCell = { ...S.td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
+                  return (
+                    <tr key={r.o.id} onClick={() => setOpenId(r.o.id)} style={{ cursor: "pointer" }}>
+                      <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>#{r.o.order_no}</td>
+                      <td style={{ ...S.td, fontWeight: 700 }}>{nameOf(r)}
+                        <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}>{(r.d && r.d.contact && r.d.contact.phone) || ""}</div></td>
+                      <td style={S.td}>{bldgOf(r)}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.o.ordered_at)}</td>
+                      <td style={numCell}>{r.o.total_cents == null ? <span style={{ color: ACCENT, fontWeight: 700 }}>Set total</span> : money(r.o.total_cents)}</td>
+                      <td style={numCell}>{r.paid ? money(r.paid) : <span style={{ color: "#94A3B8" }}>—</span>}</td>
+                      <td style={{ ...numCell, fontWeight: bal ? 800 : 600, color: bal === 0 ? "#94A3B8" : bal < 0 ? "#9A3412" : "#1E293B" }}>
+                        {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+                      </td>
+                      <td style={S.td}><span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span></td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}><span style={{ color: ACCENT, fontWeight: 700, fontSize: 12 }}>Open →</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// One order: the money detail + payment history + record-a-payment.
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf }) {
+  const { o, d } = row;
+  const [payOpen, setPayOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState("cash");
+  const [reference, setReference] = useState("");
+  const [when, setWhen] = useState(todayLocal);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [totalDraft, setTotalDraft] = useState(o.total_cents == null ? "" : (o.total_cents / 100).toFixed(2));
+  const [editTotal, setEditTotal] = useState(o.total_cents == null);
+  const bal = balOf(row); const st = stateOf(row);
+
+  const saveTotal = async () => {
+    const cents = centsFrom(totalDraft);
+    if (!Number.isFinite(cents) || cents <= 0) { setMsg({ err: "Enter a dollar amount, e.g. 9575.00" }); return; }
+    setBusy(true); setMsg(null);
+    const { error } = await sb.from("orders")
+      .update({ total_cents: cents, total_source: "manual", updated_at: new Date().toISOString() }).eq("id", o.id);
+    setBusy(false);
+    if (error) { setMsg({ err: error.message }); return; }
+    setEditTotal(false); onChanged();
+  };
+
+  const recordPayment = async () => {
+    const cents = centsFrom(amount);
+    if (!Number.isFinite(cents) || cents <= 0) { setMsg({ err: "Enter an amount greater than zero." }); return; }
+    setBusy(true); setMsg(null);
+    let uid = null;
+    try { const { data } = await sb.auth.getUser(); uid = data && data.user ? data.user.id : null; } catch (_e) {}
+    const { error } = await sb.from("payments").insert({
+      client_id: clientId, order_id: o.id, amount_cents: cents, method,
+      reference: reference.trim() || null,
+      received_at: new Date(when + "T12:00:00").toISOString(),
+      created_by: uid,
+    });
+    setBusy(false);
+    if (error) { setMsg({ err: error.message }); return; }
+    setPayOpen(false); setAmount(""); setReference(""); setMethod("cash");
+    setMsg({ ok: "Payment recorded." });
+    onChanged();
+  };
+
+  const voidPayment = async (p) => {
+    if (!window.confirm(`Void this ${money(p.amount_cents)} payment? It stays in the history, marked voided.`)) return;
+    const { error } = await sb.from("payments")
+      .update({ voided_at: new Date().toISOString(), void_reason: "voided in portal" }).eq("id", p.id);
+    if (error) { setMsg({ err: error.message }); return; }
+    onChanged();
+  };
+
+  const unvoidPayment = async (p) => {
+    const { error } = await sb.from("payments")
+      .update({ voided_at: null, void_reason: null }).eq("id", p.id);
+    if (error) { setMsg({ err: error.message }); return; }
+    onChanged();
+  };
+
+  const kv = (k, v) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, padding: "6px 0" }}>
+      <span style={{ color: "#64748B" }}>{k}</span><span style={{ fontWeight: 700, textAlign: "right" }}>{v}</span>
+    </div>
+  );
+
+  return (
+    <div>
+      <button type="button" onClick={onBack}
+        style={{ background: "none", border: "none", color: ACCENT, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 0, marginBottom: 12 }}>← All orders</button>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) minmax(0,1fr)", gap: 14, alignItems: "start" }} className="ss-order-grid">
+        <div>
+          <div style={S.card}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+              <div>
+                <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
+                <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
+                  Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
+                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
+                </div>
+              </div>
+              <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
+              {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+            </div>
+          </div>
+
+          <div style={S.card}>
+            <div style={{ ...S.h2, marginBottom: 8 }}>Payments</div>
+            {row.pays.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Nothing recorded yet.</p>}
+            {row.pays.map((p) => {
+              const dead = !!p.voided_at;
+              return (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F1F5F9", fontSize: 12.5, opacity: dead ? 0.65 : 1 }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", background: dead ? "#F1F5F9" : "#DCFCE7", color: dead ? "#64748B" : "#166534", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {dead
+                      ? <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                      : <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>}
+                  </div>
+                  <div>
+                    <b style={{ textDecoration: dead ? "line-through" : "none" }}>{(PAY_METHODS.find((m) => m[0] === p.method) || [, p.method])[1]}</b>
+                    {p.gateway === "ghl" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#EDE9FE", color: "#5B21B6", borderRadius: 5, padding: "2px 6px" }}>Synergy/GHL</span>}
+                    {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>Voided</span>}
+                    <div style={{ fontSize: 11, color: "#94A3B8" }}>{fmtDate(p.received_at)}{p.reference ? ` · ${p.reference}` : ""}{dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}</div>
+                  </div>
+                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
+                  {/* Imported payments are read-only here — GHL owns them, and a local
+                      void would silently come back (or diverge) on the next sync. */}
+                  {p.gateway
+                    ? <span title="Recorded in Synergy/GHL — manage it there" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                    : <button type="button" onClick={() => (dead ? unvoidPayment(p) : voidPayment(p))} title={dead ? "Restore this payment" : "Void this payment"}
+                        style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>{dead ? "Restore" : "Void"}</button>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", borderRadius: 12, padding: "16px 18px", marginBottom: 14 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{bal != null && bal < 0 ? "Credit owed back" : "Balance due"}</div>
+            <div style={{ fontSize: 29, fontWeight: 800, margin: "4px 0 2px", fontVariantNumeric: "tabular-nums", letterSpacing: -0.7 }}>
+              {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+            </div>
+            <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
+              {o.total_cents == null ? "Set this order's total to track a balance" : `${money(row.paid)} of ${money(o.total_cents)} collected`}
+            </div>
+            {o.total_cents != null && (
+              <button type="button" onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
+                style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13 }}>Record a payment</button>
+            )}
+          </div>
+
+          <div style={S.card}>
+            <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
+            {editTotal ? (
+              <>
+                <span style={S.lbl}>Total (from your estimate)</span>
+                <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button onClick={saveTotal} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save total"}</button>
+                  {o.total_cents != null && <button onClick={() => { setEditTotal(false); setTotalDraft((o.total_cents / 100).toFixed(2)); }} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>}
+                </div>
+                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
+                  Totals fill in automatically from the accepted estimate. Type one here if it hasn't come through yet — your number always wins.
+                </div>
+              </>
+            ) : (
+              <>
+                {kv("Total", money(o.total_cents))}
+                {kv("Paid", money(row.paid))}
+                {kv("Balance", bal == null ? "—" : money(bal))}
+                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                  {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
+                  {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div style={S.card}>
+            <div style={{ ...S.h2, marginBottom: 8 }}>Customer</div>
+            {kv("Name", nameOf(row))}
+            {kv("Phone", (d && d.contact && d.contact.phone) || "—")}
+            {kv("Email", (d && d.contact && d.contact.email) || "—")}
+          </div>
+        </div>
+      </div>
+
+      {payOpen && (
+        <div onClick={(e) => { if (e.target === e.currentTarget) setPayOpen(false); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
+          <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+            <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ fontSize: 15.5, fontWeight: 800 }}>Record a payment</div>
+              <button type="button" onClick={() => setPayOpen(false)}
+                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ padding: "17px 18px" }}>
+              <span style={S.lbl}>Amount</span>
+              <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
+              {bal > 0 && (
+                <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
+                  <button type="button" onClick={() => setAmount((bal / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Full balance</button>
+                  <button type="button" onClick={() => setAmount((Math.round(bal / 2) / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Half</button>
+                </div>
+              )}
+              <div style={{ marginTop: 13 }}><span style={S.lbl}>Method</span>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {PAY_METHODS.map(([id, label]) => (
+                    <button key={id} type="button" onClick={() => setMethod(id)}
+                      style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
+                <div><span style={S.lbl}>Received on</span><input type="date" style={S.input} value={when} onChange={(e) => setWhen(e.target.value)} /></div>
+                <div><span style={S.lbl}>Reference</span><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check # / note" /></div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 11px", fontSize: 11.5, color: "#475569", lineHeight: 1.45, marginTop: 12 }}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#64748B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 2"/></svg>
+                <div>You're recording money you already collected — no card is charged here. Taking cards in the portal is coming next.</div>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
+                <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
+                <button onClick={() => setPayOpen(false)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ─── In-portal Designer tab ───
 // Mounts the shared designer module (structure-studio.component.js, loaded before this
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
@@ -6546,7 +6976,15 @@ function Dashboard({ session }) {
                 usersRefreshKey={usersRefreshKey} />
             )}
             {!gateLocked && activeTab === "orders" && (
-              <OrdersPreview />
+              /* Operators get the REAL, interactive Orders on their OWN portal so they can
+                 build and test the feature end to end (orders/payments RLS is scoped to
+                 current_client_id(), so direct reads/writes only work for one's own tenant —
+                 hence !viewing: while viewing ANOTHER tenant the direct-read path would show
+                 nothing, so keep the locked preview there). Everyone else sees the locked
+                 example-data preview. */
+              (isOperator && !viewing)
+                ? <OrdersView clientId={tenant.clientId} />
+                : <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).
                 Kept MOUNTED across tab switches, like the designer — the original reason
