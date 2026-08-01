@@ -57,6 +57,19 @@ async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
   try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
   if (!r.ok) {
     const msg = (data && (data.message || data.error || data.msg)) || text || `request failed (${r.status})`;
+    // 401/403 means the secret EXISTS but the Management API rejected it — an expired, revoked or
+    // wrong-project token. That is a different fix from the missing-secret branch above, and it used
+    // to surface as a bare "Supabase Management API: Unauthorized", which reads like a code bug and
+    // cost a whole session to diagnose (the giveaway was only that it was NOT the missing-token
+    // message). Name the actual cause and the actual fix, matching that branch's helpfulness.
+    if (r.status === 401 || r.status === 403) {
+      throw new Error(
+        "Email sending is misconfigured on the server: the MGMT_TOKEN secret is present but the " +
+        "Supabase Management API rejected it (expired, revoked, or issued for a different project). " +
+        "Mint a fresh personal access token at https://supabase.com/dashboard/account/tokens and " +
+        "replace the Edge Function secret named MGMT_TOKEN, then retry. " +
+        `Until then get_email_sender / connect_email / disconnect_email all fail. (API said: ${String(msg).slice(0, 200)})`);
+    }
     throw new Error(`Supabase Management API: ${String(msg).slice(0, 500)}`);
   }
   return data;
