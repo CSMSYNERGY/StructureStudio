@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260801e" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260801g" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -3154,6 +3154,172 @@ Anything not shown here will be removed.`)) return;
           <div style={{ marginTop: 12, fontSize: 13 }}>
             <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} ramp(s) skipped:</div>
             <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>{msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}</ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Windows (Options tab → its own section, below Ramps) ───
+// A straight catalog like doors, minus swing/operation (windows don't swing). category='window'
+// in fixture_items; height_in holds the window HEIGHT. Full-list-replace save via save_windows.
+function WindowsView({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [imgBusyIdx, setImgBusyIdx] = useState(null);
+  const [imgFileKey, setImgFileKey] = useState(0);
+  const [sort, setSort] = useState({ key: null, dir: 1 });
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    const wins = (data.fixtures || []).filter((f) => (f.category || "") === "window");
+    setRows(wins.map((d) => ({
+      id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
+      width_in: d.width_in != null ? fmtFtIn(d.width_in) : "",
+      height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
+      price: d.price != null ? String(d.price) : "",
+      image_url: d.image_url || null, active: d.active !== false,
+    })));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
+
+  const sortBy = (key, getVal) => setSort((s) => {
+    const dir = s.key === key ? -s.dir : 1;
+    setRows((rs) => rs.map((r) => r).sort((a, b) => { const av = getVal(a), bv = getVal(b); return (av < bv ? -1 : av > bv ? 1 : 0) * dir; }));
+    return { key, dir };
+  });
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const onRowImg = async (i, file) => {
+    if (!file) return;
+    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
+    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    setImgBusyIdx(i); setMsg(null);
+    try {
+      const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRow(i, { image_url: data.url });
+      setMsg({ ok: "Photo added — click “Save windows” to apply." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
+  };
+
+  const save = async () => {
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE window list with these ${rows.length} window(s)?
+
+Anything not shown here will be removed from their account.`)) return;
+    setBusy(true); setMsg(null);
+    try {
+      const windows = rows.map((r, i) => ({
+        id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
+        widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
+        imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_windows", windows }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: `Saved ${data.saved || 0} window(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
+  const cbx = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setRow(i, { [field]: e.target.checked })} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
+  const numInput = (i, field, ph, w) => <input type="number" min="0" step="any" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value })} style={{ ...S.input, width: w, minWidth: 0 }} />;
+  const sizeInput = (i, field, ph, w) => <input type="text" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: w, minWidth: 0, textAlign: "center" }} />;
+  const caret = (key) => sort.key === key ? (sort.dir > 0 ? " ▲" : " ▼") : "";
+  const sortableTh = (label, key, getVal) => <th style={{ ...S.th, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => sortBy(key, getVal)}>{label}{caret(key)}</th>;
+
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Windows</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          The windows your customers can drop onto a building. Give each one a <b>Style</b> name (e.g. Slider, Single-hung,
+          Picture), a <b>size</b> (width × height), and a <b>price</b>. Add a <b>photo</b> to show the window to the customer
+          (and, later, in the 3D view) — tick <b>On estimate</b> to also attach that photo to the window's line on the
+          customer's estimate. The <b>Label</b> is the short initials drawn on the window on the floor plan (e.g. SL, DH) —
+          leave it blank to auto-use the name. <b>Active</b> shows/hides it. Click a column heading to sort. Enter sizes in
+          feet/inches — <b>3'</b>, <b>2'6"</b>, or <b>36"</b> (no spaces). Rows that share the EXACT same <b>Style</b> name are
+          one style: on the plan the customer picks the style, then its size.
+        </p>
+        {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No windows yet — click <b>Add window</b> below to create your first one.</div>
+        ) : (
+          <div style={{ overflowX: "auto", marginBottom: 14 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={S.th}>Photo</th>
+                <th style={S.th}>On estimate</th>
+                {sortableTh("Style", "name", (r) => (r.name || "").toLowerCase())}
+                <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
+                {sortableTh("Size (W × H)", "size", (r) => parseFtIn(r.width_in) || 0)}
+                {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
+                {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
+                <th style={S.th}></th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.id || `new-${i}`}>
+                    <td style={S.td}>
+                      {r.image_url ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <img src={r.image_url} alt="" style={thumb} />
+                          <button onClick={() => setRow(i, { image_url: null })} disabled={busy || imgBusyIdx === i} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
+                        </div>
+                      ) : (
+                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyIdx === i ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>
+                          {imgBusyIdx === i ? "Uploading…" : "Add image"}
+                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyIdx === i} style={{ display: "none" }} onChange={(e) => onRowImg(i, e.target.files && e.target.files[0])} />
+                        </label>
+                      )}
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "show_image_on_estimate")}</td>
+                    <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Slider window" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
+                    <td style={S.td}><input type="text" value={r.plan_label} placeholder="SL" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
+                    <td style={S.td}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        {sizeInput(i, "width_in", '36"', 64)}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", '36"', 64)}
+                      </div>
+                    </td>
+                    <td style={S.td}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
+                    <td style={{ ...S.td, textAlign: "center" }}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add window</button>
+          <div style={{ flex: 1 }} />
+          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save windows"}</button>
+        </div>
+        {msg && msg.skipped && msg.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} window(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
+              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
           </div>
         )}
       </div>
@@ -6379,7 +6545,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
       {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
-      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
+      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}

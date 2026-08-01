@@ -267,6 +267,12 @@ const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: tr
 // own width/length + a priced snapshot (vs the simple built-in ramp which takes the door's width).
 const FIXTURE_RAMP_COLOR = "#0284C7";
 const RAMP_PICKER_CFG = { label: "Ramp", color: FIXTURE_RAMP_COLOR, icon: "⬛", doorSnap: true, width: 3, height: 2, shortLabel: "RAMP", isRampPicker: true };
+// Catalog windows. The "Window" tool is wall-placed (like the door picker). A placed catalog
+// window is a normal type:"window" item — so it reuses the built-in window's render (mullions,
+// wall bar), collision, and payload — but carries the chosen style's width + a priced snapshot
+// (built-in windows have no fixtureItemId; that's how the two are told apart in pricing).
+const FIXTURE_WINDOW_COLOR = "#0EA5E9";
+const WINDOW_PICKER_CFG = { label: "Window", color: FIXTURE_WINDOW_COLOR, icon: "🪟", wallOnly: true, width: 2, height: 0.5, shortLabel: "WIN", isWindowPicker: true };
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
   if (fx.swingIn) return "in";
@@ -656,13 +662,16 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // ramp) price from the tenant's single ramp price when set, else the legacy layout "ramp" rate.
   const rampSettings = C.rampSettings || null;
   const rampSimplePriced = !!(rampSettings && rampSettings.price != null);
-  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0;
+  let singleDoors = 0, doubleDoors = 0, builtinWindows = 0, lofts = 0, loftSqft = 0;
   const workbenchFt = [];
   const customRamps = [], simpleRamps = [];
+  const customWindows = [];
   for (const it of items) {
     if (it.type === "singleDoor") singleDoors++;
     else if (it.type === "doubleDoor") doubleDoors++;
-    else if (it.type === "window") windows++;
+    // Catalog windows (own snapshot price) price below like fixture doors; built-in windows
+    // (no fixtureItemId) keep pricing via the layout "window" rate.
+    else if (it.type === "window") { if (it.fixtureItemId && it.price != null) customWindows.push(it); else builtinWindows++; }
     else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
     else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
     else if (it.type === "ramp") { if (it.fixtureItemId && it.price != null) customRamps.push(it); else simpleRamps.push(it); }
@@ -672,7 +681,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const measures = {
     singleDoor: { count: singleDoors },
     doubleDoor: { count: doubleDoors },
-    window:     { count: windows },
+    window:     { count: builtinWindows },
     workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
     loft:       { count: lofts, optionSqft: loftSqft },
     // Legacy layout "ramp" row applies only to simple ramps that AREN'T priced by the new ramp
@@ -754,6 +763,24 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const g = fxGroups[gk];
     const total = Math.round(g.price * g.qty * 100) / 100;
     rows.push({ key: `fx:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
+    nonPctSubtotal += total;
+  }
+
+  // Catalog windows (Options → Windows): each carries its OWN snapshot price, grouped by style
+  // like doors. Built-in windows already priced above via the layout "window" rate.
+  const winGroups = {};
+  for (const it of customWindows) {
+    const price = it.price != null ? Number(it.price) : 0;
+    if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+    const name = it.windowName || "Window";
+    const gk = `${name}|${price}`;
+    if (!winGroups[gk]) winGroups[gk] = { label: name, price, qty: 0 };
+    winGroups[gk].qty++;
+  }
+  for (const gk in winGroups) {
+    const g = winGroups[gk];
+    const total = Math.round(g.price * g.qty * 100) / 100;
+    rows.push({ key: `win:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
     nonPctSubtotal += total;
   }
 
@@ -1057,6 +1084,63 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
   );
 }
 
+// Window placement picker. Like RampPicker (style → size, no swing/operation), but the placed
+// item goes on a wall. "Choose a window" / "Place window".
+function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
+  const styles = useMemo(() => {
+    const m = new Map();
+    windows.forEach((d) => {
+      const k = d.name || "Window";
+      if (!m.has(k)) m.set(k, { name: k, imageUrl: d.imageUrl || null, sizes: [] });
+      const g = m.get(k); g.sizes.push(d); if (!g.imageUrl && d.imageUrl) g.imageUrl = d.imageUrl;
+    });
+    return [...m.values()];
+  }, [windows]);
+  const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
+  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const money = (n) => "$" + Number(n).toLocaleString();
+  const chip = (key, on, label, onClick) => (
+    <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>{label}</div>
+  );
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a window</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>{style && style.sizes.length > 1 ? "Pick a size." : "Pick a window for this wall."}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {styles.map((st) => {
+            const on = style && style.name === st.name;
+            const one = st.sizes.length === 1 ? st.sizes[0] : null;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            return (
+              <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🪟</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{st.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{sub}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {style && style.sizes.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => sel && onPlace(sel)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -1070,15 +1154,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const customerFacing = !embedded;
   const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
   const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
+  const windowFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "window"), [C.fixtures]);
   // Custom ramp mode: show the ramp picker + hide the built-in ramp TOOL (placed built-in ramps
   // still render). Simple mode leaves the built-in ramp exactly as-is.
   const rampCustom = ((C.rampSettings && C.rampSettings.mode) === "custom") && rampFixtures.length > 0;
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
-    ...(rampCustom && C.layoutItems && C.layoutItems.ramp ? { ramp: { ...C.layoutItems.ramp, noPalette: true } } : {}) };
+    ...(rampCustom && C.layoutItems && C.layoutItems.ramp ? { ramp: { ...C.layoutItems.ramp, noPalette: true } } : {}),
+    // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
+    ...(windowFixtures.length ? { windowPicker: WINDOW_PICKER_CFG } : {}) };
   const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
+  const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
@@ -1791,6 +1879,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setActiveTool(null); setToast(null);
       return;
     }
+    // The "Window" tool: like the door picker but no swing/operation — remember the wall + point
+    // and open the window picker, which places the chosen catalog window (placePickedWindow).
+    if (cfg.isWindowPicker) {
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      setWindowPick({ wall: w, ptx: pt.x, pty: pt.y });
+      setActiveTool(null); setToast(null);
+      return;
+    }
     const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
     let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
     // Wall-only items always go on a wall; if the click missed the threshold,
@@ -1976,6 +2072,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setDoorPick(null);
     setToast(null);
   }, [doorPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
+
+  // Place the window style chosen in the picker at the remembered wall/point. A catalog window is
+  // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
+  // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
+  const placePickedWindow = useCallback((fx) => {
+    if (!windowPick || !fx) return;
+    const widthFt = (Number(fx.widthIn) || 24) / 12;
+    const iwPx = widthFt * scale, ihPx = 0.5 * scale;
+    const sn = snapToWall(windowPick.wall, windowPick.ptx, windowPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
+    const ni = {
+      id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5,
+      fixtureItemId: fx.id, windowName: fx.name || "Window",
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+      price: (fx.price != null ? fx.price : null),
+      widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+    };
+    if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
+      setToast("Something's already there — pick a different spot on the wall.");
+      setTimeout(() => setToast(null), 4000);
+      setWindowPick(null);
+      return;
+    }
+    setItems((p) => [...p, ni]);
+    setSelectedId(ni.id);
+    setWindowPick(null);
+    setToast(null);
+  }, [windowPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
 
   // Place the ramp style chosen in the picker on the remembered door. A custom ramp is a normal
   // type:"ramp" item (so all ramp machinery applies) but takes the style's OWN width + length
@@ -2598,6 +2721,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
         let label = cfg.shortLabel;
         if (item.type === "fixtureDoor") label = item.planLabel || cfg.shortLabel;
+        if (item.type === "window") label = item.planLabel || cfg.shortLabel;
         if (item.type === "roughOpening") {
           const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
           label = `RO-${idx + 1}`;
@@ -2919,6 +3043,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
             ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
             ...(item.type === "ramp" ? { name: item.rampName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
+            ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId } : {}),
           };
         }),
         // Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
@@ -2956,10 +3081,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             fixtureItemId: r.fixtureItemId || null,
           };
         }),
+        // Catalog window schedule: one row per placed catalog window (has fixtureItemId), with its
+        // snapshot price. Built-in windows aren't here — they're counted in itemSummary.windows.
+        windows: items.filter((i) => i.type === "window" && i.fixtureItemId).map((w) => {
+          const lbl = getDisplayLabel(w.wall, frontWall);
+          return {
+            name: w.windowName || "Window",
+            widthIn: w.widthIn != null ? Number(w.widthIn) : null,
+            heightIn: w.heightIn != null ? Number(w.heightIn) : null,
+            price: w.price != null ? Number(w.price) : null,
+            wall: lbl ? lbl.toLowerCase() : (w.wall || null),
+            fixtureItemId: w.fixtureItemId || null,
+          };
+        }),
         itemSummary: {
           singleDoors: items.filter((i) => i.type === "singleDoor").length,
           doubleDoors: items.filter((i) => i.type === "doubleDoor").length,
-          windows: items.filter((i) => i.type === "window").length,
+          // Built-in windows only (catalog windows are priced from windows[] by snapshot).
+          windows: items.filter((i) => i.type === "window" && !i.fixtureItemId).length,
           workbenches: items.filter((i) => i.type === "workbench").map((i) => {
             const lbl = getDisplayLabel(i.wall, frontWall);
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
@@ -3322,6 +3461,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {gateEl && createPortal(gateEl, document.body)}
       {doorPick && createPortal(<DoorPicker doors={doorFixtures} showPricing={!!C.showPricing} onCancel={() => setDoorPick(null)} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={rampFixtures} showPricing={!!C.showPricing} onCancel={() => setRampPick(null)} onPlace={placePickedRamp} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={windowFixtures} showPricing={!!C.showPricing} onCancel={() => setWindowPick(null)} onPlace={placePickedWindow} />, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -3878,6 +4018,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
                       if (item.type === "fixtureDoor") return item.planLabel || cfg.shortLabel;
+                      if (item.type === "window") return item.planLabel || cfg.shortLabel;
                       if (item.type !== "roughOpening") return cfg.shortLabel;
                       const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
                       return `RO-${idx + 1}`;

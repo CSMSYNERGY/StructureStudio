@@ -1147,6 +1147,55 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, saved, deleted, skipped });
   }
 
+  // save_windows — like save_ramps but category='window'; height_in holds the window HEIGHT.
+  // No swing/operation (windows don't swing). Scoped to category='window' so doors/ramps are
+  // never touched. Full-list replace (delete rows the editor dropped), matching save_doors.
+  if (action === "save_windows") {
+    if (!Array.isArray(payload.windows)) return json({ error: "windows[] required" }, 400);
+    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "window");
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    const keptIds = new Set<string>();
+    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
+    let saved = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.windows) {
+      const name = String(row?.name ?? "").trim();
+      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
+      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
+      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
+      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid height`); i++; continue; }
+      const price = numOrNull(row?.price);
+      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
+      const rec: Record<string, unknown> = {
+        client_id: clientId, category: "window", name,
+        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
+        show_image_on_estimate: row?.showImageOnEstimate !== false,
+        width_in: w, height_in: h, price,
+        swing_in: false, swing_out: false, swing_default: null,
+        op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
+        active: row?.active !== false,
+        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
+        updated_at: new Date().toISOString(),
+      };
+      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+      const rid = String(row?.id ?? "").trim();
+      const res = (rid && existingIds.has(rid))
+        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
+        : await admin.from("fixture_items").insert(rec);
+      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (toDelete.length) {
+      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
+      if (del.error) return json({ error: del.error.message }, 500);
+      deleted = toDelete.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
+  }
+
   // Ramp mode + simple-ramp config (Options → Ramps). Updates client_settings only.
   // mode 'simple'|'custom'; method 'each'|'per_ft'; price/photo optional (photo already
   // uploaded via upload_fixture_image and passed here as imageUrl). clientId is JWT-resolved.

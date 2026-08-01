@@ -28,7 +28,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -690,6 +690,37 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
   } else if (rampCount > 0) {
     pushItem("Ramp", "ramp", "", { count: rampCount });
+  }
+
+  // Catalog windows (Options → Windows): each carries its OWN snapshot price (like fixture doors),
+  // grouped by style+price into one line, photo attached from fixture_items when the owner opts in.
+  // Built-in windows are counted in summary.windows and priced via the layout "window" rate above.
+  if (Array.isArray(windows) && windows.length) {
+    const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
+    const winIds = [...new Set(windows.map((w: any) => w && w.fixtureItemId).filter(Boolean))];
+    const wImg = new Map<string, { url: string | null; show: boolean }>();
+    if (winIds.length) {
+      const wr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", winIds);
+      for (const r of wr.data ?? []) wImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+    }
+    const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+    for (const w of windows) {
+      const price = w && w.price != null ? Number(w.price) : 0;
+      if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+      const name = (String(w.name || "Window").trim()) || "Window";
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}`;
+      const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
+      g.qty++; wg.set(key, g);
+    }
+    for (const g of wg.values()) {
+      const im = g.fixtureItemId ? wImg.get(String(g.fixtureItemId)) : null;
+      targetItems.push(tagLine({
+        name: g.name, qty: g.qty, amount: g.price,
+        priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
+        currency: "USD", type: "one_time", description: g.desc || "",
+      }, { kind: "window" }));
+    }
   }
 
   // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
