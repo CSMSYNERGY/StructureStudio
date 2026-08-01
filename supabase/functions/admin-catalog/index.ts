@@ -773,12 +773,21 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       }
 
       // ── delete a tenant and ALL of its data (operator hard delete) ──────
-      // Removes the client's designs, catalog (styles/sizes/inclusions/layout
-      // items), settings, error logs, user mappings + their now-orphaned auth
-      // logins, and uploaded storage objects (floor-plans + branding), then the
-      // client_configs row itself. Requires the typed client id to match
+      // Removes the client's designs + version history + captured leads, catalog
+      // (styles/sizes/inclusions/layout items/colours/pricing), fixtures catalog,
+      // settings, error logs, feedback submissions (and their comments, by cascade),
+      // billing subscription + vaulted-card mirrors, QuickBooks item map, user
+      // mappings + their now-orphaned auth logins, and uploaded storage objects in
+      // all four buckets (floor-plans, branding, fixtures, feedback-attachments),
+      // then the client_configs row itself. Requires the typed client id to match
       // (confirmClientId) so a stray/mistaken call can't nuke a tenant.
       // Irreversible. GHL-side contacts/estimates are external and untouched.
+      // ⚠️ NOT removed: the financial ledgers (orders/payments/invoice_sends/
+      // billing_charge_attempts). Those are records of money that moved, so the
+      // response reports their counts as `retained` instead of silently keeping
+      // them — deciding to destroy them is a retention call, not a code change.
+      // Keep this list in step with the wipes below; drift here is what left a
+      // deleted tenant's PII in the database twice already.
       case "delete_client": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
@@ -807,7 +816,48 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         await wipe("building_styles");
         await wipe("client_layout_items");
         await wipe("client_settings");
+        // 2026-08-01: the same orphan-cascade hole as design_versions/captured_leads above, on the
+        // tables added since. Verified against information_schema rather than by memory — no FK
+        // chain reaches any of these from anything wiped here.
+        //
+        //   billing_subscriptions + billing_customers are the DANGEROUS pair, and not merely
+        //   untidy: entitlement is computed purely from surviving rows keyed on client_id, and
+        //   `hasCard` / the charge vault come from billing_customers.vault_id. Recreating a slug
+        //   (a re-onboard, or just reusing a test slug) therefore handed the new tenant the dead
+        //   one's 'active' subscription — full product, no payment — and made a subscribe call
+        //   charge the FORMER customer's stored card, on an invoice nobody could attribute.
+        //   Neither table is an accounting record; both are mirrors of gateway state, and the
+        //   gateway remains the source of truth.
+        await wipe("billing_subscriptions");
+        await wipe("billing_customers");
+        //   feedback_submissions holds submitter_name + submitter_email — the named people who
+        //   filed bugs from that portal. feedback_comments cascades from it (verified ON DELETE
+        //   CASCADE), and the attachments live under {client_id}/ in the bucket loop below.
+        await wipe("feedback_submissions");
+        //   fixture_items is the per-tenant door catalog; its photos are served PUBLICLY from the
+        //   `fixtures` bucket, now included below.
+        await wipe("fixture_items");
+        //   qbo_item_map points at QuickBooks item ids from the DELETED tenant's company. Only the
+        //   style-scoped rows cascade (via qbo_item_map_style_id_fkey); the tenant-default rows
+        //   (style_id IS NULL) survived, so a recreated slug that connects a DIFFERENT QuickBooks
+        //   company would resolve its first invoice against stale ids and bill whatever items
+        //   happen to share them — exactly the harm qbo-oauth-callback's realm-change wipe exists
+        //   to prevent.
+        await wipe("qbo_item_map");
         try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
+
+        // DELIBERATELY RETAINED, and reported rather than silently kept: the financial ledgers.
+        // orders (payments cascades from it), invoice_sends and billing_charge_attempts are
+        // records of money that actually moved. Destroying them is a data-retention decision with
+        // accounting consequences, not a bug fix, so it is NOT made here — but leaving them
+        // unmentioned is how this class of miss happened in the first place. The counts go back in
+        // the response so the operator can see exactly what outlived the tenant and escalate if a
+        // deletion request requires them gone too.
+        const retained: Record<string, number> = {};
+        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts"]) {
+          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+          if (count) retained[t] = count;
+        }
 
         // Capture the logins mapped to this client, unmap them, then delete any
         // that aren't also attached to another client.
@@ -822,13 +872,34 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }
         deleted["auth_logins"] = deletedUsers;
 
-        // Storage: remove everything under <clientId>/ in both buckets.
+        // Storage: remove everything under <clientId>/ in every bucket that can hold their files.
+        //
+        // `fixtures` and `feedback-attachments` were missing. fixtures is PUBLIC, so a deleted
+        // tenant's product/door photos stayed downloadable by anyone holding the old URL;
+        // feedback-attachments holds their users' bug-report screenshots. Both are keyed
+        // {client_id}/…, so the same loop covers them.
+        //
+        // Paginated: list() caps at 1000 per call, and the old single call meant a tenant with
+        // more than 1000 objects silently left the overflow behind — junior-barns alone already has
+        // 93 floor plans, and nothing warned that the sweep was partial.
         let files = 0;
-        for (const bucket of ["floor-plans", "branding"]) {
+        for (const bucket of ["floor-plans", "branding", "fixtures", "feedback-attachments"]) {
           try {
-            const { data: list } = await sb.storage.from(bucket).list(clientId, { limit: 1000 });
-            const paths = (list ?? []).map((o: any) => `${clientId}/${o.name}`);
-            if (paths.length) { const rm = await sb.storage.from(bucket).remove(paths); if (!rm.error) files += paths.length; }
+            // Always re-list from offset 0: each round DELETES what it listed, so the next page
+            // shifts down into the same window. The bound is a round counter, not an offset —
+            // if a remove() ever fails we must not re-list the same 1000 objects forever.
+            for (let round = 0; round < 20; round++) {
+              const { data: list, error: lsErr } = await sb.storage.from(bucket)
+                .list(clientId, { limit: 1000 });
+              if (lsErr) break;
+              const batch = list ?? [];
+              if (batch.length === 0) break;
+              const paths = batch.map((o: any) => `${clientId}/${o.name}`);
+              const rm = await sb.storage.from(bucket).remove(paths);
+              if (rm.error) break;                    // stop rather than spin on the same page
+              files += rm.data?.length ?? paths.length;
+              if (batch.length < 1000) break;         // that was the last page
+            }
           } catch (_) { /* storage cleanup is best-effort */ }
         }
         deleted["storage_files"] = files;
@@ -837,7 +908,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
         deleted["client_configs"] = cc.count ?? 0;
 
-        return json({ ok: true, clientId, deleted });
+        // `retained` is empty for a normal tenant and only appears when financial rows outlived
+        // the delete — see the note above. Surfacing it is the point: the dialog says "and ALL of
+        // its data", so anything that survives has to be visible rather than assumed.
+        return json({ ok: true, clientId, deleted, ...(Object.keys(retained).length ? { retained } : {}) });
       }
 
       default:
