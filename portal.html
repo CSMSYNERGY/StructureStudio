@@ -2787,11 +2787,15 @@ Anything not shown here will be removed from their account.`)) return;
                       </div>
                     </td>
                     <td style={S.td}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
-                        <label style={optLbl}>{opChk(i, "op_double")} Double</label>
-                        <label style={optLbl}>{opChk(i, "op_slideup")} Slide up</label>
+                      <div style={{ display: "flex", gap: 16 }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <label style={optLbl}>{opChk(i, "op_double")} Double</label>
+                          <label style={optLbl}>{opChk(i, "op_slideup")} Slide up</label>
+                        </div>
                       </div>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
