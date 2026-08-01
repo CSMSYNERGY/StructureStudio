@@ -742,6 +742,19 @@ function genShortCode() {
   return `SS-${s}`;
 }
 
+// Pick readable text for a tenant-accent background: dark slate on light accents
+// (mint, yellow), white on dark ones (navy, barn red). WCAG relative luminance,
+// hex-only — the codebase already assumes hex accents (see the `${accent}50` shadows).
+function textOnAccent(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || "").trim());
+  if (!m) return "#FFFFFF";
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const c = parseInt(m[1].slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? "#1E293B" : "#FFFFFF";
+}
+
 // Progressive US phone formatter: "8163003600" -> "(816) 300-3600".
 // Caps at 10 digits; partial inputs format as "(816", "(816) 30", etc.
 // Display only — strip back to digits before sending to GHL.
@@ -3769,20 +3782,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
               cursor: detailsLocked ? "default" : "pointer", userSelect: "none",
               ...(customerFacing ? {
-                background: detailsLocked ? "#F8FAFC" : `${accent}14`,
+                // Unlocked = a SOLID accent bar with the submit button's shadow — it is the
+                // page's "see your price" call to action and reads like one. Locked stays
+                // quiet: the contact form is the customer's current job, not this bar.
+                background: detailsLocked ? "#F8FAFC" : accent,
                 border: `1.5px solid ${detailsLocked ? "#E2E8F0" : accent}`,
-                borderRadius: 10, padding: "12px 16px",
+                borderRadius: 10, padding: "14px 18px",
+                boxShadow: detailsLocked ? "none" : `0 4px 14px ${accent}50`,
+                transition: "all 0.2s",
               } : {}),
             }}>
-            {/* Text is dark slate, NOT accent-colored: the accent is tenant-configured and
-                can be light (structure-studio's mint #75E6DA was unreadable as text on
-                white). The accent brands the bar through its border and tint instead —
-                the same reason the submit button puts white text ON the accent. */}
-            <span style={{ fontSize: customerFacing ? 13.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? "#1E293B" : "#64748B", letterSpacing: 0.2 }}>Details</span>
+            {/* Text color comes from textOnAccent(): the accent is tenant-configured, so a
+                fixed color fails someone — white vanished on structure-studio's mint,
+                dark slate would vanish on a navy. Luminance decides per tenant. */}
+            <span style={{ fontSize: customerFacing ? 14.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? textOnAccent(accent) : "#64748B", letterSpacing: 0.2 }}>Details</span>
             {detailsLocked
               ? <span style={{ fontSize: customerFacing ? 12.5 : 11.5, fontWeight: 600, color: customerFacing ? "#64748B" : "#94A3B8", textAlign: "right" }}>🔒 Enter all your contact information to see the quote details.</span>
               : customerFacing
-                ? <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
+                ? <span style={{ fontSize: 13, fontWeight: 800, color: textOnAccent(accent), textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
                 : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
           </div>
           {additionalOpen && !detailsLocked && (() => {
