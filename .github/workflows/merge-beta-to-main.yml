@@ -69,14 +69,53 @@ jobs:
             if git merge --no-ff -X theirs beta -m "chore: weekly auto-merge of beta into main (conflicts auto-resolved, beta won)"; then
               RESULT="conflicts-resolved"
             else
-              git checkout --theirs -- . 2>/dev/null || true
+              # -X theirs only auto-resolves CONTENT hunks. What reaches here is modify/delete,
+              # rename/rename or add/add — and for a modify/delete path there is no "theirs" stage
+              # at all, so the old `git checkout --theirs -- . 2>/dev/null || true` exited non-zero,
+              # had its error swallowed, and then `git add -A` staged whatever git had left behind:
+              # either beta's deletion silently REVERTED (while the report claimed beta won), or a
+              # file still containing literal <<<<<<< / ======= / >>>>>>> markers. That was then
+              # pushed to main unconditionally, and for portal.html or index.html a conflict marker
+              # is a hard parse failure — every tenant's portal and public designer down, with the
+              # workflow reporting success.
+              #
+              # Resolve each remaining path EXPLICITLY toward beta's intent instead of guessing:
+              # take beta's blob where beta has one, honour beta's deletion where it does not.
+              while IFS= read -r p; do
+                [ -n "$p" ] || continue
+                if git cat-file -e "beta:$p" 2>/dev/null; then
+                  git checkout beta -- "$p"
+                else
+                  git rm -q --ignore-unmatch -- "$p"
+                fi
+              done < <(git diff --name-only --diff-filter=U)
+
+              # FAIL CLOSED. Anything still unmerged, or any conflict marker left anywhere in the
+              # tracked tree, aborts the promotion. A week of beta sitting unpromoted is a known,
+              # visible, recoverable state; production serving a half-resolved merge is not.
+              STILL="$(git diff --name-only --diff-filter=U || true)"
+              if [ -n "$STILL" ]; then
+                echo "::error::Unresolved paths remain after force-resolve; refusing to promote:"
+                echo "$STILL"
+                exit 1
+              fi
               git add -A
+              if git grep -nI -e '^<<<<<<< ' -e '^=======$' -e '^>>>>>>> ' -- . ; then
+                echo "::error::Conflict markers present in the merged tree; refusing to promote."
+                exit 1
+              fi
               git commit -m "chore: weekly auto-merge of beta into main (conflicts force-resolved, beta won)"
               RESULT="conflicts-force-resolved"
             fi
           fi
 
-          git push origin main
+          # Belt and braces: the marker scan also runs for the clean and -X theirs paths, because
+          # a marker can reach main via a beta commit that was pushed with --no-verify.
+          if git grep -nI -e '^<<<<<<< ' -e '^>>>>>>> ' -- . ; then
+            echo "::error::Conflict markers present after merge; refusing to promote."
+            exit 1
+          fi
+
           MERGED_SHA="$(git rev-parse HEAD)"
 
           {
@@ -89,6 +128,28 @@ jobs:
             echo "$CONFLICTS"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
+
+      # The repo's only correctness gate. It lints every inline text/babel block plus the two
+      # component twins (JSX-aware no-undef and friends) and enforces the CDN version lock and the
+      # ?v= cache-buster lockstep — i.e. exactly the class of defect that put the Contacts tab on
+      # "Loading…" for every tenant (RANK -> STATUS_RANK, one missed usage). It ran ONLY in the
+      # developer-side .githooks/pre-push hook, which a runner does not have configured, so the
+      # commit that reaches every paying tenant was never linted, and any beta commit pushed with
+      # --no-verify reached production unchecked. Runs BEFORE the push, and a failure means no
+      # promotion.
+      - name: Set up Node for the preflight gate
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Preflight gate (blocks the promotion on failure)
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+          npm run preflight
+
+      - name: Push main
+        run: git push origin main
 
       - name: Report to monday.com
         if: ${{ always() && env.MONDAY_API_TOKEN != '' }}
