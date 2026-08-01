@@ -187,8 +187,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
   }
   if (!dynamicUserId) {
+    // This endpoint is reachable with the public anon key, so the caller-facing message must not
+    // carry the tenant's ghl_location_id — it lives in the service-role-only client_settings and
+    // every other surface deliberately masks it (portal-settings' maskId, admin-save-settings'
+    // slice). The full id goes to the server-side log instead, where triage can still see it.
+    console.warn(`submit-estimate: GHL location has no assignable user (client=${clientId} location=${locationId})`);
     return json({
-      error: `Can't create the estimate: the GHL location for "${clientId}" (${locationId}) has no user to assign it to. ` +
+      error: `Can't create the estimate: this business's CRM location has no user to assign it to. ` +
         `GHL requires a userId. Assign at least one user to that GHL sub-account (and ideally add a product for pricing), ` +
         `or set an explicit GHL user id in the client's settings, then resubmit.`,
     }, 400);
@@ -685,10 +690,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const rate = lp?.rate || 0;
       if (rate <= 0) continue;
       const method = lp?.method || "each";
-      // Credit the included quantity for this size (shared includedMap; defaults to 1 for rows
-      // imported before the quantity feature). pct_estimate_total can't be resolved before the
-      // subtotal exists, so it keeps a flat credit — qty clamped to 1 so % isn't scaled by sq ft.
-      const qty = method === "pct_estimate_total" ? 1 : (includedMap.get(key) ?? 1);
+      // Credit the included quantity for this size. pct_estimate_total can't be resolved before
+      // the subtotal exists, so it keeps a flat credit — qty clamped to 1 so % isn't scaled by
+      // sq ft.
+      // The default is 0, NOT 1, and must match the charge path's `includedMap.get(itemKey) || 0`
+      // above: includedMap only holds rows the size actually includes, and legacy rows are already
+      // floored at 1 when it is built. So a MISSING key means the size includes none of this item
+      // — there is nothing in the base price to give back, and defaulting to 1 invented a credit
+      // for it. That is reachable whenever the designer's includedItemKeys snapshot goes stale
+      // (an owner removes an inclusion while a shopper has the page open), which would under-price
+      // the emailed quote. A zero-qty credit is skipped below, exactly like a zero rate.
+      const qty = method === "pct_estimate_total" ? 1 : (includedMap.get(key) || 0);
+      if (qty <= 0) continue;
       // Per-unit value mirrors pushItem's amount for each method, rounded to cents so the
       // printed "qty × unit = credit" math is exact and the summed discount stays sub-cent-free.
       let unitValue = rate, unitLabel = "";
@@ -986,6 +999,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   let estimateNumber: string | null = null;
   const hadLineImages = targetItems.some((it) => Array.isArray(it.attachments) && it.attachments.length > 0);
   let lineImagesStripped = false;
+  // Set when a stale ghl_estimate_id forced a create instead of an update — see below. Kept out
+  // of the try so the response can report it honestly as a create rather than an update.
+  let recreatedFromStale = false;
   try {
     const url = existingEstimateId
       ? `https://services.leadconnectorhq.com/invoices/estimate/${existingEstimateId}`
@@ -1000,11 +1016,39 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const r2 = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(stripped) });
       if (r2.ok) { r = r2; lineImagesStripped = true; console.warn("Estimate retried without line-item images (GHL rejected attachments)."); }
     }
+    // A stored ghl_estimate_id goes stale in two real, observed ways: staff DELETE the estimate
+    // inside GHL while tidying the location (GHL then answers the PUT 404 "Unable to find estimate
+    // with the given estimateId"), or the customer ACCEPTS it and GHL refuses further edits with
+    // 400 "Estimate is already accepted". Until now either one returned a terminal 502, and since
+    // nothing cleared the column, EVERY later resubmit of that design failed identically — the
+    // design could never produce a quote again without hand-editing the row. Both shapes are in
+    // app_errors against a real tenant. So: fall back to creating a fresh estimate, and let the
+    // new id replace the stale one where it is persisted below.
+    if (!r.ok && existingEstimateId) {
+      const staleBody = await r.text();
+      const gone = r.status === 404;
+      const locked = r.status === 400 && /already\s*(been\s*)?accepted/i.test(staleBody);
+      if (gone || locked) {
+        console.warn(`submit-estimate: stale ghl_estimate_id (${r.status}) — creating a fresh estimate instead`);
+        // A fresh estimate number, NOT the old one: when the estimate was merely accepted it still
+        // exists in GHL, so reusing its number would collide. The deleted case does not care.
+        const recreatePayload = { ...finalPayload, invoiceNumber: uniqueSequence.toString() };
+        const rc = await fetch(`https://services.leadconnectorhq.com/invoices/estimate`,
+          { method: "POST", headers: ghlHeaders, body: JSON.stringify(recreatePayload) });
+        if (!rc.ok) {
+          return json({ error: `Failed to recreate estimate after a stale id: ${rc.status} ${await rc.text()}` }, 502);
+        }
+        r = rc;
+        recreatedFromStale = true;
+      } else {
+        return json({ error: `Failed to update estimate: ${r.status} ${staleBody}` }, 502);
+      }
+    }
     if (!r.ok) {
-      return json({ error: `Failed to ${existingEstimateId ? "update" : "create"} estimate: ${r.status} ${await r.text()}` }, 502);
+      return json({ error: `Failed to create estimate: ${r.status} ${await r.text()}` }, 502);
     }
     const d = await r.json();
-    estimateId = d?._id || d?.estimate?._id || existingEstimateId;
+    estimateId = d?._id || d?.estimate?._id || (recreatedFromStale ? null : existingEstimateId);
     estimateNumber = String(d?.estimateNumber ?? d?.estimate?.estimateNumber ?? d?.invoiceNumber ?? uniqueSequence);
   } catch (e) {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
@@ -1092,7 +1136,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     estimateId,
     estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || null,
     opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
-    updated: Boolean(existingEstimateId),
+    // Honest about what actually happened: a stale id that forced a create is NOT an update.
+    updated: Boolean(existingEstimateId) && !recreatedFromStale,
+    recreatedFromStale,
     betaMode: effectiveBetaMode,
     lineImagesStripped,
     sendDebug,

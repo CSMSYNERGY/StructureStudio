@@ -21,9 +21,20 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { qboFetch, QboBroken, QboNotConnected } from "./qboToken.ts";
+import { logEdgeError } from "./logError.ts";
 
-/** QBO query-language string literal: only the single quote needs escaping. */
-const q = (s: string) => s.replace(/'/g, "\\'");
+/** QBO query-language string literal. Backslash is the ESCAPE character in that dialect, so it
+ *  has to be doubled FIRST — escaping only the quote left a caller-supplied trailing backslash
+ *  free to consume our own escape, closing the literal early and letting the rest of the value
+ *  be read as query syntax. These values reach us through designs.contact, which the public
+ *  save_design RPC writes, so they are untrusted. Control characters are dropped outright:
+ *  nothing legitimate in an email or a person's name contains one, and a newline inside a
+ *  literal breaks the query. Note the ORDER is load-bearing — swapping the two replaces would
+ *  re-escape the backslashes this function just added. */
+const q = (s: string) =>
+  s.replace(/[\x00-\x1F\x7F]/g, "")
+   .replace(/\\/g, "\\\\")
+   .replace(/'/g, "\\'");
 
 type PushArgs = {
   shortCode: string;
@@ -59,12 +70,22 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     if (ledger?.qbo_invoice_id) return; // already in the books
     const attempt = (Number(ledger?.qbo_attempts) || 0) + 1;
 
+    // A swallowed failure here is a push that reports nothing anywhere: the caller already got
+    // its 200 (see the contract above), so this row is the only channel. Fall back to app_errors
+    // so the reason survives even when the row will not take it.
     const fail = async (msg: string) => {
-      await admin.from("invoice_sends").update({
+      const { error } = await admin.from("invoice_sends").update({
         qbo_error: msg.slice(0, 500),
         qbo_attempts: attempt,
         updated_at: new Date().toISOString(),
       }).eq("client_id", clientId).eq("short_code", shortCode);
+      if (error) {
+        await logEdgeError({
+          fn: "qbo-invoice-push", clientId, code: "qbo_fail_write_failed",
+          message: `QuickBooks push failed and the reason could not be recorded: ${msg.slice(0, 200)}`,
+          context: { shortCode, ledgerError: error.message, attempt },
+        });
+      }
     };
 
     // ── Resolve every line to a QuickBooks item BEFORE touching QuickBooks ────────
@@ -152,6 +173,28 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
 
     // ── Build the invoice ──────────────────────────────────────────────────────────
     const round2 = (n: number) => Math.round(n * 100) / 100;
+    // ── May we use line-level tax codes at all? ────────────────────────────────────
+    // Companies with Automated Sales Tax — the default for US companies created since 2018 —
+    // derive taxability from the item/customer tax category and do NOT accept a line-level
+    // TaxCodeRef; sending one is either ignored or rejected outright (error ~6000), and a
+    // rejection aborts the whole push, leaving no invoice at all. So this is opt-IN on positive
+    // evidence: only send the code when we have confirmed AST is off. If the probe fails for any
+    // reason we omit it, because omitting can at worst produce a total-mismatch note (recorded,
+    // invoice still created) while wrongly sending it can lose the invoice entirely.
+    let lineTaxCodesOk = false;
+    try {
+      const pref = await qboFetch(admin, clientId, realmId,
+        `/query?query=${encodeURIComponent("select * from Preferences")}&minorversion=75`);
+      const taxPrefs = pref?.QueryResponse?.Preferences?.[0]?.TaxPrefs;
+      // PartnerTaxEnabled true == Automated Sales Tax. Absent TaxPrefs tells us nothing, so it
+      // stays false — "unknown" must behave like AST, not like the permissive case.
+      lineTaxCodesOk = taxPrefs ? taxPrefs.PartnerTaxEnabled !== true : false;
+    } catch (e) {
+      // A dead/revoked connection must still surface as such rather than being swallowed here.
+      if (e instanceof QboBroken || e instanceof QboNotConnected) throw e;
+      lineTaxCodesOk = false;
+    }
+
     const lines: any[] = resolved.map(({ li, item }: any) => ({
       DetailType: "SalesItemLineDetail",
       Amount: round2((Number(li.qty) || 0) * (Number(li.amount) || 0)),
@@ -160,8 +203,9 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
         ItemRef: { value: item.id, ...(item.name ? { name: item.name } : {}) },
         Qty: Number(li.qty) || 1,
         UnitPrice: Number(li.amount) || 0,
-        // Delivery mirrors GHL's NT category: exempt THIS line, others stay taxable.
-        ...(li.nonTaxable ? { TaxCodeRef: { value: "NON" } } : {}),
+        // Delivery mirrors GHL's NT category: exempt THIS line, others stay taxable. Only sent
+        // when the company accepts line-level codes at all — see lineTaxCodesOk above.
+        ...(li.nonTaxable && lineTaxCodesOk ? { TaxCodeRef: { value: "NON" } } : {}),
       },
     }));
 
@@ -199,7 +243,11 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       if (diff > 0.01) note = `pushed_with_total_mismatch: QBO $${Number(created.TotalAmt).toFixed(2)} vs GHL $${ghlTotal.toFixed(2)}`;
     }
 
-    await admin.from("invoice_sends").update({
+    // This write is the ONLY record that the invoice exists, and the `ledger?.qbo_invoice_id`
+    // guard at the top depends on it: if it fails silently, a later retry sees a null id and can
+    // create a SECOND invoice in the tenant's books. So it is checked, retried once, and — if it
+    // still will not land — the id is forced somewhere durable rather than dropped on the floor.
+    const record = () => admin.from("invoice_sends").update({
       qbo_invoice_id: String(created.Id),
       qbo_doc_number: created.DocNumber ? String(created.DocNumber) : docNumber,
       qbo_pushed_at: new Date().toISOString(),
@@ -207,6 +255,18 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       qbo_attempts: attempt,
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId).eq("short_code", shortCode);
+
+    let wrote = await record();
+    if (wrote.error) wrote = await record();
+    if (wrote.error) {
+      // The invoice is REAL and we cannot say so on the row. Log it with the ids a human needs
+      // to reconcile by hand, and make the next automated attempt refuse rather than duplicate.
+      await logEdgeError({
+        fn: "qbo-invoice-push", clientId, code: "qbo_ledger_write_failed",
+        message: `QuickBooks invoice created but invoice_sends could not record it: ${wrote.error.message}`,
+        context: { shortCode, qboInvoiceId: String(created.Id), docNumber: created.DocNumber ?? docNumber, attempt },
+      });
+    }
   } catch (e) {
     // Includes QboBroken / QboNotConnected races (disconnected mid-push) and QBO 4xx/5xx.
     const msg = e instanceof QboBroken ? "QuickBooks needs to be reconnected"
