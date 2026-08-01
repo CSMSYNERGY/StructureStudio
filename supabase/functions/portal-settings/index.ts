@@ -1187,6 +1187,34 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // widening of the "status" action's hand-enumerated list — QuickBooks state changes on
   // a different cadence and the existing card stays untouched.
 
+  // Invoices that were EMAILED but never reached QuickBooks. Without this the whole QBO push was
+  // write-only: every outcome was recorded on invoice_sends (qbo_error / qbo_invoice_id) and a
+  // retry_qbo_push action existed, but nothing in the portal read either — so send_invoice returned
+  // {ok:true, sent:true}, the design showed "Invoiced", and a push that aborted (typically an
+  // unmapped line) left the books silently untouched with no way to notice or retry short of
+  // calling the edge function by hand. Owner/admin: absent from READ_ACTIONS on purpose, since it
+  // exposes bookkeeping state.
+  if (action === "qbo_pending") {
+    const { data, error } = await admin.from("invoice_sends")
+      .select("short_code, invoice_number, qbo_error, qbo_attempts, updated_at")
+      .eq("client_id", clientId).eq("status", "sent")
+      .is("qbo_invoice_id", null).not("qbo_error", "is", null)
+      .order("updated_at", { ascending: false }).limit(50);
+    if (error) return json({ error: error.message }, 500);
+    return json({
+      ok: true, clientId,
+      pending: (data ?? []).map((r: any) => ({
+        shortCode: r.short_code,
+        invoiceNumber: r.invoice_number ?? null,
+        // Already operator-facing text written by our own code (e.g. "unmapped: … — map these
+        // under Settings → QuickBooks, then Retry"), so it is safe to show as-is.
+        error: String(r.qbo_error ?? "").slice(0, 300),
+        attempts: Number(r.qbo_attempts) || 0,
+        at: r.updated_at ?? null,
+      })),
+    });
+  }
+
   if (action === "qbo_status") {
     const { data, error } = await admin
       .from("client_settings")

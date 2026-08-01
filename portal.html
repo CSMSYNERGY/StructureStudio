@@ -5282,6 +5282,9 @@ const QBO_REASONS = {
   realm_in_use: "That QuickBooks company is already connected to a different StructureStudio account.",
   unconfigured: "QuickBooks isn't fully set up on the server yet. Tell CSM Synergy.",
   save: "The connection couldn't be saved. Try again, and tell CSM Synergy if it persists.",
+  // Connected, but the previous company's item mappings couldn't be cleared — so they are stale
+  // against the new company and would bill lines against whatever shares those ids.
+  item_map_stale: "Connected, but the old company's item mappings couldn't be cleared. Re-check the mappings below before sending an invoice.",
 };
 
 function QuickBooksView({ clientId, viewingLabel = null }) {
@@ -5300,7 +5303,10 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (!p.has("connected")) return;
-    if (p.get("connected") === "1") setMsg({ ok: "QuickBooks connected. Check the company name below is the right business." });
+    // connected=1 WITH a reason means "it connected, but read this" (today: item_map_stale). Show
+    // the reason rather than the cheerful default, or the caveat is lost.
+    if (p.get("connected") === "1" && p.get("reason") && QBO_REASONS[p.get("reason")]) setMsg({ err: QBO_REASONS[p.get("reason")] });
+    else if (p.get("connected") === "1") setMsg({ ok: "QuickBooks connected. Check the company name below is the right business." });
     else setMsg({ err: QBO_REASONS[p.get("reason")] || "The connection didn't complete. Try again." });
     p.delete("connected"); p.delete("reason");
     const qs = p.toString();
@@ -5319,6 +5325,24 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  // Invoices that were emailed but never landed in QuickBooks. Before this the push was write-only:
+  // send_invoice returned ok, the design read "Invoiced", and an aborted push (usually an unmapped
+  // line) left the books untouched with nothing to notice it and no way to retry.
+  const [pending, setPending] = useState([]);
+  const [retrying, setRetrying] = useState(null);   // shortCode in flight
+  const loadPending = useCallback(async () => {
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "qbo_pending" } });
+    if (!e && d && !d.error) setPending(d.pending || []);
+  }, []);
+  const retryPush = async (shortCode) => {
+    setRetrying(shortCode); setMsg(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "retry_qbo_push", shortCode } });
+    setRetrying(null);
+    if (e || (d && d.error)) { setMsg({ err: (e && e.message) || d.error }); return; }
+    setMsg({ ok: d && d.alreadyPushed ? "That invoice is already in QuickBooks." : "Pushed to QuickBooks." });
+    loadPending();
+  };
+
   const loadQboItems = useCallback(async () => {
     setItemsErr(null); setQboItems(null);
     const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "list_qbo_items" } });
@@ -5328,6 +5352,8 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   // Fetch the QuickBooks item list once the connection is known-good.
   useEffect(() => { if (status && status.connected && !status.broken && qboItems === null) loadQboItems(); },
     [status, qboItems, loadQboItems]);
+  // Only meaningful once connected — an unconnected tenant has no pushes to have failed.
+  useEffect(() => { if (status && status.connected) loadPending(); }, [status, loadPending]);
 
   const connect = async () => {
     setBusy(true); setMsg(null);
@@ -5493,6 +5519,41 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
           </div>
         )}
       </div>
+
+      {/* ── Card 1b: invoices that never reached QuickBooks ──
+          Deliberately ABOVE the mapping grid: the usual cause is a missing mapping, so the fix is
+          the next thing on screen. Renders only when there is something wrong, so a healthy tenant
+          never sees an empty scary panel. Before this, send_invoice returned ok and the design read
+          "Invoiced" while the books were silently untouched — the outcome was written to
+          invoice_sends and a retry action existed, but nothing in the portal read either. */}
+      {connected && pending.length > 0 && (
+        <div style={{ ...S.card, border: "1px solid #F59E0B", background: "#FFFBEB" }}>
+          <div style={{ ...S.h2, color: "#92400E" }}>
+            {pending.length} invoice{pending.length === 1 ? "" : "s"} didn’t reach QuickBooks
+          </div>
+          <p style={{ fontSize: 12, color: "#92400E", marginBottom: 12 }}>
+            The customer was emailed and the design shows as invoiced, but the entry was not created
+            in QuickBooks. Fix the cause below (usually an unmapped line), then Retry.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {pending.map((p) => (
+              <div key={p.shortCode} style={{ display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap", background: "#FFF", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px" }}>
+                <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>
+                    {p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : p.shortCode}
+                    {p.attempts > 1 && <span style={{ fontWeight: 600, color: "#92400E" }}> · {p.attempts} attempts</span>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 3, wordBreak: "break-word" }}>{p.error}</div>
+                </div>
+                <button type="button" disabled={retrying === p.shortCode} onClick={() => retryPush(p.shortCode)}
+                  style={{ ...S.btn("#92400E", "#FFF"), padding: "6px 12px", fontSize: 12, flexShrink: 0 }}>
+                  {retrying === p.shortCode ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Card 2: Item mappings ── */}
       <div style={{ ...S.card, opacity: connected && !broken ? 1 : 0.55 }}>
