@@ -3916,6 +3916,101 @@ function ComingSoon({ icon, title, blurb, bullets }) {
   );
 }
 
+// ─── Orders (preview) ───
+// Coming-soon preview of the paused Orders & payments feature (the full, wired build lives
+// on the wip/orders branch). Renders the finished LIST view with EXAMPLE data behind a
+// pointer-events/user-select lock, under a clear "coming soon / work in progress" banner —
+// so tenants can see what's coming but cannot interact with it. Intentionally self-contained
+// and inert: no data reads, no sb calls, no live wiring. When the real feature ships, this
+// whole component is replaced by the live OrdersView.
+function OrdersPreview() {
+  const pill = (bg, fg, label) => (
+    <span style={{ background: bg, color: fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{label}</span>
+  );
+  const tile = (label, value, note, accent) => (
+    <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "13px 15px", borderLeft: `3px solid ${accent}` }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 23, fontWeight: 800, marginTop: 5, letterSpacing: -0.5, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>{note}</div>
+    </div>
+  );
+  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const td = { fontSize: 13, padding: "12px 10px", borderBottom: "1px solid #F1F5F9" };
+  const numTd = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
+  const chip = (label, on) => (
+    <span style={{ fontSize: 12, fontWeight: 700, borderRadius: 20, padding: "6px 13px", border: `1px solid ${on ? "#3D3672" : "#E2E8F0"}`, background: on ? "#3D3672" : "#F1F5F9", color: on ? "#FFF" : "#475569" }}>{label}</span>
+  );
+  const muted = <span style={{ color: "#94A3B8" }}>—</span>;
+  const SAMPLE = [
+    { no: "1024", name: "Dale Hostetler", phone: "(330) 555-0148", bldg: "Lofted Barn 12×24", date: "Jul 20, 2026", total: "$9,575.00", paid: "$2,000.00", bal: "$7,575.00", balColor: "#1E293B", st: pill("#DBEAFE", "#1E40AF", "Partially paid") },
+    { no: "1023", name: "Marcus Webb", phone: "(614) 555-0192", bldg: "Garage 24×32", date: "Jul 18, 2026", total: "$18,400.00", paid: muted, bal: "$18,400.00", balColor: "#1E293B", st: pill("#FFE4E6", "#9F1239", "Awaiting payment") },
+    { no: "1022", name: "Owen Brant", phone: "(937) 555-0164", bldg: "Cabin 14×40", date: "Jul 15, 2026", total: <span style={{ color: "#3D3672", fontWeight: 700 }}>Set total</span>, paid: muted, bal: "—", balColor: "#94A3B8", st: pill("#FEF3C7", "#92400E", "Needs invoice") },
+    { no: "1021", name: "Rita Colson", phone: "(419) 555-0173", bldg: "Utility Shed 10×16", date: "Jul 12, 2026", total: "$4,300.00", paid: "$4,300.00", bal: "$0.00", balColor: "#94A3B8", st: pill("#DCFCE7", "#166534", "Paid in full") },
+    { no: "1020", name: "Gary Aldenmeyer", phone: "(740) 555-0100", bldg: "Lean-To 8×12", date: "Jul 8, 2026", total: "$2,100.00", paid: "$2,600.00", bal: "$500.00 credit", balColor: "#9A3412", st: pill("#FFEDD5", "#9A3412", "Overpaid") },
+  ];
+
+  return (
+    <div style={{ maxWidth: 1040 }}>
+      {/* Coming-soon / work-in-progress banner — the one thing that IS meant to read clearly. */}
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 12, padding: "20px 24px", color: "#FFF", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9, flexWrap: "wrap" }}>
+          <span style={{ background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px" }}>Coming soon</span>
+          <span style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.32)", color: "#FFF", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px" }}>Work in progress</span>
+        </div>
+        <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>Orders &amp; payments</div>
+        <p style={{ fontSize: 13.5, color: "#D6E4F0", lineHeight: 1.55, margin: "9px 0 0", maxWidth: 660 }}>
+          A preview of what's coming: every accepted quote becomes a tracked order — from the sale, through the build, to delivery — with payments and balances in one place. The screen below shows <b style={{ color: "#FFF" }}>example data</b> and isn't switched on yet, so it can't be clicked or edited while we finish building it.
+        </p>
+      </div>
+
+      {/* Everything below is a locked, non-interactive preview. pointerEvents:none disables
+          every click/hover/field; userSelect:none stops text selection; aria-hidden keeps the
+          sample figures out of the accessibility tree (the banner above is the real message). */}
+      <div aria-hidden="true" style={{ pointerEvents: "none", userSelect: "none", cursor: "default", opacity: 0.96 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
+          {tile("Open balance", "$25,975.00", "across 2 open orders", "#F59E0B")}
+          {tile("Collected", "$12,300.00", "6 payments recorded", "#16A34A")}
+          {tile("Needs invoice", "1", "accepted, not billed yet", "#92400E")}
+          {tile("Awaiting payment", "1", "invoiced, nothing collected", "#9F1239")}
+        </div>
+
+        <div style={{ ...S.card }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
+            <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders (5)</div>
+            {chip("All", true)}{chip("Needs invoice")}{chip("Awaiting payment")}{chip("Partially paid")}{chip("Paid in full")}
+            <div style={{ marginLeft: "auto", minWidth: 220, flex: "0 1 280px", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#94A3B8", background: "#FFF" }}>Search orders — name, building, order #…</div>
+            <span style={{ border: "1px solid #E2E8F0", background: "#F1F5F9", color: "#334155", fontWeight: 700, fontSize: 12.5, borderRadius: 8, padding: "8px 12px" }}>↻ Refresh</span>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={th}>Order</th><th style={th}>Customer</th><th style={th}>Building</th><th style={th}>Ordered</th>
+                <th style={{ ...th, textAlign: "right" }}>Total</th><th style={{ ...th, textAlign: "right" }}>Paid</th>
+                <th style={{ ...th, textAlign: "right" }}>Balance</th><th style={th}>Status</th><th style={th}></th>
+              </tr></thead>
+              <tbody>
+                {SAMPLE.map((r) => (
+                  <tr key={r.no}>
+                    <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>#{r.no}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{r.name}<div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}>{r.phone}</div></td>
+                    <td style={td}>{r.bldg}</td>
+                    <td style={{ ...td, whiteSpace: "nowrap" }}>{r.date}</td>
+                    <td style={numTd}>{r.total}</td>
+                    <td style={numTd}>{r.paid}</td>
+                    <td style={{ ...numTd, fontWeight: 800, color: r.balColor }}>{r.bal}</td>
+                    <td style={td}>{r.st}</td>
+                    <td style={{ ...td, whiteSpace: "nowrap" }}><span style={{ color: "#3D3672", fontWeight: 700, fontSize: 12 }}>Open →</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── In-portal Designer tab ───
 // Mounts the shared designer module (structure-studio.component.js, loaded before this
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
@@ -6451,17 +6546,7 @@ function Dashboard({ session }) {
                 usersRefreshKey={usersRefreshKey} />
             )}
             {!gateLocked && activeTab === "orders" && (
-              <ComingSoon
-                title="Orders"
-                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>}
-                blurb="When a customer accepts a quote it becomes an order you can track in one place — from the sale, through the build, to the day it's delivered. No more chasing status across spreadsheets and texts."
-                bullets={[
-                  "Every accepted quote turns into a tracked order",
-                  "See each order's stage — sold, building, delivered",
-                  "Linked to the customer's contact and design",
-                  "Know what's due and what's paid at a glance",
-                ]}
-              />
+              <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).
                 Kept MOUNTED across tab switches, like the designer — the original reason
