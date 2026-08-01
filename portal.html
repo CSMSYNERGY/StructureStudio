@@ -2994,6 +2994,173 @@ const METAL_LIBRARY = [
   { name: "Gallery Blue", hex: "#0E3A52" }, { name: "Ocean Blue", hex: "#3D6678" },
 ];
 
+// ─── Ramps (Options tab → its own section, below Doors) ───
+// Two modes: SIMPLE (one ramp, auto-sized to the door it attaches to; priced each or per-foot)
+// or CUSTOM (a catalog of ramp styles, category='ramp' in fixture_items — like doors, no swing/
+// operation). Mode + simple config live in client_settings; custom styles in fixture_items.
+function RampsView({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [mode, setMode] = useState("simple");
+  const [simple, setSimple] = useState({ price: "", method: "each", image_url: null, show_image_on_estimate: true });
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [imgBusyIdx, setImgBusyIdx] = useState(null);
+  const [simpleImgBusy, setSimpleImgBusy] = useState(false);
+  const [imgFileKey, setImgFileKey] = useState(0);
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    const rs = data.rampSettings || {};
+    setMode(rs.mode === "custom" ? "custom" : "simple");
+    setSimple({ price: rs.price != null ? String(rs.price) : "", method: rs.method || "each", image_url: rs.imageUrl || null, show_image_on_estimate: rs.showImage !== false });
+    const ramps = (data.fixtures || []).filter((f) => (f.category || "") === "ramp");
+    setRows(ramps.map((d) => ({
+      id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
+      width_in: d.width_in != null ? fmtFtIn(d.width_in) : "", height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
+      price: d.price != null ? String(d.price) : "", image_url: d.image_url || null, active: d.active !== false,
+    })));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const uploadImg = async (file) => {
+    const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
+    if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    return data.url;
+  };
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
+  const onRowImg = async (i, file) => {
+    if (!file) return; if (!guardImg(file)) { setImgFileKey((k) => k + 1); return; }
+    setImgBusyIdx(i); setMsg(null);
+    try { const url = await uploadImg(file); setRow(i, { image_url: url }); setMsg({ ok: "Photo added — click Save ramps to apply." }); } catch (e) { setMsg({ err: e.message }); }
+    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
+  };
+  const onSimpleImg = async (file) => {
+    if (!file) return; if (!guardImg(file)) { setImgFileKey((k) => k + 1); return; }
+    setSimpleImgBusy(true); setMsg(null);
+    try { const url = await uploadImg(file); setSimple((s) => ({ ...s, image_url: url })); setMsg({ ok: "Photo added — click Save ramps to apply." }); } catch (e) { setMsg({ err: e.message }); }
+    setSimpleImgBusy(false); setImgFileKey((k) => k + 1);
+  };
+
+  const save = async () => {
+    if (viewingLabel && mode === "custom" && !window.confirm(`Replace ${viewingLabel}'s ENTIRE ramp list with these ${rows.length} ramp style(s)?
+
+Anything not shown here will be removed.`)) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r1 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramp_settings", mode, price: simple.price, method: simple.method, imageUrl: simple.image_url || null, showImage: simple.show_image_on_estimate !== false }) });
+      if (r1.error || (r1.data && r1.data.error)) throw new Error((r1.error && r1.error.message) || r1.data.error);
+      if (mode === "custom") {
+        const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i }));
+        const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramps", ramps }) });
+        if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
+        const skipped = (r2.data && r2.data.skipped) || [];
+        setMsg({ ok: `Saved ${(r2.data && r2.data.saved) || 0} ramp style(s)` + ((r2.data && r2.data.deleted) ? `, removed ${r2.data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+      } else { setMsg({ ok: "Simple ramp saved." }); }
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
+  const cbx = (checked, onChange) => <input type="checkbox" checked={!!checked} onChange={onChange} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
+  const sizeInput = (i, field, ph) => <input type="text" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: 64, minWidth: 0, textAlign: "center" }} />;
+  const imgCell = (url, busyOn, onPick, onRemove) => url
+    ? <div style={{ display: "flex", alignItems: "center", gap: 6 }}><img src={url} alt="" style={thumb} /><button onClick={onRemove} disabled={busy || busyOn} style={S.btn("#F1F5F9", "#334155")}>Remove</button></div>
+    : <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: busyOn ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>{busyOn ? "Uploading…" : "Add image"}<input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={busyOn} style={{ display: "none" }} onChange={onPick} /></label>;
+  const modeCard = (m, title, text) => (
+    <div onClick={() => setMode(m)} style={{ border: `2px solid ${mode === m ? ACCENT : "#E2E8F0"}`, background: mode === m ? "#F5F5FF" : "#FFF", borderRadius: 12, padding: "12px 14px", cursor: "pointer", display: "flex", gap: 10, alignItems: "flex-start" }}>
+      <div style={{ width: 16, height: 16, borderRadius: "50%", border: `2px solid ${mode === m ? ACCENT : "#CBD5E1"}`, flex: "0 0 auto", marginTop: 2, position: "relative" }}>{mode === m && <div style={{ position: "absolute", inset: 3, borderRadius: "50%", background: ACCENT }} />}</div>
+      <div><div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{title}</div><div style={{ fontSize: 12, color: "#64748B", marginTop: 2, lineHeight: 1.45 }}>{text}</div></div>
+    </div>
+  );
+
+  return (
+    <>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      <div style={S.card}>
+        <div style={S.h2}>Ramps</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Pick how ramps work. <b>Simple</b> is one ramp that's automatically the width of the door it attaches to — you just set
+          the price. <b>Custom ramp styles</b> is a catalog with its own sizes and prices, like doors. Enter sizes in feet/inches (8', 6'3", 36").
+        </p>
+        {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (<>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+            {modeCard("simple", "Simple ramp", "One ramp, automatically the width of the door it attaches to. No sizes to manage.")}
+            {modeCard("custom", "Custom ramp styles", "A catalog of ramp styles with their own sizes, prices, and photos.")}
+          </div>
+
+          {mode === "simple" ? (
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div><div style={{ fontSize: 12, color: "#64748B", fontWeight: 600, marginBottom: 5 }}>How it's priced</div>
+                <select value={simple.method} onChange={(e) => setSimple((s) => ({ ...s, method: e.target.value }))} style={{ ...S.input, width: 210 }}>
+                  <option value="each">each (per ramp)</option><option value="per_ft">per foot of door width</option>
+                </select></div>
+              <div><div style={{ fontSize: 12, color: "#64748B", fontWeight: 600, marginBottom: 5 }}>Price</div>
+                <div style={{ position: "relative", width: 130 }}><span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "#94A3B8" }}>$</span><input type="number" min="0" step="any" value={simple.price} onChange={(e) => setSimple((s) => ({ ...s, price: e.target.value }))} style={{ ...S.input, width: 130, paddingLeft: 22 }} /></div></div>
+              <div><div style={{ fontSize: 12, color: "#64748B", fontWeight: 600, marginBottom: 5 }}>Photo (optional)</div>{imgCell(simple.image_url, simpleImgBusy, (e) => onSimpleImg(e.target.files && e.target.files[0]), () => setSimple((s) => ({ ...s, image_url: null })))}</div>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer" }}>{cbx(simple.show_image_on_estimate, (e) => setSimple((s) => ({ ...s, show_image_on_estimate: e.target.checked })))} On estimate</label>
+            </div>
+          ) : (
+            <>
+              {rows.length === 0 ? <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No ramp styles yet — click <b>Add ramp style</b> below.</div> : (
+                <div style={{ overflowX: "auto", marginBottom: 14 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead><tr>
+                      <th style={S.th}>Photo</th><th style={S.th}>On estimate</th><th style={S.th}>Style</th>
+                      <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
+                      <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={S.th}></th>
+                    </tr></thead>
+                    <tbody>
+                      {rows.map((r, i) => (
+                        <tr key={r.id || `new-${i}`}>
+                          <td style={S.td}>{imgCell(r.image_url, imgBusyIdx === i, (e) => onRowImg(i, e.target.files && e.target.files[0]), () => setRow(i, { image_url: null }))}</td>
+                          <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.show_image_on_estimate, (e) => setRow(i, { show_image_on_estimate: e.target.checked }))}</td>
+                          <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Aluminum ramp" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
+                          <td style={S.td}><input type="text" value={r.plan_label} placeholder="RMP" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
+                          <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 5 }}>{sizeInput(i, "width_in", '48"')}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", "3'")}</div></td>
+                          <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span><input type="number" min="0" step="any" value={r.price} placeholder="0" onChange={(e) => setRow(i, { price: e.target.value })} style={{ ...S.input, width: 90, minWidth: 0 }} /></div></td>
+                          <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.active, (e) => setRow(i, { active: e.target.checked }))}</td>
+                          <td style={{ ...S.td, textAlign: "center" }}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add ramp style</button>
+              <span style={{ fontSize: 12, color: "#94A3B8", marginLeft: 10 }}>Same Style name across rows = one style (customer picks the size). Ramps don't swing.</span>
+            </>
+          )}
+
+          <div style={{ display: "flex", marginTop: 20 }}>
+            <div style={{ flex: 1 }} />
+            <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save ramps"}</button>
+          </div>
+        </>)}
+        {msg && msg.skipped && msg.skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 13 }}>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} ramp(s) skipped:</div>
+            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>{msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}</ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 function ColorsView({ viewingLabel = null }) {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
@@ -5687,7 +5854,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
       {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
-      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
+      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
