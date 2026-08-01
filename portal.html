@@ -2657,7 +2657,7 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", width_in: "", height_in: "", price: "", swing_in: true, swing_out: false, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
@@ -2710,6 +2710,15 @@ Anything not shown here will be removed from their account.`)) return;
   const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
   const optLbl = { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "#334155", cursor: "pointer" };
   const cbx = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setRow(i, { [field]: e.target.checked })} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
+  // Operation checkboxes: Double and Slide up are EXCLUSIVE — checking either clears the rest,
+  // and checking Right/Left clears Double/Slide up, so a door's operation stays coherent.
+  const setOp = (i, field, on) => {
+    if (!on) { setRow(i, { [field]: false }); return; }
+    if (field === "op_double") setRow(i, { op_double: true, op_right: false, op_left: false, op_slideup: false, op_default: null });
+    else if (field === "op_slideup") setRow(i, { op_slideup: true, op_right: false, op_left: false, op_double: false, op_default: null });
+    else setRow(i, { [field]: true, op_double: false, op_slideup: false });
+  };
+  const opChk = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setOp(i, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
   const star = (on, onClick) => <span onClick={onClick} title="Default the customer sees first" style={{ cursor: "pointer", color: on ? "#F59E0B" : "#CBD5E1", fontSize: 15 }}>★</span>;
   const numInput = (i, field, ph, w) => <input type="number" min="0" step="any" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value })} style={{ ...S.input, width: w, minWidth: 0 }} />;
   const caret = (key) => sort.key === key ? (sort.dir > 0 ? " ▲" : " ▼") : "";
@@ -2772,17 +2781,17 @@ Anything not shown here will be removed from their account.`)) return;
                       <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
                     </td>
                     <td style={S.td}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_in")} In</label>{r.swing_in && r.swing_out && star(r.swing_default === "in", () => setRow(i, { swing_default: "in" }))}</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_out")} Out</label>{r.swing_in && r.swing_out && star(r.swing_default === "out", () => setRow(i, { swing_default: "out" }))}</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_in")} In</label>{r.swing_in && r.swing_out && star(r.swing_default === "in", () => setRow(i, { swing_default: "in" }))}</span>
                       </div>
                     </td>
                     <td style={S.td}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
-                        <label style={optLbl}>{cbx(i, "op_double")} Double</label>
-                        <label style={optLbl}>{cbx(i, "op_slideup")} Slide up</label>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
+                        <label style={optLbl}>{opChk(i, "op_double")} Double</label>
+                        <label style={optLbl}>{opChk(i, "op_slideup")} Slide up</label>
                       </div>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
