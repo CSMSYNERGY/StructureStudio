@@ -137,10 +137,30 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // deliberately NOT intercepted — a wrong password legitimately 4xxes and must
 // reach the login form's own error handling.
 let ssOnSessionExpired = null; // installed by PortalApp on mount
+// Requests that carry this header opt OUT of the session-expiry intercept, because a 401 from
+// them means something else entirely. The operator step-up password is the case: since the Admin
+// console became native (c59da3c), a wrong password makes admin-catalog answer 401 (adminGate) with
+// the operator's JWT perfectly valid — indistinguishable here from a dead session. The intercept
+// then signed them out of the whole portal mid-dialog with "Your session expired", discarding every
+// keep-mounted form and any in-progress design, and destroying the in-dialog "2 more attempts locks
+// this IP for 6 hours" warning — so the natural response was to sign back in and blind-retry into
+// the shared 6-hour admin lockout that also disables the /admin break-glass console. The dialog's
+// own "Incorrect admin password" handling never got to render.
+const SS_NO_EXPIRY_HEADER = "x-ss-stepup";
+const ssHasStepUpHeader = (url, opts) => {
+  const read = (h) => {
+    if (!h) return false;
+    if (typeof h.get === "function") return Boolean(h.get(SS_NO_EXPIRY_HEADER));
+    return Object.keys(h).some((k) => k.toLowerCase() === SS_NO_EXPIRY_HEADER);
+  };
+  // supabase-js may hand us either (Request) or (url, init), so check both.
+  return read(opts && opts.headers) || read(url && url.headers);
+};
 const ssFetch = (url, opts) => fetch(url, opts).then((res) => {
   try {
     const u = String(url && url.url ? url.url : url);
-    if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1) && ssOnSessionExpired) ssOnSessionExpired();
+    if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1)
+        && !ssHasStepUpHeader(url, opts) && ssOnSessionExpired) ssOnSessionExpired();
   } catch (_e) { /* the guard must never break the request itself */ }
   return res;
 });
@@ -551,7 +571,13 @@ function StatusChips({ counts, value, onChange, extra = [] }) {
   const extras = extra.filter(([k]) => (counts[k] || 0) > 0);
   const items = extras.concat(present);
   // One bucket means the chips carry no information — don't spend a row on them.
-  if (items.length < 2) return null;
+  // UNLESS a filter is currently applied: the chip row is the only way to clear it. When the
+  // selected bucket empties after a reload (a delete, a sync promotion, a browsing lead becoming a
+  // design) the zero-count chip is dropped and only one bucket may remain — which used to hide the
+  // whole row INCLUDING "All" while the stale filter stayed active, leaving the table showing "No
+  // designs are Accepted yet." with no control to undo it. Refresh re-ran load() but not the
+  // filter, so recovery meant switching tabs or reloading the page, neither of which was suggested.
+  if (items.length < 2 && (value === "all" || !value)) return null;
   const total = items.reduce((n, [k]) => n + (counts[k] || 0), 0);
   const all = [["all", "All", null]].concat(items);
   return (
@@ -4103,6 +4129,10 @@ function BillingGate({ reason, isAdmin }) {
 async function adminApi(action, body, adminPassword) {
   const { data, error } = await sb.functions.invoke("admin-catalog", {
     body: { action, ...(adminPassword ? { adminPassword } : {}), ...(body || {}) },
+    // Only step-up calls opt out of the session-expiry intercept — those are the ones where a
+    // 401 means "wrong operator password", not "dead JWT" (see SS_NO_EXPIRY_HEADER). An adminApi
+    // call WITHOUT a password still 401s only on a real expiry, so it must keep the guard.
+    ...(adminPassword ? { headers: { [SS_NO_EXPIRY_HEADER]: "1" } } : {}),
   });
   if (error) {
     let msg = error.message || "request failed";
@@ -5541,7 +5571,15 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["billing", "Billing", "Your StructureStudio subscription"],
   ];
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
-  const sub = (onSub ? subProp : subState) || TABS[0][0];
+  // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
+  // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
+  // below is an equality match on a KNOWN slug, nothing rendered: the banner and sub-tab bar
+  // appeared, the caption claimed "Structures — Building styles, sizes and base prices", the body
+  // was empty and no tab was underlined. `active` already fell back, so only the label was right.
+  // Clamp the slug itself so the fallback is real, and so Dashboard's URL-normalise effect (which
+  // compares p.sub against this value) rewrites the bad slug out of the address bar too.
+  const rawSub = (onSub ? subProp : subState) || TABS[0][0];
+  const sub = TABS.some((t) => t[0] === rawSub) ? rawSub : TABS[0][0];
   const active = TABS.find((t) => t[0] === sub) || TABS[0];
   return (
     <div>
@@ -6052,8 +6090,16 @@ function Dashboard({ session }) {
         </div>
       </aside>
 
+      {/* ss-designer-active pins .ss-main to 100vh and makes .ss-body overflow:hidden — correct
+          when the flex:1 designer host is present, but the host only renders when
+          `designerOpened && !gateLocked`. A billing-locked tenant clicking Designer (the FIRST nav
+          item, so a freshly-gated tenant is very likely to click it first) got BillingGate inside
+          that 100vh overflow:hidden shell instead, with no scrollbar — so on a 1366x768 laptop the
+          plan cards and the Subscribe button were clipped below the fold and unreachable, on the
+          one screen whose entire purpose is "click here to pay". Gate the class on the same
+          condition as the host so the gate falls back to a normal scrolling body. */}
       <section className={"ss-main"
-        + (activeTab === "designer" ? " ss-designer-active" : "")
+        + (activeTab === "designer" && !gateLocked ? " ss-designer-active" : "")
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           {/* Title AND description, both on the gradient — this is the one header, so there
@@ -6116,8 +6162,15 @@ function Dashboard({ session }) {
                     </span>
                   )}
                 </span>
+                {/* Both banner CTAs target the Billing sub-tab EXPLICITLY. navigate("settings")
+                    leaves sub null, which SettingsShell defaults to its first tab — so "Choose your
+                    plan" and "Update payment" both landed on the Structures catalog/pricing-CSV
+                    editor with nothing about payment on screen. Unlike the hard-locked state (where
+                    BillingGate embeds the picker wherever they click), the transition and grace
+                    states rely entirely on these two buttons to reach payment, so a non-technical
+                    owner concludes the button is broken and may let the grace period lapse. */}
                 {isAdmin && (
-                  <button type="button" onClick={() => navigate("settings")}
+                  <button type="button" onClick={() => navigate("settings", "billing")}
                     style={{ ...S.btn("#1D4ED8", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Choose your plan</button>
                 )}
               </div>
@@ -6132,7 +6185,7 @@ function Dashboard({ session }) {
                   {graceDaysLeft !== null && ` Access continues for ${graceDaysLeft} more day${graceDaysLeft === 1 ? "" : "s"}.`}
                 </span>
                 {isAdmin && (
-                  <button type="button" onClick={() => navigate("settings")}
+                  <button type="button" onClick={() => navigate("settings", "billing")}
                     style={{ ...S.btn("#92400E", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Update payment</button>
                 )}
               </div>
