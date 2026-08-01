@@ -496,6 +496,24 @@ const STATUS_COLORS = {
 // (draft → sent → accepted → invoiced → delivered) rather than sorting alphabetically.
 const STATUS_RANK = { draft: -1, sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
 
+// Only let a design's image_url become a clickable href when it is an https URL on our own
+// origin or Supabase storage. image_url is stored VERBATIM by the anon-granted save_design
+// RPC, so a hostile caller can stash a javascript: or off-site phishing URL against any
+// tenant's design — and this link renders inside the owner's authenticated portal, behind a
+// "PDF" button they have every reason to trust. Returns null if unsafe, so the caller can
+// drop the link entirely rather than render a dead one.
+// This is the twin of ssSafeUrl in StructureStudio.jsx / structure-studio.component.js
+// (audit #F8). portal.html has no .jsx sibling, so it needs its own copy — keep the three
+// in step if the rule changes.
+const ssSafeUrl = (u) => {
+  try {
+    const url = new URL(u, window.location.origin);
+    if (url.protocol !== "https:") return null;
+    const h = url.hostname;
+    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+  } catch { return null; }
+};
+
 // The one place an unrecognised/absent status becomes "sent". This expression was written out
 // by hand in seven places (search, sort, badge, and three times inside the Leads grouping),
 // and LeadsTable additionally kept its own private copy of STATUS_RANK — so a filter deriving
@@ -750,7 +768,7 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
   );
 }
 
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, onOpenDesign = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
@@ -812,6 +830,40 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // Which design the delete dialog is aimed at (null = closed), plus the outcome banner.
   const [delTarget, setDelTarget] = useState(null);
   const [delMsg, setDelMsg] = useState(null);
+  // Which design's Send-invoice request is in flight (null = none). Keyed per short code
+  // so one slow send can't disable every other row's button.
+  const [invBusyKey, setInvBusyKey] = useState(null);
+  const [invMsg, setInvMsg] = useState(null);   // { ok } | { err }
+
+  // Sends the invoice for THIS design. Owner/admin only — the edge fn enforces it
+  // server-side too, and it is idempotent: a retry after a failed email re-sends the SAME
+  // invoice rather than creating a second one (migration 052).
+  //
+  // This lives on Designs, not Contacts, and the distinction is the whole point: a contact
+  // row groups every design that person ever submitted, so the old button invoiced
+  // `acceptedCodes[0]` — "their most recent accepted design" — a guess the operator could
+  // neither see nor correct, and one that resolved to a code the server then rejected with
+  // "Design not found." A design row IS the thing being invoiced, so the short code is
+  // unambiguous and always exists.
+  const sendInvoice = async (r) => {
+    const code = r.short_code;
+    const est = r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : code;
+    const who = (r.contact || {}).name || "this customer";
+    // Acting as another tenant: name them in the confirm, because this emails a real
+    // invoice to THEIR customer, from THEIR account.
+    const asOperator = Boolean(viewingLabel);
+    const label = asOperator ? `${viewingLabel}'s customer ${who}`.trim() : who;
+    const asNote = asOperator ? `\n\nYou are doing this AS ${viewingLabel}.` : "";
+    if (!window.confirm(`Email an invoice to ${label} for ${est}?\n\nThis creates the invoice in your CRM and sends it immediately.${asNote}`)) return;
+    setInvBusyKey(code); setInvMsg(null);
+    // confirmSend is required server-side in operator mode — the confirm above is
+    // client-only, and a mis-scoped script must not be able to email a stranger's customers.
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code, ...(asOperator ? { confirmSend: true } : {}) } });
+    setInvBusyKey(null);
+    if (err) { setInvMsg({ err: await fnError(err) }); return; }
+    setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${est} is now Invoiced.` });
+    load();
+  };
 
   // Chip filter first, then the free-text search over what survives.
   const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((r) => normStatus(r.status) === statusFilter);
@@ -849,6 +901,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
+      {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
@@ -905,7 +958,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           customer's design there would corrupt that activity. */}
                       <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                      {r.image_url && <a href={r.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                      {ssSafeUrl(r.image_url) && <a href={ssSafeUrl(r.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                      {/* Only on an ACCEPTED design — that is the one state where an invoice
+                          is the next step, and it is what the server gates on too. Keyed on
+                          this row's own short code, so what gets invoiced is the design the
+                          button sits on. */}
+                      {isAdmin && normStatus(r.status) === "accepted" && (
+                        <button type="button" onClick={() => sendInvoice(r)} disabled={invBusyKey === r.short_code}
+                          title="Create and email the invoice for this accepted estimate"
+                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === r.short_code ? 0.6 : 1 }}>
+                          {invBusyKey === r.short_code ? "Sending…" : "Send invoice"}
+                        </button>
+                      )}
                       {/* Owner/admin only — a team member must not be able to destroy a
                           customer record. The server re-checks regardless (delete_design is
                           absent from READ_ACTIONS, so the resolver requires owner/admin). */}
@@ -933,7 +997,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                           <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code, v.version)}
                             style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                          {v.image_url && <a href={v.image_url} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                          {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
                         </td>
                       </tr>
                     );
@@ -1017,7 +1081,7 @@ function buildContactTimeline(act) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null }) {
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
@@ -1067,10 +1131,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
       // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
       // wins the > comparison below — seeded at "sent", a draft-only contact could never
       // display as Draft (its -1 never beats 0).
-      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [], acceptedCodes: [] }; groups.set(key, g); }
+      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
       g.count += 1;
       g.codes.push(r.short_code);                     // newest-first (list order)
-      if (normStatus(r.status) === "accepted") g.acceptedCodes.push(r.short_code);
       // Accumulate design-level searchable text (building + estimate #) so a lead is
       // findable by those too — they aren't columns here but the requirement is all-fields.
       const gsel = r.selections || {};
@@ -1101,7 +1164,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
         count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
         latestCode: null, topStatus: "browsing",
         search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
-        codes: [], acceptedCodes: [],
+        codes: [],
       });
     });
     setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
@@ -1147,10 +1210,6 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
   const [activity, setActivity] = useState(null);     // contact_activity payload
   const [actBusy, setActBusy] = useState(false);
   const [actErr, setActErr] = useState(null);
-  // Which contact's Send-invoice request is in flight (null = none). Keyed per contact
-  // so one slow send can't disable every other row's button.
-  const [invBusyKey, setInvBusyKey] = useState(null);
-  const [invMsg, setInvMsg] = useState(null);         // { ok } | { err }
   // Guards against a stale contact_activity response landing under a different contact:
   // every request stamps this ref, and only the newest one is allowed to render.
   const actReqRef = useRef(0);
@@ -1167,28 +1226,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
     setActivity(data);
   };
 
-  // Sends the invoice for the contact's most recent ACCEPTED design (one click, one
-  // estimate). Owner/admin only — the edge fn enforces it server-side too, and it is
-  // idempotent: a retry after a failed email re-sends the SAME invoice (migration 052).
-  const sendInvoice = async (g) => {
-    const code = g.acceptedCodes[0];
-    if (!code) return;
-    const more = g.acceptedCodes.length > 1 ? `\n\nThis contact has ${g.acceptedCodes.length} accepted designs — this invoices the most recent one (${code}).` : "";
-    // Acting as another tenant: name them in the confirm, because this emails a real
-    // invoice to THEIR customer, from THEIR account.
-    const asOperator = Boolean(viewingLabel);
-    const who = asOperator ? `${viewingLabel}'s customer ${g.name || ""}`.trim() : (g.name || "this customer");
-    const asNote = asOperator ? `\n\nYou are doing this AS ${viewingLabel}.` : "";
-    if (!window.confirm(`Email an invoice to ${who} for their accepted estimate?\n\nThis creates the invoice in Synergy/GHL and sends it immediately.${asNote}${more}`)) return;
-    setInvBusyKey(g.key); setInvMsg(null);
-    // confirmSend is required server-side in operator mode — the confirm above is
-    // client-only, and a mis-scoped script must not be able to email a stranger's customers.
-    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code, ...(asOperator ? { confirmSend: true } : {}) } });
-    setInvBusyKey(null);
-    if (err) { setInvMsg({ err: await fnError(err) }); return; }
-    setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — status is now Invoiced.` });
-    load();
-  };
+  // NOTE: Send invoice deliberately does NOT live here. A contact groups every design that
+  // person ever submitted, so invoicing from this row meant picking `acceptedCodes[0]` on
+  // their behalf — an invisible guess when someone has two accepted designs. It is now a
+  // per-row action on the Designs tab, where the short code is unambiguous.
 
   return (
     <div style={S.card}>
@@ -1213,8 +1254,6 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
         <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter}
           extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
       )}
-      {invMsg && invMsg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{invMsg.ok}</div>}
-      {invMsg && invMsg.err && <div style={{ ...S.err, marginBottom: 10 }}>{invMsg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
@@ -1271,16 +1310,6 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
                           {detailsFor === g.key ? "Hide details" : "Details"}
                         </button>
                       )}
-                      {/* Gated on "has an accepted design", NOT on the contact's highest
-                          status — a repeat customer with one design already invoiced must
-                          still be able to invoice their other accepted design. */}
-                      {isAdmin && g.acceptedCodes.length > 0 && (
-                        <button type="button" onClick={() => sendInvoice(g)} disabled={invBusyKey === g.key}
-                          title={g.acceptedCodes.length > 1 ? `${g.acceptedCodes.length} accepted designs — invoices the most recent` : "Create and email the invoice for their accepted estimate"}
-                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === g.key ? 0.6 : 1 }}>
-                          {invBusyKey === g.key ? "Sending…" : (g.acceptedCodes.length > 1 ? `Send invoice (${g.acceptedCodes.length})` : "Send invoice")}
-                        </button>
-                      )}
                     </td>
                   </tr>
                   {detailsFor === g.key && (
@@ -1295,11 +1324,13 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, viewingLab
                               <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
                                 Activity — {g.name || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
                               </div>
-                              {/* An invoice that exists in Synergy/GHL but was never
-                                  emailed — otherwise this design just looks Invoiced. */}
+                              {/* An invoice that exists in the CRM but was never emailed —
+                                  otherwise this design just looks Invoiced. Send invoice now
+                                  lives on the Designs tab, so this points there rather than
+                                  at a button that is no longer on this screen. */}
                               {(activity.invoiceSends || []).filter((s) => s.status === "created").map((s) => (
                                 <div key={"pend" + s.short_code} style={{ background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>
-                                  ⚠ Invoice {s.invoice_number || ""} exists in Synergy/GHL for {s.short_code} but the email never went out. Click Send invoice again to retry — it will not create a second invoice.
+                                  ⚠ Invoice {s.invoice_number || ""} exists in your CRM for {s.short_code} but the email never went out. Open the <strong>Designs</strong> tab and click <strong>Send invoice</strong> on {s.short_code} to retry — it will not create a second invoice.
                                 </div>
                               ))}
                               {tl.length === 0 && <div style={{ fontSize: 13, color: "#64748B" }}>No recorded activity yet.</div>}
@@ -6077,12 +6108,13 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "designs" && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={canAdmin} onOpenDesign={openInDesigner} />
+                isAdmin={canAdmin}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "leads" && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (

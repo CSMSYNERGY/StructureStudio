@@ -798,9 +798,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       filesRemoved = rm.error ? 0 : (rm.data?.length ?? 0);
     }
 
-    // 3. Versions, then the design.
-    const { count: versionsDeleted } = await admin.from("design_versions")
+    // 3. Versions, then the design. The version delete failing is NOT ignorable: deleting the
+    //    designs row anyway would strand those version rows, and list_design_versions is
+    //    SECURITY DEFINER, granted to anon, and keyed on short_code ALONE — so a stranded row's
+    //    contact jsonb stays fetchable by a code that is already sitting in sent customer email,
+    //    with no designs row left to show anyone it happened. Stop before that becomes true; the
+    //    action is idempotent, so a retry finishes the job.
+    const { error: verDelErr, count: versionsDeleted } = await admin.from("design_versions")
       .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
+    if (verDelErr) return json({ error: verDelErr.message }, 500);
     const { error: delErr, count } = await admin.from("designs")
       .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
     if (delErr) return json({ error: delErr.message }, 500);
