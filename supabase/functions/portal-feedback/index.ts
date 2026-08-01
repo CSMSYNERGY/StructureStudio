@@ -400,16 +400,26 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
         }).eq("id", row.id);
         refreshed++;
       }
+      // Authoritative, not append-only — see the matching block in
+      // feedback-monday-webhook/index.ts (sync_all), which this mirrors. ignoreDuplicates:true
+      // meant an EDITED body never re-synced, and `continue` on an unmarked update meant removing
+      // the /client prefix to unpublish changed nothing, so the first stored version of a comment
+      // was immutable and un-retractable in the tenant's My Submissions. Marked → overwrite;
+      // unmarked → remove. Deleting on unmark preserves the safety property: internal chatter is
+      // still never STORED, this only removes rows.
       for (const u of it.updates ?? []) {
         const text: string = u.text_body ?? "";
-        if (!CLIENT_MARKER.test(text)) continue;          // internal chatter — never stored
+        if (!CLIENT_MARKER.test(text)) {
+          await admin.from("feedback_comments").delete().eq("monday_update_id", String(u.id));
+          continue;
+        }
         await admin.from("feedback_comments").upsert({
           submission_id: row.id,
           monday_update_id: String(u.id),
           author_name: u.creator?.name ?? "Structure Studio",
           body: text.replace(CLIENT_MARKER, "").trim(),
           created_at: u.created_at ?? new Date().toISOString(),
-        }, { onConflict: "monday_update_id", ignoreDuplicates: true });
+        }, { onConflict: "monday_update_id" });
       }
     }
     return json({ ok: true, refreshed });
