@@ -4511,13 +4511,18 @@ export default function StructureStudio({ config: configProp = null, clientId: c
         }
         // Fixtures catalog (Options → Doors; windows/ramps later) — best-effort: a failure
         // just means no catalog doors in the palette, it never blocks the designer.
-        let fixtures = [];
+        let fixtures = [], rampSettings = null;
         try {
           const fxRes = await sb.rpc("get_fixtures", { p_client_id: clientId });
-          if (!cancelled && Array.isArray(fxRes.data)) fixtures = fxRes.data;
+          const fx = fxRes && fxRes.data;
+          if (!cancelled && fx) {
+            // get_fixtures returns either the legacy array or { items, ramp }.
+            if (Array.isArray(fx)) fixtures = fx;
+            else { if (Array.isArray(fx.items)) fixtures = fx.items; if (fx.ramp) rampSettings = fx.ramp; }
+          }
         } catch (_e) { /* non-fatal */ }
         if (cancelled) return;
-        setState({ status: "ready", config: { ...cfg, clientId, fixtures } });
+        setState({ status: "ready", config: { ...cfg, clientId, fixtures, rampSettings } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);
