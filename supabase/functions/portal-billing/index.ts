@@ -107,15 +107,24 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (operator) audit(`operator_billing_${action}`).catch(() => {});
   const configured = Boolean(SECURITY_KEY && TOKENIZATION_KEY);
 
-  // All active plan rows — needed by every action (feature lookup for subs too).
+  // Plan rows. Two DIFFERENT questions are asked of this table and conflating them locked out
+  // paying customers:
+  //   * "what may this tenant BUY?"      → active rows only (`plans`, below)
+  //   * "what does this subscription MEAN?" → every row, active or not (`planById`)
+  // Entitlement resolves a subscription's feature through planById. When that map held only
+  // active rows, retiring a price point (active=false — exactly what the flag is for, and
+  // grandfathered price snapshots make old rows natural retirement candidates) made every
+  // subscription on it invisible: the tenant computed as locked/never_paid while the gateway
+  // kept charging their card, and the duplicate-purchase 409 stopped firing so they could be
+  // sold the same feature twice. A plan row is a historical fact; only its availability expires.
   const { data: planRows, error: plansErr } = await admin
     .from("billing_plans")
-    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order, price_visible")
-    .eq("active", true)
+    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order, price_visible, active")
     .order("sort_order", { ascending: false });
   if (plansErr) return json({ error: plansErr.message }, 500);
-  const plans = planRows ?? [];
-  const planById = new Map(plans.map((p) => [p.id, p]));
+  const allPlans = planRows ?? [];
+  const plans = allPlans.filter((p) => p.active);   // purchasable / gate-driving
+  const planById = new Map(allPlans.map((p) => [p.id, p]));   // interpretive, includes retired
 
   // All subscription rows for this tenant, newest first (cancelled kept for history).
   const { data: subRows, error: subsErr } = await admin
@@ -175,11 +184,66 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     return pct ? Math.round((list * (100 - pct)) / 100) : list;
   };
 
-  const graceEndOf = (s: any): number | null => {
+  // Returns a number, never null — both branches produce one. The annotation used to say
+  // `number | null`, which made the `ends > now` comparison below a type error and, worse,
+  // described the opposite of the intended policy: a null would have compared false and locked
+  // a past-due tenant instantly, which is exactly what the grace period exists to prevent.
+  const graceEndOf = (s: any): number => {
     const since = s?.past_due_since ? Date.parse(s.past_due_since) : NaN;
     // No timestamp (e.g. a row that predates this column) → grace from now, so a
     // missing value is generous rather than an instant lockout.
     return Number.isFinite(since) ? since + GRACE_DAYS * 86400000 : Date.now() + GRACE_DAYS * 86400000;
+  };
+
+  // How far the tenant has actually PAID through, for a cancelled subscription.
+  //
+  // Since 2026-07-29 each period is charged UP FRONT, so a cancellation must keep access to the
+  // period already bought. The stored current_period_end cannot be trusted for this on its own:
+  // only checkout ever writes it (the FIRST renewal date), and billing-webhook's periodEnd is
+  // dead data — NMI sends next_charge_date '1970-01-01' on every observed live event, which gets
+  // filtered to null. So after the gateway's first renewal the column still holds period 1's end,
+  // and a cancellation months later evaluated as "paid through a past date" → locked the same day,
+  // confiscating the period the tenant had just paid for and contradicting the cancel dialog.
+  //
+  // Roll the stored boundary forward by whole billing intervals instead. The anchor and the
+  // interval are both facts we hold; the roll STOPS at cancellation, because that is when the
+  // gateway stopped charging — so this credits every period that was paid and not one more.
+  //
+  // On the cadence, deliberately: the gateway has two, and checkout already encodes both — the
+  // discounted plan_amount path bills on a day-of-month capped at 28, while the plan_id path uses
+  // the gateway plan's own day_frequency (365 yearly, 30 monthly). This uses CALENDAR intervals
+  // for all of them rather than inferring the path per row, because 12 × 30 days = 360 < 365: a
+  // calendar boundary is never EARLIER than the gateway's, so the worst case is a tenant keeping
+  // a couple of days more than they strictly bought. That direction is the whole point — this
+  // value is a floor on access already paid for, not an instruction to charge anyone.
+  // Calendar arithmetic with END-OF-MONTH CLAMPING. A bare setUTCMonth(+1) overflows — Aug 31
+  // becomes Oct 1 and Jan 31 becomes Mar 3 — which would hand out a bonus period whose size
+  // depends on the anchor day. Clamping gives the conventional, predictable answer instead
+  // (Aug 31 → Sep 30, Jan 31 → Feb 28/29, Feb 29 → Feb 28 on a non-leap year).
+  const addInterval = (ms: number, interval: string): number => {
+    const d = new Date(ms);
+    const yearly = /^(year|annual)/.test(String(interval).toLowerCase());
+    const day = d.getUTCDate();
+    const target = new Date(Date.UTC(
+      d.getUTCFullYear() + (yearly ? 1 : 0),
+      d.getUTCMonth() + (yearly ? 0 : 1),
+      1, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds(),
+    ));
+    const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    target.setUTCDate(Math.min(day, lastDay));
+    return target.getTime();
+  };
+  const paidThroughOf = (s: any): number => {
+    const stored = s?.current_period_end ? Date.parse(s.current_period_end) : NaN;
+    if (!Number.isFinite(stored)) return NaN;          // legacy bill-in-arrears row: nothing prepaid
+    const interval = planById.get(s.plan_id)?.billing_interval ?? "month";
+    // The gateway charged periods until cancellation (or until now, if somehow not cancelled).
+    const chargedUntil = s?.canceled_at ? Date.parse(s.canceled_at) : Date.now();
+    if (!Number.isFinite(chargedUntil)) return stored;
+    let end = stored;
+    // Bounded: 1 extra iteration per elapsed interval, capped so a bad date cannot spin.
+    for (let i = 0; i < 240 && end <= chargedUntil; i++) end = addInterval(end, interval);
+    return end;
   };
   const now = Date.now();
   // Best state per feature: active beats in-grace beats everything else.
@@ -199,7 +263,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       // period". current_period_end is reliable on rows created since the same change; the
       // legacy rows without it (nothing was prepaid under the old bill-in-arrears flow)
       // fall through to the old lock-immediately behaviour, which for them is correct.
-      const paidThrough = s.current_period_end ? Date.parse(s.current_period_end) : NaN;
+      const paidThrough = paidThroughOf(s);
       if (Number.isFinite(paidThrough) && paidThrough > now) {
         st = { usable: true, state: "cancelled_paid", graceEnds: null };
       }
@@ -287,7 +351,9 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // charge_cents is what this tenant would actually be billed — equal to price_cents
     // for everyone without a discount. The UI shows the pair so a discounted customer
     // can see the list price struck through and what they save.
-    const publicPlans = plans.map(({ gateway_plan_id: _g, ...p }) => ({
+    // `active` is stripped alongside gateway_plan_id: this list is already filtered to active
+    // rows, so the flag would only be noise the browser could come to depend on.
+    const publicPlans = plans.map(({ gateway_plan_id: _g, active: _a, ...p }) => ({
       ...p,
       charge_cents: chargeCentsFor(p),
       discount_percent: discountForFeature(p.feature),
@@ -331,7 +397,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       }
     }
 
-    const chosen = planIds.map((id) => planById.get(id));
+    // Purchase resolves against the PURCHASABLE set, not the interpretive planById — that map
+    // deliberately contains retired rows so old subscriptions still mean something, and reading a
+    // plan id out of it here would let a caller buy a price point that was deliberately withdrawn.
+    const purchasableById = new Map(plans.map((p) => [p.id, p]));
+    const chosen = planIds.map((id) => purchasableById.get(id));
     if (chosen.some((p) => !p)) return json({ error: "Unknown plan in selection." }, 400);
     if (chosen.some((p) => p!.availability !== "available")) {
       return json({ error: "One of the selected features isn't available yet." }, 400);
