@@ -548,6 +548,16 @@ function computeSelectionRows(sel, paintColors, C, items) {
   if (sel && sel.size) {
     for (const k of declinedKeys) {
       if (includedNow[k] == null) continue;
+      // Catalog fixture inclusion (key = fixture id): credit its snapshot price × the included qty.
+      const fxDecl = (Array.isArray(C.fixtures) ? C.fixtures : []).find((f) => String(f.id) === k);
+      if (fxDecl) {
+        const q0 = Math.max(1, Number(includedNow[k]) || 1);
+        const credit0 = Math.round((fxDecl.price != null ? Number(fxDecl.price) : 0) * q0 * 100) / 100;
+        if (credit0 <= 0) continue;
+        declinedLines.push(`${fxDecl.name || "Item"} declined (−${fmtMoney2(credit0)})`);
+        declinedTotal += credit0;
+        continue;
+      }
       const rp = resolveLp(k); if (!rp || !(rp.rate > 0)) continue;
       const q = rp.method === "pct_estimate_total" ? 1 : Math.max(1, Number(includedNow[k]) || 1);
       let unitValue = rp.rate;
@@ -757,20 +767,27 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // Catalog fixture doors (Options → Doors): each carries its OWN snapshotted price, not a
   // per-key rate — so they price separately from the layout items above. Identical doors
   // (same name + price) collapse into one line with a qty. Feeds the % base like any add-on.
+  // Grouped by fixture id so a size-inclusion nets the first N free (incForRows[fixtureId] = the
+  // qty the base price covers). Fully-included shows "(included)"; extras beyond it are charged.
   const fxGroups = {};
   for (const it of items) {
     if (it.type !== "fixtureDoor") continue;
     const price = it.price != null ? Number(it.price) : 0;
-    if (!(price > 0)) continue;   // $0 / unpriced = included, no line
-    const name = it.doorName || "Door";
-    const gk = `${name}|${price}`;
-    if (!fxGroups[gk]) fxGroups[gk] = { label: name, price, qty: 0 };
-    fxGroups[gk].qty++;
+    const fid = it.fixtureItemId || `${it.doorName || "Door"}|${price}`;
+    if (!fxGroups[fid]) fxGroups[fid] = { label: it.doorName || "Door", price, qty: 0, fid: it.fixtureItemId || null };
+    fxGroups[fid].qty++;
   }
-  for (const gk in fxGroups) {
-    const g = fxGroups[gk];
-    const total = Math.round(g.price * g.qty * 100) / 100;
-    rows.push({ key: `fx:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
+  for (const fid in fxGroups) {
+    const g = fxGroups[fid];
+    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+    const chargeable = Math.max(0, g.qty - inc);
+    if (g.price > 0 && inc > 0 && chargeable <= 0) {
+      rows.push({ key: `fx:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      continue;
+    }
+    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    const total = Math.round(g.price * chargeable * 100) / 100;
+    rows.push({ key: `fx:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
     nonPctSubtotal += total;
   }
 
@@ -779,16 +796,21 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const winGroups = {};
   for (const it of customWindows) {
     const price = it.price != null ? Number(it.price) : 0;
-    if (!(price > 0)) continue;   // $0 / unpriced = included, no line
-    const name = it.windowName || "Window";
-    const gk = `${name}|${price}`;
-    if (!winGroups[gk]) winGroups[gk] = { label: name, price, qty: 0 };
-    winGroups[gk].qty++;
+    const fid = it.fixtureItemId || `${it.windowName || "Window"}|${price}`;
+    if (!winGroups[fid]) winGroups[fid] = { label: it.windowName || "Window", price, qty: 0, fid: it.fixtureItemId || null };
+    winGroups[fid].qty++;
   }
-  for (const gk in winGroups) {
-    const g = winGroups[gk];
-    const total = Math.round(g.price * g.qty * 100) / 100;
-    rows.push({ key: `win:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
+  for (const fid in winGroups) {
+    const g = winGroups[fid];
+    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+    const chargeable = Math.max(0, g.qty - inc);
+    if (g.price > 0 && inc > 0 && chargeable <= 0) {
+      rows.push({ key: `win:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      continue;
+    }
+    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    const total = Math.round(g.price * chargeable * 100) / 100;
+    rows.push({ key: `win:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
     nonPctSubtotal += total;
   }
 
@@ -798,16 +820,21 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const rampGroups = {};
   for (const it of customRamps) {
     const price = it.price != null ? Number(it.price) : 0;
-    if (!(price > 0)) continue;   // $0 / unpriced = included, no line
-    const name = it.rampName || "Ramp";
-    const gk = `${name}|${price}`;
-    if (!rampGroups[gk]) rampGroups[gk] = { label: name, price, qty: 0 };
-    rampGroups[gk].qty++;
+    const fid = it.fixtureItemId || `${it.rampName || "Ramp"}|${price}`;
+    if (!rampGroups[fid]) rampGroups[fid] = { label: it.rampName || "Ramp", price, qty: 0, fid: it.fixtureItemId || null };
+    rampGroups[fid].qty++;
   }
-  for (const gk in rampGroups) {
-    const g = rampGroups[gk];
-    const total = Math.round(g.price * g.qty * 100) / 100;
-    rows.push({ key: `ramp:${gk}`, label: g.label, qty: g.qty, unit: fmtMoney2(g.price) + " each", total, method: "each" });
+  for (const fid in rampGroups) {
+    const g = rampGroups[fid];
+    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+    const chargeable = Math.max(0, g.qty - inc);
+    if (g.price > 0 && inc > 0 && chargeable <= 0) {
+      rows.push({ key: `ramp:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      continue;
+    }
+    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    const total = Math.round(g.price * chargeable * 100) / 100;
+    rows.push({ key: `ramp:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
     nonPctSubtotal += total;
   }
   if (rampSimplePriced && simpleRamps.length) {
@@ -1166,12 +1193,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Custom ramp mode: show the ramp picker + hide the built-in ramp TOOL (placed built-in ramps
   // still render). Simple mode leaves the built-in ramp exactly as-is.
   const rampCustom = ((C.rampSettings && C.rampSettings.mode) === "custom") && rampFixtures.length > 0;
+  const [sel, setSel] = useState(() => {
+    const init = { style: "", size: "", roofType: "", roofColor: "" };
+    C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
+    return init;
+  });
+  // Catalog fixtures the current size INCLUDES → a placement tool keyed by the fixture id. Each
+  // renders in the "included — place or decline" row and, when armed, drops that EXACT fixture on
+  // the next wall click (doors/windows) or door (ramps). Empty until a style+size is chosen; the
+  // built-in door/window/ramp keep their own catalog pickers.
+  const includedFixtureTools = (() => {
+    const out = {};
+    if (!sel.style || !sel.size) return out;
+    const st = (C.buildingStyles || []).find((s) => s.value === sel.style);
+    if (!st) return out;
+    const pickInc = (map) => { if (!map || typeof map !== "object") return null; if (map[sel.size] != null) return map[sel.size]; const want = normSizeLabel(sel.size); for (const k in map) { if (normSizeLabel(k) === want) return map[k]; } return null; };
+    let qmap = pickInc(st.sizeInclusionQty);
+    if (!qmap || typeof qmap !== "object" || Array.isArray(qmap)) { const arr = pickInc(st.sizeInclusions); qmap = {}; if (Array.isArray(arr)) arr.forEach((k) => { qmap[k] = 1; }); }
+    const fixtures = Array.isArray(C.fixtures) ? C.fixtures : [];
+    for (const k in qmap) {
+      const fx = fixtures.find((f) => String(f.id) === k);
+      if (!fx) continue;   // built-in keys (loft etc.) are handled by their own ITEMS entry
+      const cat = fx.category || "door";
+      out[k] = {
+        label: fx.name || "Item",
+        color: cat === "window" ? FIXTURE_WINDOW_COLOR : cat === "ramp" ? FIXTURE_RAMP_COLOR : FIXTURE_DOOR_COLOR,
+        icon: cat === "window" ? "🪟" : cat === "ramp" ? "⬛" : "🚪",
+        shortLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "ITEM").toUpperCase().slice(0, 4),
+        wallOnly: cat !== "ramp", doorSnap: cat === "ramp",
+        width: (Number(fx.widthIn) || 36) / 12, height: 0.5,
+        includedFixture: { ...fx },   // placement marker: drop THIS specific fixture
+      };
+    }
+    return out;
+  })();
   const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     ...(rampCustom && C.layoutItems && C.layoutItems.ramp ? { ramp: { ...C.layoutItems.ramp, noPalette: true } } : {}),
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
-    ...(windowFixtures.length ? { windowPicker: WINDOW_PICKER_CFG } : {}) };
+    ...(windowFixtures.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
+    ...includedFixtureTools };
   const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
@@ -1188,12 +1251,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("admin") === "1";
   }, [embedded]);
-
-  const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "", roofType: "", roofColor: "" };
-    C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
-    return init;
-  });
 
   // Options the user currently sees. Options without scoping are always in the
   // list; scoped options join/leave as the user picks/changes building style.
@@ -1895,6 +1952,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setActiveTool(null); setToast(null);
       return;
     }
+    // An INCLUDED catalog door/window chip is armed → drop that EXACT fixture here (no picker).
+    // Included ramps are doorSnap and handled in the doorSnap branch below.
+    if (cfg.includedFixture && !cfg.doorSnap) {
+      const fx = cfg.includedFixture;
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : 36)) / 12;
+      const iwPx2 = widthFt * scale, ihPx2 = 0.5 * scale;
+      const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY);
+      let ni;
+      if (fx.category === "window") {
+        ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+      } else {
+        const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
+        const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
+        ni = { id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name || "Door",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation };
+      }
+      if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
+        setToast("Something's already there — pick a different spot on the wall."); setTimeout(() => setToast(null), 4000); return;
+      }
+      setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
+      return;
+    }
     const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
     let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
     // Wall-only items always go on a wall; if the click missed the threshold,
@@ -1962,6 +2045,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       // Custom ramp: open the picker for THIS door — placePickedRamp creates the ramp item.
       if (cfg.isRampPicker) { setRampPick({ door: closest }); setActiveTool(null); setToast(null); return; }
+      // An INCLUDED catalog ramp chip: attach that EXACT ramp to this door (like a custom ramp).
+      if (cfg.includedFixture) {
+        const fx = cfg.includedFixture;
+        const widthFt = (Number(fx.widthIn) || 36) / 12;
+        const rDepth = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;
+        const rDepthPx = rDepth * scale;
+        let rx, ry, rot;
+        if (closest.wall === "north") { rx = closest.x; ry = mgY - rDepthPx / 2; rot = 0; }
+        else if (closest.wall === "south") { rx = closest.x; ry = mgY + pH + rDepthPx / 2; rot = 0; }
+        else if (closest.wall === "west") { rx = mgX - rDepthPx / 2; ry = closest.y; rot = 90; }
+        else if (closest.wall === "east") { rx = mgX + pW + rDepthPx / 2; ry = closest.y; rot = 90; }
+        else return;
+        const ni = { id: idCounter++, type: "ramp", x: rx, y: ry, rotation: rot, wall: closest.wall, widthFt, heightFt: rDepth, snapDoorId: closest.id,
+          fixtureItemId: fx.id, rampName: fx.name || "Ramp", planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+        setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
+        return;
+      }
       const doorCfg = ITEMS[closest.type];
       const doorW = doorCfg ? doorCfg.width : 3;
       const rampDepth = RAMP_SPACE_FT; // visual ramp depth in feet
@@ -2917,7 +3018,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     // Every included item must be placed on the layout, or explicitly declined.
     const declinedKeys = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
-    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k));
+    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
     if (unplacedIncluded.length > 0) {
       const names = unplacedIncluded.map((k) => (ITEMS[k] && ITEMS[k].label) || k).join(", ");
       setSubmitError(`Please place all included items on your layout, or decline the ones you don't want: ${names}.`);
@@ -3669,8 +3770,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               // so any already-placed instances are cleared (cascading a door's snapped ramp, like
               // delSel) and the tool is deselected if active.
               setItems((its) => {
-                const removedIds = new Set(its.filter((it) => it.type === key).map((it) => it.id));
-                return its.filter((it) => it.type !== key && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
+                const removedIds = new Set(its.filter((it) => it.type === key || it.fixtureItemId === key).map((it) => it.id));
+                return its.filter((it) => !(it.type === key || it.fixtureItemId === key) && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
               });
               setActiveTool((t) => (t === key ? null : t));
               setSelectedId(null);

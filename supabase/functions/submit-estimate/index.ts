@@ -596,10 +596,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     for (const g of dg.values()) {
       // Fixtures-catalog doors (2026-07-30) — their own line kind: they are neither a
       // layout_item (no layout_item_pricing row) nor a custom option (catalog-priced).
+      // Net the size-included qty (building_size_inclusions keyed by the fixture id) — the first N
+      // are covered by the base price (shown as a $0 "(included)" line), extras are charged.
+      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      const chargeable = Math.max(0, g.qty - inc);
       const im = g.fixtureItemId ? fxImg.get(String(g.fixtureItemId)) : null;
+      const atts = (im && im.show && im.url) ? imgAttachments(im.url) : [];
+      const included = inc > 0 && chargeable <= 0;
       targetItems.push(tagLine({
-        name: g.name, qty: g.qty, amount: g.price,
-        priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
+        name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
+        priceId: "", productId: "", attachments: atts,
         currency: "USD", type: "one_time", description: g.desc || "",
       }, { kind: "door" }));
     }
@@ -658,9 +664,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         g.qty++; rg.set(key, g);
       }
       for (const g of rg.values()) {
+        const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+        const chargeable = Math.max(0, g.qty - inc);
+        const included = inc > 0 && chargeable <= 0;
         const im = g.fixtureItemId ? rImg.get(String(g.fixtureItemId)) : null;
         targetItems.push(tagLine({
-          name: g.name, qty: g.qty, amount: g.price,
+          name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
           priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
           currency: "USD", type: "one_time", description: g.desc || "",
         }, { kind: "ramp" }));
@@ -717,9 +726,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       g.qty++; wg.set(key, g);
     }
     for (const g of wg.values()) {
+      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      const chargeable = Math.max(0, g.qty - inc);
+      const included = inc > 0 && chargeable <= 0;
       const im = g.fixtureItemId ? wImg.get(String(g.fixtureItemId)) : null;
       targetItems.push(tagLine({
-        name: g.name, qty: g.qty, amount: g.price,
+        name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
         priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
         currency: "USD", type: "one_time", description: g.desc || "",
       }, { kind: "window" }));
@@ -781,10 +793,32 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) placedKeys.add("workbench");
     if (rampCount > 0) placedKeys.add("ramp");
     if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
+    // A placed catalog fixture (its id in doors/windows/ramps) is kept, not credited.
+    for (const d of (Array.isArray(doors) ? doors : [])) if (d?.fixtureItemId) placedKeys.add(String(d.fixtureItemId));
+    for (const w of (Array.isArray(windows) ? windows : [])) if (w?.fixtureItemId) placedKeys.add(String(w.fixtureItemId));
+    for (const r of (Array.isArray(ramps) ? ramps : [])) if (r?.fixtureItemId && r?.price != null) placedKeys.add(String(r.fixtureItemId));
+    // Declined catalog fixtures aren't in layout_item_pricing — credit the fixture's own price ×
+    // included qty. Look up prices for any declined fixture id (a UUID key, not a layout key).
+    const declFxPrice = new Map<string, number>();
+    const declFxIds = [...new Set(declinedItems.map((x: any) => String(x?.key ?? "").trim())
+      .filter((k: string) => k && !placedKeys.has(k) && !layoutRates.has(k)))];
+    if (declFxIds.length) {
+      const fr = await supabase.from("fixture_items").select("id, price").eq("client_id", clientId).in("id", declFxIds);
+      for (const r of fr.data ?? []) if (r.price != null) declFxPrice.set(String(r.id), Number(r.price));
+    }
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();
       if (!key) continue;
       if (placedKeys.has(key)) continue;   // placed = kept, not a decline → no credit
+      if (declFxPrice.has(key)) {
+        const q = includedMap.get(key) || 0;
+        if (q <= 0) continue;
+        const credit = Math.round(declFxPrice.get(key)! * q * 100) / 100;
+        if (credit <= 0) continue;
+        bakedCredit += credit;
+        creditNotes.push(`${d?.label || "Item"} declined (−$${credit.toFixed(2)})`);
+        continue;
+      }
       const lp = layoutRates.get(key);
       const rate = lp?.rate || 0;
       if (rate <= 0) continue;
