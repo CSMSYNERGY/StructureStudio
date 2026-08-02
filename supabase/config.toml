@@ -67,6 +67,12 @@ verify_jwt = true
 [functions.portal-feedback]
 verify_jwt = true
 
+[functions.portal-commissions]
+# JWT-authenticated: the function resolves the real user via auth.getUser() and maps them
+# through client_users to their tenant + role. The confidential commission_members table is
+# service-role only, so all rate/grant access is gated here.
+verify_jwt = true
+
 [functions.operator-portal]
 verify_jwt = true
 

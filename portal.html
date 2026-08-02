@@ -7001,7 +7001,184 @@ function CommissionStructure({ clientId }) {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false }) {
+// ─── Team & commission rates (owner + admin Settings sub-tab) ───
+// Tenant-facing team management. Everything routes through the portal-commissions edge fn
+// (service-role), which is the ONLY thing that can read/write the confidential
+// commission_members table. Admins can add/remove people but see rates as ••• and cannot
+// touch grants; only the owner sees rates and flips the two grants. clientId is resolved
+// server-side from the caller's JWT — the prop is display-only here.
+function CommissionTeam() {
+  const [data, setData] = useState(null);       // { members, canSeeRates, isOwner, role } | { members: [] }
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);         // { ok } | { err }
+  const [add, setAdd] = useState({ fullName: "", email: "", role: "user" });
+  const [edits, setEdits] = useState({});       // userId -> in-progress rate string
+  const [removing, setRemoving] = useState(null); // member awaiting unlink/deactivate choice
+  const [invite, setInvite] = useState(null);   // { email, link, emailSent } after an add
+
+  const call = async (body) => {
+    const { data: r, error } = await sb.functions.invoke("portal-commissions", { body });
+    if (error) { let m = error.message; try { const c = await error.context.json(); if (c && c.error) m = c.error; } catch (_x) {} throw new Error(m); }
+    if (r && r.error) throw new Error(r.error);
+    return r;
+  };
+  const load = useCallback(async () => {
+    setErr(null);
+    try { setData(await call({ action: "list" })); }
+    catch (e) { setErr(e.message); setData({ members: [] }); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const addUser = async () => {
+    if (!add.email.trim()) { setMsg({ err: "Enter an email address." }); return; }
+    setBusy(true); setMsg(null); setInvite(null);
+    try {
+      const r = await call({ action: "add_user", email: add.email.trim(), fullName: add.fullName.trim(), role: add.role });
+      if (r.alreadyOnTeam) setMsg({ ok: `${add.email.trim()} is already on your team.` });
+      else { setMsg({ ok: `Invited ${add.email.trim()}.` }); if (r.setupLink) setInvite({ email: add.email.trim(), link: r.setupLink, emailSent: r.emailSent }); }
+      setAdd({ fullName: "", email: "", role: "user" });
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  const commitRate = async (m) => {
+    const raw = edits[m.userId];
+    if (raw === undefined) return;                       // nothing typed
+    const norm = raw.trim();
+    const current = m.commissionPercent == null ? "" : String(m.commissionPercent);
+    setEdits((p) => { const n = { ...p }; delete n[m.userId]; return n; });
+    if (norm === current) return;                        // unchanged
+    setBusy(true); setMsg(null);
+    try { await call({ action: "set_rate", userId: m.userId, percent: norm === "" ? null : norm }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  const setGrant = async (m, field, value) => {
+    setBusy(true); setMsg(null);
+    try { await call({ action: "set_grants", userId: m.userId, [field]: value }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  const doRemove = async (m, mode) => {
+    setBusy(true); setMsg(null); setRemoving(null);
+    try { await call({ action: "remove_user", userId: m.userId, mode }); setMsg({ ok: `${m.fullName || m.email} ${mode === "deactivate" ? "removed — their login is deactivated" : "removed from your team"}.` }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const td = { fontSize: 13, padding: "10px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
+  const roleChip = (r) => { const c = { owner: ["#EDE9FE", "#5B21B6"], admin: ["#DBEAFE", "#1E40AF"], user: ["#F1F5F9", "#475569"] }[r] || ["#F1F5F9", "#475569"]; return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, textTransform: "capitalize" }}>{r}</span>; };
+  const sw = (on) => <span style={{ display: "inline-block", width: 34, height: 20, borderRadius: 20, background: on ? ACCENT : "#CBD5E1", position: "relative", verticalAlign: "middle", transition: "background .12s" }}><span style={{ position: "absolute", top: 2, [on ? "right" : "left"]: 2, width: 16, height: 16, borderRadius: "50%", background: "#FFF" }} /></span>;
+
+  if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading team…</div>;
+  const isOwner = !!data.isOwner;
+  const canSeeRates = !!data.canSeeRates;
+  const members = data.members || [];
+
+  return (
+    <div style={{ ...S.card, maxWidth: 860 }}>
+      {err && <div style={S.err}>{err}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      <div style={{ ...S.h2, marginBottom: 3 }}>Team &amp; commission rates</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, margin: "0 0 16px" }}>
+        {isOwner
+          ? "Add the people who work in your account and set each one's commission rate. Rates and other people's payouts are visible to you only — grant an admin access per person with the toggles."
+          : "Add teammates for your account. Commission rates are set by the owner and shown as ••• here."}
+      </p>
+
+      {/* Add a teammate */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          <span style={S.lbl}>Full name</span>
+          <input value={add.fullName} onChange={(e) => setAdd((p) => ({ ...p, fullName: e.target.value }))} placeholder="Jordan Blake" style={{ ...S.input, width: 150 }} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          <span style={S.lbl}>Email</span>
+          <input value={add.email} onChange={(e) => setAdd((p) => ({ ...p, email: e.target.value }))} placeholder="jordan@company.com" style={{ ...S.input, width: 200 }} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          <span style={S.lbl}>Role</span>
+          <select value={add.role} onChange={(e) => setAdd((p) => ({ ...p, role: e.target.value }))} style={{ ...S.input, width: 120 }}>
+            <option value="user">User</option>
+            {isOwner && <option value="admin">Admin</option>}
+            {isOwner && <option value="owner">Owner</option>}
+          </select>
+        </div>
+        <button onClick={addUser} disabled={busy} style={{ ...S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF") }}>Add &amp; send invite</button>
+      </div>
+
+      {invite && (
+        <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 9, padding: "11px 13px", marginBottom: 14, fontSize: 12.5, color: "#3730A3" }}>
+          <b>{invite.email}</b> {invite.emailSent ? "was emailed a setup link." : "was added."} Share this one-time set-password link if the email doesn't arrive:
+          <div style={{ marginTop: 6 }}><input readOnly value={invite.link} onFocus={(e) => e.target.select()} style={{ ...S.input, width: "100%", fontSize: 11.5, color: "#475569" }} /></div>
+        </div>
+      )}
+
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            <th style={th}>Name</th><th style={th}>Email</th><th style={th}>Role</th><th style={th}>Commission&nbsp;%</th>
+            {isOwner && <th style={th}>Sees all payouts</th>}
+            {isOwner && <th style={th}>Full access</th>}
+            <th style={th}></th>
+          </tr></thead>
+          <tbody>
+            {members.map((m) => (
+              <tr key={m.userId}>
+                <td style={{ ...td, fontWeight: 700 }}>{m.fullName || <span style={{ color: "#94A3B8" }}>—</span>}{m.isSelf && <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}> (you)</span>}</td>
+                <td style={td}>{m.email}</td>
+                <td style={td}>{roleChip(m.role)}</td>
+                <td style={td}>
+                  {m.rateHidden
+                    ? <span style={{ color: "#94A3B8", fontWeight: 800, letterSpacing: 2 }}>🔒 •••</span>
+                    : m.role === "owner"
+                      ? <span style={{ color: "#94A3B8" }}>—</span>
+                      : <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          <input
+                            value={edits[m.userId] !== undefined ? edits[m.userId] : (m.commissionPercent == null ? "" : String(m.commissionPercent))}
+                            onChange={(e) => setEdits((p) => ({ ...p, [m.userId]: e.target.value.replace(/[^0-9.]/g, "") }))}
+                            onBlur={() => commitRate(m)}
+                            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                            placeholder="—" disabled={busy}
+                            style={{ ...S.input, width: 64, textAlign: "right", padding: "6px 8px" }} />
+                          <span style={{ color: "#94A3B8" }}>%</span>
+                        </span>}
+                </td>
+                {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <span onClick={() => !busy && setGrant(m, "seesAllPayouts", !m.seesAllPayouts)} style={{ cursor: "pointer" }} title="Let this person see everyone's payouts">{sw(!!m.seesAllPayouts)}</span>}</td>}
+                {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <span onClick={() => !busy && setGrant(m, "fullAccess", !m.fullAccess)} style={{ cursor: "pointer" }} title="Let this person see and edit commission rates">{sw(!!m.fullAccess)}</span>}</td>}
+                <td style={{ ...td, whiteSpace: "nowrap", textAlign: "right" }}>
+                  {m.isSelf || m.role === "owner" ? null : removing && removing.userId === m.userId ? (
+                    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                      <button onClick={() => doRemove(m, "unlink")} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 9px", fontSize: 11 }}>Remove from team</button>
+                      <button onClick={() => doRemove(m, "deactivate")} disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA", padding: "5px 9px", fontSize: 11 }}>Deactivate login</button>
+                      <button onClick={() => setRemoving(null)} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>Cancel</button>
+                    </span>
+                  ) : (
+                    <button onClick={() => setRemoving(m)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>Remove</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {members.length === 0 && <tr><td colSpan={isOwner ? 7 : 5} style={{ ...td, color: "#64748B" }}>No teammates yet — add someone above.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {isOwner && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 9, padding: "10px 12px", marginTop: 14, fontSize: 11.5, color: "#9A3412", lineHeight: 1.5 }}>
+          <span>🔒</span>
+          <div>Commission rates and everyone's payouts are visible to you only. An admin who isn't granted <b>Full access</b> sees rates as ••• and only their own payout. Nothing about pay is visible unless you turn it on.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -7012,6 +7189,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
+    ...(isAdmin ? [["team", "Team", "People, roles, and commission rates"]] : []),
     ["billing", "Billing", "Your StructureStudio subscription"],
   ];
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
@@ -7062,6 +7240,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "connection" && <SettingsView section="connection" />}
       {sub === "quickbooks" && <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
+      {sub === "team" && <CommissionTeam />}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );
@@ -7694,6 +7873,7 @@ function Dashboard({ session }) {
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 isOwner={!viewing && tenant.role === "owner"}
+                isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {!gateLocked && activeTab === "on-demand-pricing" && (
