@@ -7853,10 +7853,11 @@ function Dashboard({ session }) {
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
           {navItem("inventory", "Inventory")}
+          {soonItem("orders", "Orders")}
+          {soonItem("commissions", "Commissions")}
           {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
               NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
           {canAdmin && navItem("quickbooks", "QuickBooks")}
-          {soonItem("orders", "Orders")}
         </nav>
 
         <div className="ss-navlabel">Coming Soon</div>
@@ -7865,7 +7866,6 @@ function Dashboard({ session }) {
           {soonItem("repairs", "Repairs")}
           {soonItem("view-3d", "3D Design")}
           {soonItem("rent-to-own-contracts", "Rent to Own")}
-          {soonItem("commissions", "Commissions")}
           {soonItem("reports", "Reports")}
           {soonItem("build-schedule", "Build Schedule")}
           {soonItem("delivery-schedule", "Delivery Schedule")}
