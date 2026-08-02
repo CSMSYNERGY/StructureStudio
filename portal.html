@@ -7818,12 +7818,13 @@ function Dashboard({ session }) {
 
   // Real <button>s (not href-less anchors) so the nav stays keyboard- and
   // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
-  const navItem = (id, label) => (
+  const navItem = (id, label, badge) => (
     <button type="button" className={activeTab === id ? "active" : ""}
-      title={gateLocked ? `${label} — activate your account to use this` : label}
+      title={gateLocked ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
       onClick={() => navigate(id)}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
+      {badge && <span className="soon">{badge}</span>}
       {gateLocked && (
         <svg className="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-label="locked"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
       )}
@@ -7858,7 +7859,7 @@ function Dashboard({ session }) {
           {soonItem("commissions", "Commissions")}
           {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
               NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
-          {canAdmin && navItem("quickbooks", "QuickBooks")}
+          {canAdmin && navItem("quickbooks", "QuickBooks", "In Dev")}
         </nav>
 
         <div className="ss-navlabel">Coming Soon</div>
