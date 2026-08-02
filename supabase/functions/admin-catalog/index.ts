@@ -14,7 +14,12 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  // x-ss-stepup: sent by portal.html's adminApi on password-carrying step-up calls
+  // (delete_client) so its 401s bypass the global session-expired logout. A custom
+  // request header MUST be in this allow-list or the browser kills the call at CORS
+  // preflight — for right AND wrong passwords alike, which is exactly how the 00a819b
+  // step-up fix shipped broken: the header was added client-side only.
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-ss-stepup",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 function json(body: unknown, status = 200) {
