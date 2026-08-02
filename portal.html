@@ -29,7 +29,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-nav a:hover svg,.ss-nav button:hover svg{stroke:#475569}
 .ss-nav a.active,.ss-nav button.active{background:#DBEAFF;color:#3D3672;font-weight:700}
 .ss-nav a.active svg,.ss-nav button.active svg{stroke:#3D3672}
-.ss-nav .soon{margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#0F4C46;background:#75E6DA;border-radius:6px;padding:2px 6px;flex-shrink:0}
+/* Label fills the row and truncates so the status pill always pins to the same far-right
+   edge — long labels (Delivery Schedule, Self Serve Displays) would otherwise shove their
+   pill out of the column. Full text stays available via each button's title tooltip. */
+.ss-nav .lbl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ss-nav .soon{margin-left:auto;white-space:nowrap;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#0F4C46;background:#75E6DA;border-radius:6px;padding:2px 6px;flex-shrink:0}
 .ss-nav .lock{width:13px;height:13px;margin-left:auto;flex-shrink:0;opacity:.6;stroke:#94A3B8}
 .ss-nav .soon + .lock{margin-left:6px}
 .ss-nav .active .soon{background:#3D3672;color:#75E6DA}
