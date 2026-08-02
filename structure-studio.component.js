@@ -1253,6 +1253,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
+  // A PLACED item is "archived" (option retired) if: a catalog fixture whose fixture is no longer
+  // in the active list (get_fixtures drops archived), or a built-in whose layoutItems cfg is flagged
+  // archived (get_config keeps it, noPalette+archived). Archived items still render on the design;
+  // the rep is nudged to Swap them for a current option. Never blocks rendering.
+  const isArchivedItem = (it) => {
+    if (!it) return false;
+    if (it.fixtureItemId) {
+      const pool = it.type === "window" ? windowFixtures : it.type === "ramp" ? rampFixtures : doorFixtures;
+      return !pool.some((f) => String(f.id) === String(it.fixtureItemId));
+    }
+    const c = ITEMS[it.type];
+    return !!(c && c.archived);
+  };
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
@@ -4025,22 +4038,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </>);
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           {selectedId && (() => {
-            // Swap: change a placed catalog door/window/ramp to a DIFFERENT one, in place. Only a
-            // deliberate click — dragging/nudging never opens it. Hidden if there's nothing to swap to.
+            // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
+            // in place. Deliberate click only — dragging/nudging never opens it. Essential for
+            // replacing an ARCHIVED item; hidden if there's nothing to swap to.
             const si = items.find((i) => i.id === selectedId);
             if (!si) return null;
-            const isDoor = si.type === "fixtureDoor";
-            const isWin = si.type === "window" && si.fixtureItemId;
-            const isRamp = si.type === "ramp" && si.fixtureItemId;
-            const pool = isDoor ? doorFixtures : isWin ? windowFixtures : isRamp ? rampFixtures : null;
+            const isDoor = si.type === "fixtureDoor" || si.type === "singleDoor" || si.type === "doubleDoor";
+            const isWin = si.type === "window";
+            const isRamp = si.type === "ramp";
+            if (!(isDoor || isWin || isRamp)) return null;
+            const pool = isDoor ? doorFixtures : isWin ? windowFixtures : rampFixtures;
             if (!pool || pool.length === 0) return null;
+            const archived = isArchivedItem(si);
             const openSwap = () => {
               setSwapId(si.id); setActiveTool(null); setToast(null);
               if (isDoor) setDoorPick({ swap: true }); else if (isWin) setWindowPick({ swap: true }); else setRampPick({ swap: true });
             };
-            return <button onClick={openSwap} style={{ ...S.btn("#ECFEFF", "#0891B2"), border: "1px solid #A5F0FC" }}>⇄ Swap</button>;
+            return <>
+              {archived && <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309" }}>⚠ Archived — swap it →</span>}
+              <button onClick={openSwap} style={{ ...S.btn(archived ? "#FEF3C7" : "#ECFEFF", archived ? "#B45309" : "#0891B2"), border: `1px solid ${archived ? "#FCD34D" : "#A5F0FC"}` }}>⇄ Swap</button>
+            </>;
           })()}
           {selectedId && (
             <>
@@ -4291,6 +4310,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <g key={item.id} transform={`translate(${item.x},${item.y}) rotate(${item.rotation})`}
                 onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)} style={{ cursor: activeTool ? "crosshair" : "grab" }}>
                 {isSel && <rect x={-iw / 2 - 4} y={(cfg.wallOnly ? -8 : -ih / 2) - 4} width={iw + 8} height={(cfg.wallOnly ? 16 : ih) + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={3} />}
+                {/* Archived-option marker (screen only — NOT drawn on the exported/submitted plan). */}
+                {isArchivedItem(item) && (<>
+                  <rect x={-iw / 2 - 3} y={(cfg.wallOnly ? -8 : -ih / 2) - 3} width={iw + 6} height={(cfg.wallOnly ? 16 : ih) + 6} fill="none" stroke="#F59E0B" strokeWidth={2} strokeDasharray="2 2" rx={3} />
+                  <text x={0} y={(cfg.wallOnly ? -12 : -ih / 2 - 6)} textAnchor="middle" fontSize={9} fontWeight="800" fill="#B45309">⚠ archived</text>
+                </>)}
                 {item.type === "loft" ? (
                   <>
                     <defs><clipPath id={`loftClip${item.id}`}><rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} rx={2} /></clipPath></defs>

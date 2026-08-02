@@ -7,7 +7,10 @@ import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
 // operator with can_write). Hoisted above the handler so the resolver can consult it.
-const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile", "qbo_status"]);
+const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile", "qbo_status",
+  // Inventory (075): any linked account may VIEW inventory and locations — same posture
+  // as the Designs tab. All inventory writes stay owner/admin (or operator can_write).
+  "list_locations", "list_inventory"]);
 // Self-service: a WRITE any role may make, because it only ever touches the caller's own
 // client_users row (scoped to ctx.userId below, never to anything from the body). Kept out of
 // READ_ACTIONS on purpose — mislabelling a write as a read would make the permission gate
@@ -403,7 +406,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
       admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
-      admin.from("client_layout_items").select("item_key, label_override, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("client_layout_items").select("item_key, label_override, active, archived, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
@@ -411,15 +414,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active, archived").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image").eq("client_id", clientId).maybeSingle(),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
-    const itemList = (items.data ?? []).filter((i: any) => i.active)
-      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key }));
+    const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
+      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false };
     return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings });
@@ -1077,6 +1080,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
         op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
         active: row?.active !== false,
+        archived: row?.archived === true,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
@@ -1126,6 +1130,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         swing_in: false, swing_out: false, swing_default: null,
         op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
         active: row?.active !== false,
+        archived: row?.archived === true,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
@@ -1175,6 +1180,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         swing_in: false, swing_out: false, swing_default: null,
         op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
         active: row?.active !== false,
+        archived: row?.archived === true,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
@@ -1196,6 +1202,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, saved, deleted, skipped });
   }
 
+  // Archive / un-archive a BUILT-IN layout option (singleDoor/doubleDoor/window/ramp/…). Archived =
+  // retired from new builds but still rendered on old designs (get_config keeps it, flagged
+  // noPalette+archived). Distinct from active=false (which removes it). clientId is JWT-resolved.
+  if (action === "set_layout_item_archived") {
+    const key = String(payload?.itemKey ?? "").trim();
+    if (!key) return json({ error: "itemKey required" }, 400);
+    const archived = payload?.archived === true;
+    const { error } = await admin.from("client_layout_items")
+      .update({ archived }).eq("client_id", clientId).eq("item_key", key);
+    if (error) return json({ error: `Archive failed: ${error.message}` }, 500);
+    return json({ ok: true });
+  }
+
   // Ramp mode + simple-ramp config (Options → Ramps). Updates client_settings only.
   // mode 'simple'|'custom'; method 'each'|'per_ft'; price/photo optional (photo already
   // uploaded via upload_fixture_image and passed here as imageUrl). clientId is JWT-resolved.
@@ -1215,6 +1234,302 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (Object.prototype.hasOwnProperty.call(p, "imageUrl")) updates.ramp_image_url = String(p.imageUrl ?? "").trim() || null;
     const { error } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
     if (error) return json({ error: `Save failed: ${error.message}` }, 500);
+    return json({ ok: true });
+  }
+
+  // ═══ Inventory (migration 075) ══════════════════════════════════════════════
+  // Physical buildings on the builder's sales lots. The unit's design is a designs row
+  // with status='inventory' created HERE (service role) — the anon save_design RPC can
+  // never mint one. Each unit takes the next number in the tenant's ONE shared serial
+  // sequence (take_next_serial — Orders will draw from the same counter later).
+
+  // ── Sales locations (Settings → Branding) ───────────────────────────────────
+  if (action === "list_locations") {
+    const [locs, units] = await Promise.all([
+      admin.from("builder_locations").select("id, name, street, city, state, zip, active, sort_order")
+        .eq("client_id", clientId).eq("active", true).order("sort_order").order("created_at"),
+      admin.from("inventory_units").select("location_id").eq("client_id", clientId),
+    ]);
+    if (locs.error) return json({ error: locs.error.message }, 500);
+    const counts: Record<string, number> = {};
+    for (const u of units.data ?? []) { if (u.location_id) counts[u.location_id] = (counts[u.location_id] || 0) + 1; }
+    const locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
+    // nextSerial rides along so the Settings card renders both blocks from one call.
+    const { data: cs } = await admin.from("client_settings").select("next_serial").eq("client_id", clientId).maybeSingle();
+    return json({ ok: true, locations, nextSerial: cs?.next_serial ?? null });
+  }
+
+  if (action === "save_location") {
+    const name = String(payload.name ?? "").trim().slice(0, 120);
+    if (!name) return json({ error: "Location name is required." }, 400);
+    const str = (v: unknown, max: number) => { const s = String(v ?? "").trim().slice(0, max); return s || null; };
+    const row: Record<string, unknown> = {
+      client_id: clientId, name,
+      street: str(payload.street, 200), city: str(payload.city, 100),
+      state: str(payload.state, 60), zip: str(payload.zip, 12),
+      updated_at: new Date().toISOString(),
+    };
+    const id = String(payload.id ?? "").trim();
+    if (id) {
+      // Scoped by BOTH id and client_id — an id from another tenant matches nothing.
+      const { error, count } = await admin.from("builder_locations").update(row, { count: "exact" })
+        .eq("id", id).eq("client_id", clientId);
+      if (error) return json({ error: error.message }, 500);
+      if (!count) return json({ error: "Location not found." }, 404);
+      return json({ ok: true, id });
+    }
+    const { data: maxRow } = await admin.from("builder_locations").select("sort_order")
+      .eq("client_id", clientId).order("sort_order", { ascending: false }).limit(1).maybeSingle();
+    row.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
+    const ins = await admin.from("builder_locations").insert(row).select("id").maybeSingle();
+    if (ins.error) return json({ error: ins.error.message }, 500);
+    return json({ ok: true, id: ins.data!.id });
+  }
+
+  if (action === "delete_location") {
+    const id = String(payload.id ?? "").trim();
+    if (!id) return json({ error: "id is required." }, 400);
+    // Units at this location keep existing — their location_id FK is ON DELETE SET NULL,
+    // so they show "no location" rather than blocking the delete or vanishing.
+    const { error, count } = await admin.from("builder_locations").delete({ count: "exact" })
+      .eq("id", id).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Location not found." }, 404);
+    return json({ ok: true });
+  }
+
+  // ── Serial sequence starting number ──────────────────────────────────────────
+  if (action === "save_serial_start") {
+    const n = Math.round(Number(payload.nextSerial));
+    if (!Number.isFinite(n) || n < 1 || n > 999_999_999) {
+      return json({ error: "Next serial must be a whole number from 1 to 999,999,999." }, 400);
+    }
+    // Never allow a restart that could re-mint an already-used number: the sequence is
+    // shared with Orders later, and a duplicate serial on two physical buildings is the
+    // exact confusion serials exist to prevent.
+    const { data: maxU } = await admin.from("inventory_units").select("serial")
+      .eq("client_id", clientId).order("serial", { ascending: false }).limit(1).maybeSingle();
+    const maxUsed = Number(maxU?.serial) || 0;
+    if (n <= maxUsed) {
+      return json({ error: `Serial #${maxUsed} is already in use — the next serial must be at least ${maxUsed + 1}.` }, 400);
+    }
+    const { error } = await admin.from("client_settings").upsert(
+      { client_id: clientId, next_serial: n, updated_at: new Date().toISOString() },
+      { onConflict: "client_id" });
+    if (error) return json({ error: error.message }, 500);
+    await audit("portal_save_serial_start", 1, `next_serial=${n}`);
+    return json({ ok: true, nextSerial: n });
+  }
+
+  // ── Create / update an inventory unit (Designer → "Save to Inventory") ──────
+  if (action === "save_inventory") {
+    const SHORT_CODE = /^SS-[A-HJ-NP-Z2-9]{6,12}$/;
+    // Master-design payload — same shape save_design takes, minus contact (no customer).
+    const design = {
+      selections: payload.selections ?? {},
+      paint_colors: payload.paintColors ?? {},
+      items: Array.isArray(payload.items) ? payload.items : [],
+      custom_options: Array.isArray(payload.customOptions) ? payload.customOptions : [],
+      ro_dimensions: payload.roDimensions ?? {},
+      bldg_w: Number(payload.bldgW) || null,
+      bldg_h: Number(payload.bldgH) || null,
+    };
+    // Same trust rule as migration 070's sanitizer: a stored image_url must be OUR
+    // public floor-plans URL under THIS tenant's prefix, or it becomes null.
+    const rawImg = String(payload.imageUrl ?? "").trim();
+    const imgOk = rawImg.startsWith(`${Deno.env.get("SUPABASE_URL")}${OBJECT_PATH}${clientId}/`) &&
+      /\.(pdf|png)$/.test(rawImg);
+    const imageUrl = imgOk ? rawImg : null;
+    const priceRaw = payload.askingPriceCents;
+    const askingPriceCents = priceRaw == null || priceRaw === "" ? null : Math.round(Number(priceRaw));
+    if (askingPriceCents !== null && (!Number.isFinite(askingPriceCents) || askingPriceCents < 0)) {
+      return json({ error: "askingPriceCents must be a non-negative integer." }, 400);
+    }
+    let locationId: string | null = String(payload.locationId ?? "").trim() || null;
+    if (locationId) {
+      const { data: loc } = await admin.from("builder_locations").select("id")
+        .eq("id", locationId).eq("client_id", clientId).maybeSingle();
+      if (!loc) return json({ error: "Unknown location." }, 400);
+    }
+
+    const unitId = String(payload.unitId ?? "").trim();
+    if (unitId) {
+      // UPDATE mode: re-save the master design (the builder edited the building) and/or
+      // the unit fields. Serial never changes.
+      const { data: unit } = await admin.from("inventory_units")
+        .select("id, design_short_code").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+      if (!unit) return json({ error: "Inventory unit not found." }, 404);
+      const dPatch: Record<string, unknown> = { ...design, updated_at: new Date().toISOString() };
+      if (imageUrl) dPatch.image_url = imageUrl;   // null never blanks an existing PDF
+      const dUp = await admin.from("designs").update(dPatch)
+        .eq("client_id", clientId).eq("short_code", unit.design_short_code).eq("status", "inventory");
+      if (dUp.error) return json({ error: dUp.error.message }, 500);
+      // Version append mirrors save_design's history contract.
+      const { data: vMax } = await admin.from("design_versions").select("version")
+        .eq("short_code", unit.design_short_code).order("version", { ascending: false }).limit(1).maybeSingle();
+      await admin.from("design_versions").insert({
+        short_code: unit.design_short_code, client_id: clientId,
+        version: (Number(vMax?.version) || 0) + 1, contact: {},
+        ...design, image_url: imageUrl,
+      });
+      const uPatch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (Object.prototype.hasOwnProperty.call(payload, "askingPriceCents")) uPatch.asking_price_cents = askingPriceCents;
+      if (Object.prototype.hasOwnProperty.call(payload, "locationId")) uPatch.location_id = locationId;
+      const uUp = await admin.from("inventory_units").update(uPatch).eq("id", unitId).eq("client_id", clientId);
+      if (uUp.error) return json({ error: uUp.error.message }, 500);
+      await audit("portal_update_inventory", 1, `unit=${unitId}`);
+      return json({ ok: true, unitId, shortCode: unit.design_short_code });
+    }
+
+    // CREATE mode.
+    const shortCode = String(payload.shortCode ?? "").trim();
+    if (!SHORT_CODE.test(shortCode)) return json({ error: "invalid design code" }, 400);
+    const { data: exists } = await admin.from("designs").select("short_code")
+      .eq("short_code", shortCode).maybeSingle();
+    if (exists) return json({ error: "That design code is already in use." }, 409);
+
+    // Serial LAST among the validations — a rejected payload must not burn a number.
+    const { data: serial, error: serErr } = await admin.rpc("take_next_serial", { p_client_id: clientId });
+    if (serErr || serial == null) return json({ error: serErr?.message || "Could not assign a serial number." }, 500);
+
+    const dIns = await admin.from("designs").insert({
+      short_code: shortCode, client_id: clientId, status: "inventory",
+      contact: {}, ...design, image_url: imageUrl,
+    });
+    if (dIns.error) return json({ error: dIns.error.message }, 500);
+    await admin.from("design_versions").insert({
+      short_code: shortCode, client_id: clientId, version: 1, contact: {},
+      ...design, image_url: imageUrl,
+    });
+    const uIns = await admin.from("inventory_units").insert({
+      client_id: clientId, serial, design_short_code: shortCode,
+      location_id: locationId, asking_price_cents: askingPriceCents,
+    }).select("id").maybeSingle();
+    if (uIns.error) {
+      // Don't leave an orphan master behind a failed unit insert.
+      await admin.from("design_versions").delete().eq("short_code", shortCode).eq("client_id", clientId);
+      await admin.from("designs").delete().eq("short_code", shortCode).eq("client_id", clientId);
+      return json({ error: uIns.error.message }, 500);
+    }
+    await audit("portal_save_inventory", 1, `unit=${uIns.data!.id} serial=${serial}`);
+    return json({ ok: true, unitId: uIns.data!.id, serial, shortCode });
+  }
+
+  // ── Unit field edits from the Inventory tab (price, lot, sold/available) ────
+  if (action === "update_inventory") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(payload, "askingPriceCents")) {
+      const v = payload.askingPriceCents;
+      const cents = v == null || v === "" ? null : Math.round(Number(v));
+      if (cents !== null && (!Number.isFinite(cents) || cents < 0)) return json({ error: "Invalid asking price." }, 400);
+      patch.asking_price_cents = cents;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "locationId")) {
+      const lid = String(payload.locationId ?? "").trim() || null;
+      if (lid) {
+        const { data: loc } = await admin.from("builder_locations").select("id")
+          .eq("id", lid).eq("client_id", clientId).maybeSingle();
+        if (!loc) return json({ error: "Unknown location." }, 400);
+      }
+      patch.location_id = lid;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
+      const st = String(payload.status ?? "");
+      if (st !== "available" && st !== "sold") return json({ error: "status must be available or sold." }, 400);
+      patch.status = st;
+      if (st === "available") patch.sold_design_short_code = null;
+    }
+    const { error, count } = await admin.from("inventory_units").update(patch, { count: "exact" })
+      .eq("id", unitId).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Inventory unit not found." }, 404);
+    await audit("portal_update_inventory", 1, `unit=${unitId}`);
+    return json({ ok: true });
+  }
+
+  // ── Remove a unit (the master design is deleted by a follow-up delete_design) ─
+  if (action === "delete_inventory") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const { data: unit } = await admin.from("inventory_units")
+      .select("id, design_short_code, serial").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    // Customer estimates sent from this unit keep existing — their inventory_unit_id
+    // FK nulls out. Only the unit row goes here; the portal then calls delete_design
+    // for the master (reusing its storage/version cascade unchanged).
+    const { error } = await admin.from("inventory_units").delete().eq("id", unitId).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    await auditStrict("portal_delete_inventory", 1, `unit=${unitId} serial=${unit.serial} code=${unit.design_short_code}`);
+    return json({ ok: true, designShortCode: unit.design_short_code });
+  }
+
+  // ── The Inventory tab's data ─────────────────────────────────────────────────
+  if (action === "list_inventory") {
+    const [unitsRes, locsRes] = await Promise.all([
+      admin.from("inventory_units")
+        .select("id, serial, design_short_code, location_id, asking_price_cents, status, sold_design_short_code, created_at, updated_at")
+        .eq("client_id", clientId).order("created_at", { ascending: false }),
+      admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
+    ]);
+    if (unitsRes.error) return json({ error: unitsRes.error.message }, 500);
+    const units = unitsRes.data ?? [];
+    const locById = new Map((locsRes.data ?? []).map((l: any) => [l.id, l]));
+    const codes = units.map((u: any) => u.design_short_code);
+    const unitIds = units.map((u: any) => u.id);
+    const [mastersRes, estRes] = await Promise.all([
+      codes.length
+        ? admin.from("designs").select("short_code, selections, image_url").in("short_code", codes).eq("client_id", clientId)
+        : Promise.resolve({ data: [], error: null } as any),
+      unitIds.length
+        ? admin.from("designs")
+          .select("short_code, inventory_unit_id, contact, status, ghl_estimate_number, created_at")
+          .eq("client_id", clientId).in("inventory_unit_id", unitIds).order("created_at", { ascending: false })
+        : Promise.resolve({ data: [], error: null } as any),
+    ]);
+    if (mastersRes.error) return json({ error: mastersRes.error.message }, 500);
+    const masterByCode = new Map((mastersRes.data ?? []).map((d: any) => [d.short_code, d]));
+    const estsByUnit = new Map<string, any[]>();
+    for (const d of estRes.data ?? []) {
+      const list = estsByUnit.get(d.inventory_unit_id) ?? [];
+      list.push({
+        shortCode: d.short_code,
+        name: (d.contact && d.contact.name) || "",
+        status: d.status, estimateNumber: d.ghl_estimate_number, createdAt: d.created_at,
+      });
+      estsByUnit.set(d.inventory_unit_id, list);
+    }
+    const out = units.map((u: any) => {
+      const m = masterByCode.get(u.design_short_code);
+      const sel = (m && m.selections) || {};
+      const loc = u.location_id ? locById.get(u.location_id) : null;
+      return {
+        id: u.id, serial: u.serial, shortCode: u.design_short_code,
+        locationId: u.location_id, locationName: loc?.name ?? null, locationCity: loc?.city ?? null,
+        askingPriceCents: u.asking_price_cents, status: u.status,
+        soldDesignShortCode: u.sold_design_short_code,
+        style: sel.style ?? null, size: sel.size ?? null, imageUrl: m?.image_url ?? null,
+        createdAt: u.created_at, updatedAt: u.updated_at,
+        estimates: estsByUnit.get(u.id) ?? [],
+      };
+    });
+    return json({ ok: true, units: out, locations: locsRes.data ?? [] });
+  }
+
+  // ── After a submit from "Send estimate": tie the new design to its unit ─────
+  if (action === "link_design_to_unit") {
+    const shortCode = String(payload.shortCode ?? "").trim();
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!shortCode || !unitId) return json({ error: "shortCode and unitId are required." }, 400);
+    const { data: unit } = await admin.from("inventory_units")
+      .select("id").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    // Never relabel the master itself, and never touch another tenant's design.
+    const { error, count } = await admin.from("designs").update({ inventory_unit_id: unitId }, { count: "exact" })
+      .eq("client_id", clientId).eq("short_code", shortCode).neq("status", "inventory");
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Design not found (or it is an inventory master)." }, 404);
     return json({ ok: true });
   }
 

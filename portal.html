@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260802a" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260802b" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -2796,14 +2796,14 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
       price: d.price != null ? String(d.price) : "",
       swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
       op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
-      image_url: d.image_url || null, active: d.active !== false,
+      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true,
     })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
@@ -2840,7 +2840,7 @@ Anything not shown here will be removed from their account.`)) return;
         widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
         swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
         opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
-        imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i,
+        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_doors", doors }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -2906,8 +2906,8 @@ Anything not shown here will be removed from their account.`)) return;
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={r.id || `new-${i}`}>
+                {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
+                  <tr key={r.id || `new-${i}`} style={r.archived ? { opacity: 0.55 } : undefined}>
                     <td style={S.td}>
                       {r.image_url ? (
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -2951,7 +2951,7 @@ Anything not shown here will be removed from their account.`)) return;
                       </div>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
-                    <td style={{ ...S.td, textAlign: "center" }}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -3054,14 +3054,14 @@ function RampsView({ viewingLabel = null, clientId = null }) {
     setRows(ramps.map((d) => ({
       id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
       width_in: d.width_in != null ? fmtFtIn(d.width_in) : "", height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
-      price: d.price != null ? String(d.price) : "", image_url: d.image_url || null, active: d.active !== false,
+      price: d.price != null ? String(d.price) : "", image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true,
     })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -3094,7 +3094,7 @@ Anything not shown here will be removed.`)) return;
       const r1 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramp_settings", mode, price: simple.price, method: simple.method, imageUrl: simple.image_url || null, showImage: simple.show_image_on_estimate !== false }) });
       if (r1.error || (r1.data && r1.data.error)) throw new Error((r1.error && r1.error.message) || r1.data.error);
       if (mode === "custom") {
-        const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i }));
+        const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i }));
         const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramps", ramps }) });
         if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
         const skipped = (r2.data && r2.data.skipped) || [];
@@ -3158,8 +3158,8 @@ Anything not shown here will be removed.`)) return;
                       <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={S.th}></th>
                     </tr></thead>
                     <tbody>
-                      {rows.map((r, i) => (
-                        <tr key={r.id || `new-${i}`}>
+                      {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
+                        <tr key={r.id || `new-${i}`} style={r.archived ? { opacity: 0.55 } : undefined}>
                           <td style={S.td}>{imgCell(r.image_url, imgBusyIdx === i, (e) => onRowImg(i, e.target.files && e.target.files[0]), () => setRow(i, { image_url: null }))}</td>
                           <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.show_image_on_estimate, (e) => setRow(i, { show_image_on_estimate: e.target.checked }))}</td>
                           <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Aluminum ramp" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
@@ -3167,7 +3167,7 @@ Anything not shown here will be removed.`)) return;
                           <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 5 }}>{sizeInput(i, "width_in", '48"')}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", "3'")}</div></td>
                           <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span><input type="number" min="0" step="any" value={r.price} placeholder="0" onChange={(e) => setRow(i, { price: e.target.value })} style={{ ...S.input, width: 90, minWidth: 0 }} /></div></td>
                           <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.active, (e) => setRow(i, { active: e.target.checked }))}</td>
-                          <td style={{ ...S.td, textAlign: "center" }}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                          <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
                         </tr>
                       ))}
                     </tbody>
@@ -3217,14 +3217,14 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
       width_in: d.width_in != null ? fmtFtIn(d.width_in) : "",
       height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
       price: d.price != null ? String(d.price) : "",
-      image_url: d.image_url || null, active: d.active !== false,
+      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true,
     })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   const sortBy = (key, getVal) => setSort((s) => {
@@ -3258,7 +3258,7 @@ Anything not shown here will be removed from their account.`)) return;
       const windows = rows.map((r, i) => ({
         id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
         widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
-        imageUrl: r.image_url || null, active: r.active !== false, sortOrder: i,
+        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_windows", windows }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -3309,8 +3309,8 @@ Anything not shown here will be removed from their account.`)) return;
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={r.id || `new-${i}`}>
+                {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
+                  <tr key={r.id || `new-${i}`} style={r.archived ? { opacity: 0.55 } : undefined}>
                     <td style={S.td}>
                       {r.image_url ? (
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -3336,7 +3336,7 @@ Anything not shown here will be removed from their account.`)) return;
                       <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
-                    <td style={{ ...S.td, textAlign: "center" }}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
                   </tr>
                 ))}
               </tbody>
