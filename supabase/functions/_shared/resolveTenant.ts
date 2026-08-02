@@ -116,6 +116,22 @@ export async function resolveTenant(
      * HANDLER is still responsible for scoping the write to ctx.userId.
      */
     selfActions?: Set<string>;
+    /**
+     * Writes ANY linked account may make because they are part of doing the job the
+     * portal already lets every role do — not settings changes. Deliberately a THIRD
+     * category rather than stuffing them into readActions: calling a write a "read"
+     * would make this gate misdescribe what it permits (the same reasoning as
+     * selfActions), and these are not self-scoped either.
+     *
+     * Motivating case (2026-08-02): a role-"user" salesperson can open Inventory and
+     * send a customer an estimate on a lot building — save_design and submit-estimate
+     * are both anon-callable, so the quote goes out — but the follow-up
+     * link_design_to_unit was owner/admin-gated, so it 403'd and the estimate was never
+     * tied to its building. The unit then showed no estimates and never flipped to Sold
+     * when that customer accepted. The HANDLER still scopes every such write to the
+     * resolved tenant; this only says "role does not decide it".
+     */
+    staffActions?: Set<string>;
   },
 ): Promise<Resolved> {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -140,6 +156,7 @@ export async function resolveTenant(
   // A self-service write is allowed for any role, but ONLY on the caller's own row —
   // enforced by the handler, which must key off ctx.userId and never a body-supplied id.
   const isSelf = Boolean(opts.selfActions?.has(action));
+  const isStaff = Boolean(opts.staffActions?.has(action));
 
   // 3. The caller's own tenant. Service role: client_users has no browser policies and
   //    this lookup must not depend on the caller's own claims.
@@ -164,7 +181,7 @@ export async function resolveTenant(
   // ── Normal path: unchanged behaviour ─────────────────────────────────────────
   if (!wantsOverride) {
     if (!mapping) return { ok: false, status: 403, body: { error: "No business is linked to this account." } };
-    if (!isRead && !isSelf && mapping.role !== "owner" && mapping.role !== "admin") {
+    if (!isRead && !isSelf && !isStaff && mapping.role !== "owner" && mapping.role !== "admin") {
       return {
         ok: false,
         status: 403,

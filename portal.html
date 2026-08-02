@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260802b" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260802c" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -4691,8 +4691,26 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
       setError((data && data.error) || (err ? await fnError(err) : "Could not load inventory."));
       setRows([]); return;
     }
-    setRows(data.units || []);
+    const units = data.units || [];
+    setRows(units);
     setLocations(data.locations || []);
+    // list_inventory reports each estimate's CACHED designs.status, and nothing else on
+    // this tab talks to GHL — so a customer accepting in the CRM would not flip the
+    // building to Sold until somebody happened to open the Designs tab. Refresh the
+    // linked estimates here and re-derive. Additive: any failure just leaves the cache.
+    const codes = units.flatMap((u) => (u.estimates || []).map((e) => e.shortCode)).filter(Boolean);
+    if (codes.length) {
+      try {
+        const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: codes } });
+        const statuses = sync && sync.statuses;
+        if (statuses) {
+          setRows(units.map((u) => ({
+            ...u,
+            estimates: (u.estimates || []).map((e) => statuses[e.shortCode] ? { ...e, status: statuses[e.shortCode] } : e),
+          })));
+        }
+      } catch (_e) { /* cached statuses stand */ }
+    }
   }, [clientId]);
   useEffect(() => { load(); }, [load, refreshKey]);
 
@@ -4725,12 +4743,14 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
   const del = async (u) => {
     if (!window.confirm(`Delete building #${u.serial}? Its floor plan and version history are removed. Estimates already sent to customers are kept (they just lose the Inventory label).`)) return;
     setBusyId(u.id); setMsg(null);
+    // ONE call: delete_inventory removes the unit AND its master design (row, versions,
+    // PDFs) server-side. Two calls meant a failed/abandoned second request stranded an
+    // invisible orphan master that no screen could ever list or clean up.
     const r = await invoke({ action: "delete_inventory", unitId: u.id });
     if (r) {
-      // The master design's cascade (row + versions + PDFs) reuses delete_design.
-      // Masters are never billing records, so no typed confirmation is required.
-      await sb.functions.invoke("portal-settings", { body: { action: "delete_design", shortCode: r.designShortCode || u.shortCode } }).catch(() => {});
-      setMsg({ ok: `Building #${u.serial} deleted.` });
+      setMsg(r.masterDeleted === false
+        ? { err: `Building #${u.serial} was removed from inventory, but its saved floor plan could not be deleted — support has been notified.` }
+        : { ok: `Building #${u.serial} deleted.` });
     }
     setBusyId(null); load();
   };
@@ -7307,6 +7327,9 @@ function Dashboard({ session }) {
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
   // there would corrupt the very activity Contacts reports.
   const openInDesigner = (code, version = null, extra = null) => {
+    // `blank: true` (from "+ New inventory building") carries no code — the designer
+    // resets to an empty canvas instead of keeping the previously opened design, which
+    // could otherwise be another unit's master with an "Update" button waiting.
     // `extra` carries the inventory fields: { asNew, inventoryUnitId } for "Send
     // estimate" (load the unit's design as a FRESH estimate), or { unit: {...} } for
     // opening a master in update mode. Plain design opens pass nothing.
@@ -7714,7 +7737,7 @@ function Dashboard({ session }) {
                 refreshKey={designsRefreshKey}
                 onOpenDesign={openInDesigner}
                 onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id })}
-                onNew={() => navigate("designer")} />
+                onNew={() => openInDesigner(null, null, { blank: true })} />
             )}
             {!gateLocked && activeTab === "repairs" && (
               <ComingSoon

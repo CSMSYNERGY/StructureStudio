@@ -16,6 +16,12 @@ const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_prof
 // READ_ACTIONS on purpose — mislabelling a write as a read would make the permission gate
 // misdescribe what it allows. Without this a "user"-role account could not set its own name.
 const SELF_ACTIONS = new Set(["save_profile"]);
+// Writes any linked role may make as part of ordinary selling (see resolveTenant's
+// staffActions). link_design_to_unit only tags a design this same tenant just created
+// with the inventory unit it was quoted from — a role-"user" salesperson can send that
+// estimate, so they must be able to complete it. Owner/admin-only here meant the link
+// silently 403'd and the building never showed the estimate or flipped to Sold.
+const STAFF_ACTIONS = new Set(["link_design_to_unit"]);
 
 // Owner-facing settings endpoint for the portal (portal.html).
 //
@@ -215,7 +221,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // mode actually read and write the viewed account instead of the operator's own.
   // Everything below this block is unchanged and simply uses `clientId`.
   const admin = createClient(supabaseUrl, serviceKey);
-  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, selfActions: SELF_ACTIONS, defaultAction: "status" });
+  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, selfActions: SELF_ACTIONS, staffActions: STAFF_ACTIONS, defaultAction: "status" });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail } = r.ctx;
 
@@ -1309,9 +1315,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // exact confusion serials exist to prevent.
     const { data: maxU } = await admin.from("inventory_units").select("serial")
       .eq("client_id", clientId).order("serial", { ascending: false }).limit(1).maybeSingle();
+    const { data: csCur } = await admin.from("client_settings")
+      .select("next_serial").eq("client_id", clientId).maybeSingle();
     const maxUsed = Number(maxU?.serial) || 0;
-    if (n <= maxUsed) {
-      return json({ error: `Serial #${maxUsed} is already in use — the next serial must be at least ${maxUsed + 1}.` }, 400);
+    const cur = Number(csCur?.next_serial) || 0;
+    // The counter itself is a floor, not just the highest SURVIVING unit: deleting the
+    // newest building would otherwise reopen its number, and the delete deliberately KEEPS
+    // the customer estimates that quote it — two different buildings would then share a
+    // serial across quotes and the shop's paper trail. A first-time set (counter never
+    // configured, cur = 0) is unconstrained, which is the "we're already at #12,000" case.
+    const floor = Math.max(maxUsed + 1, cur);
+    if (cur > 0 && n < floor) {
+      return json({ error: `The next serial must be at least ${floor} — numbers already issued can never be reused.` }, 400);
     }
     const { error } = await admin.from("client_settings").upsert(
       { client_id: clientId, next_serial: n, updated_at: new Date().toISOString() },
@@ -1340,6 +1355,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const imgOk = rawImg.startsWith(`${Deno.env.get("SUPABASE_URL")}${OBJECT_PATH}${clientId}/`) &&
       /\.(pdf|png)$/.test(rawImg);
     const imageUrl = imgOk ? rawImg : null;
+    if (!Number.isFinite(design.bldg_w as number) || !Number.isFinite(design.bldg_h as number)
+        || (design.bldg_w as number) <= 0 || (design.bldg_h as number) <= 0) {
+      return json({ error: "Pick a building style and size before saving to inventory." }, 400);
+    }
     const priceRaw = payload.askingPriceCents;
     const askingPriceCents = priceRaw == null || priceRaw === "" ? null : Math.round(Number(priceRaw));
     if (askingPriceCents !== null && (!Number.isFinite(askingPriceCents) || askingPriceCents < 0)) {
@@ -1461,8 +1480,41 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // for the master (reusing its storage/version cascade unchanged).
     const { error } = await admin.from("inventory_units").delete().eq("id", unitId).eq("client_id", clientId);
     if (error) return json({ error: error.message }, 500);
-    await auditStrict("portal_delete_inventory", 1, `unit=${unitId} serial=${unit.serial} code=${unit.design_short_code}`);
-    return json({ ok: true, designShortCode: unit.design_short_code });
+
+    // The master design goes with it, HERE rather than in a second call from the browser.
+    // Split across two requests, a failed/abandoned second call left a status='inventory'
+    // row that no surface can list (excluded from Designs, and list_inventory needs a unit
+    // to find it) — an invisible orphan holding storage forever. Best-effort by design:
+    // the unit row is already gone, so a storage/DB hiccup must not fail the whole delete;
+    // it is reported back and logged instead.
+    const code = unit.design_short_code;
+    let masterDeleted = false;
+    try {
+      const { data: versions } = await admin.from("design_versions")
+        .select("image_url").eq("client_id", clientId).eq("short_code", code);
+      const { data: master } = await admin.from("designs")
+        .select("image_url").eq("client_id", clientId).eq("short_code", code).maybeSingle();
+      // Same two-step trust check delete_design uses: reduce the stored URL to an object
+      // key, then require that key to be one THIS design could have produced. A stored
+      // image_url is caller-influenced, so it may say WHICH of this design's objects to
+      // remove, never whose. legacyOk=false: inventory masters postdate the bucket-root era.
+      const keys = new Set<string>();
+      for (const u of [master?.image_url, ...(versions ?? []).map((v: any) => v.image_url)]) {
+        const key = floorPlanKey(u);
+        if (key && isOwnFloorPlanKey(key, clientId, code, false)) keys.add(key);
+      }
+      if (keys.size) await admin.storage.from(FLOOR_PLANS).remove([...keys]);
+      await admin.from("design_versions").delete().eq("client_id", clientId).eq("short_code", code);
+      const { error: dErr } = await admin.from("designs").delete()
+        .eq("client_id", clientId).eq("short_code", code).eq("status", "inventory");
+      masterDeleted = !dErr;
+      if (dErr) throw new Error(dErr.message);
+    } catch (e) {
+      await logEdgeError({ fn: "portal-settings", req, clientId, code: "inventory_master_orphan",
+        message: `Inventory unit ${unitId} deleted but its master design ${code} did not: ${(e as Error).message}` });
+    }
+    await auditStrict("portal_delete_inventory", 1, `unit=${unitId} serial=${unit.serial} code=${code} master=${masterDeleted}`);
+    return json({ ok: true, designShortCode: code, masterDeleted });
   }
 
   // ── The Inventory tab's data ─────────────────────────────────────────────────

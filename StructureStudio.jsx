@@ -1582,8 +1582,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           .upload(filePath, blob, { upsert: false, contentType: "application/pdf", cacheControl: "0" });
         if (!up.error) imageUrl = supabase.storage.from("floor-plans").getPublicUrl(filePath).data.publicUrl;
       } catch (_e) { /* PDF is nice-to-have here; the unit row matters more */ }
+      // A typo must never become $0 on the lot. `Number("12,5o0")` is NaN, and the old
+      // `|| 0` turned that into a building publicly listed at $0.
       const priceStr = String(invDialog.price ?? "").replace(/[$,\s]/g, "");
-      const askingPriceCents = priceStr === "" ? null : Math.round((Number(priceStr) || 0) * 100);
+      let askingPriceCents = null;
+      if (priceStr !== "") {
+        const n = Number(priceStr);
+        if (!Number.isFinite(n) || n < 0) {
+          setInvDialog((d) => d && { ...d, busy: false, err: "Enter the asking price as a number, e.g. 8950 — or leave it blank." });
+          return;
+        }
+        askingPriceCents = Math.round(n * 100);
+      }
       const { data, error } = await supabase.functions.invoke("portal-settings", { body: {
         action: "save_inventory", targetClientId: C.clientId,
         ...(isUpdate ? { unitId: inventoryMaster.unitId } : { shortCode: code }),
@@ -1775,7 +1785,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Direct table reads are blocked for the anon key after cutover.
     const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
     const data = Array.isArray(rows) ? rows[0] : rows;
-    if (isCancelled() || error || !data) return;
+    // Returns TRUE only when the design actually loaded. Callers act on the result:
+    // the openDesign effect must not arm inventory state (unitId / asNew reset) against
+    // whatever design is still on the canvas when the RPC failed or the row is gone —
+    // that grafted unit B's id onto unit A's design and let an update overwrite B.
+    if (isCancelled() || error || !data) return false;
     // The persistent portal designer can be sitting on the submit-success screen when an
     // Open request arrives — without this the OLD design's success screen would keep
     // covering the newly loaded one. No-op on the public ?id= path (fresh mount, false).
@@ -1808,7 +1822,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
       if (!isCancelled() && vrow) design = vrow;
     }
-    if (isCancelled()) return;
+    if (isCancelled()) return false;
     setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
 
     setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
@@ -1841,6 +1855,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Keep the global id counter ahead of any restored ids so the next placement can't
     // reuse an existing id (which collided in select/drag/delete/resize).
     idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
+    return true;
   };
 
   // ─── Load saved design from ?id=SS-XXXXXX on the URL ───
@@ -1866,7 +1881,40 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the very activity Contacts reports. Embedded-only; the public page keeps its ?id= path.
   // Each click sends a fresh object (identity change re-fires this even for the same code).
   useEffect(() => {
-    if (!embedded || !supabase || !openDesign || !openDesign.code) return;
+    if (!embedded || !supabase || !openDesign) return;
+    // "+ New inventory building" sends { blank: true } with no code: clear the canvas so
+    // a brand-new building never starts from the design that happened to be open. Without
+    // this, clicking New while another unit's MASTER was loaded left the submit bar saying
+    // "Update Inventory Building" — saving would have rewritten that other unit.
+    if (openDesign.blank) {
+      if (items.length > 0 || sel.style || sel.size) {
+        if (!window.confirm("Start a new building? This clears what's currently in the Designer tab.")) return;
+      }
+      setItems([]);
+      setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
+      setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+      setPaintColors({ body: "", trim: "" });
+      setCustomOptions([]);
+      setRoDimensions({});
+      setSelectedId(null);
+      setEditingNoteId(null);
+      currentDesignIdRef.current = null;
+      isDraftRef.current = false;
+      draftStateRef.current = null;
+      ghlContactIdRef.current = null;
+      ghlEstimateIdRef.current = null;
+      ghlEstimateNumberRef.current = null;
+      inventoryUnitRef.current = null;
+      setInventoryMaster(null);
+      setHasExistingEstimate(false);
+      setDesignCode(null);
+      setEstimateVersions([]);
+      setViewingVersion(null);
+      setSubmitted(false);
+      setSubmitError(null);
+      return;
+    }
+    if (!openDesign.code) return;
     // The persistent Designer tab may hold in-progress work — hand-built, or a previously
     // opened design mid-edit. The old public links opened a NEW tab and could never
     // destroy it; this in-place load can, so it asks first (the same courtesy the
@@ -1876,8 +1924,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     let cancelled = false;
     (async () => {
-      await loadDesignByCode(String(openDesign.code), Number(openDesign.version) || null, () => cancelled);
-      if (cancelled) return;
+      const loaded = await loadDesignByCode(String(openDesign.code), Number(openDesign.version) || null, () => cancelled);
+      // A failed load leaves the PREVIOUS design on the canvas. Arming inventory state
+      // here would point it at a building nobody can see: "Update Inventory Building"
+      // would then overwrite the clicked unit's master with the old design, and a
+      // Send-estimate would link the wrong floor plan to that unit.
+      if (cancelled || !loaded) {
+        if (!cancelled) setSubmitError("That design could not be opened — check your connection and try again.");
+        return;
+      }
       if (openDesign.asNew) {
         // "Send estimate" from Inventory: the unit's design becomes a FRESH estimate for
         // a new customer — a new short_code is minted at submit, the contact starts
@@ -4830,7 +4885,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       {/* Save-to-Inventory dialog (embedded-only; opened from the Submit Bar button). */}
       {embedded && invDialog && (
-        <div onClick={() => { if (!invDialog.busy) setInvDialog(null); }}
+        <div onClick={() => setInvDialog(null)}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
           <div onClick={(e) => e.stopPropagation()}
             style={{ background: "#FFF", borderRadius: 14, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
@@ -4881,7 +4936,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   Starts at this design's quoted price — a markdown here never changes your catalog.
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                  <button type="button" onClick={() => setInvDialog(null)} disabled={invDialog.busy}
+                  {/* Never disabled: a stalled edge call must not trap the builder behind a
+                      full-screen overlay with unsaved canvas work. Closing only drops the
+                      dialog — an in-flight save still completes on the server. */}
+                  <button type="button" onClick={() => setInvDialog(null)}
                     style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
                   <button type="button" onClick={saveInventory} disabled={invDialog.busy}
                     style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
@@ -5062,6 +5120,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ghlContactIdRef.current = null;
                 ghlEstimateIdRef.current = null;
                 ghlEstimateNumberRef.current = null;
+                // Inventory state MUST reset with everything else: a stale inventoryUnitRef
+                // would silently link the NEXT, unrelated customer's estimate to the last
+                // unit quoted — and that estimate going accepted would then flip a building
+                // that never sold to Sold, false-warning every real prospect on it.
+                inventoryUnitRef.current = null;
+                setInventoryMaster(null);
                 setHasExistingEstimate(false);
                 setDesignCode(null);
                 setEstimateVersions([]);

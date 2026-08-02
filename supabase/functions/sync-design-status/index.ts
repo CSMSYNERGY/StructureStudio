@@ -220,7 +220,11 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     // no opportunity — there is nothing in GHL to derive from, and the 'sent' baseline
     // below would otherwise promote every draft the moment the portal loads it. Their
     // status belongs to save_design alone: a real submit is what turns draft into sent.
-    if (d.status === "draft") { statuses[d.short_code] = "draft"; continue; }
+    // Inventory masters (migration 075: the design behind a physical unit on a sales lot)
+    // are the same shape of exception — no GHL estimate exists, the status is owned by
+    // portal-settings' save_inventory, and 'sent' here would surface a lot building as a
+    // customer estimate on the Designs tab.
+    if (d.status === "draft" || d.status === "inventory") { statuses[d.short_code] = d.status; continue; }
     // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
     // Otherwise start from what we already believe, so the computation below can raise the status
     // but never lower it (see dataComplete above).
