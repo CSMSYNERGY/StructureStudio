@@ -581,7 +581,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       unitValue = Math.round(unitValue * 100) / 100;
       const credit = Math.round(unitValue * q * 100) / 100;
       if (credit <= 0) continue;
-      const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+      const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || (LEGACY_LAYOUT_FALLBACK[k] && LEGACY_LAYOUT_FALLBACK[k].label) || k;
       declinedLines.push(`${label} declined (−${fmtMoney2(credit)})`);
       declinedTotal += credit;
     }
@@ -602,7 +602,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (placedSqft > 0 && placedSqft < incQ) {
         const credit = Math.round(rpk.rate * (incQ - placedSqft) * 100) / 100;
         if (credit > 0) {
-          const lbl = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+          const lbl = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || (LEGACY_LAYOUT_FALLBACK[k] && LEGACY_LAYOUT_FALLBACK[k].label) || k;
           declinedLines.push(`${lbl} smaller than included: ${incQ - placedSqft} sq ft credited (−${fmtMoney2(credit)})`);
           declinedTotal += credit;
         }
@@ -743,7 +743,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     if (!m || !m.count) continue;
     const rp = resolve(key);
     if (!rp) continue;
-    const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || key;
+    const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || (LEGACY_LAYOUT_FALLBACK[key] && LEGACY_LAYOUT_FALLBACK[key].label) || key;
     // Net out the included quantity for this item (loft = sq ft, others = count).
     const inc = incForRows[key] || 0;
     const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
