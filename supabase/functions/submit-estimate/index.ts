@@ -450,10 +450,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
     // Measured item (loft = sq ft, workbench = ft) charged only on the amount BEYOND its inclusion:
     // the GHL qty cell shows the BILLABLE measure (chargeable), so spell out the full calc in the
-    // description — total placed, included in the base price, and billable — matching the designer's
-    // "N sq ft included" note. GHL renders the description as HTML and collapses plain-text wraps, so
-    // join each part with <br> (like the building line) to force one fact per line. Appended if the
-    // caller already passed a description.
+    // description — total placed, included in the base price, and billable. GHL's estimate view
+    // STRIPS <br> (concatenating the words, e.g. "placed56 sq ft"), so join with " · " — one clean
+    // spelled-out line whose spacing survives, matching the designer's live breakdown verbatim.
     let desc = description;
     if (includedQty > 0 && (method === "sqft_option" || method === "lineal_ft")) {
       const u = method === "sqft_option" ? "sq ft" : "ft";
@@ -461,8 +460,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         `${placed} ${u} placed`,
         `${includedQty} ${u} included in base price`,
         `${chargeable} ${u} billable @ $${(Number(rate) || 0).toFixed(2)}/${u}`,
-      ].join("<br>");
-      desc = desc ? `${desc}<br>${breakdown}` : breakdown;
+      ].join(" · ");
+      desc = desc ? `${desc} · ${breakdown}` : breakdown;
     }
 
     const item = {
@@ -585,7 +584,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const price = d && d.price != null ? Number(d.price) : 0;
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";
-      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, d.operation ? String(d.operation) : null, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
+      // Spell swing + operation out the same way the floor-plan PDF does (out-swing, right hinge)
+      // so the estimate line and the plan read identically.
+      const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : null;
+      const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : null;
+      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
       const key = `${name}|${price}`;
       const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
       g.qty++; dg.set(key, g);

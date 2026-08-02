@@ -736,8 +736,16 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // amount. "each" items (doors/windows) keep the netted count.
     const measured = rp.method === "lineal_ft" || rp.method === "sqft_option";
     const dispQty = (measured && inc > 0) ? placedMeasure : ln.qty;
-    const incNote = (measured && inc > 0) ? ` · ${inc} ${rp.method === "sqft_option" ? "sq ft" : "ft"} included` : "";
-    const row = { key, label, qty: dispQty, unit: ln.unit + incNote, total: ln.total, method: rp.method };
+    // Measured item with an inclusion (loft/workbench): spell out the full calc — placed, included,
+    // billable — WORD-FOR-WORD the same as the estimate's loft line, so the two match.
+    let unit;
+    if (measured && inc > 0) {
+      const u2 = rp.method === "sqft_option" ? "sq ft" : "ft";
+      unit = [`${placedMeasure} ${u2} placed`, `${inc} ${u2} included in base price`, `${chargeable} ${u2} billable @ ${fmtMoney2(rp.rate)}/${u2}`].join(" · ");
+    } else {
+      unit = ln.unit;
+    }
+    const row = { key, label, qty: dispQty, unit, total: ln.total, method: rp.method };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
@@ -2795,8 +2803,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const winCount = items.filter((i) => i.type === "window").length;
     if (winCount > 0) bullets.push(`Window${winCount > 1 ? "s ×" + winCount : ""}`);
     items.filter((i) => i.type === "workbench").forEach((wb) => bullets.push(`${wb.widthFt}ft Workbench`));
-    const loftCount = items.filter((i) => i.type === "loft").length;
-    if (loftCount > 0) bullets.push(`Loft${loftCount > 1 ? " ×" + loftCount : ""}`);
+    const loftItems = items.filter((i) => i.type === "loft");
+    if (loftItems.length > 0) {
+      const loftSqft = Math.round(loftItems.reduce((s, l) => s + (Number(l.widthFt) || 0) * (Number(l.heightFt) || 0), 0));
+      bullets.push(`Loft${loftItems.length > 1 ? " ×" + loftItems.length : ""} — ${loftSqft} sq ft`);
+    }
     const rampCount = items.filter((i) => i.type === "ramp").length;
     if (rampCount > 0) bullets.push(`Ramp${rampCount > 1 ? " ×" + rampCount : ""}`);
     items.filter((i) => i.type === "roughOpening").forEach((ro, idx) => {
