@@ -2231,7 +2231,10 @@ function PricingCsv({ viewingLabel = null }) {
     const layout = items().map((it) => ({ key: it.key, label: it.label }));
     const fixtures = ((cat && cat.fixtures) || [])
       .filter((f) => f && f.active !== false)
-      .map((f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}×${fmtFtIn(f.height_in)})` : ""}` }));
+      // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"),
+      // and since the column is matched by its exact label on re-import, a garbled header would
+      // silently drop the inclusion. ASCII round-trips safely through any spreadsheet.
+      .map((f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` }));
     return [...layout, ...fixtures];
   };
 
