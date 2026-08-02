@@ -3100,6 +3100,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
           label = `RO-${idx + 1}`;
         }
+        // Doors + windows prefix their width, e.g. "6' DD".
+        if (item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window") {
+          const w = fmtFtIn((item.widthFt || cfg.width) * 12);
+          if (w) label = `${w} ${label}`;
+        }
         ctx.fillText(label, 0, lblY);
       }
       ctx.restore();
@@ -4381,7 +4386,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {/* Archived-option marker (screen only — NOT drawn on the exported/submitted plan). */}
                 {isArchivedItem(item) && (<>
                   <rect x={-iw / 2 - 3} y={(cfg.wallOnly ? -8 : -ih / 2) - 3} width={iw + 6} height={(cfg.wallOnly ? 16 : ih) + 6} fill="none" stroke="#F59E0B" strokeWidth={2} strokeDasharray="2 2" rx={3} />
-                  <text x={0} y={(cfg.wallOnly ? -12 : -ih / 2 - 6)} textAnchor="middle" fontSize={9} fontWeight="800" fill="#B45309">⚠ archived</text>
+                  {/* Sit the badge beyond the item's own label (which is at ±10-14 on wallOnly) so the two never overlap. */}
+                  <text x={0} y={cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 27 : -23) : (-ih / 2 - 6)} textAnchor="middle" fontSize={9} fontWeight="800" fill="#B45309">⚠ archived</text>
                 </>)}
                 {item.type === "loft" ? (
                   <>
@@ -4440,11 +4446,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {item.type === "fixtureDoor" && fixtureDoorSVG(item, iw, fixtureDoorColor(item))}
                     {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
-                      if (item.type === "fixtureDoor") return item.planLabel || cfg.shortLabel;
-                      if (item.type === "window") return item.planLabel || cfg.shortLabel;
-                      if (item.type !== "roughOpening") return cfg.shortLabel;
-                      const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
-                      return `RO-${idx + 1}`;
+                      if (item.type === "roughOpening") {
+                        const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
+                        return `RO-${idx + 1}`;
+                      }
+                      const base = ((item.type === "fixtureDoor" || item.type === "window") && item.planLabel) ? item.planLabel : cfg.shortLabel;
+                      // Doors + windows prefix their width, e.g. "6' DD", so the size reads off the plan.
+                      const isDoorOrWin = item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window";
+                      const w = isDoorOrWin ? fmtFtIn((item.widthFt || cfg.width) * 12) : "";
+                      return w ? `${w} ${base}` : base;
                     })()}</text>
                     {/* RO resize handles — drag end to change width freely */}
                     {item.type === "roughOpening" && isSel && (() => {
