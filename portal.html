@@ -2560,9 +2560,11 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
-function LayoutPricing() {
+function LayoutPricing({ viewingLabel = null, clientId = null }) {
+  // Operator "view as": scope catalog read + archive to the client on screen (see DoorsView).
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
-  const [rows, setRows] = useState([]);      // [{ item_key, label, pricing_method, rate }]
+  const [rows, setRows] = useState([]);      // [{ item_key, label, pricing_method, rate, archived }]
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [fileKey, setFileKey] = useState(0);
@@ -2573,16 +2575,29 @@ function LayoutPricing() {
     const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
     return (data.items || []).map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived };
     });
   };
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data); setRows(buildRows(data));
   };
   useEffect(() => { load(); }, []);
+
+  // Archive / restore a built-in option. Archived = retired from new builds but still rendered on
+  // every existing design (get_config keeps it, flagged noPalette+archived). Reloads to re-sort.
+  const toggleArchive = async (itemKey, archived) => {
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "set_layout_item_archived", itemKey, archived }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      setMsg({ ok: archived ? "Option archived — it stays on existing designs but can't be added to new ones." : "Option restored." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
 
   const setRow = (key, field, val) => setRows((rs) => rs.map((r) => r.item_key === key ? { ...r, [field]: val } : r));
 
@@ -2685,12 +2700,12 @@ function LayoutPricing() {
             <div style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.item_key}>
-                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}</td>
+                {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
+                  <tr key={r.item_key} style={r.archived ? { opacity: 0.55 } : undefined}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}{r.archived && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#B45309", background: "#FEF3C7", borderRadius: 4, padding: "1px 6px" }}>Archived</span>}</td>
                     <td style={S.td}>
                       <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
                         {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
@@ -2711,6 +2726,11 @@ function LayoutPricing() {
                           <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyKey === r.item_key} style={{ display: "none" }} onChange={(e) => onRowImg(r.item_key, e.target.files && e.target.files[0])} />
                         </label>
                       )}
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
+                      <button onClick={() => toggleArchive(r.item_key, !r.archived)} disabled={busy}
+                        title={r.archived ? "Restore this option to new builds" : "Archive: retire from new builds, keep on every existing design"}
+                        style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>
                     </td>
                   </tr>
                 ))}
@@ -7016,7 +7036,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
       {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
-      {sub === "options" && (<><LayoutPricing /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
+      {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
