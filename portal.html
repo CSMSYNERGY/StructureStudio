@@ -1782,10 +1782,6 @@ function SettingsView({ section }) {
       </div>
       )}
 
-      {/* Sales locations + serial numbers (075) live under Branding for now — Carolyn's
-          call until Build/Delivery Scheduling gives them a home of their own. */}
-      {show("branding") && <LocationsCard />}
-
       {show("branding") && (<>
       <div style={S.card}>
         <div style={S.h2}>Business Details (shown on estimates)</div>
@@ -4904,7 +4900,7 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
   );
 }
 
-// ─── Sales locations + building serial numbers (Settings → Branding) ───
+// ─── Sales locations + building serial numbers (Settings → Team) ───
 // Locations are where inventory buildings sit on display; the serial block sets the ONE
 // shared per-builder sequence (inventory now, orders when Build Scheduling ships).
 function LocationsCard() {
@@ -7390,7 +7386,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "connection" && <SettingsView section="connection" />}
       {sub === "quickbooks" && <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
-      {sub === "team" && <CommissionTeam />}
+      {sub === "team" && (<><LocationsCard /><CommissionTeam /></>)}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );
