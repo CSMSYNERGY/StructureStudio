@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260802c" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260802d" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -2573,7 +2573,9 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
 
   const buildRows = (data) => {
     const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
-    return (data.items || []).map((it) => {
+    // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
+    // no longer shown or archived here.
+    return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
       return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived };
     });
@@ -3055,6 +3057,7 @@ const METAL_LIBRARY = [
 function RampsView({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [mode, setMode] = useState("simple");
+  const [enabled, setEnabled] = useState(true);   // does this client OFFER a ramp at all
   const [simple, setSimple] = useState({ price: "", method: "each", image_url: null, show_image_on_estimate: true });
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -3069,6 +3072,7 @@ function RampsView({ viewingLabel = null, clientId = null }) {
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const rs = data.rampSettings || {};
     setMode(rs.mode === "custom" ? "custom" : "simple");
+    setEnabled(rs.enabled !== false);
     setSimple({ price: rs.price != null ? String(rs.price) : "", method: rs.method || "each", image_url: rs.imageUrl || null, show_image_on_estimate: rs.showImage !== false });
     const ramps = (data.fixtures || []).filter((f) => (f.category || "") === "ramp");
     setRows(ramps.map((d) => ({
@@ -3111,7 +3115,7 @@ function RampsView({ viewingLabel = null, clientId = null }) {
 Anything not shown here will be removed.`)) return;
     setBusy(true); setMsg(null);
     try {
-      const r1 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramp_settings", mode, price: simple.price, method: simple.method, imageUrl: simple.image_url || null, showImage: simple.show_image_on_estimate !== false }) });
+      const r1 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramp_settings", mode, enabled, price: simple.price, method: simple.method, imageUrl: simple.image_url || null, showImage: simple.show_image_on_estimate !== false }) });
       if (r1.error || (r1.data && r1.data.error)) throw new Error((r1.error && r1.error.message) || r1.data.error);
       if (mode === "custom") {
         const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i }));
@@ -3151,7 +3155,12 @@ Anything not shown here will be removed.`)) return;
           the price. <b>Custom ramp styles</b> is a catalog with its own sizes and prices, like doors. Enter sizes in feet/inches (8', 6'3", 36").
         </p>
         {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (<>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, fontSize: 14, fontWeight: 700, color: "#334155", cursor: "pointer" }}>
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ width: 18, height: 18, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Offer a ramp on your buildings
+          </label>
+          {!enabled && <div style={{ fontSize: 12.5, color: "#B45309", background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", marginBottom: 14 }}>Ramps are turned off — customers can't add one to a new build. Any ramp already on a saved design still shows and prices as before. (Click <b>Save ramps</b> to apply.)</div>}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20, opacity: enabled ? 1 : 0.5, pointerEvents: enabled ? "auto" : "none" }}>
             {modeCard("simple", "Simple ramp", "One ramp, automatically the width of the door it attaches to. No sizes to manage.")}
             {modeCard("custom", "Custom ramp styles", "A catalog of ramp styles with their own sizes, prices, and photos.")}
           </div>

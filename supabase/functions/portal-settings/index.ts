@@ -422,7 +422,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
       admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active, archived").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
-      admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image").eq("client_id", clientId).maybeSingle(),
+      admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
     ]);
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
@@ -430,7 +430,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived }));
     const rs = csRamp.data;
-    const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false };
+    const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings });
   }
 
@@ -1237,6 +1237,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       ramp_show_image: p.showImage !== false,
       updated_at: new Date().toISOString(),
     };
+    // Whether the tenant OFFERS a ramp at all — the designer places ramps only when this is on.
+    // Only overwrite when the caller sends it, so an older client doesn't blank it.
+    if (Object.prototype.hasOwnProperty.call(p, "enabled")) updates.ramp_enabled = p.enabled === true;
     if (Object.prototype.hasOwnProperty.call(p, "imageUrl")) updates.ramp_image_url = String(p.imageUrl ?? "").trim() || null;
     const { error } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
     if (error) return json({ error: `Save failed: ${error.message}` }, 500);

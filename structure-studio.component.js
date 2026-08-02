@@ -66,7 +66,8 @@ const LEGACY_LAYOUT_FALLBACK = {
   singleDoor: { label: "Single Door (36\")", icon: "🚪", color: "#D97706", width: 3, height: 0.5, shortLabel: "SD", wallOnly: true, noPalette: true },
   doubleDoor: { label: "Double Door (60\")", icon: "🚪🚪", color: "#B45309", width: 5, height: 0.5, shortLabel: "DD", wallOnly: true, noPalette: true },
   window: { label: "Window (24\")", icon: "🪟", color: "#0EA5E9", width: 2, height: 0.5, shortLabel: "W", wallOnly: true, noPalette: true },
-  ramp: { label: "Ramp", icon: "⬛", color: "#78716C", width: 3, height: 3, shortLabel: "RAMP", doorSnap: true, noPalette: true },
+  // NOTE: ramp is NOT here — it's fully self-contained now (SIMPLE_RAMP_CFG below), decoupled from
+  // the built-in `ramp` layout item, so a tenant's ramp works whether or not that legacy row exists.
 };
 
 // Title-case a building-style name for display (designs store either the label
@@ -281,6 +282,12 @@ const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: tr
 // own width/length + a priced snapshot (vs the simple built-in ramp which takes the door's width).
 const FIXTURE_RAMP_COLOR = "#0284C7";
 const RAMP_PICKER_CFG = { label: "Ramp", color: FIXTURE_RAMP_COLOR, icon: "⬛", doorSnap: true, width: 3, height: 2, shortLabel: "RAMP", isRampPicker: true };
+// Simple ramp — a fully self-contained option (render + placement), NO longer the built-in `ramp`
+// layout item. Auto-widths to the door it attaches to (handled in handleClick's doorSnap branch,
+// same as before). Stone color matches the old built-in so already-placed ramps look identical.
+// ITEMS.ramp is ALWAYS this cfg (so every placed type:"ramp" renders), placeable only when the
+// tenant offers a simple ramp (rampSettings.enabled + simple mode).
+const SIMPLE_RAMP_CFG = { label: "Ramp", color: "#78716C", icon: "⬛", doorSnap: true, width: 3, height: 3, shortLabel: "RAMP", isSimpleRamp: true };
 // Catalog windows. The "Window" tool is wall-placed (like the door picker). A placed catalog
 // window is a normal type:"window" item — so it reuses the built-in window's render (mullions,
 // wall bar), collision, and payload — but carries the chosen style's width + a priced snapshot
@@ -1204,9 +1211,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
   const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
   const windowFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "window"), [C.fixtures]);
-  // Custom ramp mode: show the ramp picker + hide the built-in ramp TOOL (placed built-in ramps
-  // still render). Simple mode leaves the built-in ramp exactly as-is.
-  const rampCustom = ((C.rampSettings && C.rampSettings.mode) === "custom") && rampFixtures.length > 0;
+  // Ramp is self-contained now (SIMPLE_RAMP_CFG), driven by the Ramp settings — NOT the built-in
+  // `ramp` layout item. Custom mode → the ramp picker (catalog styles); simple mode + offered → the
+  // simple ramp tool; otherwise render-only (old ramps still draw, but no new placement).
+  const rampMode = ((C.rampSettings && C.rampSettings.mode) || "simple");
+  const rampEnabled = !!(C.rampSettings && C.rampSettings.enabled);
+  const rampCustom = rampMode === "custom" && rampFixtures.length > 0;
   const [sel, setSel] = useState(() => {
     const init = { style: "", size: "", roofType: "", roofColor: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
@@ -1244,7 +1254,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
-    ...(rampCustom && C.layoutItems && C.layoutItems.ramp ? { ramp: { ...C.layoutItems.ramp, noPalette: true } } : {}),
+    // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
+    // so every placed ramp renders. Placeable only when the tenant offers a SIMPLE ramp; custom mode
+    // and not-offered are render-only (the picker handles custom placement).
+    ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
     ...(windowFixtures.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
