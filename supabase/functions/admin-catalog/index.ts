@@ -86,7 +86,7 @@ async function assertClient(sb: any, clientId: string) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("invalid client id");
   const { data, error } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
   if (error) throw error;
-  if (!data) throw new Error("unknown client");
+  if (!data) throw new Error("unknown builder");
   return clientId;
 }
 
@@ -442,13 +442,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // is out of scope here); building styles/items/pricing are added via the tabs.
       case "create_client": {
         const clientId = reqStr(p.clientId, "clientId").toLowerCase();
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Client id must be lowercase letters, numbers and hyphens (DNS-safe).");
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Builder id must be lowercase letters, numbers and hyphens (DNS-safe).");
         const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal"];
         if (reserved.includes(clientId)) throw new Error(`"${clientId}" is a reserved id.`);
         const companyName = reqStr(p.companyName, "companyName");
         const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
         if (exists.error) throw exists.error;
-        if (exists.data) throw new Error(`A client "${clientId}" already exists.`);
+        if (exists.data) throw new Error(`A builder "${clientId}" already exists.`);
         // templateClientId === "__none__" => start blank (no clone): a standard contact
         // form so the designer works, and empty sizes/options the operator fills in via
         // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
@@ -463,7 +463,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const tmplId = (typeof p.templateClientId === "string" && p.templateClientId.trim()) ? p.templateClientId.trim() : "junior-barns";
           const tmpl = await sb.from("client_configs").select("contact_fields, default_sizes, options").eq("client_id", tmplId).maybeSingle();
           if (tmpl.error) throw tmpl.error;
-          if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
+          if (!tmpl.data) throw new Error(`Template builder "${tmplId}" not found.`);
           contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
           templateId = tmplId;
         }
@@ -614,7 +614,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const clientId = reqStr(p.clientId, "clientId");
         const { data: exists } = await sb.from("client_configs")
           .select("client_id").eq("client_id", clientId).maybeSingle();
-        if (!exists) throw new Error(`Unknown client: ${clientId}`);
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
 
         const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
         if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
@@ -704,7 +704,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
         if (existingLink.error) throw existingLink.error;
         if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
-          throw new Error(`"${email}" is already linked to client "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
+          throw new Error(`"${email}" is already linked to builder "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
         }
         const up = await sb.from("client_users").upsert(
           { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });

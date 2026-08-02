@@ -330,7 +330,7 @@ function AdminApp() {
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false); setNcExempt(false); setNcDiscount("0"); setNcAllFeat(true); setNcFeat([]);
       await loadClient(id);
-      flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
+      flash({ ok: `Builder "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -411,7 +411,11 @@ function AdminApp() {
       // pull the current client out of its message so the prompt can name it.
       const errMsg = (e && e.message) || String(e);
       if (/reassign\s*:\s*true/i.test(errMsg)) {
-        const m = /already linked to client "([^"]+)"/.exec(errMsg);
+        // Tolerates BOTH wordings: the server said "client" before the 2026-08-02
+        // builder rename, and an operator's browser can be running a cached page
+        // against a newer function (or vice versa) — a strict match would silently
+        // stop naming the tenant in the reassign prompt.
+        const m = /already linked to (?:client|builder) "([^"]+)"/.exec(errMsg);
         setReassignFrom({ email: ownerEmail.trim(), role: linkRole, fromClient: m ? m[1] : null });
       } else {
         setReassignFrom(null);
@@ -421,7 +425,7 @@ function AdminApp() {
     setBusy(false);
   };
   // Operator hard-delete: server wipes the tenant + all its data (catalog,
-  // designs, settings, logins, storage). Guarded by typing the client id.
+  // designs, settings, logins, storage). Guarded by typing the builder id.
   const deleteClient = async () => {
     const id = sel;
     if (!id || delConfirm.trim() !== id) return;
@@ -431,7 +435,7 @@ function AdminApp() {
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
       const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
-      flash({ ok: `Client "${id}" deleted${parts ? ` (${parts})` : ""}.` });
+      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -582,21 +586,21 @@ function AdminApp() {
   return (
     <div>
       <div style={S.header}><div style={S.badge}>SS</div><div style={{ fontWeight: 800 }}>Operator Admin</div>
-        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} clients</div></div>
+        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} builders</div></div>
       <div style={S.wrap}>
         {msg && msg.err && <div style={S.err}>{msg.err}</div>}
         {msg && msg.ok && <div style={S.ok}>{msg.ok}</div>}
 
         <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={S.lbl}>Client</span>
+          <span style={S.lbl}>Builder</span>
           <select value={sel} onChange={(e) => loadClient(e.target.value)} style={{ ...S.input, minWidth: 240 }}>
-            <option value="">— select a client —</option>
+            <option value="">— select a builder —</option>
             {clients.map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id} ({c.client_id})</option>)}
           </select>
-          <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
+          <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New builder"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
-          <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a client first"}>{billOpen ? "Cancel" : "Billing"}</button>
-          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
+          <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a builder first"}>{billOpen ? "Cancel" : "Billing"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
               client (portal.html auto-opens ?view= for logged-in operators). */}
           {sel && <a href={`/portal?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
@@ -610,7 +614,7 @@ function AdminApp() {
 
         {newOpen && (
           <div style={{ ...S.card, background: "#DBEAFF", border: "1px solid #75E6DA" }}>
-            <div style={S.h2}>Create a new client</div>
+            <div style={S.h2}>Create a new builder</div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
               Creates the tenant config. <b>No template</b> starts blank (standard contact form, no sizes/options — you
               add everything in the tabs). Or clone a template to copy its contact fields, default sizes &amp; options.
@@ -619,13 +623,13 @@ function AdminApp() {
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input value={ncCompany} onChange={(e) => { const v = e.target.value; setNcCompany(v); if (!ncIdTouched) setNcId(slugify(v)); }} placeholder="Company name (e.g. Acme Barns)" style={{ ...S.input, minWidth: 220 }} />
-              <input value={ncId} onChange={(e) => { setNcId(e.target.value.toLowerCase()); setNcIdTouched(true); }} placeholder="client-id (auto from name)" title="Auto-generated from the company name; edit to override" style={{ ...S.input, minWidth: 200 }} />
+              <input value={ncId} onChange={(e) => { setNcId(e.target.value.toLowerCase()); setNcIdTouched(true); }} placeholder="builder-id (auto from name)" title="Auto-generated from the company name; edit to override" style={{ ...S.input, minWidth: 200 }} />
               <select value={ncTemplate} onChange={(e) => setNcTemplate(e.target.value)} style={{ ...S.input }}>
                 <option value="__none__">No template — blank (recommended)</option>
                 <option value="">Clone template: junior-barns</option>
                 {clients.map((c) => <option key={c.client_id} value={c.client_id}>Clone: {c.client_id}</option>)}
               </select>
-              <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>
+              <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create builder</button>
             </div>
             <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
               <input type="checkbox" checked={ncExempt} onChange={(e) => setNcExempt(e.target.checked)} style={{ marginTop: 2 }} />
@@ -730,7 +734,7 @@ function AdminApp() {
           <div style={{ ...S.card, background: "#EFF6FF", border: "1px solid #BFDBFE" }}>
             <div style={S.h2}>Link an owner login</div>
             {!sel ? (
-              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a builder above first.</div>
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
@@ -748,7 +752,7 @@ function AdminApp() {
                 {reassignFrom && (
                   <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
                     <div style={{ fontSize: 13, color: "#1B7895", marginBottom: 8, lineHeight: 1.5 }}>
-                      <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another client"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other client"}'s designs &amp; leads.
+                      <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another builder"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other builder"}'s designs &amp; leads.
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                       <button onClick={() => linkOwner(true)} disabled={busy} style={S.btn(busy ? "#9CA3AF" : "#B45309", "#FFF")}>{busy ? "Reassigning…" : `Reassign to ${sel}`}</button>
@@ -784,9 +788,9 @@ function AdminApp() {
 
         {delOpen && (
           <div style={{ ...S.card, background: "#FEF2F2", border: "1px solid #FECACA" }}>
-            <div style={S.h2}>⚠️ Delete client</div>
+            <div style={S.h2}>⚠️ Delete builder</div>
             {!sel ? (
-              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a builder above first.</div>
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
@@ -819,11 +823,11 @@ function AdminApp() {
                 </span>
               </div>
             ))}
-            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Global layout-item defaults. Per-client building styles &amp; sizes live under the <b>Building Styles</b> and <b>CSV / Pricing</b> tabs; new clients are seeded with the <b>Clone</b> feature.</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Global layout-item defaults. Per-builder building styles &amp; sizes live under the <b>Building Styles</b> and <b>CSV / Pricing</b> tabs; new builders are seeded with the <b>Clone</b> feature.</div>
           </div>
         )}
 
-        {tab !== "master" && !sel && <div style={S.card}>Select a client above to manage their styles and items.</div>}
+        {tab !== "master" && !sel && <div style={S.card}>Select a builder above to manage their styles and items.</div>}
 
 
         {tab === "items" && sel && cat && master && (() => {
@@ -841,7 +845,7 @@ function AdminApp() {
                 </button>
               </div>
             </div>
-            <div style={{ fontSize: 12, color: "#64748B", margin: "8px 0 10px" }}>Tick the placeable items this client gets, then click <b>Save</b> to apply them all at once.</div>
+            <div style={{ fontSize: 12, color: "#64748B", margin: "8px 0 10px" }}>Tick the placeable items this builder gets, then click <b>Save</b> to apply them all at once.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {master.layoutItemTypes.map((it) => {
                 const on = itemSel.has(it.item_key);
@@ -863,7 +867,7 @@ function AdminApp() {
             <div style={S.h2}>Building styles for <span style={{ color: ACCENT }}>{sel}</span></div>
 
             {/* This client's own styles (created here or assigned from master) */}
-            <span style={S.lbl}>This client's styles</span>
+            <span style={S.lbl}>This builder's styles</span>
             {(cat.buildingStyles || []).length === 0 &&
               <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below.</div>}
             {(cat.buildingStyles || []).map((row) => {
@@ -902,14 +906,14 @@ function AdminApp() {
 
             {/* Create a new per-client style (name + image) */}
             <div style={{ marginTop: 16, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
-              <span style={S.lbl}>Create a new style for this client</span>
+              <span style={S.lbl}>Create a new style for this builder</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
                 <input value={newStyleName} onChange={(e) => setNewStyleName(e.target.value)} placeholder="Style name (e.g. Garage)" style={{ ...S.input, minWidth: 200 }} />
                 <input key={fileKey} type="file" accept="image/*" onChange={(e) => onPickStyleImg(e.target.files && e.target.files[0])} style={{ fontSize: 12 }} />
                 {newStyleImg && <img src={newStyleImg.base64} alt="" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />}
                 <button onClick={createStyle} disabled={busy || !newStyleName.trim()} style={S.btn(busy || !newStyleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create style</button>
               </div>
-              <div style={{ fontSize: 11, color: "#1B7895", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
+              <div style={{ fontSize: 11, color: "#1B7895", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this builder.</div>
             </div>
 
           </div>

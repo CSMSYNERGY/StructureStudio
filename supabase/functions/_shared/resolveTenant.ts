@@ -71,7 +71,7 @@ export async function assertClient(admin: Admin, raw: unknown): Promise<string> 
   if (!v || !/^[a-z0-9][a-z0-9-]*$/.test(v)) throw new Error("Invalid clientId.");
   const { data, error } = await admin.from("client_configs").select("client_id").eq("client_id", v).maybeSingle();
   if (error) throw error;
-  if (!data) throw new Error(`Unknown client "${v}".`);
+  if (!data) throw new Error(`Unknown builder "${v}".`);
   return v;
 }
 

@@ -263,8 +263,8 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 
 const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
-  accounts: ["Accounts", "Open any client's portal — operators only"],
-  admin: ["Admin", "Operator console — master catalog, client setup, and onboarding"],
+  accounts: ["Accounts", "Open any builder's portal — operators only"],
+  admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
   designs: ["Designs", "Customer designs and submitted quotes"],
   leads: ["Contacts", "Everyone who has submitted a design"],
   orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
@@ -5144,9 +5144,9 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   return (
     <div style={S.card}>
       <CardHead
-        title="Client accounts"
+        title="Builder accounts"
         count={clients ? (query ? `${filtered.length} of ${clients.length}` : clients.length) : null}
-        desc="Open any client's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values."
+        desc="Open any builder's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values."
         right={<>
           {/* Acts on the filtered set, and each is disabled when it would do nothing — so the
               control tells you the current state instead of being a pair of dead buttons. */}
@@ -5536,15 +5536,15 @@ function AdmClientPicker({ clients, current, onPick, onClose }) {
   };
   return (
     <AdmOverlay onClose={onClose} labelledBy="adm-picker-ttl">
-      <div id="adm-picker-ttl" style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a client</div>
-      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14 }}>Everything on the client-scoped tabs is about whoever is selected here.</div>
+      <div id="adm-picker-ttl" style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a builder</div>
+      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14 }}>Everything on the builder-scoped tabs is about whoever is selected here.</div>
       <div onKeyDown={onKey}>
-        <SearchInput value={q} onChange={setQ} placeholder="Search clients…" />
+        <SearchInput value={q} onChange={setQ} placeholder="Search builders…" />
       </div>
       <div style={{ maxHeight: 380, overflowY: "auto", margin: "0 -4px" }}>
         {list.length === 0 && (
           <div style={{ fontSize: 13, color: "#94A3B8", padding: "14px 6px" }}>
-            {term ? `No clients match “${q}”.` : "No clients yet."}
+            {term ? `No builders match “${q}”.` : "No builders yet."}
           </div>
         )}
         {list.map((c, i) => (
@@ -5595,7 +5595,7 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
       // retype — that is the "asked twice for the same action" failure this avoids.
       const authish = e.status === 401 || e.status === 403 || /password/i.test(e.message || "");
       if (authish) { setPwd(""); setAttempts((n) => n + 1); }
-      setErr(e.message || "Could not delete this client.");
+      setErr(e.message || "Could not delete this builder.");
       setBusy(false);
     }
   };
@@ -5631,7 +5631,7 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
       </div>
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
         <button type="button" onClick={onClose} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
-        <button type="button" onClick={submit} disabled={!ready} title={!ready ? "Type the client id and the operator password" : undefined}
+        <button type="button" onClick={submit} disabled={!ready} title={!ready ? "Type the builder id and the operator password" : undefined}
           style={{ ...S.btn(ready ? "#DC2626" : "#FCA5A5", "#FFF"), cursor: ready ? "pointer" : "not-allowed" }}>
           {busy ? "Deleting…" : "Delete permanently"}
         </button>
@@ -5647,12 +5647,12 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
 // is also the onboarding order: create the client, give the owner a login, give them
 // styles, then items, then prices.
 const ADM_TABS = [
-  ["clients", "Clients",        "Every tenant on the platform — search, create, and open",       "global"],
+  ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
   ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
-  ["styles",  "Styles & Sizes", "Building styles this client offers, and the sizes under each",  "client"],
-  ["items",   "Items",          "Which placeable layout items this client gets",                 "client"],
+  ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
+  ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
   ["pricing", "Pricing",        "Bulk price and inclusion import/export by CSV",                 "client"],
-  ["master",  "Master Catalog", "The global layout-item palette every client draws from",        "global"],
+  ["master",  "Master Catalog", "The global layout-item palette every builder draws from",        "global"],
 ];
 
 function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
@@ -5731,7 +5731,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>Admin</div>
-            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>The operator console — every tenant's catalog, setup and onboarding. Changes here are live in a client's account.</div>
+            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>The operator console — every tenant's catalog, setup and onboarding. Changes here are live in a builder's account.</div>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.26)", borderRadius: 10, padding: "8px 12px" }}>
             {selRow ? (
@@ -5748,10 +5748,10 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
               </>
             ) : (
               <>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#D6E4F0" }}>No client selected</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#D6E4F0" }}>No builder selected</div>
                 <button type="button" onClick={() => setPickerOpen(true)} disabled={!clients}
                   style={{ fontFamily: "inherit", background: "transparent", border: "1px solid rgba(255,255,255,0.4)", color: "#FFF", borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: clients ? 1 : 0.5 }}>
-                  Choose client
+                  Choose builder
                 </button>
               </>
             )}
@@ -5785,7 +5785,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span>{active[1]} — {active[2]}</span>
         <AdmChip tone={active[3] === "global" ? "warn" : "neutral"}>
-          {active[3] === "global" ? "Platform-wide" : (selRow ? `For ${selRow.company_name || selRow.client_id}` : "Per client")}
+          {active[3] === "global" ? "Platform-wide" : (selRow ? `For ${selRow.company_name || selRow.client_id}` : "Per builder")}
         </AdmChip>
       </div>
 
@@ -5801,11 +5801,11 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
 
       {needsClient && !sel && clients && (
         <div style={S.card}>
-          <CardHead title="Choose a client first"
-            desc="Styles, items and pricing are per-client. Pick the tenant you're setting up and this page fills in." />
+          <CardHead title="Choose a builder first"
+            desc="Styles, items and pricing are per-builder. Pick the tenant you're setting up and this page fills in." />
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" onClick={() => setPickerOpen(true)} style={S.btn(ACCENT, "#FFF")}>Choose client</button>
-            <button type="button" onClick={() => setSub("clients")} style={S.btn("#F1F5F9", "#334155")}>Browse all clients</button>
+            <button type="button" onClick={() => setPickerOpen(true)} style={S.btn(ACCENT, "#FFF")}>Choose builder</button>
+            <button type="button" onClick={() => setSub("clients")} style={S.btn("#F1F5F9", "#334155")}>Browse all builders</button>
           </div>
         </div>
       )}
@@ -5851,7 +5851,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
   const slug = id.trim().toLowerCase();
   const taken = (clients || []).some((c) => c.client_id === slug);
   const shapeOk = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
-  const idErr = !slug ? null : taken ? "That client id is already taken." : !shapeOk ? "Lowercase letters, numbers and hyphens only — it becomes their subdomain." : null;
+  const idErr = !slug ? null : taken ? "That builder id is already taken." : !shapeOk ? "Lowercase letters, numbers and hyphens only — it becomes their subdomain." : null;
   const canCreate = slug && company.trim() && !idErr && !busy;
 
   const create = async () => {
@@ -5875,16 +5875,16 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
   return (
     <>
       <div style={S.card}>
-        <CardHead title="Client accounts"
+        <CardHead title="Builder accounts"
           count={clients ? (term ? `${list.length} of ${clients.length}` : clients.length) : null}
-          desc="Every tenant on the platform. Manage puts a client into the tabs above; Open portal takes you into their account as an operator."
+          desc="Every tenant on the platform. Manage puts a builder into the tabs above; Open portal takes you into their account as an operator."
           right={<button type="button" onClick={() => setOpenNew((v) => !v)} style={S.btn(ACCENT, "#FFF")}>
-            {openNew ? "Cancel" : "+ New client"}
+            {openNew ? "Cancel" : "+ New builder"}
           </button>} />
-        <SearchInput value={q} onChange={setQ} placeholder="Search clients…" />
-        {clients === null && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading clients…</div>}
+        <SearchInput value={q} onChange={setQ} placeholder="Search builders…" />
+        {clients === null && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading builders…</div>}
         {clients && list.length === 0 && (
-          <div style={{ fontSize: 13, color: "#94A3B8" }}>{term ? `No clients match “${q}”.` : "No clients yet — create the first one above."}</div>
+          <div style={{ fontSize: 13, color: "#94A3B8" }}>{term ? `No builders match “${q}”.` : "No builders yet — create the first one above."}</div>
         )}
         {list.map((c) => (
           <div key={c.client_id} style={ADM_ROW}>
@@ -5896,7 +5896,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
             {c.client_id === sel && <AdmChip tone="on">Selected</AdmChip>}
             {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
-            <button type="button" onClick={() => onPick(c.client_id)} title="Administer this client"
+            <button type="button" onClick={() => onPick(c.client_id)} title="Administer this builder"
               style={{ ...S.btn("#FFFFFF", ACCENT), border: "1px solid " + ACCENT, padding: "6px 12px", fontSize: 12 }}>Manage</button>
             {onOpenAccount && (
               <button type="button" onClick={() => onOpenAccount({ clientId: c.client_id, companyName: c.company_name || c.client_id })}
@@ -5909,7 +5909,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
 
       {openNew && (
         <div style={S.card}>
-          <CardHead title="Create a client" desc="The client id becomes their subdomain and can't be changed afterwards, so get it right here." />
+          <CardHead title="Create a builder" desc="The builder id becomes their subdomain and can't be changed afterwards, so get it right here." />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
             <div>
               <label style={S.lbl}>Company name</label>
@@ -5918,7 +5918,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
                 placeholder="Junior Barns" style={S.input} />
             </div>
             <div>
-              <label style={S.lbl}>Client id</label>
+              <label style={S.lbl}>Builder id</label>
               <input value={id} onChange={(e) => { setIdTouched(true); setId(e.target.value); }}
                 placeholder="junior-barns" style={{ ...S.input, borderColor: idErr ? "#DC2626" : "#CBD5E1" }} />
               <div style={{ fontSize: 11, color: idErr ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
@@ -5949,9 +5949,9 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
           </div>
           <div style={{ marginTop: 16 }}>
             <button type="button" onClick={create} disabled={!canCreate}
-              title={!canCreate ? (idErr || "Enter a company name and a client id") : undefined}
+              title={!canCreate ? (idErr || "Enter a company name and a builder id") : undefined}
               style={{ ...S.btn(ACCENT, "#FFF"), opacity: canCreate ? 1 : 0.6, cursor: canCreate ? "pointer" : "not-allowed" }}>
-              {busy ? "Creating…" : "Create client"}
+              {busy ? "Creating…" : "Create builder"}
             </button>
           </div>
         </div>
@@ -5971,7 +5971,7 @@ function AdmMaster({ master }) {
   return (
     <div style={S.card}>
       <CardHead title="Master layout items" count={master ? items.length : null}
-        desc="The platform-wide palette. Every client's Items tab is a selection from this list — nothing here belongs to one tenant, and turning an item on for a client never edits this." />
+        desc="The platform-wide palette. Every builder's Items tab is a selection from this list — nothing here belongs to one tenant, and turning an item on for a builder never edits this." />
       {!master && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading master catalog…</div>}
       {master && items.length > 0 && <SearchInput value={q} onChange={setQ} placeholder="Search items…" />}
       {master && items.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No master items defined yet.</div>}
@@ -5999,7 +5999,7 @@ function AdminClientPanes({ sub, clientId, clientRow, master, features, onFlash,
   const loadCat = useCallback(async () => {
     setCatErr(null);
     try { setCat(await adminApi("get_client_catalog", { clientId })); }
-    catch (e) { setCatErr(e.message || "Could not load this client's catalog."); }
+    catch (e) { setCatErr(e.message || "Could not load this builder's catalog."); }
   }, [clientId]);
 
   useEffect(() => { loadCat(); }, [loadCat]);
@@ -6063,7 +6063,11 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
     } catch (e) {
       const m = e.message || String(e);
       if (/reassign\s*:\s*true/i.test(m)) {
-        const hit = /already linked to client "([^"]+)"/.exec(m);
+        // Tolerates BOTH wordings: the server said "client" before the 2026-08-02
+        // builder rename, and an operator's browser can be running a cached page
+        // against a newer function (or vice versa) — a strict match would silently
+        // stop naming the tenant in the reassign prompt.
+        const hit = /already linked to (?:client|builder) "([^"]+)"/.exec(m);
         setReassignFrom({ email: addr, fromClient: hit ? hit[1] : null });
       } else setReassignFrom(null);
       onFlash({ err: m });
@@ -6095,7 +6099,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
   return (
     <>
       <div style={S.card}>
-        <CardHead title="Owner logins" desc="Grant someone access to this client's portal. A new email gets a one-time set-up link; an email already attached to another client has to be moved deliberately." />
+        <CardHead title="Owner logins" desc="Grant someone access to this builder's portal. A new email gets a one-time set-up link; an email already attached to another builder has to be moved deliberately." />
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div style={{ flex: "1 1 240px", minWidth: 200 }}>
             <label style={S.lbl}>Email</label>
@@ -6117,7 +6121,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
         </div>
         {reassignFrom && (
           <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 12.5, marginTop: 12, lineHeight: 1.5 }}>
-            <strong>{reassignFrom.email}</strong> already belongs to <strong>{reassignFrom.fromClient || "another client"}</strong>.
+            <strong>{reassignFrom.email}</strong> already belongs to <strong>{reassignFrom.fromClient || "another builder"}</strong>.
             Moving them removes their access to that account.
             <div style={{ marginTop: 8 }}>
               <button type="button" onClick={() => { setEmail(reassignFrom.email); link(true); }} disabled={linkBusy}
@@ -6175,7 +6179,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
           Deleting {label} erases their catalog, designs, settings, logins and stored images. It cannot be
           undone, and it still asks for the operator password even though you're signed in.
         </div>
-        <button type="button" onClick={() => setDelOpen(true)} style={S.btn("#FEF2F2", "#DC2626")}>Delete this client…</button>
+        <button type="button" onClick={() => setDelOpen(true)} style={S.btn("#FEF2F2", "#DC2626")}>Delete this builder…</button>
       </div>
 
       {delOpen && (
@@ -6455,7 +6459,7 @@ function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
     const styleNames = new Set(((cat && cat.buildingStyles) || []).map((s) => String(s.label || s.key).toLowerCase()));
     const anyStyleMatch = rows.some((r) => styleNames.has(String(r.style || "").toLowerCase()));
     if (!anyStyleMatch) {
-      onFlash({ err: `None of the styles in that file match ${label}'s styles — it looks like it was exported for a different client. Nothing was imported.` });
+      onFlash({ err: `None of the styles in that file match ${label}'s styles — it looks like it was exported for a different builder. Nothing was imported.` });
       setFileKey((k) => k + 1);
       return;
     }
@@ -7736,7 +7740,7 @@ function Dashboard({ session }) {
               is nothing below repeating it. */}
           <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
           {viewing && (
-            <div title="You are acting as this client. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
+            <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
               style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEE2E2", border: "1px solid #DC2626", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#991B1B", whiteSpace: "nowrap" }}>
               <span>Editing as operator — changes are live</span>
               <button type="button" onClick={exitAccount}
