@@ -7829,12 +7829,13 @@ function Dashboard({ session }) {
       )}
     </button>
   );
-  // Same as navItem but with a "Soon" pill — for the coming-soon teaser tabs.
-  const soonItem = (id, label) => (
-    <button type="button" className={activeTab === id ? "active" : ""} title={label + " — coming soon"} onClick={() => navigate(id)}>
+  // Same as navItem but with a status pill — "Soon" by default, or a custom badge
+  // (e.g. "In Development") for tabs that are further along than the teaser ones.
+  const soonItem = (id, label, badge) => (
+    <button type="button" className={activeTab === id ? "active" : ""} title={label + " — " + (badge ? badge.toLowerCase() : "coming soon")} onClick={() => navigate(id)}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
-      <span className="soon">Soon</span>
+      <span className="soon">{badge || "Soon"}</span>
     </button>
   );
 
@@ -7853,7 +7854,7 @@ function Dashboard({ session }) {
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
           {navItem("inventory", "Inventory")}
-          {soonItem("orders", "Orders")}
+          {soonItem("orders", "Orders", "In Development")}
           {soonItem("commissions", "Commissions")}
           {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
               NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
