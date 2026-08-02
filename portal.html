@@ -2222,6 +2222,18 @@ function PricingCsv({ viewingLabel = null }) {
   const items = () => (cat && cat.items) || [];
   const allStyles = () => (cat && cat.styles) || [];
   const activeStyles = () => allStyles().filter((s) => s.active);
+  // Every option THIS client offers = built-in layout items + their catalog fixtures (doors/
+  // windows/ramps). Each becomes a CSV column so an owner can set how many the base price includes
+  // per size. Catalog columns key on the fixture id, so an "included" catalog item rides the same
+  // building_size_inclusions pipeline (item_key = fixture id). Label carries the size so multiple
+  // sizes of one style stay distinct and never collide with a built-in's label.
+  const optionCols = () => {
+    const layout = items().map((it) => ({ key: it.key, label: it.label }));
+    const fixtures = ((cat && cat.fixtures) || [])
+      .filter((f) => f && f.active !== false)
+      .map((f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}×${fmtFtIn(f.height_in)})` : ""}` }));
+    return [...layout, ...fixtures];
+  };
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
   const onStyleImg = (file) => {
@@ -2324,7 +2336,7 @@ function PricingCsv({ viewingLabel = null }) {
   };
   const downloadTemplate = () => {
     if (!cat) return;
-    const its = items();
+    const its = optionCols();
     const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
     // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
     // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
@@ -2357,7 +2369,7 @@ function PricingCsv({ viewingLabel = null }) {
       const iStyle = lc.indexOf("style"), iWidth = lc.indexOf("width"), iLength = lc.indexOf("length"), iPrice = lc.indexOf("price"), iActive = lc.indexOf("active");
       if (iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0) throw new Error('CSV needs "style", "width", "length" and "price" columns.');
       const reserved = new Set([iStyle, iWidth, iLength, iPrice, iActive]);
-      const labelToKey = {}; items().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
+      const labelToKey = {}; optionCols().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
       const colKey = header.map((h, idx) => reserved.has(idx) ? null : (labelToKey[h.toLowerCase()] || null));
       const rows = matrix.slice(1).map((cols) => {
         const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
@@ -2485,6 +2497,8 @@ function PricingCsv({ viewingLabel = null }) {
           and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
           included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+          The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
+          built-in items — so you can set how many of a specific catalog item come included with each size.
         </p>
         {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
           <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
