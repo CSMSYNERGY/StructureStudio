@@ -260,5 +260,36 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     if (upErr) { console.warn(`status update failed for ${u.short_code}:`, upErr.message); statuses[u.short_code] = cached[u.short_code] ?? u.status; }
   }
 
+  // 8. Sync order totals from the GHL estimate total (the Orders feature's `orders.total_cents`).
+  //    This lived on the wip/orders branch and was clobbered off beta by an unrelated redeploy,
+  //    so new orders stopped getting a total. GHL money is in dollars → cents. Never overwrite an
+  //    owner-entered total (total_source='manual'); a missing estimate leaves the order untouched
+  //    (never zeroed). Best-effort: a total failure must never fail the status sync.
+  try {
+    const codes = (designs ?? []).map((d) => d.short_code);
+    if (codes.length) {
+      const { data: orders } = await admin
+        .from("orders").select("id, short_code, total_source").eq("client_id", clientId).in("short_code", codes);
+      if (orders && orders.length) {
+        const estTotalById = new Map<string, number>();
+        for (const e of estimates) {
+          const id = String(e?._id ?? e?.id ?? "");
+          const t = Number(e?.total ?? e?.totalamountInUSD);
+          if (id && Number.isFinite(t)) estTotalById.set(id, t);
+        }
+        const estIdByCode = new Map((designs ?? []).map((d) => [d.short_code, d.ghl_estimate_id]));
+        for (const o of orders) {
+          if (o.total_source === "manual") continue;
+          const t = estTotalById.get(String(estIdByCode.get(o.short_code) ?? ""));
+          if (t == null) continue;
+          const { error: tErr } = await admin
+            .from("orders").update({ total_cents: Math.round(t * 100), total_source: "ghl", updated_at: new Date().toISOString() })
+            .eq("id", o.id).eq("client_id", clientId);
+          if (tErr) console.warn(`order total update failed for ${o.short_code}:`, tErr.message);
+        }
+      }
+    }
+  } catch (e) { console.warn("order total sync failed:", (e as Error)?.message); }
+
   return json({ ok: true, statuses, synced: true, changed: updates.length });
 }));
