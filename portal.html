@@ -110,7 +110,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260801j" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260802a" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -274,7 +274,7 @@ const TAB_META = {
   "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
   "build-schedule": ["Build Schedule", "Track buildings from order to done — coming soon"],
   "delivery-schedule": ["Delivery Schedule", "Plan and manage deliveries — coming soon"],
-  "inventory": ["Inventory", "Track every building on your lot — coming soon"],
+  "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
   "repairs": ["Repairs", "Manage repair jobs from request to done — coming soon"],
   "view-3d": ["3D Design", "Let customers see their building in 3D — coming soon"],
   "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
@@ -826,10 +826,14 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     // Operator view-as: rows come from operator-portal (service-role, audit-logged).
     // The live status sync is SKIPPED — sync-design-status is owner-JWT-bound and
     // would refresh the operator's own tenant, not the viewed one. Cached statuses show.
+    // Inventory masters (status='inventory', migration 075) are lot buildings, not
+    // customer estimates — they live on the Inventory tab. Filtered here AFTER fetch so
+    // BOTH paths (own-tenant query and operator view-as fetchDesigns) exclude them.
+    const notInventory = (r) => r.status !== "inventory";
     if (fetchDesigns) {
       try {
         const { designs, versions } = await fetchDesigns();
-        setRows(designs || []);
+        setRows((designs || []).filter(notInventory));
         const map = {};
         (versions || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
         setVmap(map);
@@ -838,11 +842,11 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     }
     const { data, error: err } = await sb
       .from("designs")
-      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id")
       .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
-    const list = data || [];
+    const list = (data || []).filter(notInventory);
     setRows(list); // show cached statuses immediately
     // Refresh fulfillment status from GHL (read-only projection). Non-fatal: if the sync
     // errors or GHL isn't configured, the cached designs.status values above stay shown.
@@ -997,7 +1001,13 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                       )}
                     </td>
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
-                    <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>; })()}</td>
+                    <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return (
+                      <span style={{ whiteSpace: "nowrap" }}>
+                        <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>
+                        {/* Source label (075): this estimate was sent from an inventory building. */}
+                        {r.inventory_unit_id && <span title="Sent from an inventory building" style={{ marginLeft: 6, background: "#DBEAFF", color: "#3D3672", borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 8px", whiteSpace: "nowrap" }}>Inventory</span>}
+                      </span>
+                    ); })()}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {/* Opens IN THE PORTAL designer — never the public page, which now
                           silently captures leads and saves drafts; staff browsing a
@@ -1149,10 +1159,13 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     setError(null);
     let list;
     let browsing = [];
+    // Inventory masters are lot buildings, not contacts — exclude on both paths (they
+    // have an empty contact, so they'd otherwise group as a nameless short_code row).
+    const notInventoryLead = (r) => r.status !== "inventory";
     if (fetchDesigns) {
       // Operator view-as: rows from operator-portal (service-role, audit-logged);
       // live status sync skipped (owner-JWT-bound) — cached statuses show.
-      try { const res = await fetchDesigns(); list = res.designs || []; browsing = res.capturedLeads || []; }
+      try { const res = await fetchDesigns(); list = (res.designs || []).filter(notInventoryLead); browsing = res.capturedLeads || []; }
       catch (e) { setError(e.message || String(e)); setRows([]); return; }
     } else {
     const { data, error: err } = await sb
@@ -1161,7 +1174,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
-    list = data || [];
+    list = (data || []).filter(notInventoryLead);
     // Browsing leads (migration 062): people who passed the public designer's gate or
     // opened quote Details but never submitted. RLS scopes the read to this tenant.
     // Additive — a failure here must never block the design list.
@@ -1768,6 +1781,10 @@ function SettingsView({ section }) {
         <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
       </div>
       )}
+
+      {/* Sales locations + serial numbers (075) live under Branding for now — Carolyn's
+          call until Build/Delivery Scheduling gives them a home of their own. */}
+      {show("branding") && <LocationsCard />}
 
       {show("branding") && (<>
       <div style={S.card}>
@@ -4624,6 +4641,326 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 }
 
 
+// ─── Inventory tab (migration 075) ───
+// One row per PHYSICAL building on a sales lot. The master design behind a unit is a
+// designs row with status='inventory' (excluded from Designs/Contacts and from the GHL
+// sync). All reads/writes go through portal-settings, so operator view-as works via the
+// sb.functions targetClientId injection and writes get the server-side can_write gate.
+const invMoney = (cents) => cents == null ? "—" :
+  "$" + (cents / 100).toLocaleString(undefined, { minimumFractionDigits: cents % 100 ? 2 : 0, maximumFractionDigits: 2 });
+// A unit displays Sold when explicitly marked, OR when any estimate sent from it has been
+// accepted (or further) — a sale recorded only in the CRM still flips the row here.
+const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
+const invEffStatus = (u) =>
+  (u.status === "sold" || (u.estimates || []).some((e) => INV_SOLD_EST.has(normStatus(e.status)))) ? "sold" : "available";
+function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesign = null, onSendEstimate = null, onNew = null }) {
+  const [rows, setRows] = useState(null);      // null = loading
+  const [locations, setLocations] = useState([]);
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [locFilter, setLocFilter] = useState("all");
+  const [expanded, setExpanded] = useState({});  // unit id -> bool
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState(null);          // { ok } | { err }
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "list_inventory" } });
+    if (err || !data || data.error) {
+      setError((data && data.error) || (err ? await fnError(err) : "Could not load inventory."));
+      setRows([]); return;
+    }
+    setRows(data.units || []);
+    setLocations(data.locations || []);
+  }, [clientId]);
+  useEffect(() => { load(); }, [load, refreshKey]);
+
+  const counts = (rows || []).reduce((a, u) => { const k = invEffStatus(u); a[k] = (a[k] || 0) + 1; return a; }, {});
+  const filtered = (rows || []).filter((u) => {
+    if (statusFilter !== "all" && invEffStatus(u) !== statusFilter) return false;
+    if (locFilter !== "all" && String(u.locationId || "") !== locFilter) return false;
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    const hay = ["#" + u.serial, String(u.serial), titleCase(u.style || ""), u.size || "", u.locationName || "",
+      ...(u.estimates || []).map((e) => (e.name || "") + " " + (e.estimateNumber ? "EST-" + e.estimateNumber : ""))].join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+
+  const invoke = async (body, okMsg) => {
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
+    if (err || !data || data.error) {
+      setMsg({ err: (data && data.error) || (err ? await fnError(err) : "That didn't save.") });
+      return false;
+    }
+    if (okMsg) setMsg({ ok: okMsg });
+    return data;
+  };
+  const markStatus = async (u, to) => {
+    setBusyId(u.id); setMsg(null);
+    await invoke({ action: "update_inventory", unitId: u.id, status: to },
+      to === "sold" ? `#${u.serial} marked sold.` : `#${u.serial} is available again.`);
+    setBusyId(null); load();
+  };
+  const del = async (u) => {
+    if (!window.confirm(`Delete building #${u.serial}? Its floor plan and version history are removed. Estimates already sent to customers are kept (they just lose the Inventory label).`)) return;
+    setBusyId(u.id); setMsg(null);
+    const r = await invoke({ action: "delete_inventory", unitId: u.id });
+    if (r) {
+      // The master design's cascade (row + versions + PDFs) reuses delete_design.
+      // Masters are never billing records, so no typed confirmation is required.
+      await sb.functions.invoke("portal-settings", { body: { action: "delete_design", shortCode: r.designShortCode || u.shortCode } }).catch(() => {});
+      setMsg({ ok: `Building #${u.serial} deleted.` });
+    }
+    setBusyId(null); load();
+  };
+
+  const chip = (k, label, n, on) => (
+    <button key={k} type="button" aria-pressed={on} onClick={() => setStatusFilter(k)}
+      style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontFamily: "inherit",
+        fontSize: 12, fontWeight: 700, borderRadius: 16, padding: "5px 12px",
+        background: on ? "#1E293B" : "#FFF", color: on ? "#FFF" : "#475569",
+        border: `1px solid ${on ? "#1E293B" : "#E2E8F0"}` }}>
+      {label}<span style={{ fontSize: 10.5, opacity: 0.75 }}>{n}</span>
+    </button>
+  );
+  const total = (rows || []).length;
+  const tag = { background: "#DBEAFF", color: "#3D3672", borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 9px", whiteSpace: "nowrap" };
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Inventory" count={total}
+        right={<>
+          <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New inventory building</button>}
+        </>} />
+      <input value={query} onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search inventory — serial #, building, location, customer…"
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 11 }} />
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 13, alignItems: "center" }}>
+        {chip("all", "All", total, statusFilter === "all")}
+        {(counts.available || 0) > 0 && chip("available", "Available", counts.available, statusFilter === "available")}
+        {(counts.sold || 0) > 0 && chip("sold", "Sold", counts.sold, statusFilter === "sold")}
+        {locations.length > 0 && (
+          <select value={locFilter} onChange={(e) => setLocFilter(e.target.value)}
+            style={{ marginLeft: "auto", fontSize: 12, fontWeight: 700, color: "#334155", border: "1px solid #E2E8F0", background: "#FFF", borderRadius: 9, padding: "6px 10px" }}>
+            <option value="all">📍 All locations</option>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        )}
+      </div>
+      {msg && msg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginBottom: 10 }}>{msg.err}</div>}
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+          Nothing on the lot yet. Design a building in the <strong>Designer</strong> tab and click <strong>Save to Inventory</strong> — it takes the next serial number automatically.
+        </p>
+      )}
+      {rows && rows.length > 0 && filtered.length === 0 && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No buildings match{query ? <> “{query}”</> : null}.</p>
+      )}
+      {rows && filtered.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              {["Serial #", "Building", "Location", "Asking price", "Estimates", "Added", "Status", "Actions"].map((h) => (
+                <th key={h} style={S.th}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {filtered.map((u) => {
+                const st = invEffStatus(u);
+                const ests = u.estimates || [];
+                const isOpen = !!expanded[u.id];
+                const winner = ests.find((e) => INV_SOLD_EST.has(normStatus(e.status)));
+                return (
+                  <React.Fragment key={u.id}>
+                    <tr>
+                      <td style={{ ...S.td, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>#{u.serial}</td>
+                      <td style={S.td}><strong>{[titleCase(u.style || ""), u.size].filter(Boolean).join(" ") || "—"}</strong></td>
+                      <td style={S.td}>{u.locationName ? <>{u.locationName}{u.locationCity ? <span style={{ color: "#94A3B8" }}> · {u.locationCity}</span> : null}</> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
+                      <td style={S.td}><strong>{invMoney(u.askingPriceCents)}</strong></td>
+                      <td style={S.td}>
+                        {ests.length === 0 ? <span style={{ color: "#94A3B8" }}>—</span> : (
+                          <button type="button" onClick={() => setExpanded((x) => ({ ...x, [u.id]: !x[u.id] }))}
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>
+                            {ests.length} {ests.length === 1 ? "estimate" : "estimates"} {isOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                      </td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>{fmtDate(u.createdAt)}</td>
+                      <td style={S.td}>
+                        <span style={{ background: st === "sold" ? "#EEF2FF" : "#F0FDF4", color: st === "sold" ? "#3D3672" : "#15803D", borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>
+                          {st === "sold" ? "Sold" : "Available"}
+                        </span>
+                      </td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                        <button type="button" disabled={busyId === u.id}
+                          onClick={() => onOpenDesign && onOpenDesign(u.shortCode, null, { unit: { unitId: u.id, askingPriceCents: u.askingPriceCents, locationId: u.locationId } })}
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
+                        {st !== "sold" && (
+                          <button type="button" disabled={busyId === u.id}
+                            onClick={() => onSendEstimate && onSendEstimate(u)}
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Send estimate</button>
+                        )}
+                        {u.imageUrl && ssSafeUrl(u.imageUrl) && <a href={u.imageUrl} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginRight: 10 }}>PDF</a>}
+                        {isAdmin && (u.status === "sold"
+                          ? <button type="button" disabled={busyId === u.id} onClick={() => markStatus(u, "available")}
+                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#64748B", fontWeight: 700, marginRight: 10 }}>Mark available</button>
+                          : (st !== "sold" && <button type="button" disabled={busyId === u.id} onClick={() => markStatus(u, "sold")}
+                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#64748B", fontWeight: 700, marginRight: 10 }}>Mark sold</button>))}
+                        {isAdmin && <button type="button" disabled={busyId === u.id} onClick={() => del(u)}
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#CBD5E1", fontWeight: 700 }}>Delete</button>}
+                      </td>
+                    </tr>
+                    {isOpen && ests.length > 0 && (
+                      <tr><td colSpan={8} style={{ padding: "2px 8px 12px" }}>
+                        <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>
+                          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "#94A3B8", textTransform: "uppercase", marginBottom: 9 }}>
+                            Estimates on building #{u.serial}
+                          </div>
+                          {ests.map((e) => {
+                            const es = normStatus(e.status);
+                            const c = STATUS_COLORS[es] || STATUS_COLORS.sent;
+                            const isWinner = winner && winner.shortCode === e.shortCode;
+                            return (
+                              <div key={e.shortCode} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", fontSize: 13, flexWrap: "wrap" }}>
+                                <span style={tag}>Inventory</span>
+                                <strong>{e.name || "—"}</strong>
+                                <span style={{ color: "#94A3B8", fontSize: 12 }}>{e.estimateNumber ? `EST-${e.estimateNumber} · ` : ""}{fmtDate(e.createdAt)}</span>
+                                <span style={{ background: c.bg, color: c.fg, borderRadius: 14, padding: "2.5px 10px", fontSize: 11, fontWeight: 700 }}>
+                                  {STATUS_LABELS[es]}{isWinner && st === "sold" ? " — buyer" : ""}
+                                </span>
+                                {st === "sold" && !isWinner && !INV_SOLD_EST.has(es) && (
+                                  <span style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 12, fontSize: 11, fontWeight: 700, padding: "3px 10px" }}>⚠ Building sold — offer a new build?</span>
+                                )}
+                                <button type="button" onClick={() => onOpenDesign && onOpenDesign(e.shortCode, null, null)}
+                                  style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open</button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Sales locations + building serial numbers (Settings → Branding) ───
+// Locations are where inventory buildings sit on display; the serial block sets the ONE
+// shared per-builder sequence (inventory now, orders when Build Scheduling ships).
+function LocationsCard() {
+  const [locs, setLocs] = useState(null);        // null = loading
+  const [nextSerial, setNextSerial] = useState("");
+  const [form, setForm] = useState(null);        // { id?, name, street, city, state, zip } | null
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const load = useCallback(async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "list_locations" } });
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load locations." }); setLocs([]); return; }
+    setLocs(data.locations || []);
+    setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const saveLoc = async () => {
+    if (!form || !String(form.name || "").trim()) { setMsg({ err: "Give the location a name." }); return; }
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_location", ...form } });
+    setBusy(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
+    setForm(null); setMsg({ ok: "Location saved." }); load();
+  };
+  const delLoc = async (l) => {
+    if (!window.confirm(`Remove "${l.name}"? Buildings sitting there keep existing — they'll just show no location.`)) return;
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "delete_location", id: l.id } });
+    setBusy(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Delete failed." }); return; }
+    load();
+  };
+  const saveSerial = async () => {
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_serial_start", nextSerial: Number(nextSerial) } });
+    setBusy(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
+    setMsg({ ok: `Next building will be #${data.nextSerial}.` });
+  };
+  const F = form || {};
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Sales Locations</div>
+      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+        The lots where your buildings sit on display. Every inventory building is tracked to one of these.
+      </div>
+      {msg && msg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginBottom: 10 }}>{msg.err}</div>}
+      {locs === null && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}
+      {locs && locs.length === 0 && <p style={{ fontSize: 13, color: "#64748B" }}>No locations yet — add your first lot below.</p>}
+      {(locs || []).map((l) => (
+        <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 2px", borderBottom: "1px solid #F1F5F9", fontSize: 13, flexWrap: "wrap" }}>
+          <strong style={{ minWidth: 140 }}>{l.name}</strong>
+          <span style={{ color: "#64748B", flex: 1, minWidth: 200 }}>{[l.street, l.city, l.state, l.zip].filter(Boolean).join(", ") || "No address"}</span>
+          <span style={{ background: "#F1F5F9", color: "#475569", borderRadius: 12, fontSize: 11, fontWeight: 700, padding: "2px 9px" }}>{l.buildings} {l.buildings === 1 ? "building" : "buildings"}</span>
+          <button type="button" onClick={() => { setForm({ id: l.id, name: l.name, street: l.street || "", city: l.city || "", state: l.state || "", zip: l.zip || "" }); }} disabled={busy}
+            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Edit</button>
+          <button type="button" onClick={() => delLoc(l)} disabled={busy}
+            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#94A3B8", fontWeight: 700 }}>Remove</button>
+        </div>
+      ))}
+      {form ? (
+        <div style={{ background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 10, padding: "13px 14px", marginTop: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 10 }}>
+            <div><span style={S.lbl}>Location name</span><input style={S.input} value={F.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Hwy 65 Display" /></div>
+            <div><span style={S.lbl}>Street</span><input style={S.input} value={F.street} onChange={(e) => setForm((f) => ({ ...f, street: e.target.value }))} /></div>
+            <div><span style={S.lbl}>City</span><input style={S.input} value={F.city} onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))} /></div>
+            <div><span style={S.lbl}>State</span><input style={S.input} value={F.state} onChange={(e) => setForm((f) => ({ ...f, state: e.target.value }))} /></div>
+            <div><span style={S.lbl}>Zip</span><input style={S.input} value={F.zip} onChange={(e) => setForm((f) => ({ ...f, zip: e.target.value.replace(/\D/g, "").slice(0, 5) }))} /></div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={saveLoc} disabled={busy} style={S.btn(ACCENT, "#FFF")}>{busy ? "Saving…" : (F.id ? "Save location" : "+ Add location")}</button>
+            <button type="button" onClick={() => setForm(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 12 }}>
+          <button type="button" onClick={() => setForm({ name: "", street: "", city: "", state: "", zip: "" })} style={S.btn(ACCENT, "#FFF")}>+ Add location</button>
+        </div>
+      )}
+      <div style={{ borderTop: "1px solid #EDF1F6", margin: "18px 0 14px" }}></div>
+      <div style={S.h2}>Building Serial Numbers</div>
+      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+        Every inventory building — and, once Orders ships, every customer order — takes the next number
+        in one shared sequence, in the order they're created.
+      </div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <span style={S.lbl}>Next serial #</span>
+          <input style={{ ...S.input, fontSize: 18, fontWeight: 800, width: 140, fontVariantNumeric: "tabular-nums" }}
+            value={nextSerial} inputMode="numeric"
+            onChange={(e) => setNextSerial(e.target.value.replace(/\D/g, "").slice(0, 9))} />
+        </div>
+        <button type="button" onClick={saveSerial} disabled={busy || !nextSerial} style={S.btn(ACCENT, "#FFF")}>Save</button>
+        <span style={{ fontSize: 12, color: "#94A3B8", maxWidth: 420, lineHeight: 1.5 }}>
+          Set this once to match your shop's count: if your last build was <strong>#12046</strong>, enter <strong>12047</strong>.
+          It advances on its own and can never go backwards past a used number.
+        </span>
+      </div>
+      <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600, marginTop: 14, lineHeight: 1.5 }}>
+        📍 Assigning team members to locations arrives with Build &amp; Delivery Scheduling — the location list you build here is what it will use.
+      </div>
+    </div>
+  );
+}
+
 // ─── In-portal Designer tab ───
 // Mounts the shared designer module (structure-studio.component.js, loaded before this
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
@@ -6831,8 +7168,11 @@ function Dashboard({ session }) {
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
   // there would corrupt the very activity Contacts reports.
-  const openInDesigner = (code, version = null) => {
-    setOpenDesign({ clientId: effClientId, code, version, n: Date.now() });
+  const openInDesigner = (code, version = null, extra = null) => {
+    // `extra` carries the inventory fields: { asNew, inventoryUnitId } for "Send
+    // estimate" (load the unit's design as a FRESH estimate), or { unit: {...} } for
+    // opening a master in update mode. Plain design opens pass nothing.
+    setOpenDesign({ clientId: effClientId, code, version, ...(extra || {}), n: Date.now() });
     navigate("designer");
   };
 
@@ -6952,6 +7292,7 @@ function Dashboard({ session }) {
           {navItem("designer", "Designer")}
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
+          {navItem("inventory", "Inventory")}
           {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
               NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
           {canAdmin && navItem("quickbooks", "QuickBooks")}
@@ -6961,7 +7302,6 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing")}
-          {soonItem("inventory", "Inventory")}
           {soonItem("repairs", "Repairs")}
           {soonItem("view-3d", "3D Design")}
           {soonItem("rent-to-own-contracts", "Rent to Own")}
@@ -7231,16 +7571,11 @@ function Dashboard({ session }) {
               />
             )}
             {!gateLocked && activeTab === "inventory" && (
-              <ComingSoon
-                title="Inventory"
-                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>}
-                blurb="Know exactly what's on your lot at all times. Every building — in stock, on display, or sold and awaiting delivery — tracked in one live list."
-                bullets={[
-                  "Live list of every building on your lot",
-                  "Stock, display, and sold statuses at a glance",
-                  "Know what's ready to sell today",
-                ]}
-              />
+              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={canAdmin}
+                refreshKey={designsRefreshKey}
+                onOpenDesign={openInDesigner}
+                onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id })}
+                onNew={() => navigate("designer")} />
             )}
             {!gateLocked && activeTab === "repairs" && (
               <ComingSoon

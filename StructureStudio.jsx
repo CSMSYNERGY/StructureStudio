@@ -52,6 +52,20 @@ const BUILT_IN_TOOLS = {
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
 
+// Legacy render safety-net. When a tenant HIDES a built-in option (deactivates it in
+// client_layout_items so it drops out of get_config's layoutItems), its already-placed items on
+// SAVED designs would otherwise lose their render config and vanish. This provides the standard
+// built-in door/window/ramp definitions for RENDERING ONLY (noPalette → never a placeable tool),
+// so old quotes keep drawing correctly forever. Spread FIRST in ITEMS so a tenant that still has
+// the item ACTIVE overrides it with their own config (and it shows in the palette as normal); it
+// only fills the gap for a HIDDEN item. Dimensions/colors mirror the layout_item_types master.
+const LEGACY_LAYOUT_FALLBACK = {
+  singleDoor: { label: "Single Door (36\")", icon: "🚪", color: "#D97706", width: 3, height: 0.5, shortLabel: "SD", wallOnly: true, noPalette: true },
+  doubleDoor: { label: "Double Door (60\")", icon: "🚪🚪", color: "#B45309", width: 5, height: 0.5, shortLabel: "DD", wallOnly: true, noPalette: true },
+  window: { label: "Window (24\")", icon: "🪟", color: "#0EA5E9", width: 2, height: 0.5, shortLabel: "W", wallOnly: true, noPalette: true },
+  ramp: { label: "Ramp", icon: "⬛", color: "#78716C", width: 3, height: 3, shortLabel: "RAMP", doorSnap: true, noPalette: true },
+};
+
 // Title-case a building-style name for display (designs store either the label
 // "Farmland" or the lowercase key "cabin").
 function capWords(s) { return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase()); }
@@ -1224,7 +1238,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     return out;
   })();
-  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
+  const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     ...(rampCustom && C.layoutItems && C.layoutItems.ramp ? { ramp: { ...C.layoutItems.ramp, noPalette: true } } : {}),
@@ -1477,6 +1491,112 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       } catch (_e) { /* draft save must never break the designer */ }
     })();
   };
+  // ─── Inventory (migration 075) — embedded-only ───
+  // inventoryUnitRef: the unit a "Send estimate" flow came from; the submit success path
+  // links the new design back to it. inventoryMaster: non-null while an inventory MASTER
+  // design (status='inventory') is open — submit is blocked (a master must never become a
+  // customer estimate) and the save button flips to "Update Inventory Building".
+  const inventoryUnitRef = useRef(null);
+  const [inventoryMaster, setInventoryMaster] = useState(null); // { code, unitId, priceCents, locationId } | null
+  const [invDialog, setInvDialog] = useState(null); // { busy, err, locations, locationId, price, done } | null
+  // The pre-tax building total, mirroring the Details subtotal WITHOUT the customer-
+  // specific lines (delivery, discounts) — an asking price describes the building alone.
+  const inventoryQuotePrefill = () => {
+    try {
+      const selRows = computeSelectionRows(sel, paintColors, C, items);
+      const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+      const roList = items.filter((i) => i.type === "roughOpening");
+      const lp = C.layoutPricing && C.layoutPricing.roughOpening;
+      const ov = (lp && lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
+      const roRate = lp ? (Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0) : 0;
+      const customTotal = (customOptions || []).reduce((s, r) => {
+        const amt = Math.max(0, parseFloat(r && r.amount) || 0);
+        const q = r && r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1;
+        return s + amt * q;
+      }, 0);
+      return Math.max(0,
+        selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+        + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+        + (C.showPricing ? roList.length * roRate : 0)
+        + customTotal);
+    } catch (_e) { return 0; }
+  };
+  const openInventoryDialog = async () => {
+    if (!sel.style || !sel.size) { setSubmitError("Pick a Building Style and Size before saving to inventory."); return; }
+    setSubmitError(null);
+    const isUpdate = Boolean(inventoryMaster && inventoryMaster.unitId);
+    const prefill = isUpdate && inventoryMaster.priceCents != null
+      ? inventoryMaster.priceCents / 100
+      : inventoryQuotePrefill();
+    setInvDialog({
+      busy: true, err: null, locations: [],
+      locationId: (isUpdate && inventoryMaster.locationId) || "",
+      price: prefill > 0 ? String(Math.round(prefill * 100) / 100) : "",
+      done: null,
+    });
+    try {
+      // targetClientId: the component's own supabase client shares the signed-in portal
+      // session but NOT portal.html's view-as injection, so the tenant is named
+      // explicitly. For an owner it's a harmless no-op; for an operator in view-as it
+      // routes the call to the viewed tenant with the server-side can_write gate.
+      const { data, error } = await supabase.functions.invoke("portal-settings",
+        { body: { action: "list_locations", targetClientId: C.clientId } });
+      if (error || !data || data.error) throw new Error((data && data.error) || "Could not load your locations.");
+      setInvDialog((d) => d && { ...d, busy: false, locations: data.locations || [] });
+    } catch (e) {
+      setInvDialog((d) => d && { ...d, busy: false, err: e.message || String(e) });
+    }
+  };
+  const saveInventory = async () => {
+    if (!invDialog || invDialog.busy) return;
+    setInvDialog((d) => ({ ...d, busy: true, err: null }));
+    try {
+      const isUpdate = Boolean(inventoryMaster && inventoryMaster.unitId);
+      const code = isUpdate ? inventoryMaster.code : genShortCode();
+      // Render + upload the plan PDF — the same steps submitQuote runs, deliberately
+      // duplicated rather than extracted: refactoring the money path for a reuse win
+      // is a bad trade. Best-effort: an upload failure must not lose the unit.
+      let imageUrl = null;
+      try {
+        const canvas = renderExportCanvas();
+        const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        const jpegBin = atob(jpegDataUrl.split(",")[1]);
+        const jpegBytes = new Uint8Array(jpegBin.length);
+        for (let i = 0; i < jpegBin.length; i++) jpegBytes[i] = jpegBin.charCodeAt(i);
+        const blob = buildPdfFromJpegBytes(jpegBytes, canvas.width, canvas.height);
+        const filePath = `${C.clientId}/${code}-${Date.now()}.pdf`;
+        const up = await supabase.storage.from("floor-plans")
+          .upload(filePath, blob, { upsert: false, contentType: "application/pdf", cacheControl: "0" });
+        if (!up.error) imageUrl = supabase.storage.from("floor-plans").getPublicUrl(filePath).data.publicUrl;
+      } catch (_e) { /* PDF is nice-to-have here; the unit row matters more */ }
+      const priceStr = String(invDialog.price ?? "").replace(/[$,\s]/g, "");
+      const askingPriceCents = priceStr === "" ? null : Math.round((Number(priceStr) || 0) * 100);
+      const { data, error } = await supabase.functions.invoke("portal-settings", { body: {
+        action: "save_inventory", targetClientId: C.clientId,
+        ...(isUpdate ? { unitId: inventoryMaster.unitId } : { shortCode: code }),
+        imageUrl, askingPriceCents, locationId: invDialog.locationId || null,
+        selections: sel, paintColors, items, customOptions, roDimensions, bldgW, bldgH,
+      } });
+      if (error) {
+        let m = "Save failed — try again.";
+        try { const b = await error.context.clone().json(); if (b && b.error) m = b.error; } catch (_e) { /* keep generic */ }
+        throw new Error(m);
+      }
+      if (!data || data.error) throw new Error((data && data.error) || "Save failed — try again.");
+      setInvDialog((d) => ({ ...d, busy: false, done: { serial: data.serial ?? null, updated: isUpdate } }));
+      if (!isUpdate) {
+        // The design on screen IS now this unit's master — further saves are updates.
+        currentDesignIdRef.current = code;
+        setDesignCode(code);
+        setInventoryMaster({ code, unitId: data.unitId, priceCents: askingPriceCents, locationId: invDialog.locationId || null });
+      } else {
+        setInventoryMaster((m) => m && { ...m, priceCents: askingPriceCents, locationId: invDialog.locationId || null });
+      }
+      if (onSaved) onSaved();
+    } catch (e) {
+      setInvDialog((d) => ({ ...d, busy: false, err: e.message || String(e) }));
+    }
+  };
   // Details NEVER auto-opens. If the form drops back to incomplete (a cleared field, the
   // address search resetting values), the section CLOSES — so re-completing the form can
   // never resurface it without a fresh click. Without this, an earlier open survived the
@@ -1654,6 +1774,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // silent rewrites (saveDraftSilently refuses non-draft rows). Embedded mounts never
     // draft-save at all (customerFacing guard), so there this flag is inert.
     isDraftRef.current = data.status === "draft";
+    // Inventory master (075)? Mark it: submit gets blocked and the inventory button
+    // flips to update mode. unitId is enriched by the openDesign effect (the portal
+    // sends it); a master reached any other way still blocks submit.
+    setInventoryMaster(data.status === "inventory"
+      ? { code: data.short_code, unitId: null, priceCents: null, locationId: null }
+      : null);
     // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
     ghlContactIdRef.current = data.ghl_contact_id || null;
     ghlEstimateIdRef.current = data.ghl_estimate_id || null;
@@ -1736,7 +1862,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (!window.confirm("Opening this design will replace what's currently in the Designer tab. Continue?")) return;
     }
     let cancelled = false;
-    loadDesignByCode(String(openDesign.code), Number(openDesign.version) || null, () => cancelled);
+    (async () => {
+      await loadDesignByCode(String(openDesign.code), Number(openDesign.version) || null, () => cancelled);
+      if (cancelled) return;
+      if (openDesign.asNew) {
+        // "Send estimate" from Inventory: the unit's design becomes a FRESH estimate for
+        // a new customer — a new short_code is minted at submit, the contact starts
+        // blank, no GHL identity carries over, and the master itself stays untouched.
+        // Many customers can each get their own estimate on the same physical building.
+        currentDesignIdRef.current = null;
+        setDesignCode(null);
+        isDraftRef.current = false;
+        draftStateRef.current = null;
+        ghlContactIdRef.current = null;
+        ghlEstimateIdRef.current = null;
+        ghlEstimateNumberRef.current = null;
+        setHasExistingEstimate(false);
+        setViewingVersion(null);
+        setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+        setInventoryMaster(null);
+        inventoryUnitRef.current = openDesign.inventoryUnitId || null;
+      } else {
+        inventoryUnitRef.current = null;
+        if (openDesign.unit) {
+          // Inventory "Open": enrich the master marker so update mode knows its unit.
+          setInventoryMaster((m) => m && {
+            ...m,
+            unitId: openDesign.unit.unitId,
+            priceCents: openDesign.unit.askingPriceCents ?? null,
+            locationId: openDesign.unit.locationId ?? null,
+          });
+        }
+      }
+    })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, embedded, openDesign]);
@@ -3018,6 +3176,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // ─── SUBMIT QUOTE ───
   const submitQuote = async () => {
+    // An inventory MASTER is the lot building itself, never a customer estimate — a
+    // submit here would convert it (save_design promotion + a GHL estimate) and every
+    // unit list/serial would point at a customer's quote. Quoting an inventory building
+    // goes through the Inventory tab's "Send estimate", which loads it as a fresh design.
+    if (inventoryMaster && currentDesignIdRef.current === inventoryMaster.code) {
+      setSubmitError("This is an inventory building. Use “Send estimate” on the Inventory tab to quote it to a customer, or “Update Inventory Building” to save design changes.");
+      return;
+    }
     // Validate every contact field that's enabled in the config. Address fields
     // are required because downstream tax calc needs the full address.
     const FIELD_LABEL = { name: "Name", email: "Email", phone: "Phone", street: "Street Address", city: "City", state: "State", zip: "Zip" };
@@ -3124,6 +3290,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // — from here on it is a submitted design and draft saves must leave it alone.
       isDraftRef.current = false;
       draftStateRef.current = null;
+      // Estimate sent from an inventory unit ("Send estimate"): tie the new design to its
+      // unit so the Inventory tab lists it. Best-effort — a link failure must never break
+      // a submitted estimate; the fire-and-forget catch keeps it silent.
+      if (embedded && inventoryUnitRef.current) {
+        try {
+          supabase.functions.invoke("portal-settings", { body: {
+            action: "link_design_to_unit", targetClientId: C.clientId,
+            shortCode, unitId: inventoryUnitRef.current,
+          } }).catch(() => {});
+        } catch (_e) { /* never block the estimate on the label */ }
+      }
       setDesignCode(shortCode);
       setViewingVersion(null);
 
@@ -4627,6 +4804,72 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       )}
 
+      {/* Save-to-Inventory dialog (embedded-only; opened from the Submit Bar button). */}
+      {embedded && invDialog && (
+        <div onClick={() => { if (!invDialog.busy) setInvDialog(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFF", borderRadius: 14, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+            {invDialog.done ? (
+              <React.Fragment>
+                <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", marginBottom: 6 }}>
+                  {invDialog.done.updated
+                    ? "Inventory building updated"
+                    : `Added to inventory${invDialog.done.serial != null ? ` — Serial #${invDialog.done.serial}` : ""}`}
+                </div>
+                <div style={{ fontSize: 13, color: "#475569", marginBottom: 16 }}>
+                  Find it on your portal's Inventory tab{invDialog.done.updated ? "" : " — it can be quoted to customers from there"}.
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button type="button" onClick={() => setInvDialog(null)}
+                    style={{ background: "#1E293B", color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
+                </div>
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>
+                  {inventoryMaster && inventoryMaster.unitId ? "Update inventory building" : "Save to Inventory"}
+                </div>
+                <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+                  {inventoryMaster && inventoryMaster.unitId
+                    ? "Saves your design changes to this building. Its serial number and any estimates already sent are unaffected."
+                    : "No customer needed — this building goes on your lot and takes the next serial number automatically."}
+                </div>
+                {invDialog.err && (
+                  <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
+                )}
+                <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Location</label>
+                <select value={invDialog.locationId}
+                  onChange={(e) => setInvDialog((d) => d && { ...d, locationId: e.target.value })}
+                  disabled={invDialog.busy}
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 10px", fontSize: 13.5, marginBottom: 12, background: "#FFF", color: "#1E293B" }}>
+                  <option value="">{invDialog.busy ? "Loading locations…" : "No location yet"}</option>
+                  {invDialog.locations.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}{l.city ? ` — ${l.city}` : ""}</option>
+                  ))}
+                </select>
+                <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Asking price</label>
+                <input value={invDialog.price} inputMode="decimal" placeholder="0.00"
+                  onChange={(e) => setInvDialog((d) => d && { ...d, price: e.target.value })}
+                  disabled={invDialog.busy}
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 10px", fontSize: 13.5, background: "#FFF", color: "#1E293B" }} />
+                <div style={{ fontSize: 11, color: "#94A3B8", margin: "5px 0 14px" }}>
+                  Starts at this design's quoted price — a markdown here never changes your catalog.
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  <button type="button" onClick={() => setInvDialog(null)} disabled={invDialog.busy}
+                    style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                  <button type="button" onClick={saveInventory} disabled={invDialog.busy}
+                    style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
+                    {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Add to Inventory")}
+                  </button>
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Submit Bar */}
       {!submitted && (
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "16px 20px" }}>
@@ -4641,6 +4884,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
             </p>
+            {/* Business users can send this design to the lot instead of a customer.
+                Embedded-only: inventory is a portal feature; customers never see it. */}
+            {embedded && (
+              <button
+                type="button"
+                onClick={openInventoryDialog}
+                disabled={submitting || Boolean(invDialog && invDialog.busy)}
+                style={{
+                  background: "#FFF", color: "#334155", border: "1.5px solid #CBD5E1", borderRadius: 10,
+                  padding: "12px 20px", fontSize: 14, fontWeight: 800, cursor: "pointer",
+                  letterSpacing: "-0.01em", whiteSpace: "nowrap",
+                }}
+              >
+                {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}
+              </button>
+            )}
             <button
               onClick={submitQuote}
               disabled={submitting}
