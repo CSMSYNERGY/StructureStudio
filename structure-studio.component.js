@@ -1235,6 +1235,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ...(windowFixtures.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
+  const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
   const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
@@ -2158,6 +2159,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
   // swing/operation choice onto a stable `fixtureDoor` item.
   const placePickedDoor = useCallback((fx, swing, operation) => {
+    // Swap mode: replace the selected door in place (keep its wall/position) with the chosen door.
+    if (swapId != null && fx) {
+      const wFt = (Number(fx.widthIn) || 36) / 12;
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "fixtureDoor", fixtureItemId: fx.id, doorName: fx.name || "Door",
+        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+        widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null } : it));
+      setSwapId(null); setDoorPick(null); setToast(null); return;
+    }
     if (!doorPick || !fx) return;
     const widthFt = (Number(fx.widthIn) || 36) / 12;
     const iwPx = widthFt * scale, ihPx = 0.5 * scale;
@@ -2180,12 +2190,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setSelectedId(ni.id);
     setDoorPick(null);
     setToast(null);
-  }, [doorPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
+  }, [swapId, doorPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
 
   // Place the window style chosen in the picker at the remembered wall/point. A catalog window is
   // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
   // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
   const placePickedWindow = useCallback((fx) => {
+    if (swapId != null && fx) {
+      const wFt = (Number(fx.widthIn) || 24) / 12;
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
+        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, widthFt: wFt } : it));
+      setSwapId(null); setWindowPick(null); setToast(null); return;
+    }
     if (!windowPick || !fx) return;
     const widthFt = (Number(fx.widthIn) || 24) / 12;
     const iwPx = widthFt * scale, ihPx = 0.5 * scale;
@@ -2207,12 +2224,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setSelectedId(ni.id);
     setWindowPick(null);
     setToast(null);
-  }, [windowPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
+  }, [swapId, windowPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
 
   // Place the ramp style chosen in the picker on the remembered door. A custom ramp is a normal
   // type:"ramp" item (so all ramp machinery applies) but takes the style's OWN width + length
   // (length = the ramp's run/depth out from the door) and snapshots its spec + price.
   const placePickedRamp = useCallback((fx) => {
+    if (swapId != null && fx) {
+      const wFt = (Number(fx.widthIn) || 36) / 12;
+      const dpt = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "ramp", fixtureItemId: fx.id, rampName: fx.name || "Ramp",
+        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+        widthFt: wFt, heightFt: dpt } : it));
+      setSwapId(null); setRampPick(null); setToast(null); return;
+    }
     if (!rampPick || !fx) return;
     const door = rampPick.door;
     const widthFt = (Number(fx.widthIn) || 36) / 12;
@@ -2236,7 +2262,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setSelectedId(ni.id);
     setRampPick(null);
     setToast(null);
-  }, [rampPick, mgX, mgY, pW, pH, scale, RAMP_SPACE_FT]);
+  }, [swapId, rampPick, mgX, mgY, pW, pH, scale, RAMP_SPACE_FT]);
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
@@ -3571,9 +3597,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={doorFixtures} showPricing={!!C.showPricing} onCancel={() => setDoorPick(null)} onPlace={placePickedDoor} />, document.body)}
-      {rampPick && createPortal(<RampPicker ramps={rampFixtures} showPricing={!!C.showPricing} onCancel={() => setRampPick(null)} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={windowFixtures} showPricing={!!C.showPricing} onCancel={() => setWindowPick(null)} onPlace={placePickedWindow} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={doorFixtures} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
+      {rampPick && createPortal(<RampPicker ramps={rampFixtures} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={windowFixtures} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -3823,6 +3849,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          {selectedId && (() => {
+            // Swap: change a placed catalog door/window/ramp to a DIFFERENT one, in place. Only a
+            // deliberate click — dragging/nudging never opens it. Hidden if there's nothing to swap to.
+            const si = items.find((i) => i.id === selectedId);
+            if (!si) return null;
+            const isDoor = si.type === "fixtureDoor";
+            const isWin = si.type === "window" && si.fixtureItemId;
+            const isRamp = si.type === "ramp" && si.fixtureItemId;
+            const pool = isDoor ? doorFixtures : isWin ? windowFixtures : isRamp ? rampFixtures : null;
+            if (!pool || pool.length === 0) return null;
+            const openSwap = () => {
+              setSwapId(si.id); setActiveTool(null); setToast(null);
+              if (isDoor) setDoorPick({ swap: true }); else if (isWin) setWindowPick({ swap: true }); else setRampPick({ swap: true });
+            };
+            return <button onClick={openSwap} style={{ ...S.btn("#ECFEFF", "#0891B2"), border: "1px solid #A5F0FC" }}>⇄ Swap</button>;
+          })()}
           {selectedId && (
             <>
               <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
