@@ -7191,6 +7191,143 @@ function CommissionTeam() {
   );
 }
 
+// ─── Commissions report (main nav "Commissions" tab) ───
+// The payout report. One component serves everyone via server-side scoping: an owner or a
+// user granted "sees all payouts" sees the whole team; a plain rep sees only their own rows
+// and never a rate column. All data + actions go through portal-commissions (service-role);
+// the confidential ledger is never read directly by the browser.
+function CommissionsReport() {
+  const [data, setData] = useState(null);      // list_entries response | { entries: [] }
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [assign, setAssign] = useState(null);  // entry id whose rep dropdown is open
+
+  const call = async (body) => {
+    const { data: r, error } = await sb.functions.invoke("portal-commissions", { body });
+    if (error) { let m = error.message; try { const c = await error.context.json(); if (c && c.error) m = c.error; } catch (_x) {} throw new Error(m); }
+    if (r && r.error) throw new Error(r.error);
+    return r;
+  };
+  const load = useCallback(async () => {
+    setErr(null);
+    // Owner / full-access: refresh the ledger from GHL first (best-effort); a rep's compute 403s
+    // and is ignored, they just read their own rows.
+    try { await call({ action: "compute" }); } catch (_e) { /* non-owner or transient */ }
+    try { setData(await call({ action: "list_entries" })); }
+    catch (e) { setErr(e.message); setData({ entries: [] }); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const money = (c) => c == null ? "—" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const assignEarner = async (entryId, userId) => {
+    setBusy(true); setMsg(null); setAssign(null);
+    try { await call({ action: "assign_earner", entryId, userId: userId || null }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  const markPeriodPaid = async (periodKey, label) => {
+    if (!window.confirm(`Mark every payable commission in “${label}” as paid?`)) return;
+    setBusy(true); setMsg(null);
+    try { const r = await call({ action: "mark_paid", periodKey }); setMsg({ ok: `Marked ${r.paid} commission${r.paid === 1 ? "" : "s"} paid.` }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commissions…</div>;
+  const entries = data.entries || [];
+  const isOwner = !!data.isOwner, seesAll = !!data.seesAll, canSeeRates = !!data.canSeeRates;
+  const team = data.team || [];
+
+  if (data.enabled === false && entries.length === 0) {
+    return (
+      <div style={{ ...S.card, maxWidth: 640 }}>
+        <div style={{ ...S.h2, marginBottom: 6 }}>Commissions</div>
+        <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.6, margin: 0 }}>
+          {isOwner
+            ? <>Commission tracking isn't turned on yet. Set it up in <b>Settings → Commissions</b> — how reps earn and the payout schedule — and payouts appear here automatically as orders come in.</>
+            : <>Commission tracking isn't turned on for your account yet. Once it is, your payouts show up here.</>}
+        </p>
+      </div>
+    );
+  }
+
+  const groups = {};
+  for (const e of entries) { const k = e.periodKey || "unscheduled"; (groups[k] = groups[k] || { label: e.periodLabel, key: e.periodKey, rows: [] }).rows.push(e); }
+  const orderedKeys = Object.keys(groups).sort().reverse();
+
+  const statusChip = (s) => { const c = { pending: ["#FEF3C7", "#92400E", "Payable"], payable: ["#FEF3C7", "#92400E", "Payable"], paid: ["#DCFCE7", "#166534", "Paid"], excluded: ["#F1F5F9", "#64748B", "Excluded"] }[s] || ["#F1F5F9", "#64748B", s]; return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{c[2]}</span>; };
+  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const td = { fontSize: 13, padding: "10px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
+  const numTd = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
+
+  return (
+    <div>
+      {err && <div style={S.err}>{err}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>{seesAll ? "Commissions" : "Your commissions"}</div>
+        <button onClick={load} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+      </div>
+
+      {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
+
+      {orderedKeys.map((k) => {
+        const g = groups[k];
+        const total = g.rows.reduce((s, e) => s + (e.amountCents || 0), 0);
+        const anyPayable = isOwner && g.rows.some((e) => e.status !== "paid" && e.amountCents != null);
+        return (
+          <div key={k} style={{ ...S.card, marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800 }}>{g.label || "Unscheduled"}</div>
+              <div style={{ fontSize: 12.5, color: "#64748B" }}>{g.rows.length} order{g.rows.length === 1 ? "" : "s"} · <b style={{ color: "#1E293B" }}>{money(total)}</b></div>
+              {anyPayable && <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 13px" }}>Mark period paid</button>}
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={th}>Order</th><th style={th}>Customer</th><th style={th}>Building</th>
+                  {seesAll && <th style={th}>Rep</th>}
+                  <th style={{ ...th, textAlign: "right" }}>Base</th>
+                  {canSeeRates && <th style={{ ...th, textAlign: "right" }}>Rate</th>}
+                  <th style={{ ...th, textAlign: "right" }}>Commission</th><th style={th}>Status</th>
+                </tr></thead>
+                <tbody>
+                  {g.rows.map((e) => (
+                    <tr key={e.id}>
+                      <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>{e.orderNo ? "#" + e.orderNo : "—"}</td>
+                      <td style={td}>{e.customer}</td>
+                      <td style={td}>{e.building}</td>
+                      {seesAll && (
+                        <td style={td}>
+                          {e.earnerName || (canSeeRates
+                            ? (assign === e.id
+                                ? <select autoFocus disabled={busy} defaultValue="" onChange={(ev) => assignEarner(e.id, ev.target.value)} onBlur={() => setAssign(null)} style={{ ...S.input, padding: "5px 8px" }}>
+                                    <option value="" disabled>Assign rep…</option>
+                                    {team.map((t) => <option key={t.userId} value={t.userId}>{t.name}</option>)}
+                                  </select>
+                                : <button onClick={() => setAssign(e.id)} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 6, color: "#3D3672", fontWeight: 700, fontSize: 11.5, padding: "4px 9px", cursor: "pointer", fontFamily: "inherit" }}>Assign rep</button>)
+                            : <span style={{ color: "#94A3B8" }}>Unassigned</span>)}
+                        </td>
+                      )}
+                      <td style={numTd}>{money(e.baseCents)}</td>
+                      {canSeeRates && <td style={numTd}>{e.ratePercent == null ? "—" : e.ratePercent + "%"}</td>}
+                      <td style={{ ...numTd, fontWeight: 800 }}>{money(e.amountCents)}</td>
+                      <td style={td}>{statusChip(e.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
@@ -7982,16 +8119,7 @@ function Dashboard({ session }) {
               />
             )}
             {!gateLocked && activeTab === "commissions" && (
-              <ComingSoon
-                title="Commissions"
-                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>}
-                blurb="Commissions are calculated automatically on every sale, so each sales rep can see exactly what they've earned and what their next payout will be — no spreadsheets, no guesswork."
-                bullets={[
-                  "Commissions calculated automatically on every sale",
-                  "Each rep sees their own earnings and payouts",
-                  "Clear running totals, ready at pay period",
-                ]}
-              />
+              <CommissionsReport />
             )}
             {!gateLocked && activeTab === "reports" && (
               <ComingSoon

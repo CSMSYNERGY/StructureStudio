@@ -26,6 +26,9 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //   { action: "add_user",   email, fullName?, role }     // invite by email (reuses link_owner flow)
 //   { action: "remove_user", userId, mode }              // mode: "unlink" | "deactivate"
 //   { action: "compute", debug? }                        // refresh the ledger from orders×settings×rates (owner|full_access)
+//   { action: "list_entries" }                           // the report (rep=own, owner/sees_all=everyone)
+//   { action: "assign_earner", entryId, userId? }        // set/clear an entry's earner (owner|full_access)
+//   { action: "mark_paid", periodKey? | entryIds? }      // mark a period/entries paid (owner)
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -85,6 +88,18 @@ function collectedDate(pays: any[], totalCents: number | null): string | null {
   return null;
 }
 
+// Human label for a period_key ("YYYY-MM" monthly, or "freq:startdate" for day-bucket cadences).
+function periodLabel(key: string, freq: string, customDays: number | null): string {
+  if (/^\d{4}-\d{2}$/.test(key)) { const [y, m] = key.split("-").map(Number); return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }); }
+  const start = key.includes(":") ? key.split(":")[1] : key;
+  const s = new Date(start + "T00:00:00Z");
+  if (isNaN(s.getTime())) return key;
+  const len = freq === "weekly" ? 7 : freq === "biweekly" ? 14 : Math.max(1, Number(customDays) || 14);
+  const e = new Date(s.getTime() + (len - 1) * 86400000);
+  const f = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  return `${f(s)} – ${f(e)}, ${e.getUTCFullYear()}`;
+}
+
 Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -111,10 +126,11 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   const isOwner = role === "owner";
   const isAdmin = role === "owner" || role === "admin";
 
-  // The caller's own full_access grant (owner always sees rates regardless).
+  // The caller's own grants. Owner always sees rates + all payouts regardless.
   const { data: myCm } = await admin
-    .from("commission_members").select("full_access").eq("client_id", clientId).eq("user_id", user.id).maybeSingle();
+    .from("commission_members").select("full_access, sees_all_payouts").eq("client_id", clientId).eq("user_id", user.id).maybeSingle();
   const canSeeRates = isOwner || myCm?.full_access === true;
+  const seesAll = isOwner || myCm?.sees_all_payouts === true;
 
   let p: any;
   try { p = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
@@ -380,6 +396,93 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         }
         await audit(`compute (${computed} new, ${updated} updated)`);
         return json({ ok: true, orders: ords.length, computed, updated, ...(p.debug ? { diag } : {}) });
+      }
+
+      // ── the report: entries scoped to what the caller may see (rep = own; owner/sees_all = everyone) ──
+      case "list_entries": {
+        const { data: settings } = await admin.from("commission_settings").select("enabled, payout_frequency, custom_days").eq("client_id", clientId).maybeSingle();
+        const freq = settings?.payout_frequency || "biweekly";
+        const customDays = settings?.custom_days ?? null;
+        let q = admin.from("commission_entries").select("*").eq("client_id", clientId);
+        if (!seesAll) q = q.eq("earner_user_id", user.id);
+        const entries = (await q).data || [];
+
+        const orderIds = [...new Set(entries.map((e: any) => e.order_id))];
+        const ords = orderIds.length ? (await admin.from("orders").select("id, order_no, short_code").in("id", orderIds)).data || [] : [];
+        const ordById = new Map(ords.map((o: any) => [o.id, o]));
+        const codes = [...new Set(ords.map((o: any) => o.short_code).filter(Boolean))] as string[];
+        const dsns = codes.length ? (await admin.from("designs").select("short_code, contact, selections").eq("client_id", clientId).in("short_code", codes)).data || [] : [];
+        const dByCode = new Map(dsns.map((d: any) => [d.short_code, d]));
+        const earnerIds = [...new Set(entries.map((e: any) => e.earner_user_id).filter(Boolean))] as string[];
+        const nameById = new Map<string, string>();
+        if (earnerIds.length) {
+          const cu = (await admin.from("client_users").select("user_id, full_name").in("user_id", earnerIds)).data || [];
+          for (const u of cu) nameById.set(u.user_id, u.full_name || "");
+          for (const id of earnerIds) if (!nameById.get(id)) { try { const { data: au } = await admin.auth.admin.getUserById(id); nameById.set(id, au?.user?.email || "—"); } catch { nameById.set(id, "—"); } }
+        }
+        const enriched = entries.map((e: any) => {
+          const o: any = ordById.get(e.order_id) || {};
+          const d: any = o.short_code ? dByCode.get(o.short_code) : null;
+          const sel: any = d?.selections || {};
+          return {
+            id: e.id, orderId: e.order_id, orderNo: o.order_no ?? null,
+            customer: d?.contact?.name || "—",
+            building: [sel.style, sel.size].filter(Boolean).join(" ") || "—",
+            earnerUserId: e.earner_user_id,
+            earnerName: e.earner_user_id ? (nameById.get(e.earner_user_id) || "—") : null,
+            baseCents: e.base_cents, ratePercent: e.rate_percent == null ? null : Number(e.rate_percent),
+            amountCents: e.amount_cents, earnedOn: e.earned_on,
+            periodKey: e.period_key, periodLabel: e.period_key ? periodLabel(e.period_key, freq, customDays) : "Unscheduled",
+            status: e.status, kind: e.kind, isOverride: e.is_override,
+          };
+        });
+        // The assignable team (names) — only for someone who may edit commissions.
+        let team: any = undefined;
+        if (canSeeRates) {
+          const tRows = (await admin.from("client_users").select("user_id, full_name").eq("client_id", clientId).order("created_at")).data || [];
+          team = [];
+          for (const t of tRows) { let email = ""; try { const { data: au } = await admin.auth.admin.getUserById(t.user_id); email = au?.user?.email || ""; } catch { /* skip */ } team.push({ userId: t.user_id, name: t.full_name || email || "—", email }); }
+        }
+        return json({ ok: true, isOwner, seesAll, canSeeRates, enabled: !!settings?.enabled, entries: enriched, team });
+      }
+
+      // ── assign/reassign an earner on one entry (owner or full_access); recomputes its amount ──
+      case "assign_earner": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const entryId = Number(p.entryId);
+        if (!Number.isFinite(entryId)) return json({ error: "Invalid entry." }, 400);
+        const { data: entry } = await admin.from("commission_entries").select("*").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.status === "paid") return json({ error: "This commission is already paid — reverse the payment first." }, 409);
+        let earnerId: string | null = null, rate: number | null = null;
+        if (p.userId) {
+          await requireMember(p.userId);
+          earnerId = String(p.userId);
+          const { data: m } = await admin.from("commission_members").select("commission_percent").eq("client_id", clientId).eq("user_id", earnerId).maybeSingle();
+          rate = m?.commission_percent == null ? null : Number(m.commission_percent);
+        }
+        const amount = (entry.base_cents != null && rate != null) ? Math.round(entry.base_cents * rate / 100) : null;
+        const { error } = await admin.from("commission_entries")
+          .update({ earner_user_id: earnerId, rate_percent: rate, amount_cents: amount, is_override: true, updated_at: new Date().toISOString() })
+          .eq("client_id", clientId).eq("id", entryId);
+        if (error) throw error;
+        await audit(`assign_earner entry=${entryId} → ${earnerId || "unassigned"}`);
+        return json({ ok: true });
+      }
+
+      // ── mark a period (or specific entries) paid — OWNER ONLY. Skips already-paid / null-amount rows. ──
+      case "mark_paid": {
+        if (!isOwner) return json({ error: "Only the owner can mark commissions paid." }, 403);
+        const stamp = new Date().toISOString();
+        let q = admin.from("commission_entries")
+          .update({ status: "paid", paid_at: stamp, paid_batch: stamp, updated_at: stamp })
+          .eq("client_id", clientId).neq("status", "paid").not("amount_cents", "is", null);
+        if (Array.isArray(p.entryIds) && p.entryIds.length) q = q.in("id", p.entryIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n)));
+        else if (p.periodKey) q = q.eq("period_key", String(p.periodKey));
+        else return json({ error: "Nothing specified to mark paid." }, 400);
+        const paid = ((await q.select("id")).data || []).length;
+        await audit(`mark_paid ${paid} entries`);
+        return json({ ok: true, paid });
       }
 
       default:
