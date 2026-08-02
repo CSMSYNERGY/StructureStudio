@@ -25,6 +25,7 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //   { action: "set_grants", userId, seesAllPayouts?, fullAccess? }   // owner only
 //   { action: "add_user",   email, fullName?, role }     // invite by email (reuses link_owner flow)
 //   { action: "remove_user", userId, mode }              // mode: "unlink" | "deactivate"
+//   { action: "compute", debug? }                        // refresh the ledger from orders×settings×rates (owner|full_access)
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -35,6 +36,54 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
 const isUuid = (v: unknown) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+const enc = encodeURIComponent;
+
+// Bounded GHL estimate list. This is the ONLY estimate read GHL offers that works — there is
+// no single-estimate GET (/invoices/estimate/:id 404s), and the list carries the total but no
+// pre-tax subtotal. Returns [] on any failure — a missing base reads as "not yet known", never zero.
+async function listEstimates(locationId: string, apiKey: string): Promise<any[]> {
+  const headers = { Authorization: `Bearer ${apiKey}`, Version: "2021-07-28", "Content-Type": "application/json", Accept: "application/json" };
+  const out: any[] = []; const limit = 100;
+  for (let offset = 0; offset < 2000; offset += limit) {
+    let r: Response;
+    try { r = await fetch(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${enc(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers }); }
+    catch { break; }
+    if (!r.ok) break;
+    const d = await r.json().catch(() => null);
+    const arr = Array.isArray(d?.estimates) ? d.estimates : (Array.isArray(d?.data) ? d.data : []);
+    out.push(...arr);
+    if (arr.length < limit) break;
+  }
+  return out;
+}
+
+// The pay period a date falls into, per the tenant's cadence + anchor. Monthly = calendar month;
+// weekly/biweekly/custom = fixed-length day buckets counted forward from the anchor.
+function periodKey(dateStr: string, freq: string, anchor: string, customDays: number | null): { key: string; start: string; end: string } {
+  const d = new Date(dateStr + "T00:00:00Z");
+  if (freq === "monthly") {
+    const y = d.getUTCFullYear(), m = d.getUTCMonth();
+    const end = new Date(Date.UTC(y, m + 1, 0));
+    return { key: `${y}-${String(m + 1).padStart(2, "0")}`, start: new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+  }
+  const len = freq === "weekly" ? 7 : freq === "biweekly" ? 14 : Math.max(1, Number(customDays) || 14);
+  const a = new Date((anchor || dateStr) + "T00:00:00Z");
+  const bucket = Math.floor((d.getTime() - a.getTime()) / 86400000 / len);
+  const start = new Date(a.getTime() + bucket * len * 86400000);
+  const s = start.toISOString().slice(0, 10);
+  return { key: `${freq}:${s}`, start: s, end: new Date(start.getTime() + (len - 1) * 86400000).toISOString().slice(0, 10) };
+}
+
+// The date cumulative non-voided payments first reach the order total (the money-collected
+// trigger). Null until the order is fully collected — an un-collected order earns no commission yet.
+function collectedDate(pays: any[], totalCents: number | null): string | null {
+  if (totalCents == null) return null;
+  const sorted = pays.filter((p) => !p.voided_at).sort((a, b) => String(a.received_at).localeCompare(String(b.received_at)));
+  let sum = 0;
+  for (const p of sorted) { sum += p.amount_cents || 0; if (sum >= totalCents) return String(p.received_at).slice(0, 10); }
+  return null;
+}
 
 Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -225,6 +274,112 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         }
         await audit(`remove_user ${p.userId} (${mode})`);
         return json({ ok: true, mode });
+      }
+
+      // ── compute/refresh the ledger from orders × settings × rates (owner or full_access) ──
+      // Reconciles commission_entries against current orders WITHOUT disturbing rows the owner
+      // has finalized (status='paid') or hand-edited (is_override). The pre-tax base is filled
+      // best-effort from the GHL estimate subtotal; if GHL is unreachable the entry is still
+      // created with a null base/amount so the order shows on the report to be resolved.
+      case "compute": {
+        if (!canSeeRates) return json({ error: "Only the owner or a full-access admin can run commissions." }, 403);
+        const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();
+        if (!settings || !settings.enabled) return json({ ok: true, enabled: false, computed: 0, updated: 0 });
+        const baseType: string = settings.base_type;
+        const earnedOn: string = settings.earned_on;
+        const freq: string = settings.payout_frequency;
+        const anchor: string = settings.period_anchor;
+        const customDays: number | null = settings.custom_days;
+
+        const { data: orders } = await admin.from("orders")
+          .select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId);
+        const ords = orders || [];
+        if (ords.length === 0) return json({ ok: true, orders: 0, computed: 0, updated: 0 });
+        const codes = ords.map((o: any) => o.short_code).filter(Boolean);
+
+        // designs → ghl_estimate_id (for the pre-tax fetch); invoice_sends → earner; members → rate; team → still-valid earners.
+        const { data: designs } = await admin.from("designs").select("short_code, ghl_estimate_id").eq("client_id", clientId).in("short_code", codes);
+        const estIdByCode = new Map<string, string>((designs || []).map((d: any) => [d.short_code, d.ghl_estimate_id]));
+        const { data: invs } = await admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator").eq("client_id", clientId);
+        const senderByCode = new Map<string, string>();
+        for (const iv of invs || []) if (iv.sender_user_id && !iv.sent_by_operator) senderByCode.set(iv.short_code, String(iv.sender_user_id));
+        const { data: mems } = await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId);
+        const rateByUser = new Map<string, number | null>((mems || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
+        const { data: teamRows } = await admin.from("client_users").select("user_id").eq("client_id", clientId);
+        const teamSet = new Set<string>((teamRows || []).map((t: any) => t.user_id));
+
+        let paysByOrder = new Map<string, any[]>();
+        if (earnedOn === "collected") {
+          const { data: pays } = await admin.from("payments").select("order_id, amount_cents, received_at, voided_at").eq("client_id", clientId);
+          for (const pmt of pays || []) if (!pmt.voided_at) { const a = paysByOrder.get(pmt.order_id) || []; a.push(pmt); paysByOrder.set(pmt.order_id, a); }
+        }
+
+        // One bounded estimate-list call, only when some order still lacks a stored base.
+        const estById = new Map<string, any>();
+        if (baseType === "pretax_subtotal" && ords.some((o: any) => o.pretax_subtotal_cents == null && estIdByCode.get(o.short_code))) {
+          const { data: cs } = await admin.from("client_settings").select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
+          if (cs?.ghl_location_id && cs?.ghl_api_key) {
+            for (const e of await listEstimates(cs.ghl_location_id, cs.ghl_api_key)) { const id = String(e?._id ?? e?.id ?? ""); if (id) estById.set(id, e); }
+          }
+        }
+
+        const existing = (await admin.from("commission_entries").select("id, order_id, status, is_override").eq("client_id", clientId).eq("kind", "commission")).data || [];
+        const existByOrder = new Map<string, any[]>();
+        for (const e of existing) { const a = existByOrder.get(e.order_id) || []; a.push(e); existByOrder.set(e.order_id, a); }
+
+        const diag: any[] = [];
+        let computed = 0, updated = 0;
+        for (const o of ords) {
+          // Pre-tax base: stored value, else derive from the GHL estimate subtotal (scale verified
+          // against the order's known cents total, since GHL reports money in dollars).
+          let baseCents: number | null = o.pretax_subtotal_cents ?? null;
+          if (baseCents == null && baseType === "pretax_subtotal") {
+            const est = estById.get(String(estIdByCode.get(o.short_code) || ""));
+            if (est) {
+              // GHL exposes only the total (no pre-tax subtotal, no single-estimate GET). These
+              // builders rarely charge sales tax, so the total IS the pre-tax base; the owner adjusts
+              // the rare taxed order on the report. GHL money is dollars → cents (scale verified).
+              const tot = num(est.total ?? est.totalamountInUSD ?? est.invoiceTotal);
+              let scale = 100;
+              if (tot != null && o.total_cents != null) {
+                if (Math.abs(tot * 100 - o.total_cents) <= 2) scale = 100;
+                else if (Math.abs(tot - o.total_cents) <= 2) scale = 1;
+              }
+              if (tot != null) {
+                baseCents = Math.round(tot * scale);
+                await admin.from("orders").update({ pretax_subtotal_cents: baseCents, updated_at: new Date().toISOString() }).eq("id", o.id);
+              }
+              if (p.debug) diag.push({ code: o.short_code, tot, orderTotalCents: o.total_cents, scale, baseCents });
+            }
+          }
+          // Earner = the rep who sent the invoice (skip operator-sent), and only if still on the team.
+          let earner: string | null = senderByCode.get(o.short_code) || null;
+          if (earner && !teamSet.has(earner)) earner = null;
+          // Earned-on date → pay period. Delivered isn't tracked yet, so it falls back to the sold date.
+          const earnedDate = earnedOn === "collected"
+            ? collectedDate(paysByOrder.get(o.id) || [], o.total_cents)
+            : (o.ordered_at ? String(o.ordered_at).slice(0, 10) : null);
+          const period = earnedDate ? periodKey(earnedDate, freq, anchor, customDays) : null;
+          const rate = earner ? (rateByUser.get(earner) ?? null) : null;
+          const amount = (baseCents != null && rate != null) ? Math.round(baseCents * rate / 100) : null;
+
+          const ex = existByOrder.get(o.id) || [];
+          if (ex.some((e) => e.status === "paid" || e.is_override)) continue;   // finalized — never auto-touch
+          const autoRow = ex.find((e) => !e.is_override && e.status !== "paid");
+          const rowData: any = {
+            client_id: clientId, order_id: o.id, earner_user_id: earner,
+            base_cents: baseCents, rate_percent: rate, amount_cents: amount,
+            earned_on: earnedDate, period_key: period?.key ?? null, kind: "commission", updated_at: new Date().toISOString(),
+          };
+          if (autoRow) { await admin.from("commission_entries").update(rowData).eq("id", autoRow.id); updated++; }
+          else { await admin.from("commission_entries").insert({ ...rowData, status: "pending" }); computed++; }
+        }
+
+        if (p.debug && diag.length) {
+          try { await admin.from("app_errors").insert({ source: "edge:portal-commissions", severity: "info", code: "compute_diag", message: "pretax diag", client_id: clientId, context: { diag: diag.slice(0, 25) } }); } catch { /* best-effort */ }
+        }
+        await audit(`compute (${computed} new, ${updated} updated)`);
+        return json({ ok: true, orders: ords.length, computed, updated, ...(p.debug ? { diag } : {}) });
       }
 
       default:
