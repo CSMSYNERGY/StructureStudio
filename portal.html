@@ -7198,6 +7198,7 @@ function CommissionsReport() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [assign, setAssign] = useState(null);  // entry id whose rep dropdown is open
+  const [splitFor, setSplitFor] = useState(null); // { entry, rows:[{userId, share}] } while the split modal is open
 
   const call = async (body) => {
     const { data: r, error } = await sb.functions.invoke("portal-commissions", { body });
@@ -7230,6 +7231,34 @@ function CommissionsReport() {
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
+  const act = async (body, okMsg) => {
+    setBusy(true); setMsg(null);
+    try { await call(body); if (okMsg) setMsg({ ok: okMsg }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  const clawbackEntry = (e) => {
+    if (!window.confirm(`Claw back ${e.earnerName}'s ${money(e.amountCents)} commission on order #${e.orderNo}? A negative line is added to the current pay period so it comes off their next payout.`)) return;
+    act({ action: "clawback", entryId: e.id }, "Clawback added to the current period.");
+  };
+  const adjustEntry = (e) => {
+    const cur = e.amountCents != null ? (e.amountCents / 100).toFixed(2) : "";
+    const v = window.prompt(`Set the commission amount for order #${e.orderNo} (dollars):`, cur);
+    if (v == null) return;
+    const cents = Math.round(Number(String(v).replace(/[^0-9.\-]/g, "")) * 100);
+    if (!Number.isFinite(cents)) { setMsg({ err: "Enter a dollar amount." }); return; }
+    act({ action: "adjust_amount", entryId: e.id, amountCents: cents });
+  };
+  const openSplit = (e) => setSplitFor({ entry: e, rows: [{ userId: e.earnerUserId || "", share: "50" }, { userId: "", share: "50" }] });
+  const saveSplit = () => {
+    const rows = splitFor.rows;
+    const splits = rows.filter((r) => r.userId && Number(r.share) > 0).map((r) => ({ userId: r.userId, sharePercent: Number(r.share) }));
+    const sum = splits.reduce((s, x) => s + x.sharePercent, 0);
+    if (splits.length < 2) { setMsg({ err: "Pick at least two people for a split." }); return; }
+    if (Math.abs(sum - 100) > 0.01) { setMsg({ err: `Shares must add up to 100% (currently ${sum}%).` }); return; }
+    setSplitFor(null);
+    act({ action: "split_entry", entryId: splitFor.entry.id, splits }, "Split saved.");
+  };
 
   if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commissions…</div>;
   const entries = data.entries || [];
@@ -7257,6 +7286,7 @@ function CommissionsReport() {
   const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
   const td = { fontSize: 13, padding: "10px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
   const numTd = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
+  const actLink = (color) => ({ background: "none", border: "none", color, cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit", padding: 0 });
 
   return (
     <div>
@@ -7289,6 +7319,7 @@ function CommissionsReport() {
                   <th style={{ ...th, textAlign: "right" }}>Base</th>
                   {canSeeRates && <th style={{ ...th, textAlign: "right" }}>Rate</th>}
                   <th style={{ ...th, textAlign: "right" }}>Commission</th><th style={th}>Status</th>
+                  {canSeeRates && <th style={th}></th>}
                 </tr></thead>
                 <tbody>
                   {g.rows.map((e) => (
@@ -7310,8 +7341,22 @@ function CommissionsReport() {
                       )}
                       <td style={numTd}>{money(e.baseCents)}</td>
                       {canSeeRates && <td style={numTd}>{e.ratePercent == null ? "—" : e.ratePercent + "%"}</td>}
-                      <td style={{ ...numTd, fontWeight: 800 }}>{money(e.amountCents)}</td>
+                      <td style={{ ...numTd, fontWeight: 800, color: (e.amountCents != null && e.amountCents < 0) ? "#DC2626" : undefined }}>{money(e.amountCents)}</td>
                       <td style={td}>{statusChip(e.status)}</td>
+                      {canSeeRates && (
+                        <td style={{ ...td, whiteSpace: "nowrap" }}>
+                          {e.kind === "clawback" ? <span style={{ color: "#94A3B8", fontSize: 11 }}>—</span>
+                            : e.status === "paid" ? (isOwner ? <button onClick={() => clawbackEntry(e)} disabled={busy} style={actLink("#DC2626")}>Clawback</button> : null)
+                            : e.status === "excluded" ? <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: false })} disabled={busy} style={actLink("#3D3672")}>Restore</button>
+                            : (
+                              <span style={{ display: "inline-flex", gap: 10 }}>
+                                {e.earnerUserId && <button onClick={() => openSplit(e)} disabled={busy} style={actLink("#3D3672")}>Split</button>}
+                                {e.earnerUserId && <button onClick={() => adjustEntry(e)} disabled={busy} style={actLink("#3D3672")}>Adjust</button>}
+                                <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: true })} disabled={busy} style={actLink("#94A3B8")}>Exclude</button>
+                              </span>
+                            )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -7320,6 +7365,35 @@ function CommissionsReport() {
           </div>
         );
       })}
+
+      {splitFor && (
+        <div onClick={(ev) => { if (ev.target === ev.currentTarget) setSplitFor(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
+          <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 460, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+            <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", fontSize: 15.5, fontWeight: 800 }}>Split order #{splitFor.entry.orderNo}</div>
+            <div style={{ padding: "16px 18px" }}>
+              <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px" }}>Split this sale's credit between reps — each earns their own rate on their share. Shares must total 100%.</p>
+              {splitFor.rows.map((r, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <select value={r.userId} onChange={(ev) => setSplitFor((s) => ({ ...s, rows: s.rows.map((x, j) => j === i ? { ...x, userId: ev.target.value } : x) }))} style={{ ...S.input, flex: 1 }}>
+                    <option value="">Choose rep…</option>
+                    {team.map((t) => <option key={t.userId} value={t.userId}>{t.name}</option>)}
+                  </select>
+                  <input value={r.share} onChange={(ev) => setSplitFor((s) => ({ ...s, rows: s.rows.map((x, j) => j === i ? { ...x, share: ev.target.value.replace(/[^0-9.]/g, "") } : x) }))} style={{ ...S.input, width: 66, textAlign: "right" }} />
+                  <span style={{ color: "#94A3B8" }}>%</span>
+                  {splitFor.rows.length > 2 && <button onClick={() => setSplitFor((s) => ({ ...s, rows: s.rows.filter((_, j) => j !== i) }))} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontWeight: 700, fontFamily: "inherit" }}>✕</button>}
+                </div>
+              ))}
+              <button onClick={() => setSplitFor((s) => ({ ...s, rows: [...s.rows, { userId: "", share: "0" }] }))} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 8, color: "#3D3672", fontWeight: 700, fontSize: 12, padding: "6px 11px", cursor: "pointer", fontFamily: "inherit", marginTop: 2 }}>+ Add rep</button>
+              <div style={{ fontSize: 12, color: "#64748B", marginTop: 10 }}>Total: <b style={{ color: Math.abs(splitFor.rows.reduce((s, r) => s + (Number(r.share) || 0), 0) - 100) < 0.01 ? "#166534" : "#DC2626" }}>{splitFor.rows.reduce((s, r) => s + (Number(r.share) || 0), 0)}%</b></div>
+              <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
+                <button onClick={saveSplit} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), flex: 1 }}>Save split</button>
+                <button onClick={() => setSplitFor(null)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -29,6 +29,10 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //   { action: "list_entries" }                           // the report (rep=own, owner/sees_all=everyone)
 //   { action: "assign_earner", entryId, userId? }        // set/clear an entry's earner (owner|full_access)
 //   { action: "mark_paid", periodKey? | entryIds? }      // mark a period/entries paid (owner)
+//   { action: "split_entry", entryId, splits:[{userId,sharePercent}] }  // per-sale split (owner|full_access)
+//   { action: "adjust_amount", entryId, amountCents }    // override an amount (owner|full_access)
+//   { action: "set_excluded", entryId, excluded }        // exclude/restore a line (owner|full_access)
+//   { action: "clawback", entryId, note? }               // negative line for a paid+cancelled order (owner)
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -467,6 +471,91 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           .eq("client_id", clientId).eq("id", entryId);
         if (error) throw error;
         await audit(`assign_earner entry=${entryId} → ${earnerId || "unassigned"}`);
+        return json({ ok: true });
+      }
+
+      // ── split one sale between reps (owner|full_access) — replaces the entry with N override rows ──
+      case "split_entry": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const entryId = Number(p.entryId);
+        const { data: entry } = await admin.from("commission_entries").select("*").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.status === "paid" || entry.kind === "clawback") return json({ error: "A paid or clawback line can't be split." }, 409);
+        const clean: { userId: string; share: number }[] = [];
+        let sum = 0;
+        for (const s of (Array.isArray(p.splits) ? p.splits : [])) {
+          const share = Number(s?.sharePercent);
+          if (isUuid(s?.userId) && Number.isFinite(share) && share > 0 && share <= 100) { clean.push({ userId: String(s.userId), share }); sum += share; }
+        }
+        if (clean.length < 2) return json({ error: "A split needs at least two people." }, 400);
+        if (Math.abs(sum - 100) > 0.01) return json({ error: "Split shares must add up to 100%." }, 400);
+        const teamIds = new Set(((await admin.from("client_users").select("user_id").eq("client_id", clientId)).data || []).map((r: any) => r.user_id));
+        for (const cs of clean) if (!teamIds.has(cs.userId)) return json({ error: "A selected person isn't on your team." }, 400);
+        const rateBy = new Map(((await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId)).data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
+        const now = new Date().toISOString();
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("id", entryId);
+        const rows = clean.map((cs) => {
+          const baseShare = entry.base_cents != null ? Math.round(entry.base_cents * cs.share / 100) : null;
+          const rate = (rateBy.get(cs.userId) ?? null) as number | null;
+          return { client_id: clientId, order_id: entry.order_id, earner_user_id: cs.userId, base_cents: baseShare, rate_percent: rate, split_share: cs.share, amount_cents: (baseShare != null && rate != null) ? Math.round(baseShare * rate / 100) : null, earned_on: entry.earned_on, period_key: entry.period_key, kind: "commission", status: "pending", is_override: true, updated_at: now };
+        });
+        const { error } = await admin.from("commission_entries").insert(rows);
+        if (error) throw error;
+        await audit(`split_entry ${entryId} → ${rows.length} parts`);
+        return json({ ok: true, parts: rows.length });
+      }
+
+      // ── override the amount on one entry, e.g. a rep's mistake (owner|full_access) ──
+      case "adjust_amount": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const entryId = Number(p.entryId);
+        const amt = Math.round(Number(p.amountCents));
+        if (!Number.isFinite(amt)) return json({ error: "Enter a dollar amount." }, 400);
+        const { data: entry } = await admin.from("commission_entries").select("status").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.status === "paid") return json({ error: "This commission is already paid." }, 409);
+        const { error } = await admin.from("commission_entries").update({ amount_cents: amt, is_override: true, updated_at: new Date().toISOString() }).eq("client_id", clientId).eq("id", entryId);
+        if (error) throw error;
+        await audit(`adjust_amount ${entryId} = ${amt}`);
+        return json({ ok: true });
+      }
+
+      // ── exclude a line from payout, or restore it (owner|full_access) ──
+      case "set_excluded": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const entryId = Number(p.entryId);
+        const { data: entry } = await admin.from("commission_entries").select("status").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.status === "paid") return json({ error: "This commission is already paid." }, 409);
+        const { error } = await admin.from("commission_entries").update({ status: p.excluded === true ? "excluded" : "pending", is_override: true, updated_at: new Date().toISOString() }).eq("client_id", clientId).eq("id", entryId);
+        if (error) throw error;
+        await audit(`set_excluded ${entryId} = ${p.excluded === true}`);
+        return json({ ok: true });
+      }
+
+      // ── claw back an already-PAID commission when its order cancels+refunds (OWNER ONLY) ──
+      // Adds a NEGATIVE line in the pay period the cancellation lands in (today's period), linked
+      // to the original via clawback_of, so it deducts from the rep's next payout.
+      case "clawback": {
+        if (!isOwner) return json({ error: "Only the owner can claw back a commission." }, 403);
+        const entryId = Number(p.entryId);
+        const { data: entry } = await admin.from("commission_entries").select("*").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.kind === "clawback") return json({ error: "That's already a clawback line." }, 409);
+        if (entry.status !== "paid") return json({ error: "Clawback is for an already-paid commission — for an unpaid one, just exclude it." }, 409);
+        if ((await admin.from("commission_entries").select("id").eq("client_id", clientId).eq("clawback_of", entryId).maybeSingle()).data) return json({ error: "This commission was already clawed back." }, 409);
+        const { data: st } = await admin.from("commission_settings").select("payout_frequency, custom_days, period_anchor").eq("client_id", clientId).maybeSingle();
+        const today = new Date().toISOString().slice(0, 10);
+        const period = periodKey(today, st?.payout_frequency || "biweekly", st?.period_anchor || today, st?.custom_days ?? null);
+        const { error } = await admin.from("commission_entries").insert({
+          client_id: clientId, order_id: entry.order_id, earner_user_id: entry.earner_user_id,
+          base_cents: entry.base_cents != null ? -entry.base_cents : null, rate_percent: entry.rate_percent, split_share: entry.split_share,
+          amount_cents: entry.amount_cents != null ? -entry.amount_cents : null,
+          earned_on: today, period_key: period.key, kind: "clawback", status: "pending", is_override: true,
+          clawback_of: entryId, note: (p.note ? String(p.note).slice(0, 200) : "Order cancelled / refunded"), updated_at: new Date().toISOString(),
+        });
+        if (error) throw error;
+        await audit(`clawback of ${entryId}`);
         return json({ ok: true });
       }
 
