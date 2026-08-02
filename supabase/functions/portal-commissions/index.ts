@@ -28,7 +28,9 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //   { action: "compute", debug? }                        // refresh the ledger from orders×settings×rates (owner|full_access)
 //   { action: "list_entries" }                           // the report (rep=own, owner/sees_all=everyone)
 //   { action: "assign_earner", entryId, userId? }        // set/clear an entry's earner (owner|full_access)
-//   { action: "mark_paid", periodKey? | entryIds? }      // mark a period/entries paid (owner)
+//   { action: "approve_period", periodKey }              // pending → payable, the review gate (owner)
+//   { action: "unapprove_period", periodKey }            // payable → pending while unpaid (owner)
+//   { action: "mark_paid", periodKey? | entryIds? }      // mark APPROVED (payable) lines paid (owner)
 //   { action: "split_entry", entryId, splits:[{userId,sharePercent}] }  // per-sale split (owner|full_access)
 //   { action: "adjust_amount", entryId, amountCents }    // override an amount (owner|full_access)
 //   { action: "set_excluded", entryId, excluded }        // exclude/restore a line (owner|full_access)
@@ -559,13 +561,39 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         return json({ ok: true });
       }
 
-      // ── mark a period (or specific entries) paid — OWNER ONLY. Skips already-paid / null-amount rows. ──
+      // ── approve a period: its pending lines become "payable" — the review gate before paying (OWNER) ──
+      case "approve_period": {
+        if (!isOwner) return json({ error: "Only the owner can approve commissions." }, 403);
+        if (!p.periodKey) return json({ error: "No period specified." }, 400);
+        const stamp = new Date().toISOString();
+        const approved = ((await admin.from("commission_entries")
+          .update({ status: "payable", approved_at: stamp, updated_at: stamp })
+          .eq("client_id", clientId).eq("period_key", String(p.periodKey)).eq("status", "pending").not("amount_cents", "is", null)
+          .select("id")).data || []).length;
+        await audit(`approve_period ${p.periodKey} (${approved})`);
+        return json({ ok: true, approved });
+      }
+
+      // ── pull an approved period back to pending (only while still unpaid) (OWNER) ──
+      case "unapprove_period": {
+        if (!isOwner) return json({ error: "Only the owner can change approvals." }, 403);
+        if (!p.periodKey) return json({ error: "No period specified." }, 400);
+        const stamp = new Date().toISOString();
+        const reverted = ((await admin.from("commission_entries")
+          .update({ status: "pending", approved_at: null, updated_at: stamp })
+          .eq("client_id", clientId).eq("period_key", String(p.periodKey)).eq("status", "payable")
+          .select("id")).data || []).length;
+        await audit(`unapprove_period ${p.periodKey} (${reverted})`);
+        return json({ ok: true, reverted });
+      }
+
+      // ── mark a period (or specific entries) paid — OWNER ONLY. Pays only APPROVED (payable) lines. ──
       case "mark_paid": {
         if (!isOwner) return json({ error: "Only the owner can mark commissions paid." }, 403);
         const stamp = new Date().toISOString();
         let q = admin.from("commission_entries")
           .update({ status: "paid", paid_at: stamp, paid_batch: stamp, updated_at: stamp })
-          .eq("client_id", clientId).neq("status", "paid").not("amount_cents", "is", null);
+          .eq("client_id", clientId).eq("status", "payable").not("amount_cents", "is", null);
         if (Array.isArray(p.entryIds) && p.entryIds.length) q = q.in("id", p.entryIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n)));
         else if (p.periodKey) q = q.eq("period_key", String(p.periodKey));
         else return json({ error: "Nothing specified to mark paid." }, 400);

@@ -7287,6 +7287,8 @@ function CommissionsReport() {
     setSplitFor(null);
     act({ action: "split_entry", entryId: splitFor.entry.id, splits }, "Split saved.");
   };
+  const approvePeriod = (periodKey) => act({ action: "approve_period", periodKey }, "Period approved — ready to pay.");
+  const unapprovePeriod = (periodKey) => act({ action: "unapprove_period", periodKey });
 
   if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commissions…</div>;
   const entries = data.entries || [];
@@ -7310,7 +7312,7 @@ function CommissionsReport() {
   for (const e of entries) { const k = e.periodKey || "unscheduled"; (groups[k] = groups[k] || { label: e.periodLabel, key: e.periodKey, rows: [] }).rows.push(e); }
   const orderedKeys = Object.keys(groups).sort().reverse();
 
-  const statusChip = (s) => { const c = { pending: ["#FEF3C7", "#92400E", "Payable"], payable: ["#FEF3C7", "#92400E", "Payable"], paid: ["#DCFCE7", "#166534", "Paid"], excluded: ["#F1F5F9", "#64748B", "Excluded"] }[s] || ["#F1F5F9", "#64748B", s]; return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{c[2]}</span>; };
+  const statusChip = (s) => { const c = { pending: ["#FEF3C7", "#92400E", "Pending"], payable: ["#DBEAFE", "#1E40AF", "Approved"], paid: ["#DCFCE7", "#166534", "Paid"], excluded: ["#F1F5F9", "#64748B", "Excluded"] }[s] || ["#F1F5F9", "#64748B", s]; return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{c[2]}</span>; };
   const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
   const td = { fontSize: 13, padding: "10px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
   const numTd = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
@@ -7331,13 +7333,20 @@ function CommissionsReport() {
       {orderedKeys.map((k) => {
         const g = groups[k];
         const total = g.rows.reduce((s, e) => s + (e.amountCents || 0), 0);
-        const anyPayable = isOwner && g.rows.some((e) => e.status !== "paid" && e.amountCents != null);
+        const pendingRows = g.rows.filter((e) => e.status === "pending" && e.amountCents != null);
+        const approvedRows = g.rows.filter((e) => e.status === "payable");
         return (
           <div key={k} style={{ ...S.card, marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
               <div style={{ fontSize: 14.5, fontWeight: 800 }}>{g.label || "Unscheduled"}</div>
               <div style={{ fontSize: 12.5, color: "#64748B" }}>{g.rows.length} order{g.rows.length === 1 ? "" : "s"} · <b style={{ color: "#1E293B" }}>{money(total)}</b></div>
-              {anyPayable && <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 13px" }}>Mark period paid</button>}
+              {isOwner && (pendingRows.length > 0 || approvedRows.length > 0) && (
+                <div style={{ marginLeft: "auto", display: "inline-flex", gap: 8, alignItems: "center" }}>
+                  {pendingRows.length > 0 && <button onClick={() => approvePeriod(g.key)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px" }}>Approve period</button>}
+                  {approvedRows.length > 0 && <button onClick={() => unapprovePeriod(g.key)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>Un-approve</button>}
+                  {approvedRows.length > 0 && <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), padding: "6px 13px" }}>Mark period paid</button>}
+                </div>
+              )}
             </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
