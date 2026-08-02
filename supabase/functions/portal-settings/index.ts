@@ -1575,17 +1575,33 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // ── After a submit from "Send estimate": tie the new design to its unit ─────
   if (action === "link_design_to_unit") {
     const shortCode = String(payload.shortCode ?? "").trim();
-    const unitId = String(payload.unitId ?? "").trim();
-    if (!shortCode || !unitId) return json({ error: "shortCode and unitId are required." }, 400);
-    const { data: unit } = await admin.from("inventory_units")
-      .select("id").eq("id", unitId).eq("client_id", clientId).maybeSingle();
-    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    // unitId NULL is meaningful, not missing input: it is how "Design a new build
+    // instead" unties a quote from the building it started on, so the version just saved
+    // reads New instead of inheriting Inventory.
+    const rawUnit = payload.unitId;
+    const unitId = rawUnit == null || rawUnit === "" ? null : String(rawUnit).trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    if (unitId) {
+      const { data: unit } = await admin.from("inventory_units")
+        .select("id").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+      if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    }
     // Never relabel the master itself, and never touch another tenant's design.
     const { error, count } = await admin.from("designs").update({ inventory_unit_id: unitId }, { count: "exact" })
       .eq("client_id", clientId).eq("short_code", shortCode).neq("status", "inventory");
     if (error) return json({ error: error.message }, 500);
     if (!count) return json({ error: "Design not found (or it is an inventory master)." }, 404);
-    return json({ ok: true });
+
+    // Stamp the NEWEST version row (migration 080) so the Designs tab can label each
+    // version Inventory or New. Per-version, because one design can hold both: v1 quoted
+    // from the lot building, v2 a fresh custom build for the same customer.
+    const { data: newest } = await admin.from("design_versions")
+      .select("id").eq("client_id", clientId).eq("short_code", shortCode)
+      .order("version", { ascending: false }).limit(1).maybeSingle();
+    if (newest) {
+      await admin.from("design_versions").update({ inventory_unit_id: unitId }).eq("id", newest.id);
+    }
+    return json({ ok: true, unitId });
   }
 
   // ── Contact activity timeline (Contacts tab "Details"): everything we know about

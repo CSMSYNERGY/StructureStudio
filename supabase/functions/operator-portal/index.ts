@@ -269,10 +269,10 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         // get_client_portal) so DesignsTable/LeadsTable render unchanged.
         const [designs, versions, cfg, leads] = await Promise.all([
           admin.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url")
+            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id")
             .eq("client_id", clientId).order("created_at", { ascending: false }),
           admin.from("design_versions")
-            .select("short_code, version, created_at, selections, image_url")
+            .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
             .eq("client_id", clientId).order("version", { ascending: false }),
           admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
           // Browsing leads (migration 062) so the operator's view-as Contacts matches what

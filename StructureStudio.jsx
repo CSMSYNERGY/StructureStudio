@@ -1523,8 +1523,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // design (status='inventory') is open — submit is blocked (a master must never become a
   // customer estimate) and the save button flips to "Update Inventory Building".
   const inventoryUnitRef = useRef(null);
+  // The inventory unit an ALREADY-SAVED design was quoted from (designs.inventory_unit_id,
+  // read at load). Distinct from inventoryUnitRef, which arms a not-yet-submitted
+  // send-estimate flow — this one survives reopening the estimate later.
+  const [designUnit, setDesignUnit] = useState(null);   // { id, serial } | null
+  // Staff chose "Design a new build instead" on a locked estimate: the plan unlocks and
+  // the next submit saves a NEW version that is no longer tied to the unit.
+  const [newBuildMode, setNewBuildMode] = useState(false);
   const [inventoryMaster, setInventoryMaster] = useState(null); // { code, unitId, priceCents, locationId } | null
   const [invDialog, setInvDialog] = useState(null); // { busy, err, locations, locationId, price, done } | null
+  // PLAN LOCK (Carolyn, 2026-08-02): "Building is BUILT". An estimate for an inventory
+  // building describes a structure that already physically exists, so its floor plan,
+  // size, style, roof and colours are not negotiable — only the money lines are (custom
+  // options, discount, delivery). Applies to the send-estimate flow AND to reopening that
+  // estimate later, on the public share link too. NEVER applies to the inventory MASTER
+  // itself (that is the builder editing their own building via "Update Inventory
+  // Building"), and staff can lift it deliberately with "Design a new build instead".
+  const planLocked = Boolean(
+    (inventoryUnitRef.current || designUnit) && !inventoryMaster && !newBuildMode
+  );
+  // The canvas handlers are useCallbacks with their own dep arrays — reading the lock
+  // through a ref keeps them from capturing a stale value (and from re-creating on every
+  // lock change). Assigned during render on purpose: a useEffect sync would lag one
+  // render, and one render is long enough to drag an item on a building that is built.
+  const planLockedRef = useRef(false);
+  planLockedRef.current = planLocked;
   // The pre-tax building total, mirroring the Details subtotal WITHOUT the customer-
   // specific lines (delivery, discounts) — an asking price describes the building alone.
   const inventoryQuotePrefill = () => {
@@ -1820,6 +1843,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setInventoryMaster(data.status === "inventory"
       ? { code: data.short_code, unitId: null, priceCents: null, locationId: null }
       : null);
+    // An estimate quoted FROM an inventory building carries the link on the row, so
+    // reopening it later (portal or public share link) locks the plan again. The serial
+    // is a nicety for the banner: readable to a signed-in tenant under inventory_units'
+    // owner-select policy, absent for an anon visitor — never let it block the lock.
+    setNewBuildMode(false);
+    if (data.inventory_unit_id) {
+      setDesignUnit({ id: data.inventory_unit_id, serial: null });
+      supabase.from("inventory_units").select("serial").eq("id", data.inventory_unit_id).maybeSingle()
+        .then(({ data: u }) => { if (u && !isCancelled()) setDesignUnit({ id: data.inventory_unit_id, serial: u.serial }); },
+              () => {});
+    } else {
+      setDesignUnit(null);
+    }
     // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
     ghlContactIdRef.current = data.ghl_contact_id || null;
     ghlEstimateIdRef.current = data.ghl_estimate_id || null;
@@ -1919,6 +1955,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ghlEstimateNumberRef.current = null;
       inventoryUnitRef.current = null;
       setInventoryMaster(null);
+      setDesignUnit(null);
+      setNewBuildMode(false);
       setHasExistingEstimate(false);
       setDesignCode(null);
       setEstimateVersions([]);
@@ -1962,6 +2000,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setViewingVersion(null);
         setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
         setInventoryMaster(null);
+        // asNew is a NEW quote on that building: the lock comes from the armed ref, and
+        // designUnit (which tracks a SAVED row's link) must not also be set yet.
+        setDesignUnit(openDesign.inventoryUnitId
+          ? { id: openDesign.inventoryUnitId, serial: openDesign.unitSerial ?? null }
+          : null);
+        setNewBuildMode(false);
         inventoryUnitRef.current = openDesign.inventoryUnitId || null;
       } else {
         inventoryUnitRef.current = null;
@@ -2127,6 +2171,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   const handleClick = useCallback((e) => {
     if (dragging) return;
+    if (planLockedRef.current) return;   // inventory estimate: the building is already built
     // Not captured yet: any attempt to work the canvas pops the lead gate instead.
     if (gateRequired) { setGateOpen(true); return; }
     // Swallow the click that fires immediately after a drag/resize gesture —
@@ -2503,6 +2548,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
+    if (planLockedRef.current) return;   // no selecting or dragging a building that exists
     if (gateRequired) { setGateOpen(true); return; }
     if (pendingRemoval) return; // pick mode: overlays handle the pick; no select/drag
     if (activeTool) return;
@@ -2528,6 +2574,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   const startResize = useCallback((e, item, handle) => {
     e.preventDefault();
+    if (planLockedRef.current) return;
     movedRef.current = false;
     gestureStartRef.current = { x: e.touches ? e.touches[0].clientX : e.clientX, y: e.touches ? e.touches[0].clientY : e.clientY };
     const pt = getSvgPt(e);
@@ -3379,13 +3426,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Estimate sent from an inventory unit ("Send estimate"): tie the new design to its
       // unit so the Inventory tab lists it. Best-effort — a link failure must never break
       // a submitted estimate; the fire-and-forget catch keeps it silent.
-      if (embedded && inventoryUnitRef.current) {
+      // Tie this submission to its inventory building — or deliberately UNTIE it when
+      // staff designed a fresh build for the same customer ("Design a new build
+      // instead"), so the new version reads New rather than inheriting Inventory.
+      // newBuildMode is the ONLY thing that unties. An ordinary resubmit of a reopened
+      // inventory estimate (adding a discount, say) must RE-STAMP the same unit: the
+      // openDesign path deliberately clears inventoryUnitRef, so reading only that ref
+      // sent unitId:null and silently severed the quote from its building — the lock then
+      // survived exactly one submit and the unit never flipped Sold on acceptance.
+      const unitToLink = newBuildMode
+        ? null
+        : (inventoryUnitRef.current || (designUnit && designUnit.id) || null);
+      if (embedded && (unitToLink || (newBuildMode && designUnit))) {
         try {
           supabase.functions.invoke("portal-settings", { body: {
             action: "link_design_to_unit", targetClientId: C.clientId,
-            shortCode, unitId: inventoryUnitRef.current,
+            shortCode, unitId: unitToLink,
           } }).catch(() => {});
         } catch (_e) { /* never block the estimate on the label */ }
+        if (unitToLink) setDesignUnit((d) => d && d.id === unitToLink ? d : { id: unitToLink, serial: null });
+        else { setDesignUnit(null); setNewBuildMode(false); }
       }
       setDesignCode(shortCode);
       setViewingVersion(null);
@@ -3928,9 +3988,46 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       )}
 
-      {/* Configuration Panel */}
+      {/* Inventory estimate: the building already exists, so the plan is read-only. The
+          money lines below (custom options, discount, delivery) stay fully editable —
+          that is the whole point of quoting one lot building to several customers. */}
+      {planLocked && (
+        <div style={{ background: "#EFF6FF", borderBottom: "1px solid #BFDBFE", padding: "11px 20px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#1E3A8A" }}>
+            🔒 Inventory building{designUnit && designUnit.serial != null ? ` #${designUnit.serial}` : ""} — already built, so the plan can't be changed.
+          </span>
+          <span style={{ fontSize: 12.5, color: "#1E40AF", fontWeight: 600 }}>
+            Custom options, a discount and a delivery fee can still be added below.
+          </span>
+          {embedded && (
+            <button type="button" onClick={() => {
+              if (!window.confirm("Design a brand-new building for this customer instead?\n\nThe plan unlocks so you can change anything. Submitting saves it as another version of this quote, no longer tied to the inventory building.")) return;
+              setNewBuildMode(true);
+              inventoryUnitRef.current = null;
+            }} style={{ marginLeft: "auto", background: "#FFF", color: "#1D4ED8", border: "1.5px solid #93C5FD", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              Design a new build instead
+            </button>
+          )}
+        </div>
+      )}
+      {/* Started on an inventory building, then staff chose to design fresh. */}
+      {embedded && newBuildMode && designUnit && (
+        <div style={{ background: "#F0FDF4", borderBottom: "1px solid #BBF7D0", padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#15803D" }}>
+          ✎ Designing a new build for this customer — submitting saves it as another version, no longer tied to building{designUnit.serial != null ? ` #${designUnit.serial}` : ""}.
+        </div>
+      )}
+      {/* Configuration Panel — style, size, roof, paint and options all describe the
+          BUILDING, so the whole panel goes inert together when the plan is locked. One
+          gate here beats fifteen `disabled` props that a new control would silently miss. */}
       {(
-        <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
+        // A real <fieldset disabled> — pointerEvents alone leaves every <select>/<input>
+        // in the tab order, so a keyboard user could still change Building Size, and the
+        // size effect wipes every item off a plan that describes a building already built.
+        // fieldset disables form controls including via keyboard; pointerEvents covers the
+        // style cards, which are clickable divs rather than controls. Both, deliberately.
+        <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined}
+          style={{ border: "none", margin: 0, minWidth: 0, background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px",
+            ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) }}>
           {/* Building Styles */}
           <div style={{ marginBottom: 14 }}>
             <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
@@ -4018,7 +4115,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {/* Dynamic Options (filtered by selected building style — see isOptionApplicable).
               Paint is excluded — it renders inline beside the roof colors above. */}
           {visibleOptions.filter((o) => o !== paintOpt).map((opt) => renderOption(opt))}
-        </div>
+        </fieldset>
       )}
 
       {unattachedLofts.length > 0 && (
@@ -4028,9 +4125,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       )}
 
-      {/* Tool Palette */}
+      {/* Tool Palette. The ROW stays — Export and the 3D teaser live in it and neither
+          touches the building. Only the plan-editing controls inside it go away when the
+          plan is locked (hiding the whole row took Export with it). */}
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {(() => {
+        {!planLocked && (() => {
           const btn = ([key, cfg]) => (
             <button key={key} onClick={() => { if (gateRequired) { setGateOpen(true); return; } setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
               style={{
@@ -4116,6 +4215,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // replacing an ARCHIVED item; hidden if there's nothing to swap to.
             const si = items.find((i) => i.id === selectedId);
             if (!si) return null;
+            if (planLocked) return null;
             const isDoor = si.type === "fixtureDoor" || si.type === "singleDoor" || si.type === "doubleDoor";
             const isWin = si.type === "window";
             const isRamp = si.type === "ramp";
@@ -4132,13 +4232,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <button onClick={openSwap} style={{ ...S.btn(archived ? "#FEF3C7" : "#ECFEFF", archived ? "#B45309" : "#0891B2"), border: `1px solid ${archived ? "#FCD34D" : "#A5F0FC"}` }}>⇄ Swap</button>
             </>;
           })()}
-          {selectedId && (
+          {selectedId && !planLocked && (
             <>
               <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
               <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
             </>
           )}
-          <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>
+          {/* Export survives the lock — printing the plan changes nothing about it. */}
+          {!planLocked && <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>}
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
           {/* Marketing teaser for shoppers trying the public designer. Deliberately NOT
               shown in the portal — business users already see 3D Design in their nav. */}
@@ -4745,7 +4846,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </div>
                     <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
                     <div style={amtCell}>{fmtMoney2(r.total)}</div>
-                    <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
+                    {/* Removing a placed item is a PLAN edit, and this row sits outside the
+                        canvas and outside the configuration panel — so it needs its own
+                        guard, or the lock is bypassable from Details (on the customer's
+                        share link too). */}
+                    {!planLocked && <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
                       onClick={() => {
                         // "each"-priced items step down one at a time (when several are
                         // placed, the plan asks which one); everything else clears the line
@@ -4762,7 +4867,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           setSelectedId(null);
                         }
                       }}
-                      style={delBtn}>×</button>
+                      style={delBtn}>×</button>}
                   </div>
                 ))}
               </div>
@@ -4777,15 +4882,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                       <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
                       <input type="text" value={dim} placeholder='Enter Rough Opening size: e.g. 3 x 6 or 29⅞ × 34½"'
-                        onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
+                        readOnly={planLocked || undefined}
+                        onChange={(e) => { if (planLocked) return; setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value })); }}
                         style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
                       {C.showPricing && (<>
                         <div style={qtyCell}>1</div>
                         <div style={amtCell}>{fmtMoney2(roRate)}</div>
                       </>)}
-                      <button title="Remove this rough opening from the plan"
+                      {!planLocked && <button title="Remove this rough opening from the plan"
                         onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}
-                        style={delBtn}>×</button>
+                        style={delBtn}>×</button>}
                     </div>
                   );
                 })}
@@ -5149,6 +5255,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // that never sold to Sold, false-warning every real prospect on it.
                 inventoryUnitRef.current = null;
                 setInventoryMaster(null);
+                setDesignUnit(null);
+                setNewBuildMode(false);
                 setHasExistingEstimate(false);
                 setDesignCode(null);
                 setEstimateVersions([]);
