@@ -96,6 +96,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
   .ss-tname{display:none}
   .ss-body{padding:14px 12px}
 }
+/* Options-tab catalog tables: tighter gutters so the wide fixture tables (Doors/Windows/Ramps,
+   now carrying the Internal-only column) fit without a horizontal scroll bar. Scoped to the
+   .tight wrapper so the shared S.td padding is untouched for every other table. */
+.tight th,.tight td{padding-left:6px;padding-right:6px}
+.tight td{padding-top:8px;padding-bottom:8px}
+.tight input{box-sizing:border-box}
 </style>
 </head><body><div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
@@ -2870,10 +2876,10 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             {/* overflowX wrapper: the method select + rate input enforce ~300px of minimum
                 cell width, so on narrow viewports (68px icon rail) the table scrolls inside
                 its card instead of forcing page-level horizontal scroll. */}
-            <div style={{ overflowX: "auto", marginBottom: 14 }}>
+            <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -3089,7 +3095,7 @@ Anything not shown here will be removed from their account.`)) return;
         {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No doors yet — click <b>Add door</b> below to create your first one.</div>
         ) : (
-          <div style={{ overflowX: "auto", marginBottom: 14 }}>
+          <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
                 <th style={S.th}>Photo</th>
@@ -3101,7 +3107,7 @@ Anything not shown here will be removed from their account.`)) return;
                 <th style={S.th}>Swing</th>
                 <th style={S.th}>Operation</th>
                 {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
-                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th>
+                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th>
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
@@ -3138,7 +3144,7 @@ Anything not shown here will be removed from their account.`)) return;
                       </div>
                     </td>
                     <td style={S.td}>
-                      <div style={{ display: "flex", gap: 16 }}>
+                      <div style={{ display: "flex", gap: 10 }}>
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
@@ -3357,12 +3363,12 @@ Anything not shown here will be removed.`)) return;
           ) : (
             <>
               {rows.length === 0 ? <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No ramp styles yet — click <b>Add ramp style</b> below.</div> : (
-                <div style={{ overflowX: "auto", marginBottom: 14 }}>
+                <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead><tr>
                       <th style={S.th}>Photo</th><th style={S.th}>On estimate</th><th style={S.th}>Style</th>
                       <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
-                      <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ ramp buttons on the client-facing page (already-placed ramps still show).">Internal only</th><th style={S.th}></th>
+                      <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ ramp buttons on the client-facing page (already-placed ramps still show).">Internal</th><th style={S.th}></th>
                     </tr></thead>
                     <tbody>
                       {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
@@ -3504,7 +3510,7 @@ Anything not shown here will be removed from their account.`)) return;
         {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No windows yet — click <b>Add window</b> below to create your first one.</div>
         ) : (
-          <div style={{ overflowX: "auto", marginBottom: 14 }}>
+          <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
                 <th style={S.th}>Photo</th>
@@ -3514,7 +3520,7 @@ Anything not shown here will be removed from their account.`)) return;
                 {sortableTh("Size (W × H)", "size", (r) => parseFtIn(r.width_in) || 0)}
                 {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
                 {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
-                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th>
+                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th>
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
