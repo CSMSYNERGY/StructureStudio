@@ -1885,8 +1885,59 @@ function parseCSV(text) {
 }
 function downloadFile(name, text) {
   const b = new Blob([text], { type: "text/csv;charset=utf-8" });
-  const u = URL.createObjectURL(b); const a = document.createElement("a");
+  downloadBlob(name, b);
+}
+function downloadBlob(name, blob) {
+  const u = URL.createObjectURL(blob); const a = document.createElement("a");
   a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
+}
+
+// ─── Excel (.xlsx) helpers ───
+// ExcelJS is LAZY-LOADED (only when the pricing sheet is downloaded/uploaded) via dynamic script
+// injection — deliberately NOT a static <script> tag, which the preflight's CDN version-lock
+// check would flag (index/portal/admin.html must carry byte-identical CDN script tags). It's the
+// one browser lib that can colour cells, which SheetJS's free build cannot.
+let _exceljsPromise = null;
+function loadExcelJS() {
+  if (typeof window !== "undefined" && window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  if (_exceljsPromise) return _exceljsPromise;
+  _exceljsPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js";
+    s.crossOrigin = "anonymous";
+    s.onload = () => window.ExcelJS ? resolve(window.ExcelJS) : reject(new Error("Spreadsheet library failed to initialise."));
+    s.onerror = () => { _exceljsPromise = null; reject(new Error("Could not load the spreadsheet library — check your connection and try again.")); };
+    document.head.appendChild(s);
+  });
+  return _exceljsPromise;
+}
+// A cell's plain text, tolerant of ExcelJS rich-text / formula / hyperlink cell shapes.
+function xlsxCellText(v) {
+  if (v == null) return "";
+  if (typeof v === "object") {
+    if (v.text != null) return String(v.text);
+    if (v.result != null) return String(v.result);
+    if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join("");
+    if (v.hyperlink != null) return String(v.hyperlink);
+    return "";
+  }
+  return String(v);
+}
+// Read the first worksheet of an .xlsx File into a row/col matrix of strings (same shape parseCSV returns).
+async function readXlsxMatrix(file, ExcelJS) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await file.arrayBuffer());
+  const ws = wb.worksheets[0];
+  if (!ws) throw new Error("The spreadsheet has no sheets.");
+  const sv = ws.getSheetValues(); // 1-indexed rows; each row is a 1-indexed array
+  const matrix = [];
+  for (let r = 1; r < sv.length; r++) {
+    const row = sv[r]; if (!row) continue;
+    const arr = [];
+    for (let c = 1; c < row.length; c++) arr[c - 1] = xlsxCellText(row[c]);
+    if (arr.some((x) => String(x).trim() !== "")) matrix.push(arr);
+  }
+  return matrix;
 }
 
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
@@ -2238,6 +2289,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
 function PricingCsv({ viewingLabel = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
+  const [dlBusy, setDlBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [result, setResult] = useState(null);
   const [fileKey, setFileKey] = useState(0);
@@ -2268,27 +2320,29 @@ function PricingCsv({ viewingLabel = null }) {
   // per size. Catalog columns key on the fixture id, so an "included" catalog item rides the same
   // building_size_inclusions pipeline (item_key = fixture id). Label carries the size so multiple
   // sizes of one style stay distinct and never collide with a built-in's label.
-  const optionCols = () => {
-    // Column order MIRRORS the Options tab top-to-bottom — built-in options, then the Doors,
-    // Ramps and Windows catalog sections — so the CSV reads the same way the owner edits it,
-    // instead of interleaving the fixture categories.
-    // Archived options drop out of the pricing CSV entirely — they can't be added to new builds,
-    // so they must not be an inclusion column (get_config + submit-estimate also stop netting them).
+  // Option columns grouped into the same sections the Options tab shows top-to-bottom — built-in
+  // options, then the Doors, Ramps and Windows catalog sections — each with a header fill colour
+  // for the Excel template. Archived options drop out entirely (they can't be added to new builds,
+  // so they must not be an inclusion column — get_config + submit-estimate also stop netting them).
+  const optionSections = () => {
     const layout = items().filter((it) => !it.archived).map((it) => ({ key: it.key, label: it.label }));
     const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
-    // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"),
-    // and since the column is matched by its exact label on re-import, a garbled header would
-    // silently drop the inclusion. ASCII round-trips safely through any spreadsheet.
+    // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
+    // since the column is matched by its exact label on re-import, a garbled header would silently
+    // drop the inclusion. ASCII round-trips safely through any spreadsheet.
     const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
-    // Keep each section's fixtures together, in the same relative order the tab shows them (a
-    // missing category reads as "door", matching DoorsView).
-    const inCat = (f, c) => (f.category || "door") === c;
-    const doors = fx.filter((f) => inCat(f, "door")).map(col);
-    const ramps = fx.filter((f) => inCat(f, "ramp")).map(col);
-    const windows = fx.filter((f) => inCat(f, "window")).map(col);
+    const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
+    const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
     const other = fx.filter((f) => !["door", "ramp", "window"].includes(f.category || "door")).map(col);
-    return [...layout, ...doors, ...ramps, ...windows, ...other];
+    return [
+      { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
+      { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
+      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
+      { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
+      { name: "Other",            argb: "FFF1F5F9", cols: other },
+    ].filter((s) => s.cols.length);
   };
+  const optionCols = () => optionSections().flatMap((s) => s.cols);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
   const onStyleImg = (file) => {
@@ -2311,7 +2365,7 @@ function PricingCsv({ viewingLabel = null }) {
       const added = styleName.trim();
       setStyleName(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
       await load();
-      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the CSV below.` });
+      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the Excel template below.` });
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
   };
@@ -2389,40 +2443,105 @@ function PricingCsv({ viewingLabel = null }) {
     setStyleBusy(false);
     setPendingDelete(null);
   };
-  const downloadTemplate = () => {
-    if (!cat) return;
-    const its = optionCols();
+  const downloadTemplate = async () => {
+    if (!cat || dlBusy) return;
+    const sections = optionSections();
+    const its = sections.flatMap((s) => s.cols);
     const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
     // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
     // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
     const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
+    // Numbers stay numbers so Excel treats width/length/price/counts as numeric; blanks/text pass through.
+    const numOr = (v) => (v === "" || v == null || isNaN(Number(v)) ? v : Number(v));
     const rows = [];
     activeStyles().forEach((s) => {
       const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
       if (sizes.length === 0) {
         // No sizes yet → one starter row: fill width/length/price and copy the line down.
-        rows.push([s.label, "", "", "", ...its.map(() => "0"), "yes"]);
+        rows.push([s.label, "", "", "", ...its.map(() => 0), "yes"]);
       } else {
         sizes.forEach((z) => {
           const inc = incBySize[z.id] || {};
-          rows.push([s.label, z.width_ft, z.length_ft, z.base_price == null ? "" : z.base_price,
-            ...its.map((it) => String(inc[it.key] || 0)), z.active ? "yes" : "no"]);
+          rows.push([s.label, numOr(z.width_ft), numOr(z.length_ft), z.base_price == null ? "" : numOr(z.base_price),
+            ...its.map((it) => Number(inc[it.key] || 0)), z.active ? "yes" : "no"]);
         });
       }
     });
-    downloadFile(`${cat.clientId || "pricing"}-pricing.csv`, toCSV(headers, rows));
+
+    setDlBusy(true); setMsg(null);
+    let ExcelJS;
+    try { ExcelJS = await loadExcelJS(); }
+    catch (e) {
+      // Library unreachable → still hand back a usable CSV so the download never fully fails.
+      downloadFile(`${cat.clientId || "pricing"}-pricing.csv`, toCSV(headers, rows.map((r) => r.map((v) => (v == null ? "" : String(v))))));
+      setMsg({ err: `${e.message} Downloaded a plain CSV instead.` });
+      setDlBusy(false);
+      return;
+    }
+    try {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Pricing", { views: [{ state: "frozen", xSplit: 4, ySplit: 1 }] });
+      ws.addRow(headers);
+      rows.forEach((r) => ws.addRow(r));
+
+      const thin = { style: "thin", color: { argb: "FFCBD5E1" } };
+      const FIXED = "FF334155"; // dark slate header for style/width/length/price/active
+      // Header row: bold, wrapped, colour-banded by section.
+      const hdr = ws.getRow(1); hdr.height = 30;
+      const paintHdr = (c, argb, light) => {
+        const cell = hdr.getCell(c);
+        cell.font = { bold: true, size: 10, color: { argb: light ? "FF1E293B" : "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb } };
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+        cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+      };
+      [1, 2, 3, 4].forEach((c) => paintHdr(c, FIXED, false));
+      paintHdr(headers.length, FIXED, false);
+      let c = 5;
+      sections.forEach((sec) => sec.cols.forEach(() => paintHdr(c++, sec.argb, true)));
+
+      // Column widths: style wide enough for its longest name; the rest sized to their header.
+      const styleW = Math.min(Math.max(8, ...rows.map((r) => String(r[0] || "").length)) + 2, 34);
+      ws.columns.forEach((colObj, i) => { colObj.width = i === 0 ? styleW : Math.min(Math.max(String(headers[i]).length + 2, 9), 26); });
+
+      // Body: borders everywhere, bold style name, a heavier rule where a new building style starts,
+      // and a currency format on price so the sheet reads cleanly.
+      let prevStyle = null;
+      for (let r = 2; r <= ws.rowCount; r++) {
+        const row = ws.getRow(r);
+        const styleName = String(rows[r - 2][0] || "");
+        const newGroup = styleName !== prevStyle; prevStyle = styleName;
+        for (let cc = 1; cc <= headers.length; cc++) {
+          const cell = row.getCell(cc);
+          cell.border = { left: thin, right: thin, bottom: thin, top: newGroup ? { style: "medium", color: { argb: "FF94A3B8" } } : thin };
+          cell.alignment = { vertical: "middle", horizontal: cc === 1 ? "left" : "center" };
+          if (cc === 1) cell.font = { bold: true };
+        }
+        row.getCell(4).numFmt = '$#,##0';
+      }
+      ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: headers.length } };
+
+      const buf = await wb.xlsx.writeBuffer();
+      downloadBlob(`${cat.clientId || "pricing"}-pricing.xlsx`,
+        new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    } catch (e) {
+      setMsg({ err: `Could not build the Excel file: ${e.message}` });
+    }
+    setDlBusy(false);
   };
   const onUpload = async (file) => {
     if (!file) return;
     setBusy(true); setMsg(null); setResult(null);
     try {
-      if (file.size > 5_000_000) throw new Error("CSV too large (max 5MB).");
-      const matrix = parseCSV(await file.text());
-      if (matrix.length < 2) throw new Error("CSV has no data rows.");
+      if (file.size > 5_000_000) throw new Error("File too large (max 5MB).");
+      // Accept both the Excel template and a plain CSV (anything already filled out).
+      const isXlsx = /\.xlsx$/i.test(file.name) || file.type.includes("spreadsheetml");
+      const matrix = isXlsx ? await readXlsxMatrix(file, await loadExcelJS()) : parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("The sheet has no data rows.");
       const header = matrix[0].map((h) => String(h).trim());
       const lc = header.map((h) => h.toLowerCase());
       const iStyle = lc.indexOf("style"), iWidth = lc.indexOf("width"), iLength = lc.indexOf("length"), iPrice = lc.indexOf("price"), iActive = lc.indexOf("active");
-      if (iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0) throw new Error('CSV needs "style", "width", "length" and "price" columns.');
+      if (iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0) throw new Error('The sheet needs "style", "width", "length" and "price" columns.');
       const reserved = new Set([iStyle, iWidth, iLength, iPrice, iActive]);
       const labelToKey = {}; optionCols().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
       const colKey = header.map((h, idx) => reserved.has(idx) ? null : (labelToKey[h.toLowerCase()] || null));
@@ -2498,7 +2617,7 @@ function PricingCsv({ viewingLabel = null }) {
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
-          style using the CSV below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          style using the Excel template below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
           design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
           sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
           use it only when you’re sure you won’t need that style again.
@@ -2544,7 +2663,7 @@ function PricingCsv({ viewingLabel = null }) {
       </div>
 
       <div style={S.card}>
-        <div style={S.h2}>Pricing &amp; included options (CSV)</div>
+        <div style={S.h2}>Pricing &amp; included options (Excel)</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Download the template (one row per building style), then add a row for every size you offer: type the
           <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
@@ -2562,10 +2681,10 @@ function PricingCsv({ viewingLabel = null }) {
           </div>
         ) : (
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <button onClick={downloadTemplate} style={S.btn("#F1F5F9", "#334155")}>⬇ Download template</button>
+            <button onClick={downloadTemplate} disabled={dlBusy} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: dlBusy ? 0.6 : 1, cursor: dlBusy ? "default" : "pointer" }}>{dlBusy ? "Preparing…" : "⬇ Download Excel template"}</button>
             <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
-              {busy ? "Importing…" : "⬆ Upload filled CSV"}
-              <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }}
+              {busy ? "Importing…" : "⬆ Upload filled sheet"}
+              <input key={fileKey} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{ display: "none" }}
                 onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
             </label>
           </div>
