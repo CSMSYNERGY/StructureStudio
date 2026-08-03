@@ -412,7 +412,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
       admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
-      admin.from("client_layout_items").select("item_key, label_override, active, archived, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
@@ -420,7 +420,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active, archived").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
     ]);
@@ -428,7 +428,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
-      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived }));
+      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings });
@@ -1087,6 +1087,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
         active: row?.active !== false,
         archived: row?.archived === true,
+        internal_only: row?.internalOnly === true,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
@@ -1137,6 +1138,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
         active: row?.active !== false,
         archived: row?.archived === true,
+        internal_only: row?.internalOnly === true,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
@@ -1187,6 +1189,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
         active: row?.active !== false,
         archived: row?.archived === true,
+        internal_only: row?.internalOnly === true,
         sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
         updated_at: new Date().toISOString(),
       };
@@ -1218,6 +1221,20 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("client_layout_items")
       .update({ archived }).eq("client_id", clientId).eq("item_key", key);
     if (error) return json({ error: `Archive failed: ${error.message}` }, 500);
+    return json({ ok: true });
+  }
+
+  // Flag a BUILT-IN layout option as INTERNAL-designer-only. When on, the item is still placeable
+  // in the embedded (rep) designer and still renders on saved designs, but is dropped from the
+  // client-facing designer's palette (get_config emits internalOnly; the designer filters by
+  // `embedded`). Independent of active/archived. clientId is JWT-resolved.
+  if (action === "set_layout_item_internal_only") {
+    const key = String(payload?.itemKey ?? "").trim();
+    if (!key) return json({ error: "itemKey required" }, 400);
+    const internalOnly = payload?.internalOnly === true;
+    const { error } = await admin.from("client_layout_items")
+      .update({ internal_only: internalOnly }).eq("client_id", clientId).eq("item_key", key);
+    if (error) return json({ error: `Save failed: ${error.message}` }, 500);
     return json({ ok: true });
   }
 

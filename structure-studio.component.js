@@ -1211,12 +1211,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
   const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
   const windowFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "window"), [C.fixtures]);
+  // Internal-only fixtures: the rep (embedded) designer can place them, but the customer-facing page
+  // must NOT offer them as placement options. These "placeable" lists drive the PICKERS + picker
+  // buttons only; the full memos above still feed isArchivedItem / swap / render so an already-placed
+  // internal-only fixture keeps rendering for the customer and never reads as archived.
+  const placeableDoors = customerFacing ? doorFixtures.filter((f) => !f.internalOnly) : doorFixtures;
+  const placeableRamps = customerFacing ? rampFixtures.filter((f) => !f.internalOnly) : rampFixtures;
+  const placeableWindows = customerFacing ? windowFixtures.filter((f) => !f.internalOnly) : windowFixtures;
   // Ramp is self-contained now (SIMPLE_RAMP_CFG), driven by the Ramp settings — NOT the built-in
   // `ramp` layout item. Custom mode → the ramp picker (catalog styles); simple mode + offered → the
   // simple ramp tool; otherwise render-only (old ramps still draw, but no new placement).
   const rampMode = ((C.rampSettings && C.rampSettings.mode) || "simple");
   const rampEnabled = !!(C.rampSettings && C.rampSettings.enabled);
-  const rampCustom = rampMode === "custom" && rampFixtures.length > 0;
+  const rampCustom = rampMode === "custom" && placeableRamps.length > 0;
   const [sel, setSel] = useState(() => {
     const init = { style: "", size: "", roofType: "", roofColor: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
@@ -1238,6 +1245,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     for (const k in qmap) {
       const fx = fixtures.find((f) => String(f.id) === k);
       if (!fx) continue;   // built-in keys (loft etc.) are handled by their own ITEMS entry
+      if (customerFacing && fx.internalOnly) continue;   // internal-only: rep can place it, customer can't add/decline it
       const cat = fx.category || "door";
       out[k] = {
         label: fx.name || "Item",
@@ -1252,14 +1260,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return out;
   })();
   const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
-    ...(doorFixtures.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
+    ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
     // so every placed ramp renders. Placeable only when the tenant offers a SIMPLE ramp; custom mode
     // and not-offered are render-only (the picker handles custom placement).
     ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
-    ...(windowFixtures.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    ...(placeableWindows.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
   const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
@@ -3920,9 +3928,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={doorFixtures} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
-      {rampPick && createPortal(<RampPicker ramps={rampFixtures} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={windowFixtures} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
+      {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -4144,7 +4152,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
-          const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette);
+          const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette && (embedded || !c.internalOnly));
           const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
           const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
           // Decline control for an included item: X it off (a deduction line is added on the
@@ -4222,7 +4230,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const isWin = si.type === "window";
             const isRamp = si.type === "ramp";
             if (!(isDoor || isWin || isRamp)) return null;
-            const pool = isDoor ? doorFixtures : isWin ? windowFixtures : rampFixtures;
+            const pool = isDoor ? placeableDoors : isWin ? placeableWindows : placeableRamps;
             if (!pool || pool.length === 0) return null;
             const archived = isArchivedItem(si);
             const openSwap = () => {

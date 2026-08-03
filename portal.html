@@ -114,7 +114,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260802f" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260803a" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -2734,7 +2734,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // no longer shown or archived here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly };
     });
   };
 
@@ -2755,6 +2755,20 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
       await load();
       setMsg({ ok: archived ? "Option archived — it stays on existing designs but can't be added to new ones." : "Option restored." });
     } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  // Internal-only = still placeable in the rep (embedded) designer and still rendered on existing
+  // designs, but dropped from the customer-facing designer's palette (get_config emits internalOnly;
+  // the designer filters by `embedded`). Independent of archive. Optimistic local update.
+  const toggleInternal = async (itemKey, internalOnly) => {
+    setBusy(true); setMsg(null);
+    setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, internalOnly } : r));
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "set_layout_item_internal_only", itemKey, internalOnly }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setMsg({ ok: internalOnly ? "Item set to Internal Designer only — customers can’t add it, but it still shows on designs that already have it." : "Item available on the customer designer again." });
+    } catch (e) { setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, internalOnly: !internalOnly } : r)); setMsg({ err: e.message }); }
     setBusy(false);
   };
 
@@ -2859,7 +2873,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -2885,6 +2899,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                           <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyKey === r.item_key} style={{ display: "none" }} onChange={(e) => onRowImg(r.item_key, e.target.files && e.target.files[0])} />
                         </label>
                       )}
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <label title="Internal only: reps can still place it in the designer and it stays on existing designs, but customers can't add it on the client-facing page" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
+                        <input type="checkbox" checked={!!r.internalOnly} disabled={busy} onChange={() => toggleInternal(r.item_key, !r.internalOnly)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
+                      </label>
                     </td>
                     <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
                       <button onClick={() => toggleArchive(r.item_key, !r.archived)} disabled={busy}
@@ -2975,14 +2994,14 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
       price: d.price != null ? String(d.price) : "",
       swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
       op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
-      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true,
+      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
     })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false, internalOnly: false }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
@@ -3019,7 +3038,7 @@ Anything not shown here will be removed from their account.`)) return;
         widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
         swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
         opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
-        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i,
+        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true, sortOrder: i,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_doors", doors }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -3082,6 +3101,7 @@ Anything not shown here will be removed from their account.`)) return;
                 <th style={S.th}>Swing</th>
                 <th style={S.th}>Operation</th>
                 {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
+                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th>
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
@@ -3130,6 +3150,7 @@ Anything not shown here will be removed from their account.`)) return;
                       </div>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "internalOnly")}</td>
                     <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
                   </tr>
                 ))}
@@ -3235,14 +3256,14 @@ function RampsView({ viewingLabel = null, clientId = null }) {
     setRows(ramps.map((d) => ({
       id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
       width_in: d.width_in != null ? fmtFtIn(d.width_in) : "", height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
-      price: d.price != null ? String(d.price) : "", image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true,
+      price: d.price != null ? String(d.price) : "", image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
     })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false, internalOnly: false }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -3275,7 +3296,7 @@ Anything not shown here will be removed.`)) return;
       const r1 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramp_settings", mode, enabled, price: simple.price, method: simple.method, imageUrl: simple.image_url || null, showImage: simple.show_image_on_estimate !== false }) });
       if (r1.error || (r1.data && r1.data.error)) throw new Error((r1.error && r1.error.message) || r1.data.error);
       if (mode === "custom") {
-        const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i }));
+        const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true, sortOrder: i }));
         const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramps", ramps }) });
         if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
         const skipped = (r2.data && r2.data.skipped) || [];
@@ -3341,7 +3362,7 @@ Anything not shown here will be removed.`)) return;
                     <thead><tr>
                       <th style={S.th}>Photo</th><th style={S.th}>On estimate</th><th style={S.th}>Style</th>
                       <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
-                      <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={S.th}></th>
+                      <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ ramp buttons on the client-facing page (already-placed ramps still show).">Internal only</th><th style={S.th}></th>
                     </tr></thead>
                     <tbody>
                       {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
@@ -3353,6 +3374,7 @@ Anything not shown here will be removed.`)) return;
                           <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 5 }}>{sizeInput(i, "width_in", '48"')}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", "3'")}</div></td>
                           <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span><input type="number" min="0" step="any" value={r.price} placeholder="0" onChange={(e) => setRow(i, { price: e.target.value })} style={{ ...S.input, width: 90, minWidth: 0 }} /></div></td>
                           <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.active, (e) => setRow(i, { active: e.target.checked }))}</td>
+                          <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.internalOnly, (e) => setRow(i, { internalOnly: e.target.checked }))}</td>
                           <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
                         </tr>
                       ))}
@@ -3403,14 +3425,14 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
       width_in: d.width_in != null ? fmtFtIn(d.width_in) : "",
       height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
       price: d.price != null ? String(d.price) : "",
-      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true,
+      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
     })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false }]);
+  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false, internalOnly: false }]);
   const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
   const sortBy = (key, getVal) => setSort((s) => {
@@ -3444,7 +3466,7 @@ Anything not shown here will be removed from their account.`)) return;
       const windows = rows.map((r, i) => ({
         id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
         widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
-        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, sortOrder: i,
+        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true, sortOrder: i,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_windows", windows }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -3492,6 +3514,7 @@ Anything not shown here will be removed from their account.`)) return;
                 {sortableTh("Size (W × H)", "size", (r) => parseFtIn(r.width_in) || 0)}
                 {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
                 {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
+                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th>
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
@@ -3522,6 +3545,7 @@ Anything not shown here will be removed from their account.`)) return;
                       <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
+                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "internalOnly")}</td>
                     <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
                   </tr>
                 ))}
