@@ -14,6 +14,11 @@ import { withErrorLog } from "../_shared/logError.ts";
 //   x-deposyt-signature: sha256=<hex>      — legacy BuildBridge-style (over raw body)
 // Missing secret => endpoint refuses everything (503), inert until set up.
 //
+// DEPLOY NOTE: this function MUST stay verify_jwt=false. Deposyt cannot send a
+// Supabase JWT, so with JWT verification on, the gateway 401s every delivery before
+// this code runs — the signature is never even checked and nothing is recorded.
+// That silently broke the whole billing lifecycle until 2026-07-28.
+//
 // Events handled (anything else is logged + acknowledged):
 //   recurring.subscription.add     → upsert row (client_id from metadata/merchant field)
 //   recurring.subscription.update  → status / period end
@@ -108,7 +113,18 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
     const subId = String(sub.subscription_id ?? sub.id ?? "");
     if (!subId) throw new Error("No subscription id in payload");
     const status = sub.status ? String(sub.status) : null;
-    const periodEnd = sub.current_period_end ?? sub.next_charge_date ?? null;
+    // NMI sends next_charge_date: "1970-01-01" as its placeholder for "no scheduled date"
+    // — observed on EVERY live event 2026-07-28, adds and deletes alike. Stored at face
+    // value that puts an epoch-zero renewal date in front of the tenant and makes any
+    // "period has ended" comparison instantly true, so an implausibly old date is treated
+    // as absent rather than trusted.
+    const rawPeriodEnd = sub.current_period_end ?? sub.next_charge_date ?? null;
+    const periodEnd = (() => {
+      if (!rawPeriodEnd) return null;
+      const t = Date.parse(String(rawPeriodEnd));
+      if (!Number.isFinite(t) || t < Date.parse("2020-01-01")) return null;
+      return new Date(t).toISOString();
+    })();
     // Tenant: subscribe-time we set merchant_defined_field_1 = client_id. NMI may
     // echo it as merchant_defined_fields (array or object); older shapes used
     // metadata. Fall back to the already-known row for updates.
@@ -132,18 +148,90 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
 
     switch (eventType) {
       case "recurring.subscription.add": {
-        if (!clientId) throw new Error("subscription.add without a client id (metadata/merchant field)");
-        const { error } = await admin.from("billing_subscriptions").upsert({
-          id: subId, client_id: String(clientId),
-          status: norm(status) ?? "active",
-          current_period_start: new Date().toISOString(),
-          current_period_end: periodEnd ? new Date(periodEnd).toISOString() : null,
-        }, { onConflict: "id" });
+        // NMI does NOT echo merchant_defined_fields in the webhook payload. Verified
+        // against live events 2026-07-28: event_body carries subscription_id, order_id,
+        // order_description, plan{id,name,amount,payments,day_of_month,month_frequency},
+        // card, merchant, billing_address, shipping, tax, features, next_charge_date,
+        // attempted_payments, completed_payments, remaining_payments — and no MDF or
+        // metadata block anywhere. So merchant_defined_field_1 (which we DO send on
+        // add_subscription) cannot be read back here, and every add event failed with
+        // "without a client id" until this was fixed.
+        //
+        // Two recoveries, both reliable:
+        //   1. The row we already wrote. portal-billing creates it immediately after the
+        //      gateway call, so by the time this arrives the tenant is already known.
+        //      This is authoritative — it is our own record, not a parsed string.
+        //   2. order_id, which is ours: `ss_<clientId>_<planId>`. clientId is a DNS-safe
+        //      slug (it doubles as a subdomain, so no underscores), hence the segment
+        //      after "ss_" is exactly it. Covers a subscription created directly in the
+        //      gateway, which we would have no row for.
+        const { data: existingSub } = await admin.from("billing_subscriptions")
+          .select("client_id, current_period_start, status").eq("id", subId).maybeSingle();
+        const orderId = String(sub.order_id ?? sub.orderid ?? "");
+        const fromOrderId = /^ss_([a-z0-9-]+)_/.exec(orderId)?.[1] ?? null;
+        const tenant = existingSub?.client_id ?? clientId ?? fromOrderId;
+        if (!tenant) {
+          throw new Error(`subscription.add: cannot resolve tenant (order_id=${orderId || "absent"})`);
+        }
+        // This event's real value is next_charge_date — portal-billing cannot know it.
+        // Don't clobber what we already recorded: leave current_period_start alone on a
+        // row that exists, and never overwrite a period end with null.
+        const addPatch: Record<string, unknown> = {
+          id: subId,
+          client_id: String(tenant),
+        };
+        // `add` is the FIRST event in a subscription's life, so one arriving for a row we
+        // already hold as cancelled is a stale replay — and Deposyt does retry failed
+        // deliveries for hours. Applying its status would resurrect the subscription to
+        // active and silently hand a cancelled tenant their account back. Never let an
+        // add event raise the status of an already-cancelled row.
+        if (existingSub?.status !== "cancelled") addPatch.status = norm(status) ?? "active";
+        if (periodEnd) addPatch.current_period_end = periodEnd;
+        if (!existingSub) addPatch.current_period_start = new Date().toISOString();
+        const { error } = await admin.from("billing_subscriptions")
+          .upsert(addPatch, { onConflict: "id" });
         if (error) throw new Error(error.message);
         break;
       }
       case "recurring.subscription.update": {
-        const next = norm(status) ?? "active";
+        // An UNMAPPED status must never be read as "everything is fine". This used to
+        // default to "active", which would take a payment-failure state we don't
+        // recognise and silently keep a non-paying tenant fully entitled — the gate's
+        // entire purpose inverted, and invisibly. norm() only guesses at what NMI sends
+        // on a decline (past_due / pastdue / failed / declined); the real string has never
+        // been observed, because no test has yet driven a card failure.
+        //
+        // Same rule as the Monday status map: an unknown label leaves the tenant's state
+        // untouched and shouts, rather than inventing one. Throwing records the event as
+        // FAILED in billing_webhook_events with the offending string, so it is
+        // discoverable and Deposyt's retries will apply the mapping once it is added.
+        const next = norm(status);
+        // ABSENT and UNKNOWN are different things, and conflating them was a retry-storm waiting
+        // to happen. norm() returns null for both: for a status string we do not recognise (which
+        // SHOULD fail loudly, so the mapping gets added) and for no status field at all — and
+        // every one of the six live NMI subscription payloads carries NO status field. So the
+        // first benign update event (a card swap, a gateway-side amount edit) would have 422'd on
+        // every hourly redelivery until NMI gave up, filling app_errors and leaving a permanently
+        // 'failed' event indistinguishable at triage time from a real defect. An update that
+        // carries no status simply is not a status change: apply what it does carry and accept it.
+        if (status == null || String(status).trim() === "") {
+          const { error: peErr, count } = await admin.from("billing_subscriptions")
+            .update({ current_period_end: periodEnd ?? undefined, updated_at: new Date().toISOString() },
+                    { count: "exact" })
+            .eq("id", subId);
+          if (peErr) throw new Error(peErr.message);
+          if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+          break;
+        }
+        if (!next) {
+          console.warn(`[billing-webhook] UNMAPPED status "${status}" on ${eventType}`);
+          const { error: peErr } = await admin.from("billing_subscriptions").update({
+            current_period_end: periodEnd ?? undefined,
+            updated_at: new Date().toISOString(),
+          }).eq("id", subId);
+          if (peErr) throw new Error(peErr.message);
+          throw new Error(`Unmapped subscription status "${status}" — left status unchanged; add it to norm()`);
+        }
         // Stamp when a subscription FIRST goes past_due — that starts the grace clock
         // the portal gate reads (a failed payment keeps working for a few days with a
         // warning instead of locking a paying customer out over an expired card).
@@ -157,27 +245,44 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         } else {
           pastDuePatch = { past_due_since: null };
         }
-        const { error } = await admin.from("billing_subscriptions").update({
+        // A 0-row match is NOT success — see the note on the delete case below.
+        const { error, count } = await admin.from("billing_subscriptions").update({
           status: next,
-          current_period_end: periodEnd ? new Date(periodEnd).toISOString() : undefined,
+          current_period_end: periodEnd ?? undefined,
           updated_at: new Date().toISOString(),
           ...pastDuePatch,
-        }).eq("id", subId);
+        }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
+        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
         break;
       }
       case "recurring.subscription.delete": {
-        const { error } = await admin.from("billing_subscriptions").update({
+        // COUNT THE ROWS. A PostgREST update matching zero rows returns no error, so this used to
+        // no-op and then mark the event 'processed' — which quietly broke the anti-resurrection
+        // guard on `add` (line ~188: `if (existingSub?.status !== "cancelled")` only protects when
+        // the cancelled row EXISTS). Event reordering is real on this gateway: on 2026-07-29 a
+        // delete processed at 02:46:45 while its own add, stuck in the 422 retry loop, only landed
+        // at 03:30:30. Order survived that time solely because portal-billing had pre-created the
+        // row — but a subscription created directly in the gateway (the exact case the order_id
+        // fallback exists to support) has no pre-created row, so the delete vanished and the
+        // retried add then wrote status 'active' with nothing ever correcting it: the mirror says
+        // active forever and nobody is paying. Throwing instead leaves the event FAILED and lets
+        // the gateway redeliver after the add has created the row, which is the correct order.
+        const { error, count } = await admin.from("billing_subscriptions").update({
           status: "cancelled", canceled_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-        }).eq("id", subId);
+        }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
+        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
         break;
       }
       case "recurring.subscription.pause": {
-        const { error } = await admin.from("billing_subscriptions").update({
+        // Same 0-row reasoning as delete: a swallowed pause loses a past_due/paused signal, so the
+        // grace clock never starts and no failure is recorded anywhere.
+        const { error, count } = await admin.from("billing_subscriptions").update({
           status: "paused", updated_at: new Date().toISOString(),
-        }).eq("id", subId);
+        }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
+        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
         break;
       }
       default:

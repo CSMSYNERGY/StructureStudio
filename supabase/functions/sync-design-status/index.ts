@@ -69,36 +69,51 @@ function mapEstimateStatus(raw: unknown): "sent" | "accepted" | "invoiced" {
 }
 
 // GET all estimates for a location (offset paginated, capped).
-async function listEstimates(locationId: string, headers: HeadersInit): Promise<any[]> {
+//
+// `complete` is the load-bearing half of the return value. A caller that only sees rows cannot
+// tell "this location has no estimates" from "GHL refused to tell us" — and treating the second
+// as the first is what let a single 401/429/5xx rewrite every design's status down to 'sent'.
+// It is false when any page failed at the HTTP level, and also when the pagination cap is hit
+// while pages are still coming back full, because the tail we never fetched is indistinguishable
+// from data that does not exist.
+async function listEstimates(locationId: string, headers: HeadersInit): Promise<{ rows: any[]; complete: boolean }> {
   const out: any[] = [];
   const limit = 100;
+  let complete = false;
   for (let offset = 0; offset < 2000; offset += limit) {
     const url = `https://services.leadconnectorhq.com/invoices/estimate/list?altId=${enc(locationId)}&altType=location&limit=${limit}&offset=${offset}`;
     const r = await fetch(url, { headers });
-    if (!r.ok) { console.warn("estimate list failed:", r.status, await safeText(r)); break; }
+    if (!r.ok) { console.warn("estimate list failed:", r.status, await safeText(r)); return { rows: out, complete: false }; }
     const d = await r.json();
     const arr = Array.isArray(d?.estimates) ? d.estimates : (Array.isArray(d?.data) ? d.data : []);
     out.push(...arr);
-    if (arr.length < limit) break;
+    if (arr.length < limit) { complete = true; break; }   // short page == the real end
   }
-  return out;
+  return { rows: out, complete };
 }
 
 // GET opportunities for a location (follows GHL's meta.nextPageUrl, capped).
-async function listOpportunities(locationId: string, headers: HeadersInit): Promise<any[]> {
+// Same contract as listEstimates: `complete` false means "do not read absence as deletion".
+async function listOpportunities(locationId: string, headers: HeadersInit): Promise<{ rows: any[]; complete: boolean }> {
   const out: any[] = [];
+  let complete = false;
   let url: string | null =
     `https://services.leadconnectorhq.com/opportunities/search?location_id=${enc(locationId)}&limit=100`;
   for (let i = 0; i < 20 && url; i++) {
-    const r = await fetch(url, { headers });
-    if (!r.ok) { console.warn("opportunity search failed:", r.status, await safeText(r)); break; }
-    const d = await r.json();
+    // r / d / next are annotated deliberately. `url` is both an input to the fetch and reassigned
+    // from that fetch's own response, so without these TypeScript hits a circular inference
+    // (TS7022) and silently degrades this whole function to `any` — which is precisely the state
+    // that lets a typo ship. Keep the annotations if you touch this loop.
+    const r: Response = await fetch(url, { headers });
+    if (!r.ok) { console.warn("opportunity search failed:", r.status, await safeText(r)); return { rows: out, complete: false }; }
+    const d: any = await r.json();
     const arr: any[] = Array.isArray(d?.opportunities) ? d.opportunities : [];
     out.push(...arr);
-    const next = d?.meta?.nextPageUrl || null;
-    url = next && arr.length > 0 ? String(next) : null;
+    const next: string | null = d?.meta?.nextPageUrl ? String(d.meta.nextPageUrl) : null;
+    url = next && arr.length > 0 ? next : null;
+    if (!url) complete = true;   // GHL stopped offering pages == the real end
   }
-  return out;
+  return { rows: out, complete };
 }
 
 Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
@@ -167,7 +182,8 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   };
 
   // 5. Bounded GHL reads. Opportunities only matter if any pipeline-stage is mapped.
-  const estimates = await listEstimates(locationId, ghlHeaders);
+  const estRes = await listEstimates(locationId, ghlHeaders);
+  const estimates = estRes.rows;
   const estStatusById = new Map<string, string>();
   for (const e of estimates) {
     const id = String(e?._id ?? e?.id ?? "");
@@ -177,19 +193,45 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   }
 
   const oppStageById = new Map<string, string>();
+  let oppsComplete = true;   // never read == nothing missing
   if (stageIdToStatus.size > 0) {
-    const opps = await listOpportunities(locationId, ghlHeaders);
-    for (const o of opps) {
+    const oppRes = await listOpportunities(locationId, ghlHeaders);
+    oppsComplete = oppRes.complete;
+    for (const o of oppRes.rows) {
       const id = String(o?.id ?? o?._id ?? "");
       if (id) oppStageById.set(id, String(o?.pipelineStageId ?? o?.pipeline_stage_id ?? ""));
     }
   }
 
+  // Whether absence of a row is allowed to mean "gone". When either GHL read was incomplete we
+  // only ever promote: the cached status becomes a floor, so a 401 from a rotated api key, a 429,
+  // or a location with more estimates than the pagination cap can no longer rewrite a tenant's
+  // fulfilled work back down to 'sent'. This is what the header comment already promised
+  // ("GHL failures never throw — the design keeps its cached status"), which previously held only
+  // for thrown network errors and not for HTTP-level refusals.
+  const dataComplete = estRes.complete && oppsComplete;
+  if (!dataComplete) console.warn("sync-design-status: incomplete GHL read — promotions only, no downgrades");
+
   // 6. Compute the highest stage per design and collect changes.
   const statuses: Record<string, string> = {};
   const updates: { short_code: string; status: string }[] = [];
   for (const d of designs ?? []) {
-    let stage: "sent" | "accepted" | "invoiced" | "delivered" = "sent";
+    // Drafts (migration 063: a browsing lead's silently-saved design) have no estimate and
+    // no opportunity — there is nothing in GHL to derive from, and the 'sent' baseline
+    // below would otherwise promote every draft the moment the portal loads it. Their
+    // status belongs to save_design alone: a real submit is what turns draft into sent.
+    // Inventory masters (migration 075: the design behind a physical unit on a sales lot)
+    // are the same shape of exception — no GHL estimate exists, the status is owned by
+    // portal-settings' save_inventory, and 'sent' here would surface a lot building as a
+    // customer estimate on the Designs tab.
+    if (d.status === "draft" || d.status === "inventory") { statuses[d.short_code] = d.status; continue; }
+    // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
+    // Otherwise start from what we already believe, so the computation below can raise the status
+    // but never lower it (see dataComplete above).
+    const cachedStage = (d.status && STAGE_RANK[d.status as keyof typeof STAGE_RANK] !== undefined)
+      ? (d.status as "sent" | "accepted" | "invoiced" | "delivered")
+      : "sent";
+    let stage: "sent" | "accepted" | "invoiced" | "delivered" = dataComplete ? "sent" : cachedStage;
 
     const estStatus = d.ghl_estimate_id ? estStatusById.get(String(d.ghl_estimate_id)) : undefined;
     if (estStatus !== undefined) {
@@ -217,6 +259,37 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
       .eq("short_code", u.short_code);
     if (upErr) { console.warn(`status update failed for ${u.short_code}:`, upErr.message); statuses[u.short_code] = cached[u.short_code] ?? u.status; }
   }
+
+  // 8. Sync order totals from the GHL estimate total (the Orders feature's `orders.total_cents`).
+  //    This lived on the wip/orders branch and was clobbered off beta by an unrelated redeploy,
+  //    so new orders stopped getting a total. GHL money is in dollars → cents. Never overwrite an
+  //    owner-entered total (total_source='manual'); a missing estimate leaves the order untouched
+  //    (never zeroed). Best-effort: a total failure must never fail the status sync.
+  try {
+    const codes = (designs ?? []).map((d) => d.short_code);
+    if (codes.length) {
+      const { data: orders } = await admin
+        .from("orders").select("id, short_code, total_source").eq("client_id", clientId).in("short_code", codes);
+      if (orders && orders.length) {
+        const estTotalById = new Map<string, number>();
+        for (const e of estimates) {
+          const id = String(e?._id ?? e?.id ?? "");
+          const t = Number(e?.total ?? e?.totalamountInUSD);
+          if (id && Number.isFinite(t)) estTotalById.set(id, t);
+        }
+        const estIdByCode = new Map((designs ?? []).map((d) => [d.short_code, d.ghl_estimate_id]));
+        for (const o of orders) {
+          if (o.total_source === "manual") continue;
+          const t = estTotalById.get(String(estIdByCode.get(o.short_code) ?? ""));
+          if (t == null) continue;
+          const { error: tErr } = await admin
+            .from("orders").update({ total_cents: Math.round(t * 100), total_source: "ghl", updated_at: new Date().toISOString() })
+            .eq("id", o.id).eq("client_id", clientId);
+          if (tErr) console.warn(`order total update failed for ${o.short_code}:`, tErr.message);
+        }
+      }
+    }
+  } catch (e) { console.warn("order total sync failed:", (e as Error)?.message); }
 
   return json({ ok: true, statuses, synced: true, changed: updates.length });
 }));

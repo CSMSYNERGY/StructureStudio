@@ -215,7 +215,7 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
     const body2 = await res.json();
     if (body2.errors) return json({ ok: false, error: JSON.stringify(body2.errors) }, 502);
 
-    let statusChanges = 0, newComments = 0;
+    let statusChanges = 0, newComments = 0, retracted = 0;
     for (const it of body2?.data?.items ?? []) {
       const row2 = byItem.get(String(it.id));
       if (!row2) continue;
@@ -232,21 +232,36 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
           .update({ status: mapped, status_changed_at: now2, updated_at: now2 }).eq("id", row2.id);
         statusChanges++;
       }
+      // Reconcile is AUTHORITATIVE over the mirror, not append-only. It used to be neither:
+      // ignoreDuplicates:true skipped any monday_update_id already stored, so an EDITED body never
+      // re-synced, and an unmarked update was `continue`d, so removing the /client prefix to
+      // unpublish changed nothing. Combined with the webhook only being subscribed to
+      // change_column_value + create_update (its edit_update branch therefore never fires), the
+      // first stored version of a /client comment was immutable and un-retractable — a teammate who
+      // posted "/client Fixed — the root cause was <another client>'s config" and corrected it
+      // seconds later still had the original text sitting in that tenant's My Submissions forever.
+      // Marked → overwrite; unmarked → remove. Deleting on unmark keeps the safety property intact
+      // (internal chatter is still never STORED — this only ever removes rows).
       for (const u of it.updates ?? []) {
         const t = u.text_body ?? "";
-        if (!CLIENT_MARKER.test(t)) continue;      // internal chatter — never stored
+        if (!CLIENT_MARKER.test(t)) {
+          const del = await admin2.from("feedback_comments")
+            .delete({ count: "exact" }).eq("monday_update_id", String(u.id));
+          if (del.count) retracted += del.count;
+          continue;
+        }
         const ins = await admin2.from("feedback_comments").upsert({
           submission_id: row2.id,
           monday_update_id: String(u.id),
           author_name: u.creator?.name ?? "Structure Studio",
           body: t.replace(CLIENT_MARKER, "").trim(),
           created_at: u.created_at ?? new Date().toISOString(),
-        }, { onConflict: "monday_update_id", ignoreDuplicates: true }).select();
+        }, { onConflict: "monday_update_id" }).select();
         if (ins.data && ins.data.length) newComments++;
       }
     }
-    console.log(`sync_all: checked ${rows.length}, ${statusChanges} status changes, ${newComments} new comments`);
-    return json({ ok: true, checked: rows.length, statusChanges, newComments });
+    console.log(`sync_all: checked ${rows.length}, ${statusChanges} status changes, ${newComments} new comments, ${retracted} retracted`);
+    return json({ ok: true, checked: rows.length, statusChanges, newComments, retracted });
   }
 
   // Monday's webhook handshake: it POSTs {challenge} once when the webhook is created

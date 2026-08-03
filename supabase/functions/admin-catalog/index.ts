@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
+import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -13,7 +14,12 @@ import { withErrorLog } from "../_shared/logError.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  // x-ss-stepup: sent by portal.html's adminApi on password-carrying step-up calls
+  // (delete_client) so its 401s bypass the global session-expired logout. A custom
+  // request header MUST be in this allow-list or the browser kills the call at CORS
+  // preflight — for right AND wrong passwords alike, which is exactly how the 00a819b
+  // step-up fix shipped broken: the header was added client-side only.
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-ss-stepup",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 function json(body: unknown, status = 200) {
@@ -24,20 +30,10 @@ const reqStr = (v: unknown, name: string) => {
   return v.trim();
 };
 
-// ── Where every auth email lands ────────────────────────────────────────────
-// ONE canonical destination for invite / set-password / reset links, regardless of
-// which host generated them. Callers used to pass `location.origin + "/portal"`, so a
-// link created from beta.structurestudio.app carried redirect_to=beta — and Supabase
-// only honours allow-listed redirects, silently substituting Site URL for anything
-// else. Verified 2026-07-28 against this project: beta got back the *identical*
-// response as a deliberately hostile control URL. Every invite Carolyn created from
-// beta therefore bounced to the apex, which is how these links broke.
-//
-// Forcing the apex is correct rather than a workaround: beta and production share ONE
-// Supabase project, so a password set here is immediately valid on beta too. A
-// caller-supplied portalUrl is IGNORED on purpose — one allow-listed destination
-// cannot drift out of the allow-list, and no future caller can reintroduce this bug.
-const AUTH_PORTAL_URL = "https://structurestudio.app/portal";
+// AUTH_PORTAL_URL — the one destination every auth email lands on — moved to
+// `_shared/authPortalUrl.ts` (imported above) when operator-portal gained its own
+// reset-link action. The reasoning is in that file; the short version is that a second
+// copy of this constant would be exactly the drift it exists to prevent.
 
 // ── Supabase Auth custom-SMTP config via the Management API ──────────────────
 // Powers the admin.html "Email Sender" card. Pointing the project's Auth SMTP at
@@ -66,6 +62,19 @@ async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
   try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
   if (!r.ok) {
     const msg = (data && (data.message || data.error || data.msg)) || text || `request failed (${r.status})`;
+    // 401/403 means the secret EXISTS but the Management API rejected it — an expired, revoked or
+    // wrong-project token. That is a different fix from the missing-secret branch above, and it used
+    // to surface as a bare "Supabase Management API: Unauthorized", which reads like a code bug and
+    // cost a whole session to diagnose (the giveaway was only that it was NOT the missing-token
+    // message). Name the actual cause and the actual fix, matching that branch's helpfulness.
+    if (r.status === 401 || r.status === 403) {
+      throw new Error(
+        "Email sending is misconfigured on the server: the MGMT_TOKEN secret is present but the " +
+        "Supabase Management API rejected it (expired, revoked, or issued for a different project). " +
+        "Mint a fresh personal access token at https://supabase.com/dashboard/account/tokens and " +
+        "replace the Edge Function secret named MGMT_TOKEN, then retry. " +
+        `Until then get_email_sender / connect_email / disconnect_email all fail. (API said: ${String(msg).slice(0, 200)})`);
+    }
     throw new Error(`Supabase Management API: ${String(msg).slice(0, 500)}`);
   }
   return data;
@@ -77,7 +86,7 @@ async function assertClient(sb: any, clientId: string) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("invalid client id");
   const { data, error } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
   if (error) throw error;
-  if (!data) throw new Error("unknown client");
+  if (!data) throw new Error("unknown builder");
   return clientId;
 }
 
@@ -206,6 +215,30 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     if (!stepUp.ok) return json(stepUp.body, stepUp.status);
   }
 
+  // Per-operator rights (migration 056: can_write / can_bill, both default FALSE).
+  //
+  // Enumerated as READS rather than writes, deliberately: a new action added below and
+  // forgotten here is then denied to read-only operators rather than silently granted to
+  // them. Deny-by-default is the only safe direction for a list somebody will extend.
+  //
+  // Gated on `via === "operator"` ONLY. The password path has no operator row, so
+  // `canWrite` is undefined there and an unconditional check would 403 the standalone
+  // break-glass console out of every write while telling it the account is read-only.
+  const READ_ONLY_ACTIONS = new Set([
+    "list_clients", "get_master", "get_client_catalog", "get_email_sender",
+  ]);
+  if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
+    if (!identity.canWrite) {
+      return json({ error: "This operator account is read-only." }, 403);
+    }
+    // Money is a separate grant from configuration — 056's own words: "Adding an operator
+    // should never silently grant the ability to charge a client's card." set_billing sets
+    // the discount and the exemption that every later charge is computed from.
+    if (String(action ?? "") === "set_billing" && !identity.canBill) {
+      return json({ error: "This operator account cannot change billing." }, 403);
+    }
+  }
+
   // Successful operator-authenticated calls are recorded. Until now only FAILURES were
   // audited, which meant an authorized admin action left no trace at all.
   if (identity.via === "operator") {
@@ -226,7 +259,34 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "list_clients": {
         const { data, error } = await sb.from("client_configs").select("client_id, company_name").order("client_id");
         if (error) throw error;
-        return json({ ok: true, clients: data });
+        // Billing posture per tenant, so the console can show at a glance who is comped
+        // and who is discounted. client_settings is service-role only — this function is
+        // the only place it can be read from.
+        const { data: cs } = await sb.from("client_settings")
+          .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features");
+        const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
+        // The billable feature list, so the console can offer a per-feature discount
+        // picker without hardcoding a copy of the catalogue that would drift from
+        // billing_plans. One entry per feature (monthly/annual share a feature).
+        const { data: planRows } = await sb.from("billing_plans")
+          .select("feature, name, availability, required").eq("active", true).order("sort_order", { ascending: false });
+        const seenFeature = new Set<string>();
+        const features = (planRows ?? []).filter((p: any) => {
+          if (!p.feature || seenFeature.has(p.feature)) return false;
+          seenFeature.add(p.feature);
+          return true;
+        }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required }));
+        const clients = (data ?? []).map((c: any) => {
+          const s = byId.get(c.client_id);
+          return {
+            ...c,
+            billingExempt: Boolean(s?.billing_exempt),
+            discountPercent: Number(s?.discount_percent) || 0,
+            discountFeatures: s?.discount_features ?? null,
+            exemptUntil: s?.billing_exempt_until ?? null,
+          };
+        });
+        return json({ ok: true, clients, features });
       }
       case "get_master": {
         // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
@@ -382,13 +442,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // is out of scope here); building styles/items/pricing are added via the tabs.
       case "create_client": {
         const clientId = reqStr(p.clientId, "clientId").toLowerCase();
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Client id must be lowercase letters, numbers and hyphens (DNS-safe).");
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Builder id must be lowercase letters, numbers and hyphens (DNS-safe).");
         const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal"];
         if (reserved.includes(clientId)) throw new Error(`"${clientId}" is a reserved id.`);
         const companyName = reqStr(p.companyName, "companyName");
         const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
         if (exists.error) throw exists.error;
-        if (exists.data) throw new Error(`A client "${clientId}" already exists.`);
+        if (exists.data) throw new Error(`A builder "${clientId}" already exists.`);
         // templateClientId === "__none__" => start blank (no clone): a standard contact
         // form so the designer works, and empty sizes/options the operator fills in via
         // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
@@ -403,7 +463,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const tmplId = (typeof p.templateClientId === "string" && p.templateClientId.trim()) ? p.templateClientId.trim() : "junior-barns";
           const tmpl = await sb.from("client_configs").select("contact_fields, default_sizes, options").eq("client_id", tmplId).maybeSingle();
           if (tmpl.error) throw tmpl.error;
-          if (!tmpl.data) throw new Error(`Template client "${tmplId}" not found.`);
+          if (!tmpl.data) throw new Error(`Template builder "${tmplId}" not found.`);
           contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
           templateId = tmplId;
         }
@@ -422,9 +482,22 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // owner to fill in via the portal. A normal new client gets no row here, so
         // billing_exempt reads false and the gate applies: they land on Billing and pay
         // before anything unlocks.
-        if (p.billingExempt === true) {
-          const bx = await sb.from("client_settings")
-            .upsert({ client_id: clientId, billing_exempt: true, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+        const newDiscount = Math.round(Number(p.discountPercent) || 0);
+        if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
+          throw new Error("discountPercent must be a whole number from 0 to 100.");
+        }
+        // Empty/absent = the discount applies to EVERY feature. A list narrows it.
+        const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
+          ? p.discountFeatures.map((f: unknown) => String(f))
+          : null;
+        if (p.billingExempt === true || newDiscount > 0) {
+          const bx = await sb.from("client_settings").upsert({
+            client_id: clientId,
+            billing_exempt: p.billingExempt === true,
+            discount_percent: newDiscount,
+            discount_features: newDiscountFeatures,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: "client_id" });
           if (bx.error) throw bx.error;
         }
 
@@ -524,6 +597,67 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // needs SMTP), and either way we return a one-time set-password link the
       // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
       // Settings) or "user" (Designs & Leads only).
+      case "set_billing": {
+        // Billing posture for an EXISTING tenant: the comp flag and the account discount.
+        // Separate from create_client because the customers most likely to need a discount
+        // — founding customers — already exist by the time you decide to give them one.
+        //
+        // Two things this deliberately does NOT do:
+        //   1. It does not touch live subscriptions. NMI stores the amount on the
+        //      subscription itself, so a discount set now applies to what they subscribe
+        //      to NEXT, not to what is already running. Re-pricing an existing
+        //      subscription would mean a gateway update_subscription call and is a
+        //      separate, money-moving operation.
+        //   2. Clearing billing_exempt on a tenant with no active subscription LOCKS them
+        //      out immediately — the gate has nothing to let them in on. Order matters:
+        //      set the discount first, let them subscribe, then remove the exemption.
+        const clientId = reqStr(p.clientId, "clientId");
+        const { data: exists } = await sb.from("client_configs")
+          .select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+
+        const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
+        if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
+        if (p.discountPercent !== undefined) {
+          const pct = Math.round(Number(p.discountPercent));
+          if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+            throw new Error("discountPercent must be a whole number from 0 to 100.");
+          }
+          patch.discount_percent = pct;
+        }
+        if (p.discountFeatures !== undefined) {
+          patch.discount_features = Array.isArray(p.discountFeatures) && p.discountFeatures.length
+            ? p.discountFeatures.map((f: unknown) => String(f))
+            : null;
+        }
+        // Dated free period (059). Empty string clears it. A date-only value is taken as the
+        // END of that day in UTC, so "free until Aug 5" includes all of Aug 5 rather than
+        // expiring at midnight as it begins.
+        if (p.exemptUntil !== undefined) {
+          const raw = String(p.exemptUntil ?? "").trim();
+          if (!raw) {
+            patch.billing_exempt_until = null;
+          } else {
+            const iso = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T23:59:59.999Z` : raw;
+            const t = Date.parse(iso);
+            if (!Number.isFinite(t)) throw new Error(`exemptUntil is not a valid date: ${raw}`);
+            patch.billing_exempt_until = new Date(t).toISOString();
+          }
+        }
+        const { error } = await sb.from("client_settings").upsert(patch, { onConflict: "client_id" });
+        if (error) throw error;
+
+        // Warn the operator when the change cannot take effect on its own.
+        const { data: live } = await sb.from("billing_subscriptions")
+          .select("id").eq("client_id", clientId).neq("status", "cancelled").limit(1);
+        return json({
+          ok: true,
+          hasLiveSubscription: Boolean(live && live.length),
+          note: live && live.length
+            ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
+            : "Saved.",
+        });
+      }
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const email = reqStr(p.email, "email").toLowerCase();
@@ -570,7 +704,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
         if (existingLink.error) throw existingLink.error;
         if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
-          throw new Error(`"${email}" is already linked to client "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
+          throw new Error(`"${email}" is already linked to builder "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
         }
         const up = await sb.from("client_users").upsert(
           { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
@@ -657,12 +791,21 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       }
 
       // ── delete a tenant and ALL of its data (operator hard delete) ──────
-      // Removes the client's designs, catalog (styles/sizes/inclusions/layout
-      // items), settings, error logs, user mappings + their now-orphaned auth
-      // logins, and uploaded storage objects (floor-plans + branding), then the
-      // client_configs row itself. Requires the typed client id to match
+      // Removes the client's designs + version history + captured leads, catalog
+      // (styles/sizes/inclusions/layout items/colours/pricing), fixtures catalog,
+      // settings, error logs, feedback submissions (and their comments, by cascade),
+      // billing subscription + vaulted-card mirrors, QuickBooks item map, user
+      // mappings + their now-orphaned auth logins, and uploaded storage objects in
+      // all four buckets (floor-plans, branding, fixtures, feedback-attachments),
+      // then the client_configs row itself. Requires the typed client id to match
       // (confirmClientId) so a stray/mistaken call can't nuke a tenant.
       // Irreversible. GHL-side contacts/estimates are external and untouched.
+      // ⚠️ NOT removed: the financial ledgers (orders/payments/invoice_sends/
+      // billing_charge_attempts). Those are records of money that moved, so the
+      // response reports their counts as `retained` instead of silently keeping
+      // them — deciding to destroy them is a retention call, not a code change.
+      // Keep this list in step with the wipes below; drift here is what left a
+      // deleted tenant's PII in the database twice already.
       case "delete_client": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
@@ -677,6 +820,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Catalog/design rows first, config last. Order respects FKs
         // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");
+        // design_versions and captured_leads were BOTH missing from this list until
+        // 2026-07-30. Neither has a foreign key to designs (verified: zero FKs on either), so
+        // nothing cascaded and both survived a tenant hard-delete — leaving that tenant's
+        // full quote history and their browsing leads, complete with customer names, phone
+        // numbers and addresses, in a database the tenant no longer exists in.
+        await wipe("design_versions");
+        await wipe("captured_leads");
         await wipe("layout_item_pricing");      // FK style_id → building_styles
         await wipe("colors");                   // standalone per-tenant palette
         await wipe("building_size_inclusions");
@@ -684,7 +834,48 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         await wipe("building_styles");
         await wipe("client_layout_items");
         await wipe("client_settings");
+        // 2026-08-01: the same orphan-cascade hole as design_versions/captured_leads above, on the
+        // tables added since. Verified against information_schema rather than by memory — no FK
+        // chain reaches any of these from anything wiped here.
+        //
+        //   billing_subscriptions + billing_customers are the DANGEROUS pair, and not merely
+        //   untidy: entitlement is computed purely from surviving rows keyed on client_id, and
+        //   `hasCard` / the charge vault come from billing_customers.vault_id. Recreating a slug
+        //   (a re-onboard, or just reusing a test slug) therefore handed the new tenant the dead
+        //   one's 'active' subscription — full product, no payment — and made a subscribe call
+        //   charge the FORMER customer's stored card, on an invoice nobody could attribute.
+        //   Neither table is an accounting record; both are mirrors of gateway state, and the
+        //   gateway remains the source of truth.
+        await wipe("billing_subscriptions");
+        await wipe("billing_customers");
+        //   feedback_submissions holds submitter_name + submitter_email — the named people who
+        //   filed bugs from that portal. feedback_comments cascades from it (verified ON DELETE
+        //   CASCADE), and the attachments live under {client_id}/ in the bucket loop below.
+        await wipe("feedback_submissions");
+        //   fixture_items is the per-tenant door catalog; its photos are served PUBLICLY from the
+        //   `fixtures` bucket, now included below.
+        await wipe("fixture_items");
+        //   qbo_item_map points at QuickBooks item ids from the DELETED tenant's company. Only the
+        //   style-scoped rows cascade (via qbo_item_map_style_id_fkey); the tenant-default rows
+        //   (style_id IS NULL) survived, so a recreated slug that connects a DIFFERENT QuickBooks
+        //   company would resolve its first invoice against stale ids and bill whatever items
+        //   happen to share them — exactly the harm qbo-oauth-callback's realm-change wipe exists
+        //   to prevent.
+        await wipe("qbo_item_map");
         try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
+
+        // DELIBERATELY RETAINED, and reported rather than silently kept: the financial ledgers.
+        // orders (payments cascades from it), invoice_sends and billing_charge_attempts are
+        // records of money that actually moved. Destroying them is a data-retention decision with
+        // accounting consequences, not a bug fix, so it is NOT made here — but leaving them
+        // unmentioned is how this class of miss happened in the first place. The counts go back in
+        // the response so the operator can see exactly what outlived the tenant and escalate if a
+        // deletion request requires them gone too.
+        const retained: Record<string, number> = {};
+        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts"]) {
+          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+          if (count) retained[t] = count;
+        }
 
         // Capture the logins mapped to this client, unmap them, then delete any
         // that aren't also attached to another client.
@@ -699,13 +890,34 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }
         deleted["auth_logins"] = deletedUsers;
 
-        // Storage: remove everything under <clientId>/ in both buckets.
+        // Storage: remove everything under <clientId>/ in every bucket that can hold their files.
+        //
+        // `fixtures` and `feedback-attachments` were missing. fixtures is PUBLIC, so a deleted
+        // tenant's product/door photos stayed downloadable by anyone holding the old URL;
+        // feedback-attachments holds their users' bug-report screenshots. Both are keyed
+        // {client_id}/…, so the same loop covers them.
+        //
+        // Paginated: list() caps at 1000 per call, and the old single call meant a tenant with
+        // more than 1000 objects silently left the overflow behind — junior-barns alone already has
+        // 93 floor plans, and nothing warned that the sweep was partial.
         let files = 0;
-        for (const bucket of ["floor-plans", "branding"]) {
+        for (const bucket of ["floor-plans", "branding", "fixtures", "feedback-attachments"]) {
           try {
-            const { data: list } = await sb.storage.from(bucket).list(clientId, { limit: 1000 });
-            const paths = (list ?? []).map((o: any) => `${clientId}/${o.name}`);
-            if (paths.length) { const rm = await sb.storage.from(bucket).remove(paths); if (!rm.error) files += paths.length; }
+            // Always re-list from offset 0: each round DELETES what it listed, so the next page
+            // shifts down into the same window. The bound is a round counter, not an offset —
+            // if a remove() ever fails we must not re-list the same 1000 objects forever.
+            for (let round = 0; round < 20; round++) {
+              const { data: list, error: lsErr } = await sb.storage.from(bucket)
+                .list(clientId, { limit: 1000 });
+              if (lsErr) break;
+              const batch = list ?? [];
+              if (batch.length === 0) break;
+              const paths = batch.map((o: any) => `${clientId}/${o.name}`);
+              const rm = await sb.storage.from(bucket).remove(paths);
+              if (rm.error) break;                    // stop rather than spin on the same page
+              files += rm.data?.length ?? paths.length;
+              if (batch.length < 1000) break;         // that was the last page
+            }
           } catch (_) { /* storage cleanup is best-effort */ }
         }
         deleted["storage_files"] = files;
@@ -714,7 +926,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
         deleted["client_configs"] = cc.count ?? 0;
 
-        return json({ ok: true, clientId, deleted });
+        // `retained` is empty for a normal tenant and only appears when financial rows outlived
+        // the delete — see the note above. Surfacing it is the point: the dialog says "and ALL of
+        // its data", so anything that survives has to be visible rather than assumed.
+        return json({ ok: true, clientId, deleted, ...(Object.keys(retained).length ? { retained } : {}) });
       }
 
       default:

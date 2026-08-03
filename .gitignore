@@ -20,3 +20,13 @@ _archive/
 # Supabase CLI local cache (linked project, pooler URL, versions)
 supabase/.temp/
 .wrangler/
+
+# Dev tooling (preflight gate)
+node_modules/
+package-lock.json
+
+# Written by `deno check --node-modules-dir=none`, which CLAUDE.md tells everyone to
+# run on the edge functions — so it reappears for every contributor. Not committed:
+# the functions are deployed by the Supabase CLI, which resolves independently, and
+# there is no build step for this lock to make reproducible.
+deno.lock

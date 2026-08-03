@@ -55,6 +55,21 @@ const BUILT_IN_TOOLS = {
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
 
+// Legacy render safety-net. When a tenant HIDES a built-in option (deactivates it in
+// client_layout_items so it drops out of get_config's layoutItems), its already-placed items on
+// SAVED designs would otherwise lose their render config and vanish. This provides the standard
+// built-in door/window/ramp definitions for RENDERING ONLY (noPalette → never a placeable tool),
+// so old quotes keep drawing correctly forever. Spread FIRST in ITEMS so a tenant that still has
+// the item ACTIVE overrides it with their own config (and it shows in the palette as normal); it
+// only fills the gap for a HIDDEN item. Dimensions/colors mirror the layout_item_types master.
+const LEGACY_LAYOUT_FALLBACK = {
+  singleDoor: { label: "Single Door (36\")", icon: "🚪", color: "#D97706", width: 3, height: 0.5, shortLabel: "SD", wallOnly: true, noPalette: true },
+  doubleDoor: { label: "Double Door (60\")", icon: "🚪🚪", color: "#B45309", width: 5, height: 0.5, shortLabel: "DD", wallOnly: true, noPalette: true },
+  window: { label: "Window (24\")", icon: "🪟", color: "#0EA5E9", width: 2, height: 0.5, shortLabel: "W", wallOnly: true, noPalette: true },
+  // NOTE: ramp is NOT here — it's fully self-contained now (SIMPLE_RAMP_CFG below), decoupled from
+  // the built-in `ramp` layout item, so a tenant's ramp works whether or not that legacy row exists.
+};
+
 // Title-case a building-style name for display (designs store either the label
 // "Farmland" or the lowercase key "cabin").
 function capWords(s) { return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase()); }
@@ -157,19 +172,40 @@ function getNearestWall(x, y, pW, pH, mgX, mgY) {
 
 function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
   if (!ni.wall) return false;
-  const niw = nc.width * sc;
+  const niw = (ni.widthFt || nc.width) * sc;
   for (const it of existing) {
     const c = itemTypes[it.type];
     if (!c || !c.wallOnly || it.type === "window") continue;
     // Only check doors on the same wall
     if (it.wall !== ni.wall) continue;
-    const iw = c.width * sc;
+    const iw = (it.widthFt || c.width) * sc;
     // Check overlap along the wall axis
     if (ni.wall === "north" || ni.wall === "south") {
       if (Math.abs(ni.x - it.x) < (niw / 2) + (iw / 2) + 4) return true;
     } else {
       if (Math.abs(ni.y - it.y) < (niw / 2) + (iw / 2) + 4) return true;
     }
+  }
+  return false;
+}
+
+// Does a wall-mounted item (door / window / rough opening) at `sn` overlap a WORKBENCH on the
+// same wall? checkDoorCollision above deliberately only compares wallOnly items to each other, and
+// a workbench is wallSnap, so it is skipped there — which meant the invariant was enforced in one
+// direction only: dragging a workbench into a door showed "A door is blocking this wall!", while
+// dragging the DOOR onto the workbench silently succeeded and produced exactly the layout that
+// toast exists to prevent, rasterized into the PDF and sent to the shop. Same math as the
+// workbench-side check, read from the other side.
+function checkWorkbenchOverlap(sn, widthFtPx, existing, itemTypes, sc) {
+  if (!sn.wall) return false;
+  const isH = sn.wall === "north" || sn.wall === "south";
+  const candPos = isH ? sn.x : sn.y;
+  const candHalf = widthFtPx / 2;
+  for (const ob of existing) {
+    if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
+    const obHalf = ((ob.widthFt || (itemTypes[ob.type] && itemTypes[ob.type].width)) * sc) / 2;
+    const obPos = isH ? ob.x : ob.y;
+    if (Math.abs(candPos - obPos) < candHalf + obHalf - 2) return true;
   }
   return false;
 }
@@ -216,11 +252,204 @@ function noteEdgePoint(cx, cy, w, h, tx, ty) {
 // Determine which positional wall (north/south/east/west) is the FRONT
 // based on door placement. Double door wins over single door.
 function getFrontWall(items) {
-  const doubleDoors = items.filter((i) => i.type === "doubleDoor" && i.wall);
-  if (doubleDoors.length > 0) return doubleDoors[0].wall;
-  const singleDoors = items.filter((i) => i.type === "singleDoor" && i.wall);
-  if (singleDoors.length > 0) return singleDoors[0].wall;
+  // Catalog fixture doors count as doors too; a double-leaf (built-in doubleDoor, or a
+  // fixture whose operation is "double") wins over a single, same as before.
+  const doubles = items.filter((i) => i.wall && (i.type === "doubleDoor" || (i.type === "fixtureDoor" && i.operation === "double")));
+  if (doubles.length > 0) return doubles[0].wall;
+  const singles = items.filter((i) => i.wall && (i.type === "singleDoor" || i.type === "fixtureDoor"));
+  if (singles.length > 0) return singles[0].wall;
   return null;
+}
+
+// ── Fixtures catalog (Options → Doors) → placeable designer tools + rendering ──────
+// Each active catalog door (from get_fixtures) becomes a palette tool keyed `fx:<id>`
+// (wallOnly, carrying its own width in feet). Placing one creates a stable `fixtureDoor`
+// item that SNAPSHOTS the door's spec (name/width/price/swing/operation) so a later catalog
+// edit never changes a saved design. FIXTURE_DOOR_CFG is the render cfg for those placed
+// items; `noPalette` keeps it out of the tool row (only the fx: tools are shown).
+const FIXTURE_DOOR_COLOR = "#D97706";         // matches the built-in Single Door glyph
+const FIXTURE_DOOR_COLOR_DOUBLE = "#B45309";  // matches the built-in Double Door glyph
+// Amber like the built-in doors, darker for a double so it reads the same as doubleDoor.
+function fixtureDoorColor(item) { return item && item.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR; }
+const FIXTURE_DOOR_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", noPalette: true, isFixtureDoor: true };
+// The single "Door" palette tool. Arming it and clicking a wall opens the door picker
+// (below) instead of placing immediately — the shopper chooses WHICH door (and its swing/
+// operation where more than one is offered) in the popup.
+const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", isDoorPicker: true };
+// Custom ramps (custom mode). The "Ramp" tool attaches to a door (doorSnap) and opens the ramp
+// picker. A placed custom ramp is a normal type:"ramp" item — so it reuses ALL the existing ramp
+// machinery (render, door-snap follow, delete-cascade, z-order) — but carries the chosen style's
+// own width/length + a priced snapshot (vs the simple built-in ramp which takes the door's width).
+const FIXTURE_RAMP_COLOR = "#0284C7";
+const RAMP_PICKER_CFG = { label: "Ramp", color: FIXTURE_RAMP_COLOR, icon: "⬛", doorSnap: true, width: 3, height: 2, shortLabel: "RAMP", isRampPicker: true };
+// Simple ramp — a fully self-contained option (render + placement), NO longer the built-in `ramp`
+// layout item. Auto-widths to the door it attaches to (handled in handleClick's doorSnap branch,
+// same as before). Stone color matches the old built-in so already-placed ramps look identical.
+// ITEMS.ramp is ALWAYS this cfg (so every placed type:"ramp" renders), placeable only when the
+// tenant offers a simple ramp (rampSettings.enabled + simple mode).
+const SIMPLE_RAMP_CFG = { label: "Ramp", color: "#78716C", icon: "⬛", doorSnap: true, width: 3, height: 3, shortLabel: "RAMP", isSimpleRamp: true };
+// Catalog windows. The "Window" tool is wall-placed (like the door picker). A placed catalog
+// window is a normal type:"window" item — so it reuses the built-in window's render (mullions,
+// wall bar), collision, and payload — but carries the chosen style's width + a priced snapshot
+// (built-in windows have no fixtureItemId; that's how the two are told apart in pricing).
+const FIXTURE_WINDOW_COLOR = "#0EA5E9";
+const WINDOW_PICKER_CFG = { label: "Window", color: FIXTURE_WINDOW_COLOR, icon: "🪟", wallOnly: true, width: 2, height: 0.5, shortLabel: "WIN", isWindowPicker: true };
+function fixtureInitialSwing(fx) {
+  if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
+  if (fx.swingIn) return "in";
+  if (fx.swingOut) return "out";
+  return null;
+}
+function fixtureInitialOperation(fx) {
+  if (fx.opSlideUp) return "slideup";
+  if (fx.opDouble) return "double";
+  if (fx.opRight && fx.opLeft) return fx.opDefault || "right";
+  if (fx.opRight) return "right";
+  if (fx.opLeft) return "left";
+  return null;
+}
+function buildFixtureTools(fixtures) {
+  const out = {};
+  (Array.isArray(fixtures) ? fixtures : []).forEach((fx) => {
+    if (!fx || (fx.category && fx.category !== "door")) return;
+    const wIn = Number(fx.widthIn) || 36;
+    out[`fx:${fx.id}`] = {
+      label: fx.name || "Door", color: FIXTURE_DOOR_COLOR, icon: "🚪",
+      wallOnly: true, width: wIn / 12, height: 0.5,
+      shortLabel: (fx.name || "DOOR").toUpperCase().slice(0, 10), fixture: fx,
+    };
+  });
+  return out;
+}
+// Swing/operation-aware door glyph. `out` combines the wall side (like the built-in
+// singleDoor/doubleDoor) with the door's in/out swing (in = mirror of out). Hinge side
+// comes from operation (right/left); "double" = two leaves; "slideup" = a segmented
+// garage/roll-up panel with no arc.
+function fixtureDoorOut(item) {
+  const outBase = item.wall === "north" || item.wall === "east";
+  return item.swing === "in" ? !outBase : outBase;
+}
+function fixtureDoorSVG(item, iw, color) {
+  const stroke = color + "60", op = item.operation, out = fixtureDoorOut(item);
+  if (op === "slideup") {
+    return <g>{[-iw / 4, 0, iw / 4].map((lx, k) => <line key={k} x1={lx} y1={-5} x2={lx} y2={5} stroke="#FFF" strokeWidth={1.5} />)}</g>;
+  }
+  if (op === "double") {
+    const r = iw * 0.4, s = out ? -1 : 1;
+    return (<><path d={`M ${-iw / 2 + r} 0 A ${r} ${r} 0 0 ${out ? 0 : 1} ${-iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><path d={`M ${iw / 2 - r} 0 A ${r} ${r} 0 0 ${out ? 1 : 0} ${iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><line x1={0} y1={-5} x2={0} y2={5} stroke="#FFF" strokeWidth={1.5} /></>);
+  }
+  const r = iw * 0.8, rightHinge = op === "right", ey = out ? -r : r;
+  const sx = rightHinge ? iw / 2 - r : -iw / 2 + r, ex = rightHinge ? iw / 2 : -iw / 2;
+  const sweep = rightHinge ? (out ? 1 : 0) : (out ? 0 : 1);
+  return <path d={`M ${sx} 0 A ${r} ${r} 0 0 ${sweep} ${ex} ${ey}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" />;
+}
+function fixtureDoorCanvas(ctx, item, iw, color) {
+  const op = item.operation, out = fixtureDoorOut(item);
+  if (op === "slideup") {
+    ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
+    [-iw / 4, 0, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -5); ctx.lineTo(lx, 5); ctx.stroke(); });
+    return;
+  }
+  ctx.strokeStyle = color + "60"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+  if (op === "double") {
+    const r = iw * 0.4;
+    ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke();
+    ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
+    ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
+    return;
+  }
+  const r = iw * 0.8, rightHinge = op === "right";
+  if (rightHinge) { ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
+  ctx.setLineDash([]);
+}
+// Door sizes are stored in inches; show them as feet/inches on the plan + in the picker.
+function fmtFtIn(inches) {
+  const n = Number(inches);
+  if (!isFinite(n) || n <= 0) return "";
+  const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100;
+  if (ft === 0) return inch + '"';
+  if (inch === 0) return ft + "'";
+  return ft + "'" + inch + '"';
+}
+// Door placement picker. Doors are grouped by STYLE (exact name): one card per style; picking a
+// style with more than one size reveals a size chooser, then swing/operation where more than one
+// is offered, then place.
+function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
+  const styles = useMemo(() => {
+    const m = new Map();
+    doors.forEach((d) => {
+      const k = d.name || "Door";
+      if (!m.has(k)) m.set(k, { name: k, imageUrl: d.imageUrl || null, sizes: [] });
+      const g = m.get(k); g.sizes.push(d); if (!g.imageUrl && d.imageUrl) g.imageUrl = d.imageUrl;
+    });
+    return [...m.values()];
+  }, [doors]);
+  const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
+  const [swing, setSwing] = useState(null);
+  const [operation, setOperation] = useState(null);
+  useEffect(() => {
+    if (!sel) { setSwing(null); setOperation(null); return; }
+    setSwing(fixtureInitialSwing(sel));
+    setOperation(fixtureInitialOperation(sel));
+  }, [sel]);
+  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const swingOpts = sel ? [sel.swingIn && "in", sel.swingOut && "out"].filter(Boolean) : [];
+  const opOpts = sel ? [sel.opRight && "right", sel.opLeft && "left", sel.opDouble && "double", sel.opSlideUp && "slideup"].filter(Boolean) : [];
+  const OP_LABEL = { right: "Right", left: "Left", double: "Double", slideup: "Slide up" };
+  const money = (n) => "$" + Number(n).toLocaleString();
+  const chip = (key, on, label, onClick) => (
+    <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, background: on ? "#FEF3C7" : "#FFF", color: on ? "#92400E" : "#334155" }}>{label}</div>
+  );
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a door</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>{style && style.sizes.length > 1 ? "Pick a size." : "Pick a door to place on this wall."}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {styles.map((st) => {
+            const on = style && style.name === st.name;
+            const one = st.sizes.length === 1 ? st.sizes[0] : null;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            return (
+              <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>🚪</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{st.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{sub}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {style && style.sizes.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+          </div>
+        )}
+        {sel && swingOpts.length > 1 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Swing</div>
+            <div style={{ display: "flex", gap: 8 }}>{swingOpts.map((o) => chip(o, swing === o, o === "in" ? "In-swing" : "Out-swing", () => setSwing(o)))}</div>
+          </div>
+        )}
+        {sel && opOpts.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Operation</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{opOpts.map((o) => chip(o, operation === o, OP_LABEL[o], () => setOperation(o)))}</div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => sel && onPlace(sel, swing, operation)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place door</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // Map a positional wall to a display label (FRONT/BACK/LEFT/RIGHT)
@@ -340,6 +569,16 @@ function computeSelectionRows(sel, paintColors, C, items) {
   if (sel && sel.size) {
     for (const k of declinedKeys) {
       if (includedNow[k] == null) continue;
+      // Catalog fixture inclusion (key = fixture id): credit its snapshot price × the included qty.
+      const fxDecl = (Array.isArray(C.fixtures) ? C.fixtures : []).find((f) => String(f.id) === k);
+      if (fxDecl) {
+        const q0 = Math.max(1, Number(includedNow[k]) || 1);
+        const credit0 = Math.round((fxDecl.price != null ? Number(fxDecl.price) : 0) * q0 * 100) / 100;
+        if (credit0 <= 0) continue;
+        declinedLines.push(`${fxDecl.name || "Item"} declined (−${fmtMoney2(credit0)})`);
+        declinedTotal += credit0;
+        continue;
+      }
       const rp = resolveLp(k); if (!rp || !(rp.rate > 0)) continue;
       const q = rp.method === "pct_estimate_total" ? 1 : Math.max(1, Number(includedNow[k]) || 1);
       let unitValue = rp.rate;
@@ -352,7 +591,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       unitValue = Math.round(unitValue * 100) / 100;
       const credit = Math.round(unitValue * q * 100) / 100;
       if (credit <= 0) continue;
-      const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+      const label = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || (LEGACY_LAYOUT_FALLBACK[k] && LEGACY_LAYOUT_FALLBACK[k].label) || k;
       declinedLines.push(`${label} declined (−${fmtMoney2(credit)})`);
       declinedTotal += credit;
     }
@@ -373,7 +612,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (placedSqft > 0 && placedSqft < incQ) {
         const credit = Math.round(rpk.rate * (incQ - placedSqft) * 100) / 100;
         if (credit > 0) {
-          const lbl = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || k;
+          const lbl = (C.layoutItems && C.layoutItems[k] && C.layoutItems[k].label) || (LEGACY_LAYOUT_FALLBACK[k] && LEGACY_LAYOUT_FALLBACK[k].label) || k;
           declinedLines.push(`${lbl} smaller than included: ${incQ - placedSqft} sq ft credited (−${fmtMoney2(credit)})`);
           declinedTotal += credit;
         }
@@ -449,27 +688,36 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const buildingPerimeter = 2 * (bW + bL);
   const buildingPrice = (szRow && szRow.basePrice != null) ? Number(szRow.basePrice) : 0;
 
-  // Roll placed items into counts + per-measure quantities. Ramp is priced "each" like
-  // doors/windows — its qty is the number of ramps placed (one per door).
-  let singleDoors = 0, doubleDoors = 0, windows = 0, lofts = 0, loftSqft = 0, ramps = 0;
+  // Roll placed items into counts + per-measure quantities. Ramps split two ways: CUSTOM ramps
+  // (a catalog style with a snapshot price) price like fixture doors; SIMPLE ramps (the built-in
+  // ramp) price from the tenant's single ramp price when set, else the legacy layout "ramp" rate.
+  const rampSettings = C.rampSettings || null;
+  const rampSimplePriced = !!(rampSettings && rampSettings.price != null);
+  let singleDoors = 0, doubleDoors = 0, builtinWindows = 0, lofts = 0, loftSqft = 0;
   const workbenchFt = [];
+  const customRamps = [], simpleRamps = [];
+  const customWindows = [];
   for (const it of items) {
     if (it.type === "singleDoor") singleDoors++;
     else if (it.type === "doubleDoor") doubleDoors++;
-    else if (it.type === "window") windows++;
+    // Catalog windows (own snapshot price) price below like fixture doors; built-in windows
+    // (no fixtureItemId) keep pricing via the layout "window" rate.
+    else if (it.type === "window") { if (it.fixtureItemId && it.price != null) customWindows.push(it); else builtinWindows++; }
     else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
     else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
-    else if (it.type === "ramp") ramps++;
+    else if (it.type === "ramp") { if (it.fixtureItemId && it.price != null) customRamps.push(it); else simpleRamps.push(it); }
   }
   loftSqft = Math.round(loftSqft);
   const totalWorkbenchFt = workbenchFt.reduce((s, f) => s + f, 0);
   const measures = {
     singleDoor: { count: singleDoors },
     doubleDoor: { count: doubleDoors },
-    window:     { count: windows },
+    window:     { count: builtinWindows },
     workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
     loft:       { count: lofts, optionSqft: loftSqft },
-    ramp:       { count: ramps },
+    // Legacy layout "ramp" row applies only to simple ramps that AREN'T priced by the new ramp
+    // settings — otherwise ramps price below (custom by snapshot, simple by ramp settings).
+    ramp:       { count: rampSimplePriced ? 0 : simpleRamps.length },
   };
 
   const lineFor = (rate, method, m) => {
@@ -505,7 +753,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     if (!m || !m.count) continue;
     const rp = resolve(key);
     if (!rp) continue;
-    const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || key;
+    const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || (LEGACY_LAYOUT_FALLBACK[key] && LEGACY_LAYOUT_FALLBACK[key].label) || key;
     // Net out the included quantity for this item (loft = sq ft, others = count).
     const inc = incForRows[key] || 0;
     const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
@@ -522,11 +770,116 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // amount. "each" items (doors/windows) keep the netted count.
     const measured = rp.method === "lineal_ft" || rp.method === "sqft_option";
     const dispQty = (measured && inc > 0) ? placedMeasure : ln.qty;
-    const incNote = (measured && inc > 0) ? ` · ${inc} ${rp.method === "sqft_option" ? "sq ft" : "ft"} included` : "";
-    const row = { key, label, qty: dispQty, unit: ln.unit + incNote, total: ln.total, method: rp.method };
+    // Measured item with an inclusion (loft/workbench): spell out the full calc — placed, included,
+    // billable — WORD-FOR-WORD the same as the estimate's loft line, so the two match.
+    let unit;
+    if (measured && inc > 0) {
+      const u2 = rp.method === "sqft_option" ? "sq ft" : "ft";
+      unit = [`${placedMeasure} ${u2} placed`, `${inc} ${u2} included in base price`, `${chargeable} ${u2} billable @ ${fmtMoney2(rp.rate)}/${u2}`].join(" · ");
+    } else {
+      unit = ln.unit;
+    }
+    const row = { key, label, qty: dispQty, unit, total: ln.total, method: rp.method };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
+  }
+
+  // Catalog fixture doors (Options → Doors): each carries its OWN snapshotted price, not a
+  // per-key rate — so they price separately from the layout items above. Identical doors
+  // (same name + price) collapse into one line with a qty. Feeds the % base like any add-on.
+  // Grouped by fixture id so a size-inclusion nets the first N free (incForRows[fixtureId] = the
+  // qty the base price covers). Fully-included shows "(included)"; extras beyond it are charged.
+  const fxGroups = {};
+  for (const it of items) {
+    if (it.type !== "fixtureDoor") continue;
+    const price = it.price != null ? Number(it.price) : 0;
+    const fid = it.fixtureItemId || `${it.doorName || "Door"}|${price}`;
+    if (!fxGroups[fid]) fxGroups[fid] = { label: it.doorName || "Door", price, qty: 0, fid: it.fixtureItemId || null };
+    fxGroups[fid].qty++;
+  }
+  for (const fid in fxGroups) {
+    const g = fxGroups[fid];
+    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+    const chargeable = Math.max(0, g.qty - inc);
+    if (g.price > 0 && inc > 0 && chargeable <= 0) {
+      rows.push({ key: `fx:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      continue;
+    }
+    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    const total = Math.round(g.price * chargeable * 100) / 100;
+    rows.push({ key: `fx:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    nonPctSubtotal += total;
+  }
+
+  // Catalog windows (Options → Windows): each carries its OWN snapshot price, grouped by style
+  // like doors. Built-in windows already priced above via the layout "window" rate.
+  const winGroups = {};
+  for (const it of customWindows) {
+    const price = it.price != null ? Number(it.price) : 0;
+    const fid = it.fixtureItemId || `${it.windowName || "Window"}|${price}`;
+    if (!winGroups[fid]) winGroups[fid] = { label: it.windowName || "Window", price, qty: 0, fid: it.fixtureItemId || null };
+    winGroups[fid].qty++;
+  }
+  for (const fid in winGroups) {
+    const g = winGroups[fid];
+    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+    const chargeable = Math.max(0, g.qty - inc);
+    if (g.price > 0 && inc > 0 && chargeable <= 0) {
+      rows.push({ key: `win:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      continue;
+    }
+    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    const total = Math.round(g.price * chargeable * 100) / 100;
+    rows.push({ key: `win:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    nonPctSubtotal += total;
+  }
+
+  // Catalog ramps (Options → Ramps). Custom ramps carry their own snapshot price (grouped by
+  // style like doors); simple ramps price from the tenant's single ramp price — "each" per ramp,
+  // or "per_ft" × the attached door's width. Both feed the % base like any add-on.
+  const rampGroups = {};
+  for (const it of customRamps) {
+    const price = it.price != null ? Number(it.price) : 0;
+    const fid = it.fixtureItemId || `${it.rampName || "Ramp"}|${price}`;
+    if (!rampGroups[fid]) rampGroups[fid] = { label: it.rampName || "Ramp", price, qty: 0, fid: it.fixtureItemId || null };
+    rampGroups[fid].qty++;
+  }
+  for (const fid in rampGroups) {
+    const g = rampGroups[fid];
+    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+    const chargeable = Math.max(0, g.qty - inc);
+    if (g.price > 0 && inc > 0 && chargeable <= 0) {
+      rows.push({ key: `ramp:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      continue;
+    }
+    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    const total = Math.round(g.price * chargeable * 100) / 100;
+    rows.push({ key: `ramp:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    nonPctSubtotal += total;
+  }
+  if (rampSimplePriced && simpleRamps.length) {
+    const rampPrice = Number(rampSettings.price) || 0;
+    const perFt = rampSettings.method === "per_ft";
+    if (rampPrice > 0) {
+      if (perFt) {
+        // Price per foot of the attached door's width. fixture doors carry their real width
+        // (widthIn); built-in doors fall back to the ramp's stored widthFt.
+        let totalFt = 0;
+        for (const r of simpleRamps) {
+          const door = items.find((d) => d.id === r.snapDoorId);
+          let dw = Number(r.widthFt) || 0;
+          if (door && door.type === "fixtureDoor" && door.widthIn) dw = Number(door.widthIn) / 12;
+          totalFt += dw;
+        }
+        totalFt = Math.round(totalFt * 100) / 100;
+        if (totalFt > 0) { const total = Math.round(rampPrice * totalFt * 100) / 100; rows.push({ key: "ramp:simple", label: "Ramp", qty: totalFt, unit: fmtMoney2(rampPrice) + " / ft", total, method: "lineal_ft" }); nonPctSubtotal += total; }
+      } else {
+        const total = Math.round(rampPrice * simpleRamps.length * 100) / 100;
+        rows.push({ key: "ramp:simple", label: "Ramp", qty: simpleRamps.length, unit: fmtMoney2(rampPrice) + " each", total, method: "each" });
+        nonPctSubtotal += total;
+      }
+    }
   }
 
   // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
@@ -573,6 +926,19 @@ function genShortCode() {
   let s = "";
   for (let i = 0; i < 10; i++) s += _SHORT_ALPHA[Math.floor(Math.random() * _SHORT_ALPHA.length)];
   return `SS-${s}`;
+}
+
+// Pick readable text for a tenant-accent background: dark slate on light accents
+// (mint, yellow), white on dark ones (navy, barn red). WCAG relative luminance,
+// hex-only — the codebase already assumes hex accents (see the `${accent}50` shadows).
+function textOnAccent(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || "").trim());
+  if (!m) return "#FFFFFF";
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const c = parseInt(m[1].slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? "#1E293B" : "#FFFFFF";
 }
 
 // Progressive US phone formatter: "8163003600" -> "(816) 300-3600".
@@ -717,9 +1083,210 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   );
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null }) {
+// Ramp placement picker (custom mode). Like DoorPicker but no swing/operation: pick a ramp
+// STYLE (exact name), then its size, then place it on the door the tool was dropped near.
+function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
+  const styles = useMemo(() => {
+    const m = new Map();
+    ramps.forEach((d) => {
+      const k = d.name || "Ramp";
+      if (!m.has(k)) m.set(k, { name: k, imageUrl: d.imageUrl || null, sizes: [] });
+      const g = m.get(k); g.sizes.push(d); if (!g.imageUrl && d.imageUrl) g.imageUrl = d.imageUrl;
+    });
+    return [...m.values()];
+  }, [ramps]);
+  const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
+  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const money = (n) => "$" + Number(n).toLocaleString();
+  const chip = (key, on, label, onClick) => (
+    <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_RAMP_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>{label}</div>
+  );
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a ramp</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>{style && style.sizes.length > 1 ? "Pick a size." : "Pick a ramp for this door."}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {styles.map((st) => {
+            const on = style && style.name === st.name;
+            const one = st.sizes.length === 1 ? st.sizes[0] : null;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            return (
+              <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_RAMP_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>⬛</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{st.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{sub}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {style && style.sizes.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => sel && onPlace(sel)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_RAMP_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place ramp</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Window placement picker. Like RampPicker (style → size, no swing/operation), but the placed
+// item goes on a wall. "Choose a window" / "Place window".
+function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
+  const styles = useMemo(() => {
+    const m = new Map();
+    windows.forEach((d) => {
+      const k = d.name || "Window";
+      if (!m.has(k)) m.set(k, { name: k, imageUrl: d.imageUrl || null, sizes: [] });
+      const g = m.get(k); g.sizes.push(d); if (!g.imageUrl && d.imageUrl) g.imageUrl = d.imageUrl;
+    });
+    return [...m.values()];
+  }, [windows]);
+  const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
+  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const money = (n) => "$" + Number(n).toLocaleString();
+  const chip = (key, on, label, onClick) => (
+    <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>{label}</div>
+  );
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a window</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>{style && style.sizes.length > 1 ? "Pick a size." : "Pick a window for this wall."}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {styles.map((st) => {
+            const on = style && style.name === st.name;
+            const one = st.sizes.length === 1 ? st.sizes[0] : null;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            return (
+              <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🪟</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{st.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{sub}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {style && style.sizes.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => sel && onPlace(sel)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null }) {
   const C = config;
-  const ITEMS = { ...C.layoutItems, ...BUILT_IN_TOOLS };
+  // ── Which surface is this? THE discriminator between the two mounts of this module ──
+  //   embedded = true  → the Designer tab inside portal.html: business users building
+  //                      quotes for customers (discounts, delivery fees, full tooling).
+  //   embedded = false → the PUBLIC customer-facing page (index.html / tenant subdomains /
+  //                      the "try it" link on marketing sites): anonymous shed-shoppers.
+  // New surface differences gate on one of these two flags — never on a new prop, never on
+  // sniffing the URL. If a feature is for the business, use `embedded`; if it is lead- or
+  // customer-flavoured (contact gates, silent lead capture), use `customerFacing`.
+  const customerFacing = !embedded;
+  const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
+  const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
+  const windowFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "window"), [C.fixtures]);
+  // Internal-only fixtures: the rep (embedded) designer can place them, but the customer-facing page
+  // must NOT offer them as placement options. These "placeable" lists drive the PICKERS + picker
+  // buttons only; the full memos above still feed isArchivedItem / swap / render so an already-placed
+  // internal-only fixture keeps rendering for the customer and never reads as archived.
+  const placeableDoors = customerFacing ? doorFixtures.filter((f) => !f.internalOnly) : doorFixtures;
+  const placeableRamps = customerFacing ? rampFixtures.filter((f) => !f.internalOnly) : rampFixtures;
+  const placeableWindows = customerFacing ? windowFixtures.filter((f) => !f.internalOnly) : windowFixtures;
+  // Ramp is self-contained now (SIMPLE_RAMP_CFG), driven by the Ramp settings — NOT the built-in
+  // `ramp` layout item. Custom mode → the ramp picker (catalog styles); simple mode + offered → the
+  // simple ramp tool; otherwise render-only (old ramps still draw, but no new placement).
+  const rampMode = ((C.rampSettings && C.rampSettings.mode) || "simple");
+  const rampEnabled = !!(C.rampSettings && C.rampSettings.enabled);
+  const rampCustom = rampMode === "custom" && placeableRamps.length > 0;
+  const [sel, setSel] = useState(() => {
+    const init = { style: "", size: "", roofType: "", roofColor: "" };
+    C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
+    return init;
+  });
+  // Catalog fixtures the current size INCLUDES → a placement tool keyed by the fixture id. Each
+  // renders in the "included — place or decline" row and, when armed, drops that EXACT fixture on
+  // the next wall click (doors/windows) or door (ramps). Empty until a style+size is chosen; the
+  // built-in door/window/ramp keep their own catalog pickers.
+  const includedFixtureTools = (() => {
+    const out = {};
+    if (!sel.style || !sel.size) return out;
+    const st = (C.buildingStyles || []).find((s) => s.value === sel.style);
+    if (!st) return out;
+    const pickInc = (map) => { if (!map || typeof map !== "object") return null; if (map[sel.size] != null) return map[sel.size]; const want = normSizeLabel(sel.size); for (const k in map) { if (normSizeLabel(k) === want) return map[k]; } return null; };
+    let qmap = pickInc(st.sizeInclusionQty);
+    if (!qmap || typeof qmap !== "object" || Array.isArray(qmap)) { const arr = pickInc(st.sizeInclusions); qmap = {}; if (Array.isArray(arr)) arr.forEach((k) => { qmap[k] = 1; }); }
+    const fixtures = Array.isArray(C.fixtures) ? C.fixtures : [];
+    for (const k in qmap) {
+      const fx = fixtures.find((f) => String(f.id) === k);
+      if (!fx) continue;   // built-in keys (loft etc.) are handled by their own ITEMS entry
+      if (customerFacing && fx.internalOnly) continue;   // internal-only: rep can place it, customer can't add/decline it
+      const cat = fx.category || "door";
+      out[k] = {
+        label: fx.name || "Item",
+        color: cat === "window" ? FIXTURE_WINDOW_COLOR : cat === "ramp" ? FIXTURE_RAMP_COLOR : FIXTURE_DOOR_COLOR,
+        icon: cat === "window" ? "🪟" : cat === "ramp" ? "⬛" : "🚪",
+        shortLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "ITEM").toUpperCase().slice(0, 4),
+        wallOnly: cat !== "ramp", doorSnap: cat === "ramp",
+        width: (Number(fx.widthIn) || 36) / 12, height: 0.5,
+        includedFixture: { ...fx },   // placement marker: drop THIS specific fixture
+      };
+    }
+    return out;
+  })();
+  const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
+    ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
+    ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
+    // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
+    // so every placed ramp renders. Placeable only when the tenant offers a SIMPLE ramp; custom mode
+    // and not-offered are render-only (the picker handles custom placement).
+    ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
+    // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
+    ...(placeableWindows.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
+    ...includedFixtureTools };
+  const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
+  const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
+  const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
+  const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
+  // A PLACED item is "archived" (option retired) if: a catalog fixture whose fixture is no longer
+  // in the active list (get_fixtures drops archived), or a built-in whose layoutItems cfg is flagged
+  // archived (get_config keeps it, noPalette+archived). Archived items still render on the design;
+  // the rep is nudged to Swap them for a current option. Never blocks rendering.
+  const isArchivedItem = (it) => {
+    if (!it) return false;
+    if (it.fixtureItemId) {
+      const pool = it.type === "window" ? windowFixtures : it.type === "ramp" ? rampFixtures : doorFixtures;
+      return !pool.some((f) => String(f.id) === String(it.fixtureItemId));
+    }
+    const c = ITEMS[it.type];
+    return !!(c && c.archived);
+  };
   const accent = C.branding.accentColor || "#D97706";
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
@@ -733,12 +1300,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("admin") === "1";
   }, [embedded]);
-
-  const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "", roofType: "", roofColor: "" };
-    C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
-    return init;
-  });
 
   // Options the user currently sees. Options without scoping are always in the
   // list; scoped options join/leave as the user picks/changes building style.
@@ -889,6 +1450,237 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   const [versionsOpen, setVersionsOpen] = useState(false);
   // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
   const [additionalOpen, setAdditionalOpen] = useState(false);
+  // Every enabled contact field filled, phone a real 10 digits — the same bar submitQuote
+  // enforces. Drives the public Details gate: a shopper sees quote details only after
+  // giving full contact info (which is what makes them a capturable lead).
+  const contactComplete = useMemo(() => {
+    const req = ["name", "email", "phone", "street", "city", "state", "zip"].filter((f) => C.contactFields.includes(f));
+    if (req.some((f) => !String(contact[f] || "").trim())) return false;
+    if (C.contactFields.includes("phone") && String(contact.phone || "").replace(/\D/g, "").length !== 10) return false;
+    return true;
+  }, [contact, C.contactFields]);
+  // The public Details section is locked until the contact form is complete. Content is
+  // ALSO gated on this (not just the click), so emptying a field after opening re-locks
+  // the details instead of leaving prices on screen behind a stale open state.
+  const detailsLocked = customerFacing && !contactComplete;
+  // Silent lead save, once per page load, the first time a shopper opens Details: they
+  // have just typed full contact info and asked to see prices — that IS a lead, even if
+  // they never press submit. Best-effort fire-and-forget (capture-lead validates and
+  // upserts into the tenant's GHL); it must never block or break the designer.
+  const leadCapturedRef = useRef(false);
+  const captureLeadSilently = () => {
+    if (!customerFacing || leadCapturedRef.current || !contactComplete) return;
+    leadCapturedRef.current = true;
+    try {
+      supabase.functions.invoke("capture-lead", { body: {
+        clientId: C.clientId,
+        source: "details",     // vs the gate's default — "asked for prices" ranks higher
+        name: String(contact.name || "").trim(),
+        phone: String(contact.phone || "").trim(),
+        email: String(contact.email || "").trim(),
+        street: String(contact.street || "").trim(),
+        city: String(contact.city || "").trim(),
+        state: String(contact.state || "").trim(),
+        zip: String(contact.zip || "").trim(),
+      } });
+    } catch (_e) { /* lead capture must never break the designer */ }
+  };
+  // Draft-design capture (migration 063). The same Details-open moment that captures the
+  // lead also saves WHAT they designed, as a status='draft' designs row — so the portal
+  // can open a browsing lead's actual floor plan even though they never pressed submit.
+  // A later real submit reuses the same short_code (currentDesignIdRef) and save_design
+  // promotes the row to 'sent'. Silent and best-effort like the lead capture: no PDF is
+  // rendered, no URL is rewritten, nothing changes for the visitor.
+  const draftStateRef = useRef(null);  // JSON of the last draft-saved payload (skip no-op re-saves)
+  const isDraftRef = useRef(false);    // the row behind currentDesignIdRef is a draft, safe to re-save
+  const saveDraftSilently = () => {
+    if (!customerFacing || !supabase) return;
+    // Never write over a row we didn't create as a draft: someone re-opening a SUBMITTED
+    // design from a share link must not have it silently rewritten by browsing further.
+    if (currentDesignIdRef.current && !isDraftRef.current) return;
+    if (!sel.style && !sel.size && items.length === 0) return; // nothing designed yet
+    const body = {
+      p_contact: contact,
+      p_selections: sel,
+      p_paint_colors: paintColors,
+      p_items: items,
+      p_custom_options: customOptions,
+      p_ro_dimensions: roDimensions,
+      p_bldg_w: bldgW,
+      p_bldg_h: bldgH,
+    };
+    const snapshot = JSON.stringify(body);
+    if (snapshot === draftStateRef.current) return; // unchanged since the last draft save
+    const code = currentDesignIdRef.current || genShortCode();
+    (async () => {
+      try {
+        const { error } = await supabase.rpc("save_design", {
+          p_code: code,
+          p_client_id: C.clientId,
+          ...body,
+          p_image_url: null,   // drafts carry no PDF; save_design preserves any existing one
+          p_status: "draft",   // the ONLY status the RPC accepts from an anon caller
+        });
+        if (error) return;     // best-effort: a failed draft save is invisible by design
+        currentDesignIdRef.current = code;
+        isDraftRef.current = true;
+        draftStateRef.current = snapshot;
+      } catch (_e) { /* draft save must never break the designer */ }
+    })();
+  };
+  // ─── Inventory (migration 075) — embedded-only ───
+  // inventoryUnitRef: the unit a "Send estimate" flow came from; the submit success path
+  // links the new design back to it. inventoryMaster: non-null while an inventory MASTER
+  // design (status='inventory') is open — submit is blocked (a master must never become a
+  // customer estimate) and the save button flips to "Update Inventory Building".
+  const inventoryUnitRef = useRef(null);
+  // The inventory unit an ALREADY-SAVED design was quoted from (designs.inventory_unit_id,
+  // read at load). Distinct from inventoryUnitRef, which arms a not-yet-submitted
+  // send-estimate flow — this one survives reopening the estimate later.
+  const [designUnit, setDesignUnit] = useState(null);   // { id, serial } | null
+  // Staff chose "Design a new build instead" on a locked estimate: the plan unlocks and
+  // the next submit saves a NEW version that is no longer tied to the unit.
+  const [newBuildMode, setNewBuildMode] = useState(false);
+  const [inventoryMaster, setInventoryMaster] = useState(null); // { code, unitId, priceCents, locationId } | null
+  const [invDialog, setInvDialog] = useState(null); // { busy, err, locations, locationId, price, done } | null
+  // PLAN LOCK (Carolyn, 2026-08-02): "Building is BUILT". An estimate for an inventory
+  // building describes a structure that already physically exists, so its floor plan,
+  // size, style, roof and colours are not negotiable — only the money lines are (custom
+  // options, discount, delivery). Applies to the send-estimate flow AND to reopening that
+  // estimate later, on the public share link too. NEVER applies to the inventory MASTER
+  // itself (that is the builder editing their own building via "Update Inventory
+  // Building"), and staff can lift it deliberately with "Design a new build instead".
+  const planLocked = Boolean(
+    (inventoryUnitRef.current || designUnit) && !inventoryMaster && !newBuildMode
+  );
+  // The canvas handlers are useCallbacks with their own dep arrays — reading the lock
+  // through a ref keeps them from capturing a stale value (and from re-creating on every
+  // lock change). Assigned during render on purpose: a useEffect sync would lag one
+  // render, and one render is long enough to drag an item on a building that is built.
+  const planLockedRef = useRef(false);
+  planLockedRef.current = planLocked;
+  // The pre-tax building total, mirroring the Details subtotal WITHOUT the customer-
+  // specific lines (delivery, discounts) — an asking price describes the building alone.
+  const inventoryQuotePrefill = () => {
+    try {
+      const selRows = computeSelectionRows(sel, paintColors, C, items);
+      const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+      const roList = items.filter((i) => i.type === "roughOpening");
+      const lp = C.layoutPricing && C.layoutPricing.roughOpening;
+      const ov = (lp && lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
+      const roRate = lp ? (Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0) : 0;
+      const customTotal = (customOptions || []).reduce((s, r) => {
+        const amt = Math.max(0, parseFloat(r && r.amount) || 0);
+        const q = r && r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1;
+        return s + amt * q;
+      }, 0);
+      return Math.max(0,
+        selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+        + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+        + (C.showPricing ? roList.length * roRate : 0)
+        + customTotal);
+    } catch (_e) { return 0; }
+  };
+  const openInventoryDialog = async () => {
+    if (!sel.style || !sel.size) { setSubmitError("Pick a Building Style and Size before saving to inventory."); return; }
+    setSubmitError(null);
+    const isUpdate = Boolean(inventoryMaster && inventoryMaster.unitId);
+    const prefill = isUpdate && inventoryMaster.priceCents != null
+      ? inventoryMaster.priceCents / 100
+      : inventoryQuotePrefill();
+    setInvDialog({
+      busy: true, err: null, locations: [],
+      locationId: (isUpdate && inventoryMaster.locationId) || "",
+      price: prefill > 0 ? String(Math.round(prefill * 100) / 100) : "",
+      done: null,
+    });
+    try {
+      // targetClientId: the component's own supabase client shares the signed-in portal
+      // session but NOT portal.html's view-as injection, so the tenant is named
+      // explicitly. For an owner it's a harmless no-op; for an operator in view-as it
+      // routes the call to the viewed tenant with the server-side can_write gate.
+      const { data, error } = await supabase.functions.invoke("portal-settings",
+        { body: { action: "list_locations", targetClientId: C.clientId } });
+      if (error || !data || data.error) throw new Error((data && data.error) || "Could not load your locations.");
+      setInvDialog((d) => d && { ...d, busy: false, locations: data.locations || [] });
+    } catch (e) {
+      setInvDialog((d) => d && { ...d, busy: false, err: e.message || String(e) });
+    }
+  };
+  const saveInventory = async () => {
+    if (!invDialog || invDialog.busy) return;
+    setInvDialog((d) => ({ ...d, busy: true, err: null }));
+    try {
+      const isUpdate = Boolean(inventoryMaster && inventoryMaster.unitId);
+      const code = isUpdate ? inventoryMaster.code : genShortCode();
+      // Render + upload the plan PDF — the same steps submitQuote runs, deliberately
+      // duplicated rather than extracted: refactoring the money path for a reuse win
+      // is a bad trade. Best-effort: an upload failure must not lose the unit.
+      let imageUrl = null;
+      try {
+        const canvas = renderExportCanvas();
+        const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        const jpegBin = atob(jpegDataUrl.split(",")[1]);
+        const jpegBytes = new Uint8Array(jpegBin.length);
+        for (let i = 0; i < jpegBin.length; i++) jpegBytes[i] = jpegBin.charCodeAt(i);
+        const blob = buildPdfFromJpegBytes(jpegBytes, canvas.width, canvas.height);
+        const filePath = `${C.clientId}/${code}-${Date.now()}.pdf`;
+        const up = await supabase.storage.from("floor-plans")
+          .upload(filePath, blob, { upsert: false, contentType: "application/pdf", cacheControl: "0" });
+        if (!up.error) imageUrl = supabase.storage.from("floor-plans").getPublicUrl(filePath).data.publicUrl;
+      } catch (_e) { /* PDF is nice-to-have here; the unit row matters more */ }
+      // A typo must never become $0 on the lot. `Number("12,5o0")` is NaN, and the old
+      // `|| 0` turned that into a building publicly listed at $0.
+      const priceStr = String(invDialog.price ?? "").replace(/[$,\s]/g, "");
+      let askingPriceCents = null;
+      if (priceStr !== "") {
+        const n = Number(priceStr);
+        if (!Number.isFinite(n) || n < 0) {
+          setInvDialog((d) => d && { ...d, busy: false, err: "Enter the asking price as a number, e.g. 8950 — or leave it blank." });
+          return;
+        }
+        askingPriceCents = Math.round(n * 100);
+      }
+      const { data, error } = await supabase.functions.invoke("portal-settings", { body: {
+        action: "save_inventory", targetClientId: C.clientId,
+        ...(isUpdate ? { unitId: inventoryMaster.unitId } : { shortCode: code }),
+        imageUrl, askingPriceCents, locationId: invDialog.locationId || null,
+        selections: sel, paintColors, items, customOptions, roDimensions, bldgW, bldgH,
+      } });
+      if (error) {
+        let m = "Save failed — try again.";
+        try { const b = await error.context.clone().json(); if (b && b.error) m = b.error; } catch (_e) { /* keep generic */ }
+        throw new Error(m);
+      }
+      if (!data || data.error) throw new Error((data && data.error) || "Save failed — try again.");
+      setInvDialog((d) => ({ ...d, busy: false, done: { serial: data.serial ?? null, updated: isUpdate } }));
+      if (!isUpdate) {
+        // The design on screen IS now this unit's master — further saves are updates.
+        currentDesignIdRef.current = code;
+        setDesignCode(code);
+        setInventoryMaster({ code, unitId: data.unitId, priceCents: askingPriceCents, locationId: invDialog.locationId || null });
+      } else {
+        setInventoryMaster((m) => m && { ...m, priceCents: askingPriceCents, locationId: invDialog.locationId || null });
+      }
+      if (onSaved) onSaved();
+    } catch (e) {
+      setInvDialog((d) => ({ ...d, busy: false, err: e.message || String(e) }));
+    }
+  };
+  // Details NEVER auto-opens. If the form drops back to incomplete (a cleared field, the
+  // address search resetting values), the section CLOSES — so re-completing the form can
+  // never resurface it without a fresh click. Without this, an earlier open survived the
+  // re-lock and the rows reappeared "by themselves" the moment the last field was filled.
+  useEffect(() => {
+    if (detailsLocked && additionalOpen) setAdditionalOpen(false);
+  }, [detailsLocked]);
+  // The lead save keys off VISIBILITY, not the click handler: whatever path reveals the
+  // details, the contact is saved. The ref in captureLeadSilently keeps it once per load,
+  // and its customerFacing guard keeps the portal designer out entirely. The draft save
+  // rides the same moment: who they are (lead) and what they designed (draft) together.
+  useEffect(() => {
+    if (additionalOpen && !detailsLocked) { captureLeadSilently(); saveDraftSilently(); }
+  }, [additionalOpen, detailsLocked]);
   const [toast, setToast] = useState(null);
   const svgRef = useRef(null);
   // After a drag or resize gesture ends, the trailing click on the SVG
@@ -1032,6 +1824,100 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     prevSizeRef.current = sel.size;
   }, [sel.size]);
 
+  // ─── Load a saved design by short code ───
+  // Shared by the public ?id= URL path and the portal's openDesign prop below — the two
+  // must hydrate identically (GHL refs, draft flag, optional version snapshot, id counter).
+  const loadDesignByCode = async (id, vParam, isCancelled = () => false) => {
+    // Capability RPC: returns the one row matching the code (or nothing).
+    // Direct table reads are blocked for the anon key after cutover.
+    const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
+    const data = Array.isArray(rows) ? rows[0] : rows;
+    // Returns TRUE only when the design actually loaded. Callers act on the result:
+    // the openDesign effect must not arm inventory state (unitId / asNew reset) against
+    // whatever design is still on the canvas when the RPC failed or the row is gone —
+    // that grafted unit B's id onto unit A's design and let an update overwrite B.
+    if (isCancelled() || error || !data) return false;
+    // The persistent portal designer can be sitting on the submit-success screen when an
+    // Open request arrives — without this the OLD design's success screen would keep
+    // covering the newly loaded one. No-op on the public ?id= path (fresh mount, false).
+    setSubmitted(false);
+    setSubmitError(null);
+    currentDesignIdRef.current = data.short_code;
+    setDesignCode(data.short_code);
+    // A re-opened draft may keep draft-saving; any other status locks the row against
+    // silent rewrites (saveDraftSilently refuses non-draft rows). Embedded mounts never
+    // draft-save at all (customerFacing guard), so there this flag is inert.
+    isDraftRef.current = data.status === "draft";
+    // Inventory master (075)? Mark it: submit gets blocked and the inventory button
+    // flips to update mode. unitId is enriched by the openDesign effect (the portal
+    // sends it); a master reached any other way still blocks submit.
+    setInventoryMaster(data.status === "inventory"
+      ? { code: data.short_code, unitId: null, priceCents: null, locationId: null }
+      : null);
+    // An estimate quoted FROM an inventory building carries the link on the row, so
+    // reopening it later (portal or public share link) locks the plan again. The serial
+    // is a nicety for the banner: readable to a signed-in tenant under inventory_units'
+    // owner-select policy, absent for an anon visitor — never let it block the lock.
+    setNewBuildMode(false);
+    if (data.inventory_unit_id) {
+      setDesignUnit({ id: data.inventory_unit_id, serial: null });
+      supabase.from("inventory_units").select("serial").eq("id", data.inventory_unit_id).maybeSingle()
+        .then(({ data: u }) => { if (u && !isCancelled()) setDesignUnit({ id: data.inventory_unit_id, serial: u.serial }); },
+              () => {});
+    } else {
+      setDesignUnit(null);
+    }
+    // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
+    ghlContactIdRef.current = data.ghl_contact_id || null;
+    ghlEstimateIdRef.current = data.ghl_estimate_id || null;
+    ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
+    setHasExistingEstimate(!!data.ghl_estimate_id);
+
+    // Optionally open a specific saved version for review/resubmit. The design DATA
+    // comes from that version's snapshot; the GHL refs above stay from the current
+    // row so a resubmit updates the same one estimate rather than creating a new one.
+    let design = data;
+    if (Number.isFinite(vParam) && vParam > 0) {
+      const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
+      const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
+      if (!isCancelled() && vrow) design = vrow;
+    }
+    if (isCancelled()) return false;
+    setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
+
+    setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+    // Pre-set prevSizeRef to what sel.size is ABOUT to become, so the size effect doesn't
+    // treat this load as a user size-change and wipe the items set below (same guard
+    // openVersion uses). "" (not the old size) because sel is REBUILT below, not merged.
+    prevSizeRef.current = (design.selections || {}).size || "";
+    // Rebuild sel from pristine defaults rather than merging over the persistent portal
+    // designer's current selections: a design saved before an option existed (e.g. rows
+    // from before roofType/roofColor shipped) must not inherit the previously opened
+    // design's values for those keys. Mirrors the sel useState initializer.
+    setSel(() => {
+      const base = { style: "", size: "", roofType: "", roofColor: "" };
+      C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
+      return { ...base, ...(design.selections || {}) };
+    });
+    setPaintColors(design.paint_colors || { body: "", trim: "" });
+    setPaintCustom({ body: false, trim: false });
+    setCustomOptions(design.custom_options || []);
+    setRoDimensions(design.ro_dimensions || {});
+    // Items must be set after sel.size has propagated; the prevSizeRef guard
+    // above keeps the size effect from wiping them.
+    const loadedItems = Array.isArray(design.items) ? design.items : [];
+    setItems(loadedItems);
+    // The persistent portal mount can carry a selection/note-edit from the PREVIOUS
+    // design; item ids are small integers that collide across designs, so a stale
+    // selectedId would put the Delete/Rotate toolbar on an arbitrary item of this one.
+    setSelectedId(null);
+    setEditingNoteId(null);
+    // Keep the global id counter ahead of any restored ids so the next placement can't
+    // reuse an existing id (which collided in select/drag/delete/resize).
+    idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
+    return true;
+  };
+
   // ─── Load saved design from ?id=SS-XXXXXX on the URL ───
   useEffect(() => {
     if (!supabase) return;
@@ -1042,50 +1928,112 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     const id = params.get("id");
     if (!id) return;
     let cancelled = false;
-    (async () => {
-      // Capability RPC: returns the one row matching the code (or nothing).
-      // Direct table reads are blocked for the anon key after cutover.
-      const { data: rows, error } = await supabase.rpc("load_design", { p_code: id });
-      const data = Array.isArray(rows) ? rows[0] : rows;
-      if (cancelled || error || !data) return;
-      currentDesignIdRef.current = data.short_code;
-      setDesignCode(data.short_code);
-      // Hydrate GHL refs so a re-submit becomes an update of the same estimate.
-      ghlContactIdRef.current = data.ghl_contact_id || null;
-      ghlEstimateIdRef.current = data.ghl_estimate_id || null;
-      ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
-      setHasExistingEstimate(!!data.ghl_estimate_id);
-
-      // Optionally open a specific saved version (?v=N) for review/resubmit. The design
-      // DATA comes from that version's snapshot; the GHL refs above stay from the current
-      // row so a resubmit updates the same one estimate rather than creating a new one.
-      let design = data;
-      const vParam = parseInt(params.get("v") || "", 10);
-      if (Number.isFinite(vParam) && vParam > 0) {
-        const { data: vrows } = await supabase.rpc("load_design_version", { p_code: id, p_version: vParam });
-        const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
-        if (!cancelled && vrow) design = vrow;
-      }
-      if (cancelled) return;
-      setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
-
-      setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
-      setSel((prev) => ({ ...prev, ...(design.selections || {}) }));
-      setPaintColors(design.paint_colors || { body: "", trim: "" });
-      setPaintCustom({ body: false, trim: false });
-      setCustomOptions(design.custom_options || []);
-      setRoDimensions(design.ro_dimensions || {});
-      // Items must be set after sel.size has propagated; the prevSizeRef guard
-      // above keeps the size effect from wiping them.
-      const loadedItems = Array.isArray(design.items) ? design.items : [];
-      setItems(loadedItems);
-      // Keep the global id counter ahead of any restored ids so the next placement can't
-      // reuse an existing id (which collided in select/drag/delete/resize).
-      idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
-    })();
+    loadDesignByCode(id, parseInt(params.get("v") || "", 10), () => cancelled);
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, embedded]);
+
+  // ─── Open a design on demand (portal Designer tab) ───
+  // The portal's Designs/Contacts "Open" buttons hand the persistent embedded designer an
+  // { code, version } request instead of linking to the public page. Business users must
+  // NEVER review a customer's design on the public page: it silently captures leads and
+  // saves drafts (capture-lead / saveDraftSilently), so staff browsing there would corrupt
+  // the very activity Contacts reports. Embedded-only; the public page keeps its ?id= path.
+  // Each click sends a fresh object (identity change re-fires this even for the same code).
+  useEffect(() => {
+    if (!embedded || !supabase || !openDesign) return;
+    // "+ New inventory building" sends { blank: true } with no code: clear the canvas so
+    // a brand-new building never starts from the design that happened to be open. Without
+    // this, clicking New while another unit's MASTER was loaded left the submit bar saying
+    // "Update Inventory Building" — saving would have rewritten that other unit.
+    if (openDesign.blank) {
+      if (items.length > 0 || sel.style || sel.size) {
+        if (!window.confirm("Start a new building? This clears what's currently in the Designer tab.")) return;
+      }
+      setItems([]);
+      setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
+      setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+      setPaintColors({ body: "", trim: "" });
+      setCustomOptions([]);
+      setRoDimensions({});
+      setSelectedId(null);
+      setEditingNoteId(null);
+      currentDesignIdRef.current = null;
+      isDraftRef.current = false;
+      draftStateRef.current = null;
+      ghlContactIdRef.current = null;
+      ghlEstimateIdRef.current = null;
+      ghlEstimateNumberRef.current = null;
+      inventoryUnitRef.current = null;
+      setInventoryMaster(null);
+      setDesignUnit(null);
+      setNewBuildMode(false);
+      setHasExistingEstimate(false);
+      setDesignCode(null);
+      setEstimateVersions([]);
+      setViewingVersion(null);
+      setSubmitted(false);
+      setSubmitError(null);
+      return;
+    }
+    if (!openDesign.code) return;
+    // The persistent Designer tab may hold in-progress work — hand-built, or a previously
+    // opened design mid-edit. The old public links opened a NEW tab and could never
+    // destroy it; this in-place load can, so it asks first (the same courtesy the
+    // portal's openAccount extends before its remount discards the designer).
+    if (items.length > 0 || sel.style || sel.size) {
+      if (!window.confirm("Opening this design will replace what's currently in the Designer tab. Continue?")) return;
+    }
+    let cancelled = false;
+    (async () => {
+      const loaded = await loadDesignByCode(String(openDesign.code), Number(openDesign.version) || null, () => cancelled);
+      // A failed load leaves the PREVIOUS design on the canvas. Arming inventory state
+      // here would point it at a building nobody can see: "Update Inventory Building"
+      // would then overwrite the clicked unit's master with the old design, and a
+      // Send-estimate would link the wrong floor plan to that unit.
+      if (cancelled || !loaded) {
+        if (!cancelled) setSubmitError("That design could not be opened — check your connection and try again.");
+        return;
+      }
+      if (openDesign.asNew) {
+        // "Send estimate" from Inventory: the unit's design becomes a FRESH estimate for
+        // a new customer — a new short_code is minted at submit, the contact starts
+        // blank, no GHL identity carries over, and the master itself stays untouched.
+        // Many customers can each get their own estimate on the same physical building.
+        currentDesignIdRef.current = null;
+        setDesignCode(null);
+        isDraftRef.current = false;
+        draftStateRef.current = null;
+        ghlContactIdRef.current = null;
+        ghlEstimateIdRef.current = null;
+        ghlEstimateNumberRef.current = null;
+        setHasExistingEstimate(false);
+        setViewingVersion(null);
+        setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+        setInventoryMaster(null);
+        // asNew is a NEW quote on that building: the lock comes from the armed ref, and
+        // designUnit (which tracks a SAVED row's link) must not also be set yet.
+        setDesignUnit(openDesign.inventoryUnitId
+          ? { id: openDesign.inventoryUnitId, serial: openDesign.unitSerial ?? null }
+          : null);
+        setNewBuildMode(false);
+        inventoryUnitRef.current = openDesign.inventoryUnitId || null;
+      } else {
+        inventoryUnitRef.current = null;
+        if (openDesign.unit) {
+          // Inventory "Open": enrich the master marker so update mode knows its unit.
+          setInventoryMaster((m) => m && {
+            ...m,
+            unitId: openDesign.unit.unitId,
+            priceCents: openDesign.unit.askingPriceCents ?? null,
+            locationId: openDesign.unit.locationId ?? null,
+          });
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase, embedded, openDesign]);
 
   // On the submit-success screen, load every version of this design (this estimate) so the
   // customer/rep can see and reopen all designs on the estimate. Capability read by code.
@@ -1234,6 +2182,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
 
   const handleClick = useCallback((e) => {
     if (dragging) return;
+    if (planLockedRef.current) return;   // inventory estimate: the building is already built
     // Not captured yet: any attempt to work the canvas pops the lead gate instead.
     if (gateRequired) { setGateOpen(true); return; }
     // Swallow the click that fires immediately after a drag/resize gesture —
@@ -1280,6 +2229,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       setSelectedId(hit ? hit.id : null); return;
     }
     const cfg = ITEMS[activeTool]; if (!cfg) return;
+    // The single "Door" tool: don't place yet — remember the wall + click point and open the
+    // door picker, which chooses the door + swing/operation and then places it (placePickedDoor).
+    if (cfg.isDoorPicker) {
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      setDoorPick({ wall: w, ptx: pt.x, pty: pt.y });
+      setActiveTool(null); setToast(null);
+      return;
+    }
+    // The "Window" tool: like the door picker but no swing/operation — remember the wall + point
+    // and open the window picker, which places the chosen catalog window (placePickedWindow).
+    if (cfg.isWindowPicker) {
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      setWindowPick({ wall: w, ptx: pt.x, pty: pt.y });
+      setActiveTool(null); setToast(null);
+      return;
+    }
+    // An INCLUDED catalog door/window chip is armed → drop that EXACT fixture here (no picker).
+    // Included ramps are doorSnap and handled in the doorSnap branch below.
+    if (cfg.includedFixture && !cfg.doorSnap) {
+      const fx = cfg.includedFixture;
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : 36)) / 12;
+      const iwPx2 = widthFt * scale, ihPx2 = 0.5 * scale;
+      const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY);
+      let ni;
+      if (fx.category === "window") {
+        ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+      } else {
+        const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
+        const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
+        ni = { id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name || "Door",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation };
+      }
+      if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
+        setToast("Something's already there — pick a different spot on the wall."); setTimeout(() => setToast(null), 4000); return;
+      }
+      setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
+      return;
+    }
     const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
     let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
     // Wall-only items always go on a wall; if the click missed the threshold,
@@ -1322,7 +2313,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
 
     // Door-snap items (ramp): find nearest door and snap to its outside
     if (cfg.doorSnap) {
-      const doors = items.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor");
+      // fixtureDoor counts as a door here. It is the item type EVERY catalog door placement
+      // creates, and it is treated as a door everywhere else — getFrontWall, checkDoorCollision via
+      // wallOnly, the payload doors[] schedule — but the ramp tool filtered it out, so a shopper who
+      // placed the tenant's own catalog door (a slide-up or garage door, the most natural ramp
+      // companion) got "Place a door first, then add a ramp to it." with a door plainly on the plan.
+      // Catalog doors are live: fixture_items has active category='door' rows today.
+      const doors = items.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor");
       if (doors.length === 0) {
         setToast("Place a door first, then add a ramp to it.");
         setTimeout(() => setToast(null), 5000);
@@ -1337,6 +2334,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       if (existingRamp) {
         setToast("This door already has a ramp. Delete it first to replace.");
         setTimeout(() => setToast(null), 5000);
+        return;
+      }
+      // Custom ramp: open the picker for THIS door — placePickedRamp creates the ramp item.
+      if (cfg.isRampPicker) { setRampPick({ door: closest }); setActiveTool(null); setToast(null); return; }
+      // An INCLUDED catalog ramp chip: attach that EXACT ramp to this door (like a custom ramp).
+      if (cfg.includedFixture) {
+        const fx = cfg.includedFixture;
+        const widthFt = (Number(fx.widthIn) || 36) / 12;
+        const rDepth = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;
+        const rDepthPx = rDepth * scale;
+        let rx, ry, rot;
+        if (closest.wall === "north") { rx = closest.x; ry = mgY - rDepthPx / 2; rot = 0; }
+        else if (closest.wall === "south") { rx = closest.x; ry = mgY + pH + rDepthPx / 2; rot = 0; }
+        else if (closest.wall === "west") { rx = mgX - rDepthPx / 2; ry = closest.y; rot = 90; }
+        else if (closest.wall === "east") { rx = mgX + pW + rDepthPx / 2; ry = closest.y; rot = 90; }
+        else return;
+        const ni = { id: idCounter++, type: "ramp", x: rx, y: ry, rotation: rot, wall: closest.wall, widthFt, heightFt: rDepth, snapDoorId: closest.id,
+          fixtureItemId: fx.id, rampName: fx.name || "Ramp", planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+        setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
         return;
       }
       const doorCfg = ITEMS[closest.type];
@@ -1405,6 +2422,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH };
     } else if (wall) {
       const sn = snapToWall(wall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
+      // Placing a door/window/RO had NO overlap check at all, so one could be click-placed straight
+      // on top of another door, or onto a workbench’s wall span. Both checks now run here, matching
+      // the wallSnap (workbench) branch, so the invariant holds whichever item is the one moving.
+      const cand = { id: -1, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+      if (checkDoorCollision(cand, cfg, items, ITEMS, scale)) {
+        setToast("Something is already on that spot. Pick a clear part of the wall.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+      if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+        setToast("A workbench is on that wall — place this somewhere else on the wall.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
       ni = { id: idCounter++, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
     } else {
       const x = Math.max(mgX + iwPx / 2, Math.min(pt.x, mgX + pW - iwPx / 2));
@@ -1416,8 +2447,118 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     setToast(null);
   }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired]);
 
+  // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
+  // door's spec (so a later catalog edit never changes this saved design) + the shopper's
+  // swing/operation choice onto a stable `fixtureDoor` item.
+  const placePickedDoor = useCallback((fx, swing, operation) => {
+    // Swap mode: replace the selected door in place (keep its wall/position) with the chosen door.
+    if (swapId != null && fx) {
+      const wFt = (Number(fx.widthIn) || 36) / 12;
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "fixtureDoor", fixtureItemId: fx.id, doorName: fx.name || "Door",
+        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+        widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null } : it));
+      setSwapId(null); setDoorPick(null); setToast(null); return;
+    }
+    if (!doorPick || !fx) return;
+    const widthFt = (Number(fx.widthIn) || 36) / 12;
+    const iwPx = widthFt * scale, ihPx = 0.5 * scale;
+    const sn = snapToWall(doorPick.wall, doorPick.ptx, doorPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
+    const ni = {
+      id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5,
+      fixtureItemId: fx.id, doorName: fx.name || "Door",
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+      price: (fx.price != null ? fx.price : null),
+      widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+      swing: swing || null, operation: operation || null,
+    };
+    if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
+      setToast("A door is already there — pick a different spot on the wall.");
+      setTimeout(() => setToast(null), 4000);
+      setDoorPick(null);
+      return;
+    }
+    setItems((p) => [...p, ni]);
+    setSelectedId(ni.id);
+    setDoorPick(null);
+    setToast(null);
+  }, [swapId, doorPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
+
+  // Place the window style chosen in the picker at the remembered wall/point. A catalog window is
+  // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
+  // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
+  const placePickedWindow = useCallback((fx) => {
+    if (swapId != null && fx) {
+      const wFt = (Number(fx.widthIn) || 24) / 12;
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
+        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, widthFt: wFt } : it));
+      setSwapId(null); setWindowPick(null); setToast(null); return;
+    }
+    if (!windowPick || !fx) return;
+    const widthFt = (Number(fx.widthIn) || 24) / 12;
+    const iwPx = widthFt * scale, ihPx = 0.5 * scale;
+    const sn = snapToWall(windowPick.wall, windowPick.ptx, windowPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
+    const ni = {
+      id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5,
+      fixtureItemId: fx.id, windowName: fx.name || "Window",
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+      price: (fx.price != null ? fx.price : null),
+      widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+    };
+    if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
+      setToast("Something's already there — pick a different spot on the wall.");
+      setTimeout(() => setToast(null), 4000);
+      setWindowPick(null);
+      return;
+    }
+    setItems((p) => [...p, ni]);
+    setSelectedId(ni.id);
+    setWindowPick(null);
+    setToast(null);
+  }, [swapId, windowPick, items, mgX, mgY, pW, pH, scale, ITEMS]);
+
+  // Place the ramp style chosen in the picker on the remembered door. A custom ramp is a normal
+  // type:"ramp" item (so all ramp machinery applies) but takes the style's OWN width + length
+  // (length = the ramp's run/depth out from the door) and snapshots its spec + price.
+  const placePickedRamp = useCallback((fx) => {
+    if (swapId != null && fx) {
+      const wFt = (Number(fx.widthIn) || 36) / 12;
+      const dpt = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "ramp", fixtureItemId: fx.id, rampName: fx.name || "Ramp",
+        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+        widthFt: wFt, heightFt: dpt } : it));
+      setSwapId(null); setRampPick(null); setToast(null); return;
+    }
+    if (!rampPick || !fx) return;
+    const door = rampPick.door;
+    const widthFt = (Number(fx.widthIn) || 36) / 12;
+    const rampDepth = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;   // style length = run out from the door
+    const rampDepthPx = rampDepth * scale;
+    let rx, ry, rot;
+    if (door.wall === "north") { rx = door.x; ry = mgY - rampDepthPx / 2; rot = 0; }
+    else if (door.wall === "south") { rx = door.x; ry = mgY + pH + rampDepthPx / 2; rot = 0; }
+    else if (door.wall === "west") { rx = mgX - rampDepthPx / 2; ry = door.y; rot = 90; }
+    else if (door.wall === "east") { rx = mgX + pW + rampDepthPx / 2; ry = door.y; rot = 90; }
+    else { setRampPick(null); return; }
+    const ni = {
+      id: idCounter++, type: "ramp", x: rx, y: ry, rotation: rot, wall: door.wall,
+      widthFt, heightFt: rampDepth, snapDoorId: door.id,
+      fixtureItemId: fx.id, rampName: fx.name || "Ramp",
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+      price: (fx.price != null ? fx.price : null),
+      widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+    };
+    setItems((p) => [...p, ni]);
+    setSelectedId(ni.id);
+    setRampPick(null);
+    setToast(null);
+  }, [swapId, rampPick, mgX, mgY, pW, pH, scale, RAMP_SPACE_FT]);
+
   const onPtrDown = useCallback((e, item) => {
     e.stopPropagation();
+    if (planLockedRef.current) return;   // no selecting or dragging a building that exists
     if (gateRequired) { setGateOpen(true); return; }
     if (pendingRemoval) return; // pick mode: overlays handle the pick; no select/drag
     if (activeTool) return;
@@ -1443,6 +2584,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
 
   const startResize = useCallback((e, item, handle) => {
     e.preventDefault();
+    if (planLockedRef.current) return;
     movedRef.current = false;
     gestureStartRef.current = { x: e.touches ? e.touches[0].clientX : e.clientX, y: e.touches ? e.touches[0].clientY : e.clientY };
     const pt = getSvgPt(e);
@@ -1651,6 +2793,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
         if (sn.wall === "east")  return { ...rmp, x: mgX + pW + rampDepthPx / 2, y: sn.y, rotation: 90, wall: "east" };
         return rmp;
       };
+      // Refuse the move rather than commit an overlap — same posture as the workbench branch
+      // below, which simply returns. Without this, dragging a door onto another door or onto a
+      // workbench silently succeeded, producing the exact layout the workbench-side toast prevents.
+      const dOthers = items.filter((i) => i.id !== dragging.id);
+      const dCand = { ...it, ...sn, widthFt: iWidthFt };
+      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) return;
+      if (checkWorkbenchOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale)) return;
       setItems((p) => p.map((i) =>
         i.id === dragging.id ? { ...i, ...sn }
         : (i.type === "ramp" && i.snapDoorId === dragging.id ? relocRamp(i) : i)
@@ -1783,7 +2932,66 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   }, [dragging, resizing, onPtrMove, onPtrUp]);
 
   const delSel = () => { if (selectedId) { setItems((p) => p.filter((i) => i.id !== selectedId && !(i.type === "ramp" && i.snapDoorId === selectedId))); setSelectedId(null); setEditingNoteId(null); } };
-  const rotSel = () => { if (!selectedId) return; setItems((p) => p.map((i) => { if (i.id !== selectedId) return i; const c = ITEMS[i.type]; if (c && (c.wallOnly || c.wallSnap || c.lineType)) return i; return { ...i, rotation: ((i.rotation || 0) + 90) % 360 }; })); };
+  // Rotate the selection.
+  //
+  // Lofts are handled by SWAPPING widthFt/heightFt rather than by setting a rotation angle, and
+  // that is the whole fix for the rotated-loft class of bug. Both renderers honour `rotation` (SVG
+  // transform, canvas ctx.rotate) and the hit test swaps the bbox for 90/270 — but EVERY piece of
+  // loft geometry ignored it: the loft-vs-loft overlap checks, the resize clamps, the drag
+  // containment clamp (halfW/halfH from the UNROTATED widthFt/heightFt) and checkLoftAttached /
+  // the unattachedLofts banner. So one click on Rotate could leave a 10x4 loft rendering as 4x10,
+  // sticking 3ft outside the north wall with no warning, visually overlapping another loft, and
+  // reporting attached/unattached wrongly — and that geometry is what gets rasterized into the PDF
+  // the customer signs against and the shop builds from.
+  //
+  // A loft is an axis-aligned resizable rectangle, so a 90-degree turn IS a width/height swap;
+  // expressing it that way keeps `rotation` at 0 and leaves every invariant above valid as
+  // written, instead of teaching six separate places about rotation. The swap is validated exactly
+  // like a drag: clamp the centre back inside the building, then refuse if the new footprint would
+  // overlap another loft or no longer fit.
+  //
+  // doorSnap items (ramps) are excluded too: a ramp's position and rotation are DERIVED from the
+  // door it is attached to, and it deliberately cannot be dragged — rotating it only desynced it
+  // from its door.
+  const rotSel = () => {
+    if (!selectedId) return;
+    const sel = items.find((i) => i.id === selectedId);
+    if (!sel) return;
+    const c = ITEMS[sel.type];
+    if (c && (c.wallOnly || c.wallSnap || c.lineType || c.doorSnap)) return;
+
+    if (sel.type === "loft") {
+      const curW = sel.widthFt || c.width, curH = sel.heightFt || c.height;
+      const newW = curH, newH = curW;
+      if (newW > bldgW || newH > bldgH) {
+        setToast("Turning this loft won't fit inside the building. Resize it first.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+      const halfW = newW / 2, halfH = newH / 2;
+      let cxFt = (sel.x - mgX) / scale, cyFt = (sel.y - mgY) / scale;
+      cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
+      cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+      const fL = cxFt - halfW, fR = cxFt + halfW, fT = cyFt - halfH, fB = cyFt + halfH;
+      for (const o of items) {
+        if (o.id === sel.id || o.type !== "loft") continue;
+        const oW = (o.widthFt || c.width) / 2, oH = (o.heightFt || c.height) / 2;
+        const oCx = (o.x - mgX) / scale, oCy = (o.y - mgY) / scale;
+        if (fL < oCx + oW - 0.1 && fR > oCx - oW + 0.1 && fT < oCy + oH - 0.1 && fB > oCy - oH + 0.1) {
+          setToast("Turning this loft would overlap another loft. Move one of them first.");
+          setTimeout(() => setToast(null), 4000);
+          return;
+        }
+      }
+      setItems((p) => p.map((i) => i.id !== selectedId ? i : {
+        ...i, widthFt: newW, heightFt: newH, rotation: 0,
+        x: mgX + cxFt * scale, y: mgY + cyFt * scale,
+      }));
+      return;
+    }
+
+    setItems((p) => p.map((i) => i.id !== selectedId ? i : { ...i, rotation: ((i.rotation || 0) + 90) % 360 }));
+  };
   const clearAll = () => { setItems([]); setSelectedId(null); setEditingNoteId(null); };
 
   // ─── EXPORT RENDERING (shared by Export modal, PDF, and submit) ───
@@ -1896,7 +3104,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       } else if (cfg.wallOnly) {
         // Rounded rect for door/window bar (matches SVG rx=1)
         const barH = 10, barR = 1;
-        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : cfg.color;
+        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : item.type === "fixtureDoor" ? fixtureDoorColor(item) : cfg.color;
         ctx.beginPath();
         ctx.moveTo(-iw / 2 + barR, -barH / 2);
         ctx.lineTo(iw / 2 - barR, -barH / 2);
@@ -1922,6 +3130,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           // Right leaf: hinge at right edge of door
           ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
           ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
+        } else if (item.type === "fixtureDoor") {
+          fixtureDoorCanvas(ctx, item, iw, fixtureDoorColor(item));
         } else if (item.type === "window") {
           ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
           [0, -iw / 4, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -4); ctx.lineTo(lx, 4); ctx.stroke(); });
@@ -1934,14 +3144,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       }
       ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
       if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
-      else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText("RAMP", -iw / 2 + 5, 4); }
+      else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText(item.planLabel || "RAMP", -iw / 2 + 5, 4); }
       else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
         let label = cfg.shortLabel;
+        if (item.type === "fixtureDoor") label = item.planLabel || cfg.shortLabel;
+        if (item.type === "window") label = item.planLabel || cfg.shortLabel;
         if (item.type === "roughOpening") {
           const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
           label = `RO-${idx + 1}`;
+        }
+        // Doors + windows prefix their width, e.g. "6' DD".
+        if (item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window") {
+          const w = fmtFtIn((item.widthFt || cfg.width) * 12);
+          if (w) label = `${w} ${label}`;
         }
         ctx.fillText(label, 0, lblY);
       }
@@ -1999,11 +3216,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
     if (ddCount > 0) bullets.push(`Double Door${ddCount > 1 ? " ×" + ddCount : ""}`);
+    // Catalog fixture doors — one bullet per placed door with its full spec (name, size,
+    // swing, operation), driven by the placed items so ANY catalog door lists automatically
+    // (nothing hard-coded per door). Windows/ramps will slot in the same way later.
+    items.filter((i) => i.type === "fixtureDoor").forEach((d) => {
+      const parts = [];
+      if (d.widthIn && d.heightIn) parts.push(`${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}`);
+      const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : "";
+      if (sw) parts.push(sw);
+      const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : "";
+      if (op) parts.push(op);
+      bullets.push(`${d.doorName || "Door"}${parts.length ? " — " + parts.join(", ") : ""}`);
+    });
     const winCount = items.filter((i) => i.type === "window").length;
     if (winCount > 0) bullets.push(`Window${winCount > 1 ? "s ×" + winCount : ""}`);
     items.filter((i) => i.type === "workbench").forEach((wb) => bullets.push(`${wb.widthFt}ft Workbench`));
-    const loftCount = items.filter((i) => i.type === "loft").length;
-    if (loftCount > 0) bullets.push(`Loft${loftCount > 1 ? " ×" + loftCount : ""}`);
+    const loftItems = items.filter((i) => i.type === "loft");
+    if (loftItems.length > 0) {
+      const loftSqft = Math.round(loftItems.reduce((s, l) => s + (Number(l.widthFt) || 0) * (Number(l.heightFt) || 0), 0));
+      bullets.push(`Loft${loftItems.length > 1 ? " ×" + loftItems.length : ""} — ${loftSqft} sq ft`);
+    }
     const rampCount = items.filter((i) => i.type === "ramp").length;
     if (rampCount > 0) bullets.push(`Ramp${rampCount > 1 ? " ×" + rampCount : ""}`);
     items.filter((i) => i.type === "roughOpening").forEach((ro, idx) => {
@@ -2087,6 +3319,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
 
   // ─── SUBMIT QUOTE ───
   const submitQuote = async () => {
+    // An inventory MASTER is the lot building itself, never a customer estimate — a
+    // submit here would convert it (save_design promotion + a GHL estimate) and every
+    // unit list/serial would point at a customer's quote. Quoting an inventory building
+    // goes through the Inventory tab's "Send estimate", which loads it as a fresh design.
+    if (inventoryMaster && currentDesignIdRef.current === inventoryMaster.code) {
+      setSubmitError("This is an inventory building. Use “Send estimate” on the Inventory tab to quote it to a customer, or “Update Inventory Building” to save design changes.");
+      return;
+    }
     // Validate every contact field that's enabled in the config. Address fields
     // are required because downstream tax calc needs the full address.
     const FIELD_LABEL = { name: "Name", email: "Email", phone: "Phone", street: "Street Address", city: "City", state: "State", zip: "Zip" };
@@ -2111,7 +3351,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
     }
     // Every included item must be placed on the layout, or explicitly declined.
     const declinedKeys = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
-    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k));
+    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
     if (unplacedIncluded.length > 0) {
       const names = unplacedIncluded.map((k) => (ITEMS[k] && ITEMS[k].label) || k).join(", ");
       setSubmitError(`Please place all included items on your layout, or decline the ones you don't want: ${names}.`);
@@ -2189,6 +3429,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
       const viewUrl = `${window.location.origin}${embedded ? "/" : window.location.pathname}?${shareParams.toString()}`;
       if (!embedded) window.history.replaceState({}, "", `?${shareParams.toString()}`);
       currentDesignIdRef.current = shortCode;
+      // If this code began life as a silent draft, save_design just promoted it to 'sent'
+      // — from here on it is a submitted design and draft saves must leave it alone.
+      isDraftRef.current = false;
+      draftStateRef.current = null;
+      // Estimate sent from an inventory unit ("Send estimate"): tie the new design to its
+      // unit so the Inventory tab lists it. Best-effort — a link failure must never break
+      // a submitted estimate; the fire-and-forget catch keeps it silent.
+      // Tie this submission to its inventory building — or deliberately UNTIE it when
+      // staff designed a fresh build for the same customer ("Design a new build
+      // instead"), so the new version reads New rather than inheriting Inventory.
+      // newBuildMode is the ONLY thing that unties. An ordinary resubmit of a reopened
+      // inventory estimate (adding a discount, say) must RE-STAMP the same unit: the
+      // openDesign path deliberately clears inventoryUnitRef, so reading only that ref
+      // sent unitId:null and silently severed the quote from its building — the lock then
+      // survived exactly one submit and the unit never flipped Sold on acceptance.
+      const unitToLink = newBuildMode
+        ? null
+        : (inventoryUnitRef.current || (designUnit && designUnit.id) || null);
+      if (embedded && (unitToLink || (newBuildMode && designUnit))) {
+        try {
+          supabase.functions.invoke("portal-settings", { body: {
+            action: "link_design_to_unit", targetClientId: C.clientId,
+            shortCode, unitId: unitToLink,
+          } }).catch(() => {});
+        } catch (_e) { /* never block the estimate on the label */ }
+        if (unitToLink) setDesignUnit((d) => d && d.id === unitToLink ? d : { id: unitToLink, serial: null });
+        else { setDesignUnit(null); setNewBuildMode(false); }
+      }
       setDesignCode(shortCode);
       setViewingVersion(null);
 
@@ -2242,12 +3510,64 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
             ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
+            ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
+            ...(item.type === "ramp" ? { name: item.rampName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
+            ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId } : {}),
+          };
+        }),
+        // Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
+        // price. submit-estimate turns each into a priced estimate line. Kept separate from
+        // itemSummary (which counts the built-in door types) so the estimate engine has the
+        // full per-door detail, not just a count.
+        doors: items.filter((i) => i.type === "fixtureDoor").map((d) => {
+          const lbl = getDisplayLabel(d.wall, frontWall);
+          return {
+            name: d.doorName || "Door",
+            widthIn: d.widthIn != null ? Number(d.widthIn) : null,
+            heightIn: d.heightIn != null ? Number(d.heightIn) : null,
+            swing: d.swing || null,
+            operation: d.operation || null,
+            price: d.price != null ? Number(d.price) : null,
+            wall: lbl ? lbl.toLowerCase() : (d.wall || null),
+            fixtureItemId: d.fixtureItemId || null,
+          };
+        }),
+        // Ramp schedule: one row per placed ramp. Custom ramps carry their snapshot price; simple
+        // ramps leave price null and submit-estimate prices them from the tenant's ramp settings
+        // (each, or per_ft × the attached door width, passed here as doorWidthFt).
+        ramps: items.filter((i) => i.type === "ramp").map((r) => {
+          const door = items.find((d) => d.id === r.snapDoorId);
+          let doorWidthFt = r.widthFt != null ? Number(r.widthFt) : null;
+          if (door && door.type === "fixtureDoor" && door.widthIn) doorWidthFt = Number(door.widthIn) / 12;
+          const lbl = getDisplayLabel(r.wall, frontWall);
+          return {
+            name: r.rampName || null,
+            widthIn: r.widthIn != null ? Number(r.widthIn) : null,
+            heightIn: r.heightIn != null ? Number(r.heightIn) : null,
+            price: r.price != null ? Number(r.price) : null,
+            doorWidthFt: doorWidthFt != null ? Math.round(doorWidthFt * 100) / 100 : null,
+            wall: lbl ? lbl.toLowerCase() : (r.wall || null),
+            fixtureItemId: r.fixtureItemId || null,
+          };
+        }),
+        // Catalog window schedule: one row per placed catalog window (has fixtureItemId), with its
+        // snapshot price. Built-in windows aren't here — they're counted in itemSummary.windows.
+        windows: items.filter((i) => i.type === "window" && i.fixtureItemId).map((w) => {
+          const lbl = getDisplayLabel(w.wall, frontWall);
+          return {
+            name: w.windowName || "Window",
+            widthIn: w.widthIn != null ? Number(w.widthIn) : null,
+            heightIn: w.heightIn != null ? Number(w.heightIn) : null,
+            price: w.price != null ? Number(w.price) : null,
+            wall: lbl ? lbl.toLowerCase() : (w.wall || null),
+            fixtureItemId: w.fixtureItemId || null,
           };
         }),
         itemSummary: {
           singleDoors: items.filter((i) => i.type === "singleDoor").length,
           doubleDoors: items.filter((i) => i.type === "doubleDoor").length,
-          windows: items.filter((i) => i.type === "window").length,
+          // Built-in windows only (catalog windows are priced from windows[] by snapshot).
+          windows: items.filter((i) => i.type === "window" && !i.fixtureItemId).length,
           workbenches: items.filter((i) => i.type === "workbench").map((i) => {
             const lbl = getDisplayLabel(i.wall, frontWall);
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
@@ -2608,6 +3928,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
+      {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -2675,9 +3998,46 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
         </div>
       )}
 
-      {/* Configuration Panel */}
+      {/* Inventory estimate: the building already exists, so the plan is read-only. The
+          money lines below (custom options, discount, delivery) stay fully editable —
+          that is the whole point of quoting one lot building to several customers. */}
+      {planLocked && (
+        <div style={{ background: "#EFF6FF", borderBottom: "1px solid #BFDBFE", padding: "11px 20px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#1E3A8A" }}>
+            🔒 Inventory building{designUnit && designUnit.serial != null ? ` #${designUnit.serial}` : ""} — already built, so the plan can't be changed.
+          </span>
+          <span style={{ fontSize: 12.5, color: "#1E40AF", fontWeight: 600 }}>
+            Custom options, a discount and a delivery fee can still be added below.
+          </span>
+          {embedded && (
+            <button type="button" onClick={() => {
+              if (!window.confirm("Design a brand-new building for this customer instead?\n\nThe plan unlocks so you can change anything. Submitting saves it as another version of this quote, no longer tied to the inventory building.")) return;
+              setNewBuildMode(true);
+              inventoryUnitRef.current = null;
+            }} style={{ marginLeft: "auto", background: "#FFF", color: "#1D4ED8", border: "1.5px solid #93C5FD", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              Design a new build instead
+            </button>
+          )}
+        </div>
+      )}
+      {/* Started on an inventory building, then staff chose to design fresh. */}
+      {embedded && newBuildMode && designUnit && (
+        <div style={{ background: "#F0FDF4", borderBottom: "1px solid #BBF7D0", padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#15803D" }}>
+          ✎ Designing a new build for this customer — submitting saves it as another version, no longer tied to building{designUnit.serial != null ? ` #${designUnit.serial}` : ""}.
+        </div>
+      )}
+      {/* Configuration Panel — style, size, roof, paint and options all describe the
+          BUILDING, so the whole panel goes inert together when the plan is locked. One
+          gate here beats fifteen `disabled` props that a new control would silently miss. */}
       {(
-        <div style={{ background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px" }}>
+        // A real <fieldset disabled> — pointerEvents alone leaves every <select>/<input>
+        // in the tab order, so a keyboard user could still change Building Size, and the
+        // size effect wipes every item off a plan that describes a building already built.
+        // fieldset disables form controls including via keyboard; pointerEvents covers the
+        // style cards, which are clickable divs rather than controls. Both, deliberately.
+        <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined}
+          style={{ border: "none", margin: 0, minWidth: 0, background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px",
+            ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) }}>
           {/* Building Styles */}
           <div style={{ marginBottom: 14 }}>
             <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
@@ -2765,7 +4125,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           {/* Dynamic Options (filtered by selected building style — see isOptionApplicable).
               Paint is excluded — it renders inline beside the roof colors above. */}
           {visibleOptions.filter((o) => o !== paintOpt).map((opt) => renderOption(opt))}
-        </div>
+        </fieldset>
       )}
 
       {unattachedLofts.length > 0 && (
@@ -2775,9 +4135,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
         </div>
       )}
 
-      {/* Tool Palette */}
+      {/* Tool Palette. The ROW stays — Export and the 3D teaser live in it and neither
+          touches the building. Only the plan-editing controls inside it go away when the
+          plan is locked (hiding the whole row took Export with it). */}
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {(() => {
+        {!planLocked && (() => {
           const btn = ([key, cfg]) => (
             <button key={key} onClick={() => { if (gateRequired) { setGateOpen(true); return; } setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
               style={{
@@ -2786,11 +4148,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                 color: activeTool === key ? "#FFF" : "#334155",
                 border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
               }}>
-              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
+              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
-          const entries = Object.entries(ITEMS);
+          const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette && (embedded || !c.internalOnly));
           const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
           const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
           // Decline control for an included item: X it off (a deduction line is added on the
@@ -2804,8 +4166,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
               // so any already-placed instances are cleared (cascading a door's snapped ramp, like
               // delSel) and the tool is deselected if active.
               setItems((its) => {
-                const removedIds = new Set(its.filter((it) => it.type === key).map((it) => it.id));
-                return its.filter((it) => it.type !== key && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
+                const removedIds = new Set(its.filter((it) => it.type === key || it.fixtureItemId === key).map((it) => it.id));
+                return its.filter((it) => !(it.type === key || it.fixtureItemId === key) && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
               });
               setActiveTool((t) => (t === key ? null : t));
               setSelectedId(null);
@@ -2856,15 +4218,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           </>);
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          {selectedId && (
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          {selectedId && (() => {
+            // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
+            // in place. Deliberate click only — dragging/nudging never opens it. Essential for
+            // replacing an ARCHIVED item; hidden if there's nothing to swap to.
+            const si = items.find((i) => i.id === selectedId);
+            if (!si) return null;
+            if (planLocked) return null;
+            const isDoor = si.type === "fixtureDoor" || si.type === "singleDoor" || si.type === "doubleDoor";
+            const isWin = si.type === "window";
+            const isRamp = si.type === "ramp";
+            if (!(isDoor || isWin || isRamp)) return null;
+            const pool = isDoor ? placeableDoors : isWin ? placeableWindows : placeableRamps;
+            if (!pool || pool.length === 0) return null;
+            const archived = isArchivedItem(si);
+            const openSwap = () => {
+              setSwapId(si.id); setActiveTool(null); setToast(null);
+              if (isDoor) setDoorPick({ swap: true }); else if (isWin) setWindowPick({ swap: true }); else setRampPick({ swap: true });
+            };
+            return <>
+              {archived && <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309" }}>⚠ Archived — swap it →</span>}
+              <button onClick={openSwap} style={{ ...S.btn(archived ? "#FEF3C7" : "#ECFEFF", archived ? "#B45309" : "#0891B2"), border: `1px solid ${archived ? "#FCD34D" : "#A5F0FC"}` }}>⇄ Swap</button>
+            </>;
+          })()}
+          {selectedId && !planLocked && (
             <>
               <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
               <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
             </>
           )}
-          <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>
+          {/* Export survives the lock — printing the plan changes nothing about it. */}
+          {!planLocked && <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>}
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
+          {/* Marketing teaser for shoppers trying the public designer. Deliberately NOT
+              shown in the portal — business users already see 3D Design in their nav. */}
+          {customerFacing && (
+            <button disabled title="See your building in 3D — coming soon"
+              style={{ ...S.btn("#F8FAFC", "#94A3B8"), border: "1px dashed #CBD5E1", cursor: "default", display: "inline-flex", alignItems: "center", gap: 5 }}>
+              3D
+              <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", background: "#75E6DA", color: "#0F4C46", borderRadius: 5, padding: "1.5px 5px" }}>Coming&nbsp;soon</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -3097,6 +4492,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
               <g key={item.id} transform={`translate(${item.x},${item.y}) rotate(${item.rotation})`}
                 onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)} style={{ cursor: activeTool ? "crosshair" : "grab" }}>
                 {isSel && <rect x={-iw / 2 - 4} y={(cfg.wallOnly ? -8 : -ih / 2) - 4} width={iw + 8} height={(cfg.wallOnly ? 16 : ih) + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={3} />}
+                {/* Archived-option marker (screen only — NOT drawn on the exported/submitted plan). */}
+                {isArchivedItem(item) && (<>
+                  <rect x={-iw / 2 - 3} y={(cfg.wallOnly ? -8 : -ih / 2) - 3} width={iw + 6} height={(cfg.wallOnly ? 16 : ih) + 6} fill="none" stroke="#F59E0B" strokeWidth={2} strokeDasharray="2 2" rx={3} />
+                  {/* Sit the badge beyond the item's own label (which is at ±10-14 on wallOnly) so the two never overlap. */}
+                  <text x={0} y={cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 27 : -23) : (-ih / 2 - 6)} textAnchor="middle" fontSize={9} fontWeight="800" fill="#B45309">⚠ archived</text>
+                </>)}
                 {item.type === "loft" ? (
                   <>
                     <defs><clipPath id={`loftClip${item.id}`}><rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} rx={2} /></clipPath></defs>
@@ -3134,7 +4535,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                     {item.type === "roughOpening" ? (
                       <rect x={-iw / 2} y={-5} width={iw} height={10} fill="#FFFFFF" stroke="#000000" strokeWidth={1.5} rx={1} />
                     ) : (
-                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={cfg.color} rx={1} />
+                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={item.type === "fixtureDoor" ? fixtureDoorColor(item) : cfg.color} rx={1} />
                     )}
                     {item.type === "singleDoor" && (() => {
                       const r = iw * 0.8, out = item.wall === "north" || item.wall === "east";
@@ -3151,11 +4552,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                         </>
                       );
                     })()}
+                    {item.type === "fixtureDoor" && fixtureDoorSVG(item, iw, fixtureDoorColor(item))}
                     {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
-                      if (item.type !== "roughOpening") return cfg.shortLabel;
-                      const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
-                      return `RO-${idx + 1}`;
+                      if (item.type === "roughOpening") {
+                        const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
+                        return `RO-${idx + 1}`;
+                      }
+                      const base = ((item.type === "fixtureDoor" || item.type === "window") && item.planLabel) ? item.planLabel : cfg.shortLabel;
+                      // Doors + windows prefix their width, e.g. "6' DD", so the size reads off the plan.
+                      const isDoorOrWin = item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window";
+                      const w = isDoorOrWin ? fmtFtIn((item.widthFt || cfg.width) * 12) : "";
+                      return w ? `${w} ${base}` : base;
                     })()}</text>
                     {/* RO resize handles — drag end to change width freely */}
                     {item.type === "roughOpening" && isSel && (() => {
@@ -3183,7 +4591,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                   <>
                     <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + (item.type === "ramp" ? "12" : "30")} stroke={cfg.color + (item.type === "ramp" ? "80" : "FF")} strokeWidth={item.type === "ramp" ? 1.5 : 2} rx={2} />
                     {item.type === "ramp" ? (
-                      <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">RAMP</text>
+                      <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">{item.planLabel || "RAMP"}</text>
                     ) : isWB ? (
                       <>
                         <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
@@ -3349,12 +4757,40 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           fee) — collapsible; relocated below the address, just above the submit bar. */}
       {!submitted && (
         <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
-          <div onClick={() => setAdditionalOpen((o) => !o)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", userSelect: "none" }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#CBD5E1", letterSpacing: 0.2 }}>Details</span>
-            <span style={{ fontSize: 11, color: "#CBD5E1" }}>{additionalOpen ? "▾" : "▸"}</span>
+          {/* Public gate: Details opens only once the contact form is complete — the moment
+              a shopper asks to see prices with full contact info, they are silently saved
+              as a lead (and their design as a draft). Customer-facing this is a REAL bar
+              in the tenant's accent: it is the page's "see your price" affordance and the
+              capture moment, so it must not read as a footnote — and it keeps a right-side
+              label in EVERY state (locked explains how to unlock, unlocked invites the
+              click; an empty right side made the bar look broken the moment the form was
+              completed). Embedded keeps the quiet header business users know. */}
+          <div onClick={() => { if (!detailsLocked) setAdditionalOpen((o) => !o); }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+              cursor: detailsLocked ? "default" : "pointer", userSelect: "none",
+              ...(customerFacing ? {
+                // Unlocked = a SOLID accent bar with the submit button's shadow — it is the
+                // page's "see your price" call to action and reads like one. Locked stays
+                // quiet: the contact form is the customer's current job, not this bar.
+                background: detailsLocked ? "#F8FAFC" : accent,
+                border: `1.5px solid ${detailsLocked ? "#E2E8F0" : accent}`,
+                borderRadius: 10, padding: "14px 18px",
+                boxShadow: detailsLocked ? "none" : `0 4px 14px ${accent}50`,
+                transition: "all 0.2s",
+              } : {}),
+            }}>
+            {/* Text color comes from textOnAccent(): the accent is tenant-configured, so a
+                fixed color fails someone — white vanished on structure-studio's mint,
+                dark slate would vanish on a navy. Luminance decides per tenant. */}
+            <span style={{ fontSize: customerFacing ? 14.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? textOnAccent(accent) : "#64748B", letterSpacing: 0.2 }}>Details</span>
+            {detailsLocked
+              ? <span style={{ fontSize: customerFacing ? 12.5 : 11.5, fontWeight: 600, color: customerFacing ? "#64748B" : "#94A3B8", textAlign: "right" }}>🔒 Enter all your contact information to see the quote details.</span>
+              : customerFacing
+                ? <span style={{ fontSize: 13, fontWeight: 800, color: textOnAccent(accent), textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
+                : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
           </div>
-          {additionalOpen && (() => {
+          {additionalOpen && !detailsLocked && (() => {
             // ── Invoice-style detail rows ─────────────────────────────────────────
             // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
@@ -3420,7 +4856,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                     </div>
                     <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
                     <div style={amtCell}>{fmtMoney2(r.total)}</div>
-                    <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
+                    {/* Removing a placed item is a PLAN edit, and this row sits outside the
+                        canvas and outside the configuration panel — so it needs its own
+                        guard, or the lock is bypassable from Details (on the customer's
+                        share link too). */}
+                    {!planLocked && <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
                       onClick={() => {
                         // "each"-priced items step down one at a time (when several are
                         // placed, the plan asks which one); everything else clears the line
@@ -3437,7 +4877,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                           setSelectedId(null);
                         }
                       }}
-                      style={delBtn}>×</button>
+                      style={delBtn}>×</button>}
                   </div>
                 ))}
               </div>
@@ -3452,15 +4892,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                     <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                       <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
                       <input type="text" value={dim} placeholder='Enter Rough Opening size: e.g. 3 x 6 or 29⅞ × 34½"'
-                        onChange={(e) => setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value }))}
+                        readOnly={planLocked || undefined}
+                        onChange={(e) => { if (planLocked) return; setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value })); }}
                         style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
                       {C.showPricing && (<>
                         <div style={qtyCell}>1</div>
                         <div style={amtCell}>{fmtMoney2(roRate)}</div>
                       </>)}
-                      <button title="Remove this rough opening from the plan"
+                      {!planLocked && <button title="Remove this rough opening from the plan"
                         onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}
-                        style={delBtn}>×</button>
+                        style={delBtn}>×</button>}
                     </div>
                   );
                 })}
@@ -3493,21 +4934,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
               </div>
             )}
 
-            {/* Discounts — reduce the estimate total. */}
+            {/* Discounts — reduce the estimate total. Editable ONLY in the portal: on the
+                public side a rep-applied discount renders read-only, because an editable
+                row would let a shopper reopen their share link, inflate their own discount
+                and resubmit — the estimate is rebuilt from these values. */}
             {(sel.discounts || []).length > 0 && (
               <div style={{ marginTop: 14 }}>
                 {(sel.discounts || []).map((row, idx) => (
                   <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <input type="text" value={row.description || ""} placeholder="Discount description"
-                      onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
-                      style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
-                    <div style={amtInputWrap}>
-                      <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
-                      <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
-                        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
-                        style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                    </div>
-                    <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
+                    {embedded ? (
+                      <input type="text" value={row.description || ""} placeholder="Discount description"
+                        onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
+                        style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
+                    ) : (
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: "#334155", padding: "6px 0", wordBreak: "break-word" }}>{row.description || "Discount"}</div>
+                    )}
+                    {embedded ? (
+                      <div style={amtInputWrap}>
+                        <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
+                        <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
+                          onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
+                          style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                      </div>
+                    ) : (
+                      <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#059669", flexShrink: 0 }}>−${Number(row.amount || 0).toFixed(2)}</div>
+                    )}
+                    {embedded
+                      ? <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
+                      : <span style={{ width: 28, flexShrink: 0 }} />}
                   </div>
                 ))}
               </div>
@@ -3521,15 +4975,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
                   <div style={{ fontSize: 10.5, color: "#94A3B8" }}>Non-taxable line on the estimate</div>
                 </div>
-                <div style={amtInputWrap}>
-                  <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
-                  <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
-                    onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                    style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                </div>
-                <button title="Remove the delivery fee"
-                  onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
-                  style={delBtn}>×</button>
+                {embedded ? (
+                  <div style={amtInputWrap}>
+                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
+                    <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
+                      onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                      style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                  </div>
+                ) : (
+                  <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#334155", flexShrink: 0 }}>${Number(sel.deliveryFee || 0).toFixed(2)}</div>
+                )}
+                {embedded
+                  ? <button title="Remove the delivery fee"
+                      onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
+                      style={delBtn}>×</button>
+                  : <span style={{ width: 28, flexShrink: 0 }} />}
               </div>
             )}
 
@@ -3547,8 +5007,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
             {/* Add buttons — below the subtotal, invoice-footer style. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
               <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])} style={dashBtn}>+ Add Custom Option</button>
-              <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>
-              {!showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
+              {/* Business-only: a shopper must not be able to discount their own quote or
+                  invent a delivery fee. Rows already ON a reopened design still render —
+                  a rep-applied discount is part of the customer's real quote. */}
+              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>}
+              {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
             </div>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
               Custom options add charges · discounts reduce the estimate total · delivery is added as a non-taxable line.
@@ -3556,6 +5019,75 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
           </div>
             );
           })()}
+        </div>
+      )}
+
+      {/* Save-to-Inventory dialog (embedded-only; opened from the Submit Bar button). */}
+      {embedded && invDialog && (
+        <div onClick={() => setInvDialog(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFF", borderRadius: 14, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+            {invDialog.done ? (
+              <React.Fragment>
+                <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", marginBottom: 6 }}>
+                  {invDialog.done.updated
+                    ? "Inventory building updated"
+                    : `Added to inventory${invDialog.done.serial != null ? ` — Serial #${invDialog.done.serial}` : ""}`}
+                </div>
+                <div style={{ fontSize: 13, color: "#475569", marginBottom: 16 }}>
+                  Find it on your portal's Inventory tab{invDialog.done.updated ? "" : " — it can be quoted to customers from there"}.
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button type="button" onClick={() => setInvDialog(null)}
+                    style={{ background: "#1E293B", color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
+                </div>
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>
+                  {inventoryMaster && inventoryMaster.unitId ? "Update inventory building" : "Save to Inventory"}
+                </div>
+                <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+                  {inventoryMaster && inventoryMaster.unitId
+                    ? "Saves your design changes to this building. Its serial number and any estimates already sent are unaffected."
+                    : "No customer needed — this building goes on your lot and takes the next serial number automatically."}
+                </div>
+                {invDialog.err && (
+                  <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
+                )}
+                <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Location</label>
+                <select value={invDialog.locationId}
+                  onChange={(e) => setInvDialog((d) => d && { ...d, locationId: e.target.value })}
+                  disabled={invDialog.busy}
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 10px", fontSize: 13.5, marginBottom: 12, background: "#FFF", color: "#1E293B" }}>
+                  <option value="">{invDialog.busy ? "Loading locations…" : "No location yet"}</option>
+                  {invDialog.locations.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}{l.city ? ` — ${l.city}` : ""}</option>
+                  ))}
+                </select>
+                <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Asking price</label>
+                <input value={invDialog.price} inputMode="decimal" placeholder="0.00"
+                  onChange={(e) => setInvDialog((d) => d && { ...d, price: e.target.value })}
+                  disabled={invDialog.busy}
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 10px", fontSize: 13.5, background: "#FFF", color: "#1E293B" }} />
+                <div style={{ fontSize: 11, color: "#94A3B8", margin: "5px 0 14px" }}>
+                  Starts at this design's quoted price — a markdown here never changes your catalog.
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  {/* Never disabled: a stalled edge call must not trap the builder behind a
+                      full-screen overlay with unsaved canvas work. Closing only drops the
+                      dialog — an in-flight save still completes on the server. */}
+                  <button type="button" onClick={() => setInvDialog(null)}
+                    style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                  <button type="button" onClick={saveInventory} disabled={invDialog.busy}
+                    style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
+                    {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Add to Inventory")}
+                  </button>
+                </div>
+              </React.Fragment>
+            )}
+          </div>
         </div>
       )}
 
@@ -3573,6 +5105,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
             </p>
+            {/* Business users can send this design to the lot instead of a customer.
+                Embedded-only: inventory is a portal feature; customers never see it. */}
+            {embedded && (
+              <button
+                type="button"
+                onClick={openInventoryDialog}
+                disabled={submitting || Boolean(invDialog && invDialog.busy)}
+                style={{
+                  background: "#FFF", color: "#334155", border: "1.5px solid #CBD5E1", borderRadius: 10,
+                  padding: "12px 20px", fontSize: 14, fontWeight: 800, cursor: "pointer",
+                  letterSpacing: "-0.01em", whiteSpace: "nowrap",
+                }}
+              >
+                {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}
+              </button>
+            )}
             <button
               onClick={submitQuote}
               disabled={submitting}
@@ -3706,9 +5254,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null }) {
                 setCustomOptions([]);
                 setRoDimensions({});
                 currentDesignIdRef.current = null;
+                isDraftRef.current = false;
+                draftStateRef.current = null;
                 ghlContactIdRef.current = null;
                 ghlEstimateIdRef.current = null;
                 ghlEstimateNumberRef.current = null;
+                // Inventory state MUST reset with everything else: a stale inventoryUnitRef
+                // would silently link the NEXT, unrelated customer's estimate to the last
+                // unit quoted — and that estimate going accepted would then flip a building
+                // that never sold to Sold, false-warning every real prospect on it.
+                inventoryUnitRef.current = null;
+                setInventoryMaster(null);
+                setDesignUnit(null);
+                setNewBuildMode(false);
                 setHasExistingEstimate(false);
                 setDesignCode(null);
                 setEstimateVersions([]);
@@ -3820,7 +5378,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null }) {
+function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -3913,7 +5471,20 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
           setState({ status: "error", clientId, message: `Configuration row is incomplete (missing: ${missing.join(", ")}).` });
           return;
         }
-        setState({ status: "ready", config: { ...cfg, clientId } });
+        // Fixtures catalog (Options → Doors; windows/ramps later) — best-effort: a failure
+        // just means no catalog doors in the palette, it never blocks the designer.
+        let fixtures = [], rampSettings = null;
+        try {
+          const fxRes = await sb.rpc("get_fixtures", { p_client_id: clientId });
+          const fx = fxRes && fxRes.data;
+          if (!cancelled && fx) {
+            // get_fixtures returns either the legacy array or { items, ramp }.
+            if (Array.isArray(fx)) fixtures = fx;
+            else { if (Array.isArray(fx.items)) fixtures = fx.items; if (fx.ramp) rampSettings = fx.ramp; }
+          }
+        } catch (_e) { /* non-fatal */ }
+        if (cancelled) return;
+        setState({ status: "ready", config: { ...cfg, clientId, fixtures, rampSettings } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);
@@ -3940,7 +5511,7 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} /></DesignerErrorBoundary>;
 }
 
 // Publish for the host pages' thin mount blocks (cross-block const sharing does not

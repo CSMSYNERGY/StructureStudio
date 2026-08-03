@@ -1,0 +1,16 @@
+#!/bin/sh
+# Pre-push correctness gate. Wire it up once per clone:
+#   git config core.hooksPath .githooks
+#   npm install
+# Runs scripts/preflight.mjs (JSX no-undef and friends across all five source files, the
+# CDN version lock, cache-buster lockstep). Zero output means go. On failure the push is
+# refused with file:line reasons. Emergency bypass: git push --no-verify — say so in the
+# commit message if you use it.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ ! -d node_modules/eslint ]; then
+  echo "pre-push: preflight gate needs its dev tools — run: npm install" >&2
+  exit 1
+fi
+
+node scripts/preflight.mjs || exit 1

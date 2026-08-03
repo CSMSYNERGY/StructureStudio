@@ -1,2 +1,9 @@
 /portal /portal.html 200
+# Every portal page has its own URL (/portal/settings/colors, /portal/admin/clients). The
+# splat rewrites them all to the same document — 200, never 301, so the address the user
+# typed is the address they keep and the SPA can read the path on boot.
+#
+# The bare /portal rule above stays FIRST and separate: it is the oldest link we hand out
+# and it must keep resolving exactly as it always has.
+/portal/* /portal.html 200
 /admin /admin.html 200
