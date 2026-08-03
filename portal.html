@@ -6731,13 +6731,29 @@ const QBO_REASONS = {
   state: "That connection attempt expired or didn't match. Start it again from this page.",
   exchange: "Intuit didn't accept the connection. Try again.",
   verify: "Connected at Intuit, but QuickBooks couldn't be reached to confirm. Try again.",
-  realm_in_use: "That QuickBooks company is already connected to a different StructureStudio account.",
+  realm_in_use: "That QuickBooks company is already connected to a different StructureStudio account. Disconnect it there first, or choose a different company at Intuit.",
   unconfigured: "QuickBooks isn't fully set up on the server yet. Tell CSM Synergy.",
   save: "The connection couldn't be saved. Try again, and tell CSM Synergy if it persists.",
   // Connected, but the previous company's item mappings couldn't be cleared — so they are stale
   // against the new company and would bill lines against whatever shares those ids.
   item_map_stale: "Connected, but the old company's item mappings couldn't be cleared. Re-check the mappings below before sending an invoice.",
+  // Success, but with a consequence on an account this user can't see (migration 084). Worth
+  // saying plainly: the usual cause is picking the wrong company at Intuit, and that is undone
+  // by reconnecting the right one. The other account is never named.
+  displaced_other: "Connected. This QuickBooks company was moved here from another StructureStudio account, so it no longer syncs there. If that wasn't intended, reconnect and choose a different company at Intuit.",
 };
+
+// realm_in_use optionally carries `company` — the QuickBooks company the user just authorised
+// (qbo-oauth-callback adds it). Naming it is the difference between an actionable message and
+// a dead end, because the usual cause is simply picking the wrong company in Intuit's selector.
+// The other tenant is never named: that would leak one customer's identity to another.
+function qboReasonText(reason, company) {
+  if (reason === "realm_in_use" && company) {
+    return `“${company}” is already connected to a different StructureStudio account. `
+      + "Disconnect it there first, or choose a different company at Intuit.";
+  }
+  return QBO_REASONS[reason];
+}
 
 function QuickBooksView({ clientId, viewingLabel = null }) {
   const [status, setStatus] = useState(null);   // qbo_status response; null = loading
@@ -6761,10 +6777,11 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     if (!p.has("connected")) return;
     // connected=1 WITH a reason means "it connected, but read this" (today: item_map_stale). Show
     // the reason rather than the cheerful default, or the caveat is lost.
-    if (p.get("connected") === "1" && p.get("reason") && QBO_REASONS[p.get("reason")]) setMsg({ err: QBO_REASONS[p.get("reason")] });
+    const landCompany = p.get("company");
+    if (p.get("connected") === "1" && p.get("reason") && QBO_REASONS[p.get("reason")]) setMsg({ err: qboReasonText(p.get("reason"), landCompany) });
     else if (p.get("connected") === "1") setMsg({ ok: "QuickBooks connected. Check the company name below is the right business." });
-    else { landFailRef.current = p.get("reason") || ""; setMsg({ err: QBO_REASONS[p.get("reason")] || "The connection didn't complete. Try again." }); }
-    p.delete("connected"); p.delete("reason");
+    else { landFailRef.current = p.get("reason") || ""; setMsg({ err: qboReasonText(p.get("reason"), landCompany) || "The connection didn't complete. Try again." }); }
+    p.delete("connected"); p.delete("reason"); p.delete("company");
     const qs = p.toString();
     window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
   }, []);
@@ -6813,6 +6830,10 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     setItemsErr(null); setQboItems(null);
     const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "list_qbo_items" } });
     if (e || (d && d.error)) { setItemsErr((e && e.message) || d.error); setQboItems([]); return; }
+    // Not-connected / needs-reconnect come back 200 with no `error` on purpose (see the
+    // action in portal-settings). The connection card above already says both, so stand down
+    // quietly instead of stacking a second, redundant failure under the grid.
+    if (d && (d.notConnected || d.broken)) { setQboItems([]); return; }
     setQboItems(d.items || []);
   }, []);
   // Fetch the QuickBooks item list once the connection is known-good.
@@ -6850,6 +6871,16 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     setBusy(false);
     if (e || (d && d.error)) { setMsg({ err: (d && d.error) || e.message }); return; }
     setMsg({ ok: "QuickBooks disconnected. Your mappings were kept." });
+    // Mark disconnected in the SAME commit that clears the item list. `load()` is async, so
+    // until its qbo_status lands `status` still reads connected — while setQboItems(null) has
+    // just re-armed the auto-load effect below, whose condition is exactly
+    // (status.connected && qboItems === null). That fired list_qbo_items against a tenant
+    // disconnected milliseconds earlier and filed a FunctionsHttpError in app_errors
+    // (2026-08-03, structure-studio: disconnect at 16:35:56, error at 16:35:59). The server
+    // no longer serves a disconnect tombstone either way; this stops the call being made.
+    // Safe as optimistic state: disconnect_qbo has already returned ok, so we KNOW the
+    // answer, and load() overwrites it with server truth a moment later regardless.
+    setStatus((s) => ({ ...(s || {}), connected: false, broken: false }));
     setGrid(null); setQboItems(null); setDraft({});
     load();
   };
@@ -6937,6 +6968,15 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
       {/* ── Card 1: Connection ── */}
       <div style={S.card}>
         <div style={S.h2}>QuickBooks connection</div>
+        {/* Why it stopped, when this tenant did not stop it themselves — currently only:
+            another StructureStudio account took the QuickBooks company over (migration 084).
+            Server sends it only while disconnected. Without it the displaced tenant finds a
+            bare "Connect" card and no explanation for why their invoices stopped syncing. */}
+        {!connected && status.disconnectReason && (
+          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: "#92400E", fontWeight: 600 }}>{status.disconnectReason}</div>
+          </div>
+        )}
         {!connected && !ready && (
           <div>
             <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 8, padding: "10px 14px", color: "#1D4ED8", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>

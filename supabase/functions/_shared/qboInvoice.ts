@@ -20,7 +20,7 @@
  */
 
 // deno-lint-ignore-file no-explicit-any
-import { qboFetch, QboBroken, QboNotConnected } from "./qboToken.ts";
+import { getQboConnection, qboFetch, QboBroken, QboNotConnected } from "./qboToken.ts";
 import { logEdgeError } from "./logError.ts";
 
 /** QBO query-language string literal. Backslash is the ESCAPE character in that dialect, so it
@@ -50,11 +50,15 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
   // Everything below is best-effort by contract; one catch-all keeps the promise.
   try {
     // ── Dark guards ────────────────────────────────────────────────────────────────
-    const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id, qbo_refresh_error")
-      .eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id || cs.qbo_refresh_error) return; // not connected / broken → dark
-    const realmId = String(cs.qbo_realm_id);
+    // getQboConnection, NOT a bare qbo_realm_id read: the realm survives a disconnect as a
+    // tombstone, so realm-alone left this function live for tenants that had disconnected —
+    // it would run all the way to the first qboFetch, throw QboNotConnected, and land in the
+    // catch below, stamping every invoice with a QuickBooks failure the tenant never asked
+    // for and cannot clear (the portal's "didn't reach QuickBooks" card offers a Retry that
+    // can only fail again). Dark means dark.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected || conn.broken) return; // not connected / broken → dark
+    const realmId = conn.realmId as string;
 
     const { data: design } = await admin.from("designs")
       .select("estimate_lines, contact")

@@ -54,6 +54,41 @@ export class QboTransient extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The tenant's connection state — and the ONE test for "may we call QuickBooks".
+ *
+ * **`qbo_realm_id` alone is NOT a connection.** `disconnect_qbo` deliberately keeps the realm
+ * id as a tombstone (it reserves the company under the partial unique index, and lets a
+ * reconnect of the SAME books keep its item map) while nulling the tokens and
+ * `qbo_connected_at`. So a guard written `if (!cs.qbo_realm_id) …` reads every DISCONNECTED
+ * tenant as connected. That is not hypothetical: on 2026-08-03 a disconnect on
+ * `structure-studio` left the tombstone standing, `list_qbo_items` sailed past its guard and
+ * fell out of the token helper as an HTTP 400, and `pushQboInvoice` stayed live enough to
+ * stamp "QuickBooks is not connected" onto invoices it was supposed to skip entirely.
+ *
+ * Connected means realm id AND `qbo_connected_at` — the same test `qbo_status` reports to the
+ * portal, which is the point: four call sites disagreeing with the status card is what let the
+ * bug hide. `realmId` is null unless connected, so a caller cannot reach for a tombstone.
+ *
+ * Deliberately does NOT select the tokens: nothing that only asks "are we connected?" should
+ * be holding a credential it has no use for.
+ */
+export async function getQboConnection(admin: any, clientId: string): Promise<{
+  realmId: string | null;
+  connected: boolean;
+  broken: boolean;
+}> {
+  const { data } = await admin.from("client_settings")
+    .select("qbo_realm_id, qbo_connected_at, qbo_refresh_error")
+    .eq("client_id", clientId).maybeSingle();
+  const connected = !!data?.qbo_realm_id && !!data?.qbo_connected_at;
+  return {
+    realmId: connected ? String(data.qbo_realm_id) : null,
+    connected,
+    broken: connected && !!data?.qbo_refresh_error,
+  };
+}
+
 async function releaseClaim(admin: any, clientId: string) {
   await admin.from("client_settings")
     .update({ qbo_refreshing_at: null })

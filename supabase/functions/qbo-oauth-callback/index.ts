@@ -162,7 +162,7 @@ Deno.serve(async (req) => {
   const realmChanged = Boolean(previousRealm && previousRealm !== realmId);
 
   const now = Date.now();
-  const { error: saveErr } = await admin.from("client_settings").update({
+  const saveConnection = () => admin.from("client_settings").update({
     qbo_realm_id: realmId,
     qbo_company_name: companyName,
     qbo_access_token: tok.access_token,
@@ -174,16 +174,53 @@ Deno.serve(async (req) => {
     qbo_token_refreshed_at: new Date(now).toISOString(),
     qbo_refresh_error: null,
     qbo_refreshing_at: null,
+    // Clears any "another account took your company" note from a previous displacement.
+    qbo_disconnect_reason: null,
   }).eq("client_id", cid);
 
+  const isRealmConflict = (m: string) => /client_settings_qbo_realm_uniq|duplicate key/i.test(m);
+
+  let { error: saveErr } = await saveConnection();
+  let displacedFrom: string | null = null;
+
+  // ── Takeover (migration 084) ──────────────────────────────────────────────────────
+  // The company is already attached to a different tenant. Hand it over rather than refuse:
+  // completing Intuit's consent for this company requires credentials FOR this company, so
+  // whoever got this far already controls the books and is entitled to say which
+  // StructureStudio account syncs to them. The unique index is not being relaxed — the RPC
+  // clears the incumbent inside an advisory lock first, so there is still exactly one tenant
+  // per company, and the hand-off is recorded on the displaced row + in admin_audit rather
+  // than happening silently (see the migration header for why that matters).
+  if (saveErr && isRealmConflict(saveErr.message)) {
+    const { data: displaced, error: dispErr } = await admin.rpc("qbo_displace_realm", {
+      p_realm_id: realmId,
+      p_new_client_id: cid,
+    });
+    if (!dispErr) {
+      displacedFrom = (displaced as string | null) ?? null;
+      ({ error: saveErr } = await saveConnection());   // one retry, now that the realm is free
+    }
+  }
+
   if (saveErr) {
-    // The realm unique index is the one expected failure: this QuickBooks company is
-    // already attached to a different tenant. Naming that precisely is the whole point of
-    // having the index — the alternative is two tenants quietly fighting over one token.
-    const reason = /client_settings_qbo_realm_uniq|duplicate key/i.test(saveErr.message)
-      ? "realm_in_use"
-      : "save";
-    return land(host, { connected: "0", reason });
+    // Since 084 a realm conflict is normally HANDED OVER above, so reaching realm_in_use now
+    // means the takeover itself did not work — the displace RPC errored, or another tenant
+    // grabbed the company in the moment between the RPC releasing its lock and this retry.
+    // Either way the honest answer to the user is unchanged: the company is spoken for, try
+    // again. Keeping the branch also means an un-migrated database degrades to the old
+    // refusal instead of a raw 500.
+    const reason = isRealmConflict(saveErr.message) ? "realm_in_use" : "save";
+    // Name the COMPANY on realm_in_use. Without it the banner is a dead end — it says a
+    // company is taken but not WHICH, and picking the wrong one in Intuit's company selector
+    // is a single mis-click. On 2026-08-03 that cost three identical retries on
+    // structure-studio (the operator had selected the sandbox company already attached to the
+    // testtttttt tenant) and the realm id could only be recovered from an edge log.
+    // Safe to echo: it is the company THIS user just authorised, so it reveals nothing they
+    // did not themselves supply. Deliberately NOT the other tenant's name — the index exists
+    // to keep strangers apart, and naming them would leak one customer's identity to another.
+    return land(host, companyName && reason === "realm_in_use"
+      ? { connected: "0", reason, company: companyName.slice(0, 80) }
+      : { connected: "0", reason });
   }
 
   // The connection is now definitively pointing at the new company, so the old company's item ids
@@ -201,8 +238,16 @@ Deno.serve(async (req) => {
     action: "qbo_connected",
     target_client_id: cid,
     row_count: 1,
-    note: companyName ? `Connected to ${companyName}` : null,
+    note: [companyName ? `Connected to ${companyName}` : null,
+           displacedFrom ? `took over from ${displacedFrom}` : null].filter(Boolean).join(" — ") || null,
   });
+
+  // Tell the person who just connected that they moved the company off another account. It is
+  // a success, not an error — but it is the one outcome here with a consequence somewhere they
+  // cannot see, and the usual cause is picking the wrong company at Intuit, which they can
+  // still undo. The displaced tenant is NEVER named: the person taking a company over need not
+  // learn which other business had it, and this index exists for tenants who are strangers.
+  if (displacedFrom) return land(host, { connected: "1", reason: "displaced_other" });
 
   return land(host, { connected: "1" });
 });

@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
-import { qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
+import { getQboConnection, qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
@@ -1745,7 +1745,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "qbo_status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at")
+      .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at, qbo_disconnect_reason")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);
@@ -1767,6 +1767,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       broken: connected && !!data?.qbo_refresh_error,
       brokenReason: data?.qbo_refresh_error ?? null,
       refreshTokenExpiresAt: data?.qbo_refresh_token_expires_at ?? null,
+      // Only meaningful while NOT connected: why it stopped, when the tenant did not stop it
+      // themselves (today: another account took the QuickBooks company over — migration 084).
+      // Without this the displaced tenant just finds a bare "Connect QuickBooks" card and no
+      // explanation for why their invoices quietly stopped syncing.
+      disconnectReason: data?.qbo_connected_at ? null : (data?.qbo_disconnect_reason ?? null),
       mappedCount: count ?? 0,
     });
   }
@@ -1854,19 +1859,29 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "list_qbo_items") {
     // Server-side QBO query; the token never leaves this function (the
     // list_ghl_pipelines doctrine). Fed to the mapping grid's dropdowns.
-    const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+    //
+    // "Not connected" and "needs reconnect" answer 200 with NO `error` key, because they are
+    // STATES, not failures — the connection card above the grid already reports both, and this
+    // call is made automatically on render, by an effect the user never asked for. Returning
+    // 400/409 here was doubly wrong: portal.html's invoke wrapper files anything with a
+    // non-2xx or an `error` body into app_errors (so an ordinary disconnect raised an incident
+    // — this is the 2026-08-03 FunctionsHttpError), and supabase-js collapses a non-2xx into
+    // "Edge Function returned a non-2xx status code", throwing away the readable reason on the
+    // way. Only a genuine QuickBooks-side failure below is worth an error, and it keeps 502.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected) return json({ items: [], notConnected: true, clientId });
+    if (conn.broken) return json({ items: [], broken: true, clientId });
     try {
       const q = encodeURIComponent("select Id, Name, Type, Active from Item where Active = true maxresults 1000");
-      const body = await qboFetch(admin, clientId, cs.qbo_realm_id, `/query?query=${q}&minorversion=75`);
+      const body = await qboFetch(admin, clientId, conn.realmId as string, `/query?query=${q}&minorversion=75`);
       const items = (body?.QueryResponse?.Item ?? []).map((i: any) => ({
         id: String(i.Id), name: i.Name ?? String(i.Id), type: i.Type ?? "",
       }));
       return json({ items, clientId });
     } catch (e) {
-      if (e instanceof QboBroken) return json({ error: "QuickBooks needs to be reconnected.", broken: true }, 409);
-      if (e instanceof QboNotConnected) return json({ error: "QuickBooks is not connected." }, 400);
+      // Still reachable: the connection can die between the check above and the call landing.
+      if (e instanceof QboBroken) return json({ items: [], broken: true, clientId });
+      if (e instanceof QboNotConnected) return json({ items: [], notConnected: true, clientId });
       return json({ error: "Could not load items from QuickBooks. Try again shortly." }, 502);
     }
   }
@@ -1874,12 +1889,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "qbo_test") {
     // On-demand probe via CompanyInfo THROUGH the token helper, so an expired access
     // token exercises the refresh path — which is exactly what a "Test" should prove.
-    const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+    //
+    // Unlike list_qbo_items this KEEPS its `error` key (and the app_errors row that follows):
+    // the Test button only renders on a card that believes it is connected, so a
+    // not-connected answer means the page is stale in a way worth a trace. What it must not
+    // do is lie about WHY — reading the disconnect tombstone as connected sent this down the
+    // catch below and reported "Could not reach QuickBooks", which starts someone hunting a
+    // network fault that does not exist.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected) return json({ ok: false, error: "QuickBooks is not connected.", clientId }, 200);
     try {
-      const body = await qboFetch(admin, clientId, cs.qbo_realm_id,
-        `/companyinfo/${cs.qbo_realm_id}?minorversion=75`);
+      const body = await qboFetch(admin, clientId, conn.realmId as string,
+        `/companyinfo/${conn.realmId}?minorversion=75`);
       const name = body?.CompanyInfo?.CompanyName ?? null;
       if (name) {
         // Keep the stored name current — it may have been edited in QuickBooks.
@@ -1894,13 +1915,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   }
 
   if (action === "disconnect_qbo") {
+    // Idempotent: disconnecting an already-disconnected tenant is a no-op success, not an
+    // error. Guarding on the realm alone made this "succeed" against a tombstone — writing a
+    // second qbo_disconnect audit row asserting a disconnect that had already happened, and
+    // re-running the revoke below with a refresh token that is null by then anyway.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected) return json({ ok: true, alreadyDisconnected: true, clientId });
+
     const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id, qbo_refresh_token").eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+      .select("qbo_refresh_token").eq("client_id", clientId).maybeSingle();
 
     // Best-effort revoke at Intuit — a failure here must not block the disconnect.
     const id = Deno.env.get("QBO_CLIENT_ID"), secret = Deno.env.get("QBO_CLIENT_SECRET");
-    if (id && secret && cs.qbo_refresh_token) {
+    if (id && secret && cs?.qbo_refresh_token) {
       await fetch("https://developer.api.intuit.com/v2/oauth2/tokens/revoke", {
         method: "POST",
         headers: {
@@ -1927,6 +1954,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       qbo_refreshing_at: null,
       qbo_oauth_state: null,
       qbo_oauth_state_expires_at: null,
+      // This tenant chose to disconnect, so any "another account took your company" note from
+      // an earlier displacement is now stale and must not sit on the card explaining THIS one.
+      qbo_disconnect_reason: null,
     }).eq("client_id", clientId);
     if (error) return json({ error: error.message }, 500);
 
