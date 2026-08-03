@@ -7265,10 +7265,6 @@ function CommissionsReport() {
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
-  const clawbackEntry = (e) => {
-    if (!window.confirm(`Claw back ${e.earnerName}'s ${money(e.amountCents)} commission on order #${e.orderNo}? A negative line is added to the current pay period so it comes off their next payout.`)) return;
-    act({ action: "clawback", entryId: e.id }, "Clawback added to the current period.");
-  };
   const adjustEntry = (e) => {
     const cur = e.amountCents != null ? (e.amountCents / 100).toFixed(2) : "";
     const v = window.prompt(`Set the commission amount for order #${e.orderNo} (dollars):`, cur);
@@ -7289,6 +7285,18 @@ function CommissionsReport() {
   };
   const approvePeriod = (periodKey) => act({ action: "approve_period", periodKey }, "Period approved — ready to pay.");
   const unapprovePeriod = (periodKey) => act({ action: "unapprove_period", periodKey });
+  const cancelOrder = (e) => {
+    if (!window.confirm(`Cancel order #${e.orderNo}? Any PAID commission on it is clawed back (a negative line in the current pay period); unpaid commission is removed from payout. Applies to the whole order, splits included.`)) return;
+    setBusy(true); setMsg(null);
+    (async () => {
+      try {
+        const r = await call({ action: "cancel_order", orderId: e.orderId });
+        setMsg({ ok: `Order #${e.orderNo} cancelled — ${r.clawed || 0} clawed back, ${r.excluded || 0} removed${r.clawbackDisabled ? " (clawback is off in Settings, so paid commission was kept)" : ""}.` });
+        await load();
+      } catch (er) { setMsg({ err: er.message }); }
+      setBusy(false);
+    })();
+  };
 
   if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commissions…</div>;
   const entries = data.entries || [];
@@ -7383,13 +7391,14 @@ function CommissionsReport() {
                       {canSeeRates && (
                         <td style={{ ...td, whiteSpace: "nowrap" }}>
                           {e.kind === "clawback" ? <span style={{ color: "#94A3B8", fontSize: 11 }}>—</span>
-                            : e.status === "paid" ? (isOwner ? <button onClick={() => clawbackEntry(e)} disabled={busy} style={actLink("#DC2626")}>Clawback</button> : null)
+                            : e.status === "paid" ? (isOwner ? <button onClick={() => cancelOrder(e)} disabled={busy} style={actLink("#DC2626")}>Cancel order</button> : null)
                             : e.status === "excluded" ? <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: false })} disabled={busy} style={actLink("#3D3672")}>Restore</button>
                             : (
-                              <span style={{ display: "inline-flex", gap: 10 }}>
+                              <span style={{ display: "inline-flex", gap: 10, flexWrap: "wrap" }}>
                                 {e.earnerUserId && <button onClick={() => openSplit(e)} disabled={busy} style={actLink("#3D3672")}>Split</button>}
                                 {e.earnerUserId && <button onClick={() => adjustEntry(e)} disabled={busy} style={actLink("#3D3672")}>Adjust</button>}
                                 <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: true })} disabled={busy} style={actLink("#94A3B8")}>Exclude</button>
+                                {isOwner && <button onClick={() => cancelOrder(e)} disabled={busy} style={actLink("#DC2626")}>Cancel order</button>}
                               </span>
                             )}
                         </td>

@@ -34,7 +34,8 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //   { action: "split_entry", entryId, splits:[{userId,sharePercent}] }  // per-sale split (owner|full_access)
 //   { action: "adjust_amount", entryId, amountCents }    // override an amount (owner|full_access)
 //   { action: "set_excluded", entryId, excluded }        // exclude/restore a line (owner|full_access)
-//   { action: "clawback", entryId, note? }               // negative line for a paid+cancelled order (owner)
+//   { action: "clawback", entryId, note? }               // negative line for one paid+cancelled line (owner)
+//   { action: "cancel_order", orderId }                   // cancel a whole order: claw back paid + exclude unpaid (owner)
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -559,6 +560,41 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         if (error) throw error;
         await audit(`clawback of ${entryId}`);
         return json({ ok: true });
+      }
+
+      // ── cancel a whole order ("deal fell through"): claw back its PAID commissions (when the
+      //    tenant's clawback-on-cancel is on) and exclude its unpaid ones — across every line of the
+      //    order, splits included. OWNER only. The discoverable version of the per-line clawback. ──
+      case "cancel_order": {
+        if (!isOwner) return json({ error: "Only the owner can cancel an order's commissions." }, 403);
+        if (!isUuid(p.orderId)) return json({ error: "Invalid order." }, 400);
+        const { data: rows } = await admin.from("commission_entries").select("*").eq("client_id", clientId).eq("order_id", p.orderId).eq("kind", "commission");
+        if (!rows || !rows.length) return json({ error: "That order has no commission to cancel." }, 404);
+        const { data: st } = await admin.from("commission_settings").select("clawback_on_cancel, payout_frequency, custom_days, period_anchor").eq("client_id", clientId).maybeSingle();
+        const clawEnabled = st?.clawback_on_cancel !== false;
+        const today = new Date().toISOString().slice(0, 10);
+        const period = periodKey(today, st?.payout_frequency || "biweekly", st?.period_anchor || today, st?.custom_days ?? null);
+        const now = new Date().toISOString();
+        let clawed = 0, excluded = 0;
+        for (const e of rows) {
+          if (e.status === "paid") {
+            if (!clawEnabled) continue;   // owner chose not to claw back already-paid commissions
+            if ((await admin.from("commission_entries").select("id").eq("client_id", clientId).eq("clawback_of", e.id).maybeSingle()).data) continue; // already clawed
+            await admin.from("commission_entries").insert({
+              client_id: clientId, order_id: e.order_id, earner_user_id: e.earner_user_id,
+              base_cents: e.base_cents != null ? -e.base_cents : null, rate_percent: e.rate_percent, split_share: e.split_share,
+              amount_cents: e.amount_cents != null ? -e.amount_cents : null,
+              earned_on: today, period_key: period.key, kind: "clawback", status: "pending", is_override: true,
+              clawback_of: e.id, note: "Order cancelled", updated_at: now,
+            });
+            clawed++;
+          } else if (e.status !== "excluded") {
+            await admin.from("commission_entries").update({ status: "excluded", is_override: true, updated_at: now }).eq("client_id", clientId).eq("id", e.id);
+            excluded++;
+          }
+        }
+        await audit(`cancel_order ${p.orderId} (clawed ${clawed}, excluded ${excluded})`);
+        return json({ ok: true, clawed, excluded, clawbackDisabled: !clawEnabled });
       }
 
       // ── approve a period: its pending lines become "payable" — the review gate before paying (OWNER) ──
