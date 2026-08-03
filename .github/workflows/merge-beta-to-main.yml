@@ -5,8 +5,8 @@
 # in the monday.com report so nothing is silently overwritten.
 # Runs on GitHub's servers - nothing needs to be open on your computer.
 #
-# Cron is UTC-only (no timezone). 13:00 UTC = 9am US Eastern (summer)
-# / 8am (winter). Edit the cron to taste (https://crontab.guru).
+# Cron is UTC-only (no timezone). 10:00 UTC = 6am US Eastern (summer)
+# / 5am (winter). Edit the cron to taste (https://crontab.guru).
 #
 # Reporting: posts an update to the "StructureStudio" item on the
 # monday.com "Projects (Repos)" board after every run. Requires a repo
@@ -17,7 +17,7 @@ name: Weekly merge beta into main
 
 on:
   schedule:
-    - cron: "0 13 * * 1"   # 13:00 UTC every Monday
+    - cron: "0 10 * * 1"   # 10:00 UTC every Monday
   workflow_dispatch: {}      # also runnable on demand from the Actions tab
 
 concurrency:
