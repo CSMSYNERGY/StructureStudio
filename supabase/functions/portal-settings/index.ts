@@ -1615,9 +1615,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { data: newest } = await admin.from("design_versions")
       .select("id").eq("client_id", clientId).eq("short_code", shortCode)
       .order("version", { ascending: false }).limit(1).maybeSingle();
+    let versionStamped = false;
     if (newest) {
-      await admin.from("design_versions").update({ inventory_unit_id: unitId }).eq("id", newest.id);
+      const { error: vErr } = await admin.from("design_versions")
+        .update({ inventory_unit_id: unitId }).eq("id", newest.id);
+      versionStamped = !vErr;
     }
+
+    // Audited because this was the ONE inventory write that left no trace, and the two
+    // columns it sets are the only link between a customer estimate and the building it
+    // was quoted from. An untie (unitId null) is invisible by nature — it removes the very
+    // evidence that a link existed — so without this row a designs/design_versions
+    // disagreement is unattributable after the fact. Not hypothetical: on 2026-08-03 a
+    // design was found with BOTH versions pointing at a unit while its
+    // designs.inventory_unit_id was null, so list_inventory reported that building with
+    // zero estimates and invEffStatus could never derive Sold from it — and nothing
+    // recorded what had done it. The version outcome is logged for the same reason: a
+    // stamped-versions / null-design split is exactly that shape, and it is silent
+    // otherwise. Best-effort like its save_inventory / update_inventory neighbours — the
+    // estimate is already submitted and linked here, so a logging blip must not fail it.
+    await audit("portal_link_design_to_unit", (count ?? 0) + (versionStamped ? 1 : 0),
+      `code=${shortCode} unit=${unitId ?? "none (untied)"} version=${versionStamped ? (newest?.id ?? "") : "not stamped"}`);
     return json({ ok: true, unitId });
   }
 
