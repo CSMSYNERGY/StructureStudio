@@ -2269,9 +2269,11 @@ function PricingCsv({ viewingLabel = null }) {
   // building_size_inclusions pipeline (item_key = fixture id). Label carries the size so multiple
   // sizes of one style stay distinct and never collide with a built-in's label.
   const optionCols = () => {
-    const layout = items().map((it) => ({ key: it.key, label: it.label }));
+    // Archived options drop out of the pricing CSV entirely — they can't be added to new builds,
+    // so they must not be an inclusion column (get_config + submit-estimate also stop netting them).
+    const layout = items().filter((it) => !it.archived).map((it) => ({ key: it.key, label: it.label }));
     const fixtures = ((cat && cat.fixtures) || [])
-      .filter((f) => f && f.active !== false)
+      .filter((f) => f && f.active !== false && f.archived !== true)
       // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"),
       // and since the column is matched by its exact label on re-import, a garbled header would
       // silently drop the inclusion. ASCII round-trips safely through any spreadsheet.

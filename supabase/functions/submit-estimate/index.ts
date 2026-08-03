@@ -368,8 +368,23 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const includedMap = new Map<string, number>();
   if (sizeRowId) {
     try {
+      // An ARCHIVED option no longer counts as "included" — it's retired from new builds, so its
+      // base-price inclusion must not net on the quote (matches get_config, which drops the same
+      // rows from sizeInclusionQty). Skip any inclusion whose item_key is an archived built-in
+      // (client_layout_items.archived) or archived catalog fixture (fixture_items.archived).
+      const [archLayout, archFix] = await Promise.all([
+        supabase.from("client_layout_items").select("item_key").eq("client_id", clientId).eq("archived", true),
+        supabase.from("fixture_items").select("id").eq("client_id", clientId).eq("archived", true),
+      ]);
+      const archivedKeys = new Set<string>([
+        ...((archLayout.data || []) as any[]).map((r) => String(r.item_key)),
+        ...((archFix.data || []) as any[]).map((r) => String(r.id)),
+      ]);
       const incRes = await supabase.from("building_size_inclusions").select("item_key, qty").eq("size_id", sizeRowId).eq("included", true);
-      for (const r of (incRes.data || []) as any[]) includedMap.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
+      for (const r of (incRes.data || []) as any[]) {
+        if (archivedKeys.has(String(r.item_key))) continue;
+        includedMap.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
+      }
     } catch { /* no inclusions → everything placed is charged as-is */ }
   }
 
