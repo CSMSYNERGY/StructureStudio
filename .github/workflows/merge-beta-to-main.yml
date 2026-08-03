@@ -53,7 +53,14 @@ jobs:
           set -euo pipefail
           git fetch origin beta:beta
 
-          COMMITS="$(git log --oneline --no-decorate main..beta | head -50)"
+          # Cap with git's own -50, NEVER "| head -50". Under `set -o pipefail`,
+          # head closes the pipe as soon as it has its 50 lines; once beta is
+          # more than ~50 commits ahead git log is still writing, takes SIGPIPE,
+          # and exits 141 - aborting the step before the merge ever runs. That
+          # is what silently skipped the 2026-08-03 promotion (beta was 124
+          # ahead). The bug is invisible on small weeks, so do not "simplify"
+          # this back into a pipe.
+          COMMITS="$(git log --oneline --no-decorate -50 main..beta)"
           if [ -z "$COMMITS" ]; then
             COMMITS="(nothing new on beta this week)"
           fi
