@@ -7390,6 +7390,15 @@ function CommissionsReport() {
   const [msg, setMsg] = useState(null);
   const [assign, setAssign] = useState(null);  // entry id whose rep dropdown is open
   const [splitFor, setSplitFor] = useState(null); // { entry, rows:[{userId, share}] } while the split modal is open
+  // Filter / sort / search state for the report view.
+  const [q, setQ] = useState("");
+  const [fRep, setFRep] = useState("");        // earnerUserId | "__none__" (unassigned) | ""
+  const [fPeriod, setFPeriod] = useState("");  // periodKey | ""
+  const [fStatus, setFStatus] = useState("");  // pending|payable|paid|excluded | ""
+  const [fFrom, setFFrom] = useState("");      // earned-on >= (YYYY-MM-DD)
+  const [fTo, setFTo] = useState("");          // earned-on <= (YYYY-MM-DD)
+  const [sortBy, setSortBy] = useState("");    // "" = default period order; else date|amount|order|customer|rep
+  const [sortDir, setSortDir] = useState("desc");
 
   const call = async (body) => {
     const { data: r, error } = await sb.functions.invoke("portal-commissions", { body });
@@ -7467,9 +7476,57 @@ function CommissionsReport() {
     );
   }
 
+  // ── Filter / sort / search ──────────────────────────────────────────────
+  // Reps and pay periods present in the data drive the dropdown options.
+  const repOpts = (() => {
+    const m = new Map(); let unassigned = false;
+    for (const e of entries) { if (e.earnerUserId) m.set(e.earnerUserId, e.earnerName || "—"); else unassigned = true; }
+    const arr = [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+    if (unassigned) arr.push({ id: "__none__", name: "Unassigned" });
+    return arr;
+  })();
+  const periodOpts = (() => {
+    const m = new Map();
+    for (const e of entries) m.set(e.periodKey || "unscheduled", e.periodLabel || "Unscheduled");
+    return [...m.entries()].map(([key, label]) => ({ key, label })).sort((a, b) => String(b.key).localeCompare(String(a.key)));
+  })();
+  const ql = q.trim().toLowerCase();
+  const matches = (e) => {
+    if (ql) {
+      const hay = [e.orderNo != null ? "#" + e.orderNo : "", e.customer, e.building, e.earnerName].filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(ql)) return false;
+    }
+    if (fRep) { if (fRep === "__none__") { if (e.earnerUserId) return false; } else if (e.earnerUserId !== fRep) return false; }
+    if (fPeriod && (e.periodKey || "unscheduled") !== fPeriod) return false;
+    if (fStatus && e.status !== fStatus) return false;
+    if (fFrom && (!e.earnedOn || e.earnedOn < fFrom)) return false;
+    if (fTo && (!e.earnedOn || e.earnedOn > fTo)) return false;
+    return true;
+  };
+  const filtered = entries.filter(matches);
+  const hasFilters = !!(ql || fRep || fPeriod || fStatus || fFrom || fTo);
+  const clearFilters = () => { setQ(""); setFRep(""); setFPeriod(""); setFStatus(""); setFFrom(""); setFTo(""); };
+  const sortRows = (rows) => {
+    if (!sortBy) return rows;
+    const dir = sortDir === "asc" ? 1 : -1;
+    const val = (e) => sortBy === "amount" ? (e.amountCents ?? 0)
+      : sortBy === "order" ? (e.orderNo ?? 0)
+      : sortBy === "customer" ? String(e.customer || "").toLowerCase()
+      : sortBy === "rep" ? String(e.earnerName || "").toLowerCase()
+      : String(e.earnedOn || ""); // date
+    return [...rows].sort((a, b) => { const va = val(a), vb = val(b); return va < vb ? -dir : va > vb ? dir : 0; });
+  };
+
+  // Group the FILTERED rows into pay-period cards; per-period Approve/Pay counts use the FULL
+  // period (those actions are whole-period, never just the filtered subset).
   const groups = {};
-  for (const e of entries) { const k = e.periodKey || "unscheduled"; (groups[k] = groups[k] || { label: e.periodLabel, key: e.periodKey, rows: [] }).rows.push(e); }
+  for (const e of filtered) { const k = e.periodKey || "unscheduled"; (groups[k] = groups[k] || { label: e.periodLabel, key: e.periodKey, rows: [] }).rows.push(e); }
+  const periodAll = {};
+  for (const e of entries) { const k = e.periodKey || "unscheduled"; (periodAll[k] = periodAll[k] || []).push(e); }
   const orderedKeys = Object.keys(groups).sort().reverse();
+
+  const ctrlWrap = { display: "flex", flexDirection: "column", gap: 3 };
+  const ctrlSel = { ...S.input, padding: "6px 8px", minWidth: 130 };
 
   const statusChip = (s) => { const c = { pending: ["#FEF3C7", "#92400E", "Pending"], payable: ["#DBEAFE", "#1E40AF", "Approved"], paid: ["#DCFCE7", "#166534", "Paid"], excluded: ["#F1F5F9", "#64748B", "Excluded"] }[s] || ["#F1F5F9", "#64748B", s]; return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{c[2]}</span>; };
   const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
@@ -7489,11 +7546,62 @@ function CommissionsReport() {
 
       {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
 
+      {entries.length > 0 && (
+        <div style={{ ...S.card, marginBottom: 14, padding: "12px 14px" }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div style={{ ...ctrlWrap, flex: "1 1 220px", minWidth: 170 }}>
+              <span style={S.lbl}>Search</span>
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Order #, customer, building, rep" style={{ ...S.input, padding: "6px 8px" }} />
+            </div>
+            {seesAll && repOpts.length > 0 && (
+              <div style={ctrlWrap}><span style={S.lbl}>Rep</span>
+                <select value={fRep} onChange={(e) => setFRep(e.target.value)} style={ctrlSel}>
+                  <option value="">All reps</option>
+                  {repOpts.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </select></div>
+            )}
+            <div style={ctrlWrap}><span style={S.lbl}>Pay period</span>
+              <select value={fPeriod} onChange={(e) => setFPeriod(e.target.value)} style={ctrlSel}>
+                <option value="">All periods</option>
+                {periodOpts.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+              </select></div>
+            <div style={ctrlWrap}><span style={S.lbl}>Status</span>
+              <select value={fStatus} onChange={(e) => setFStatus(e.target.value)} style={ctrlSel}>
+                <option value="">All statuses</option>
+                <option value="pending">Pending</option>
+                <option value="payable">Approved</option>
+                <option value="paid">Paid</option>
+                <option value="excluded">Excluded</option>
+              </select></div>
+            <div style={ctrlWrap}><span style={S.lbl}>Earned from</span>
+              <input type="date" value={fFrom} onChange={(e) => setFFrom(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} /></div>
+            <div style={ctrlWrap}><span style={S.lbl}>Earned to</span>
+              <input type="date" value={fTo} onChange={(e) => setFTo(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} /></div>
+            <div style={ctrlWrap}><span style={S.lbl}>Sort by</span>
+              <div style={{ display: "inline-flex", gap: 6 }}>
+                <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={ctrlSel}>
+                  <option value="">Pay period (default)</option>
+                  <option value="date">Earned date</option>
+                  <option value="amount">Commission</option>
+                  <option value="order">Order #</option>
+                  <option value="customer">Customer</option>
+                  {seesAll && <option value="rep">Rep</option>}
+                </select>
+                {sortBy && <button onClick={() => setSortDir((d) => d === "asc" ? "desc" : "asc")} title="Toggle direction" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 10px" }}>{sortDir === "asc" ? "↑" : "↓"}</button>}
+              </div></div>
+            {hasFilters && <button onClick={clearFilters} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "6px 12px" }}>Clear</button>}
+          </div>
+          {hasFilters && <div style={{ fontSize: 12, color: "#64748B", marginTop: 9 }}>Showing <b>{filtered.length}</b> of {entries.length} commission{entries.length === 1 ? "" : "s"}.{filtered.length === 0 ? " Nothing matches — adjust the filters." : ""}</div>}
+        </div>
+      )}
+
       {orderedKeys.map((k) => {
         const g = groups[k];
         const total = g.rows.reduce((s, e) => s + (e.amountCents || 0), 0);
-        const pendingRows = g.rows.filter((e) => e.status === "pending" && e.amountCents != null);
-        const approvedRows = g.rows.filter((e) => e.status === "payable");
+        // Approve / pay act on the whole pay period, so count against the FULL period, not the filtered view.
+        const fullRows = periodAll[k] || g.rows;
+        const pendingRows = fullRows.filter((e) => e.status === "pending" && e.amountCents != null);
+        const approvedRows = fullRows.filter((e) => e.status === "payable");
         return (
           <div key={k} style={{ ...S.card, marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
@@ -7518,7 +7626,7 @@ function CommissionsReport() {
                   {canSeeRates && <th style={th}></th>}
                 </tr></thead>
                 <tbody>
-                  {g.rows.map((e) => (
+                  {sortRows(g.rows).map((e) => (
                     <tr key={e.id}>
                       <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>{e.orderNo ? "#" + e.orderNo : "—"}</td>
                       <td style={td}>{e.customer}</td>
