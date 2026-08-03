@@ -1820,7 +1820,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // infer (same documented reason as save_layout_pricing above).
     if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
 
-    const KINDS = new Set(["building", "paint", "roof", "door", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
+    const KINDS = new Set(["building", "paint", "roof", "door", "window", "ramp", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
 
     // Validate against the tenant's OWN catalog — an item key or style id from another
     // tenant must not be writable here.
@@ -1890,12 +1890,68 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!conn.connected) return json({ items: [], notConnected: true, clientId });
     if (conn.broken) return json({ items: [], broken: true, clientId });
     try {
-      const q = encodeURIComponent("select Id, Name, Type, Active from Item where Active = true maxresults 1000");
-      const body = await qboFetch(admin, clientId, conn.realmId as string, `/query?query=${q}&minorversion=75`);
-      const items = (body?.QueryResponse?.Item ?? []).map((i: any) => ({
-        id: String(i.Id), name: i.Name ?? String(i.Id), type: i.Type ?? "",
-      }));
-      return json({ items, clientId });
+      // PAGED. A single `maxresults 1000` silently truncated any company with more items
+      // than that, and there was no way to tell a complete list from a clipped one — the
+      // grid just wouldn't offer the item you were looking for. Real shed books run to
+      // hundreds of rows (base buildings plus an "OP …" line per option), so this is not
+      // hypothetical. The cap exists so a pathological book can't hold the request open
+      // forever; when it bites we SAY so rather than pretending the list is whole.
+      const PAGE = 1000, MAX_PAGES = 5;
+      // Explicit column list, not `select *`: * returns account/tax refs and purchase costs
+      // we never read — roughly ten times the payload for the same dropdown.
+      // FullyQualifiedName is the item's category path ("Options:Doors:OP Door 4");
+      // ParentRef is deliberately NOT fetched, because resolving those ids to names would
+      // mean keeping the very Category rows we drop below.
+      const COLS = "Id, Name, Type, Active, FullyQualifiedName";
+      const pageQuery = (cols: string, page: number, paged: boolean) => encodeURIComponent(
+        `select ${cols} from Item where Active = true`
+        + (paged ? ` startposition ${page * PAGE + 1} maxresults ${PAGE}` : ` maxresults ${PAGE}`),
+      );
+      const fetchPage = (cols: string, page: number, paged: boolean) =>
+        qboFetch(admin, clientId, conn.realmId as string, `/query?query=${pageQuery(cols, page, paged)}&minorversion=75`);
+
+      const raw: any[] = [];
+      let truncated = false;
+      let cols = COLS, paged = true;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        let body: any;
+        try {
+          body = await fetchPage(cols, page, paged);
+        } catch (qe) {
+          // A connection problem is not a query problem — let those through to the outer
+          // catch, which has the right answer for each.
+          if (qe instanceof QboBroken || qe instanceof QboNotConnected) throw qe;
+          // Otherwise: this shape was rejected. Fall back ONCE to the long-standing query
+          // (no qualified name, no startposition) so a dialect surprise degrades to the
+          // old behaviour — an unsorted list of up to 1000 items — instead of an empty
+          // dropdown that blocks all mapping work. Only worth trying on the first page;
+          // a failure deeper in means paging itself worked.
+          if (page > 0 || cols === "Id, Name, Type, Active") throw qe;
+          cols = "Id, Name, Type, Active"; paged = false;
+          body = await fetchPage(cols, 0, false);
+        }
+        const rows = body?.QueryResponse?.Item ?? [];
+        raw.push(...rows);
+        if (!paged) { truncated = rows.length >= PAGE; break; }
+        if (rows.length < PAGE) break;
+        if (page === MAX_PAGES - 1) truncated = true;
+      }
+      // Categories are Item rows in QuickBooks, so they arrive mixed in with real products
+      // — and they are NOT usable as an invoice ItemRef. Offering them meant a mapping that
+      // looked fine and then failed the whole push with an Intuit 400. Filtered here rather
+      // than in the query: QBO's SQL dialect has no `!=`, and enumerating the allowed types
+      // would silently drop whatever type Intuit adds next.
+      const items = raw
+        .filter((i: any) => i.Type !== "Category")
+        .map((i: any) => ({
+          id: String(i.Id),
+          name: i.Name ?? String(i.Id),
+          type: i.Type ?? "",
+          fullName: i.FullyQualifiedName ?? "",
+        }));
+      // `id`/`name`/`type` keep their old meaning on purpose: production portal.html groups
+      // by `type` until the next Monday promotion, and both hosts call THIS one function.
+      return json({ items, ...(truncated ? { truncated: true } : {}), clientId });
     } catch (e) {
       // Still reachable: the connection can die between the check above and the call landing.
       if (e instanceof QboBroken) return json({ items: [], broken: true, clientId });

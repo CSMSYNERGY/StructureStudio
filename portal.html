@@ -6719,7 +6719,9 @@ const QBO_KINDS = [
   ["paint", "Paint", "Paint / color upgrade lines"],
   ["roof", "Roof", "Roof upgrade lines"],
   ["door", "Doors", "Catalog doors placed on the design"],
-  ["layout_item", "Layout items", "One mapping per placeable item (windows, lofts, workbenches…)"],
+  ["window", "Windows", "Catalog windows placed on the design"],
+  ["ramp", "Ramps", "Ramps — from the catalog or the simple per-ramp price"],
+  ["layout_item", "Layout items", "One mapping per built-in placeable (lofts, workbenches, rough openings…)"],
   ["custom_option", "Custom options", "Tenant-defined add-on options"],
   ["discount", "Discount", "Optional — QuickBooks' built-in discount is used when unmapped"],
   ["delivery", "Delivery", "Pushed non-taxable"],
@@ -6764,6 +6766,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   const [grid, setGrid] = useState(null);       // list_item_map response
   const [qboItems, setQboItems] = useState(null); // null = not loaded, [] = loaded empty
   const [itemsErr, setItemsErr] = useState(null);
+  const [itemsTruncated, setItemsTruncated] = useState(false); // hit the server's page cap
   const [draft, setDraft] = useState({});       // key(kind|itemKey|styleId) -> qboItemId
   const [saving, setSaving] = useState(false);
 
@@ -6827,7 +6830,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   };
 
   const loadQboItems = useCallback(async () => {
-    setItemsErr(null); setQboItems(null);
+    setItemsErr(null); setQboItems(null); setItemsTruncated(false);
     const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "list_qbo_items" } });
     if (e || (d && d.error)) { setItemsErr((e && e.message) || d.error); setQboItems([]); return; }
     // Not-connected / needs-reconnect come back 200 with no `error` on purpose (see the
@@ -6835,6 +6838,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     // quietly instead of stacking a second, redundant failure under the grid.
     if (d && (d.notConnected || d.broken)) { setQboItems([]); return; }
     setQboItems(d.items || []);
+    setItemsTruncated(!!(d && d.truncated));
   }, []);
   // Fetch the QuickBooks item list once the connection is known-good.
   useEffect(() => { if (status && status.connected && !status.broken && qboItems === null) loadQboItems(); },
@@ -6901,7 +6905,9 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     // Post the FULL grid — server-side validation decides row by row. Name captured from
     // the loaded item list so the grid can label a mapping even if QuickBooks is briefly
     // unreachable next load.
-    const nameOf = (id) => { const it = (qboItems || []).find((i) => i.id === id); return it ? it.name : null; };
+    // Prefer the qualified path ("Options:Doors:OP Door 4") — two categories can hold the
+    // same leaf name, and this label is all an unmapped-line error has to identify by.
+    const nameOf = (id) => { const it = (qboItems || []).find((i) => i.id === id); return it ? (it.fullName || it.name) : null; };
     const rows = [];
     const pushRow = (kind, itemKey, styleId) => {
       const k = kFor(kind, itemKey, styleId);
@@ -6934,8 +6940,18 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   const ItemSelect = ({ kind, itemKey, styleId, placeholder }) => {
     const val = mappedId(kind, itemKey, styleId);
     const items = qboItems || [];
-    const byType = {};
-    items.forEach((i) => { (byType[i.type || "Other"] = byType[i.type || "Other"] || []).push(i); });
+    // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
+    // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
+    // grouping they can navigate. Items with no category (and any response from a
+    // not-yet-updated function, where fullName is absent) fall back to the old grouping by
+    // Type, so this degrades to previous behaviour instead of collapsing into one blob.
+    const groupOf = (i) => {
+      const fn = i.fullName || "";
+      const cut = fn.lastIndexOf(":");
+      return cut > 0 ? fn.slice(0, cut) : (i.type || "Other");
+    };
+    const byGroup = {};
+    items.forEach((i) => { const g = groupOf(i); (byGroup[g] = byGroup[g] || []).push(i); });
     const stale = val && !items.some((i) => i.id === val);
     const savedRow = stale ? (grid && grid.mappings || []).find((m) => m.qbo_item_id === val) : null;
     return (
@@ -6943,9 +6959,9 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
         style={{ ...S.input, maxWidth: 340 }}>
         <option value="">{placeholder || "— not mapped —"}</option>
         {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
-        {Object.keys(byType).sort().map((t) => (
-          <optgroup key={t} label={t}>
-            {byType[t].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+        {Object.keys(byGroup).sort().map((g) => (
+          <optgroup key={g} label={g}>
+            {byGroup[g].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
           </optgroup>
         ))}
       </select>
@@ -7074,12 +7090,23 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
           Which QuickBooks product or service each line of an estimate is billed as when an invoice
           is pushed to QuickBooks. Lines without a mapping fall back to the Fallback item; if that's
           not set either, the push is skipped for that invoice.
+          <br /><br />
+          <b>Tip:</b> most builders keep this simple with one broad QuickBooks product per line — a
+          single “Buildings” item, one “Doors”, one “Windows” — mapped here once, rather than a
+          separate QuickBooks item for every size and option. The size and option details still ride
+          along on each invoice line's description.
         </p>
         {!connected && <p style={{ fontSize: 13, color: "#64748B" }}>Connect QuickBooks above to set up mappings.</p>}
         {connected && !broken && grid && (
           <div>
             {itemsErr && <div style={S.err}>{itemsErr}</div>}
             {qboItems === null && !itemsErr && <p style={{ fontSize: 12, color: "#64748B" }}>Loading products &amp; services from QuickBooks…</p>}
+            {itemsTruncated && (
+              <p style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>
+                Showing the first 5,000 products &amp; services from QuickBooks. If an item you need
+                isn't listed, tell CSM Synergy.
+              </p>
+            )}
             {QBO_KINDS.map(([kind, label, hint]) => (
               <div key={kind} style={{ padding: "10px 0", borderBottom: "1px solid #F1F5F9" }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{label}</div>
