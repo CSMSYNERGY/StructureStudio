@@ -2269,16 +2269,25 @@ function PricingCsv({ viewingLabel = null }) {
   // building_size_inclusions pipeline (item_key = fixture id). Label carries the size so multiple
   // sizes of one style stay distinct and never collide with a built-in's label.
   const optionCols = () => {
+    // Column order MIRRORS the Options tab top-to-bottom — built-in options, then the Doors,
+    // Ramps and Windows catalog sections — so the CSV reads the same way the owner edits it,
+    // instead of interleaving the fixture categories.
     // Archived options drop out of the pricing CSV entirely — they can't be added to new builds,
     // so they must not be an inclusion column (get_config + submit-estimate also stop netting them).
     const layout = items().filter((it) => !it.archived).map((it) => ({ key: it.key, label: it.label }));
-    const fixtures = ((cat && cat.fixtures) || [])
-      .filter((f) => f && f.active !== false && f.archived !== true)
-      // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"),
-      // and since the column is matched by its exact label on re-import, a garbled header would
-      // silently drop the inclusion. ASCII round-trips safely through any spreadsheet.
-      .map((f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` }));
-    return [...layout, ...fixtures];
+    const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
+    // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"),
+    // and since the column is matched by its exact label on re-import, a garbled header would
+    // silently drop the inclusion. ASCII round-trips safely through any spreadsheet.
+    const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
+    // Keep each section's fixtures together, in the same relative order the tab shows them (a
+    // missing category reads as "door", matching DoorsView).
+    const inCat = (f, c) => (f.category || "door") === c;
+    const doors = fx.filter((f) => inCat(f, "door")).map(col);
+    const ramps = fx.filter((f) => inCat(f, "ramp")).map(col);
+    const windows = fx.filter((f) => inCat(f, "window")).map(col);
+    const other = fx.filter((f) => !["door", "ramp", "window"].includes(f.category || "door")).map(col);
+    return [...layout, ...doors, ...ramps, ...windows, ...other];
   };
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
