@@ -7418,18 +7418,6 @@ function CommissionsReport() {
   };
   const approvePeriod = (periodKey) => act({ action: "approve_period", periodKey }, "Period approved — ready to pay.");
   const unapprovePeriod = (periodKey) => act({ action: "unapprove_period", periodKey });
-  const cancelOrder = (e) => {
-    if (!window.confirm(`Cancel order #${e.orderNo}? Any PAID commission on it is clawed back (a negative line in the current pay period); unpaid commission is removed from payout. Applies to the whole order, splits included.`)) return;
-    setBusy(true); setMsg(null);
-    (async () => {
-      try {
-        const r = await call({ action: "cancel_order", orderId: e.orderId });
-        setMsg({ ok: `Order #${e.orderNo} cancelled — ${r.clawed || 0} clawed back, ${r.excluded || 0} removed${r.clawbackDisabled ? " (clawback is off in Settings, so paid commission was kept)" : ""}.` });
-        await load();
-      } catch (er) { setMsg({ err: er.message }); }
-      setBusy(false);
-    })();
-  };
 
   if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commissions…</div>;
   const entries = data.entries || [];
@@ -7523,15 +7511,16 @@ function CommissionsReport() {
                       <td style={td}>{statusChip(e.status)}</td>
                       {canSeeRates && (
                         <td style={{ ...td, whiteSpace: "nowrap" }}>
+                          {/* Order cancellation is handled entirely in the Orders tab, not here —
+                              this table only reflects the resulting clawback/excluded lines. */}
                           {e.kind === "clawback" ? <span style={{ color: "#94A3B8", fontSize: 11 }}>—</span>
-                            : e.status === "paid" ? (isOwner ? <button onClick={() => cancelOrder(e)} disabled={busy} style={actLink("#DC2626")}>Cancel order</button> : null)
+                            : e.status === "paid" ? <span style={{ color: "#94A3B8", fontSize: 11 }}>—</span>
                             : e.status === "excluded" ? <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: false })} disabled={busy} style={actLink("#3D3672")}>Restore</button>
                             : (
                               <span style={{ display: "inline-flex", gap: 10, flexWrap: "wrap" }}>
                                 {e.earnerUserId && <button onClick={() => openSplit(e)} disabled={busy} style={actLink("#3D3672")}>Split</button>}
                                 {e.earnerUserId && <button onClick={() => adjustEntry(e)} disabled={busy} style={actLink("#3D3672")}>Adjust</button>}
                                 <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: true })} disabled={busy} style={actLink("#94A3B8")}>Exclude</button>
-                                {isOwner && <button onClick={() => cancelOrder(e)} disabled={busy} style={actLink("#DC2626")}>Cancel order</button>}
                               </span>
                             )}
                         </td>
