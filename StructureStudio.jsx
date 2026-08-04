@@ -5137,9 +5137,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   onClick={openInventoryDialog}
                   disabled={submitting || Boolean(invDialog && invDialog.busy)}
                   style={{
-                    background: "#FFF", color: "#334155", border: "1.5px solid #CBD5E1", borderRadius: 10,
-                    padding: "12px 20px", fontSize: 14, fontWeight: 800, cursor: "pointer",
+                    background: (submitting || (invDialog && invDialog.busy)) ? "#9CA3AF" : accent, color: "#FFF",
+                    border: "none", borderRadius: 10, padding: "12px 22px", fontSize: 14, fontWeight: 800,
+                    cursor: (submitting || (invDialog && invDialog.busy)) ? "wait" : "pointer",
                     letterSpacing: "-0.01em", whiteSpace: "nowrap",
+                    boxShadow: (submitting || (invDialog && invDialog.busy)) ? "none" : `0 4px 14px ${accent}50`,
                   }}
                 >
                   {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}
