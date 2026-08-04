@@ -218,7 +218,7 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // Allow-list, not a deny-list: a function added later gets NO injection until it is named
 // here. operator-portal is deliberately absent — it passes its own explicit clientId, and
 // its list_clients is a cross-tenant listing that must never look tenant-scoped.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect"];
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -5098,6 +5098,500 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
   );
 }
 
+// ─── Build Schedule tab (SCHEDULING_SCOPE.md Phase 2) ───
+// Kanban of tenant-custom stages over build_jobs, plus a table view and the unscheduled
+// tray. ALL reads/writes go through portal-schedule (service role): operator view-as works
+// via the sb.functions targetClientId injection; crew ("user" role) may move cards and add
+// notes (STAFF actions server-side), everything else is owner/admin. Stage KIND
+// (queue/active/done) drives every derived state — never the stage's editable name.
+//
+// ⚠️ OPERATOR-ONLY until the schedule_builds billing flip (Phase 5): tenants keep the
+// ComingSoon teaser (see the render site), so the automatic Monday beta→main promotion
+// cannot leak a paid feature early. The launch flip is ONE condition at the render site.
+const SCHED_SRC_CHIP = {
+  order:     { bg: "#EEF2FF", fg: "#3D3672", label: "Order" },
+  inventory: { bg: "#ECFEFF", fg: "#0E7490", label: "Inventory" },
+  repair:    { bg: "#FDF2F8", fg: "#BE185D", label: "Repair" },
+  manual:    { bg: "#F1F5F9", fg: "#475569", label: "Manual" },
+};
+const schedChip = (bg, fg) => ({ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, fontWeight: 800, borderRadius: 999, padding: "3px 9px", whiteSpace: "nowrap", background: bg, color: fg });
+const schedInitials = (name) => String(name || "").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?";
+// Past due = has a due date, that date is before today, and the stage isn't finished.
+const schedPastDue = (job, kind) => {
+  if (!job.due_date || kind === "done") return false;
+  return job.due_date < new Date().toISOString().slice(0, 10);
+};
+const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
+
+// Inline editor rendered INSIDE the expanded card/row — job info stays at face value,
+// never in a popout (scope decision 6). Admin edits fields; every role can add a note.
+function SchedJobEditor({ job, stages, team, canAdmin, busy, onSave, onComplete, onDelete, onMove, onNote, onOpenDesign }) {
+  const [f, setF] = useState({
+    title: job.title || "", customerName: job.customer_name || "", buildingLabel: job.building_label || "",
+    scheduledStart: job.scheduled_start || "", dueDate: job.due_date || "",
+    assigneeUserId: job.assignee_user_id || "", notes: job.notes || "",
+  });
+  const [note, setNote] = useState("");
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const lbl = { ...S.lbl, marginBottom: 3 };
+  const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
+  return (
+    <div style={{ borderTop: "1px solid #F1F5F9", marginTop: 8, paddingTop: 9 }} onClick={(e) => e.stopPropagation()}>
+      {canAdmin && (<>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 10px", marginBottom: 8 }}>
+          <div><span style={lbl}>Customer</span><input style={inp} value={f.customerName} onChange={set("customerName")} /></div>
+          <div><span style={lbl}>Building</span><input style={inp} value={f.buildingLabel} onChange={set("buildingLabel")} /></div>
+          <div><span style={lbl}>Start</span><input type="date" style={inp} value={f.scheduledStart} onChange={set("scheduledStart")} /></div>
+          <div><span style={lbl}>Due</span><input type="date" style={inp} value={f.dueDate} onChange={set("dueDate")} /></div>
+          <div><span style={lbl}>Assigned to</span>
+            <select style={inp} value={f.assigneeUserId} onChange={set("assigneeUserId")}>
+              <option value="">— Unassigned —</option>
+              {team.map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)}</option>)}
+            </select>
+          </div>
+          <div><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
+        </div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
+          <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={() => onSave({
+            customerName: f.customerName, buildingLabel: f.buildingLabel, title: f.title,
+            scheduledStart: f.scheduledStart || null, dueDate: f.dueDate || null,
+            assigneeUserId: f.assigneeUserId || null, notes: f.notes,
+          })}>Save</button>
+          <button type="button" disabled={busy} style={S.btn("#F0FDF4", "#15803D")} onClick={onComplete}>✓ Mark built</button>
+          {job.design_short_code && onOpenDesign && (
+            <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => onOpenDesign(job.design_short_code)}>Open design</button>
+          )}
+          <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), marginLeft: "auto" }} onClick={onDelete}>Delete</button>
+        </div>
+      </>)}
+      {/* Stage move without drag — the touch/keyboard path, and the crew path on phones. */}
+      <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+        <select style={{ ...inp, width: "auto" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
+          {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <input style={{ ...inp, flex: 1, minWidth: 120 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
+        <button type="button" disabled={busy || !note.trim()} style={S.btn("#F1F5F9", "#334155")}
+          onClick={() => { if (note.trim()) { onNote(note.trim()); setNote(""); } }}>Add note</button>
+      </div>
+    </div>
+  );
+}
+
+// Stage editor — a modal on purpose: this is CONFIG (like Settings), not job data, so the
+// no-popout rule doesn't apply. Kind is presented in plain words; the server enforces
+// "at least one finished stage".
+function SchedStageEditor({ stages, busy, onClose, onSave }) {
+  const [rows, setRows] = useState(stages.map((s) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, archived: !!s.archived })));
+  const move = (i, d) => {
+    const j = i + d; if (j < 0 || j >= rows.length) return;
+    const next = rows.slice(); const t = next[i]; next[i] = next[j]; next[j] = t; setRows(next);
+  };
+  const set = (i, k, v) => setRows(rows.map((r, idx) => idx === i ? { ...r, [k]: v } : r));
+  const valid = rows.every((r) => r.name.trim()) && rows.some((r) => r.kind === "done" && !r.archived);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.38)", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div style={{ background: "#FFF", borderRadius: 14, width: 520, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto", padding: "18px 20px" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <span style={S.h2}>Build stages</span>
+          <button type="button" onClick={onClose} style={{ ...S.btn("#F1F5F9", "#64748B"), marginLeft: "auto", padding: "4px 10px" }}>×</button>
+        </div>
+        {rows.map((r, i) => (
+          <div key={r.id || "new" + i} style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #E2E8F0", borderRadius: 10, padding: "7px 10px", marginBottom: 7, background: r.archived ? "#F8FAFC" : "#FBFCFE", opacity: r.archived ? 0.65 : 1 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <button type="button" onClick={() => move(i, -1)} disabled={i === 0} style={{ border: "none", background: "none", cursor: "pointer", color: "#94A3B8", fontSize: 10, padding: 0 }} aria-label="Move up">▲</button>
+              <button type="button" onClick={() => move(i, 1)} disabled={i === rows.length - 1} style={{ border: "none", background: "none", cursor: "pointer", color: "#94A3B8", fontSize: 10, padding: 0 }} aria-label="Move down">▼</button>
+            </div>
+            <input type="color" value={r.color} onChange={(e) => set(i, "color", e.target.value)} style={{ width: 26, height: 26, border: "none", background: "none", padding: 0, cursor: "pointer" }} aria-label="Stage color" />
+            <input value={r.name} onChange={(e) => set(i, "name", e.target.value)} style={{ ...S.input, flex: 1, padding: "6px 8px", fontSize: 13 }} />
+            <select value={r.kind} onChange={(e) => set(i, "kind", e.target.value)} style={{ ...S.input, width: "auto", padding: "6px 8px", fontSize: 12 }}>
+              <option value="queue">Waiting to start</option>
+              <option value="active">Work in progress</option>
+              <option value="done">Finished</option>
+            </select>
+            <button type="button" onClick={() => set(i, "archived", !r.archived)} title={r.archived ? "Restore this stage" : "Archive this stage"}
+              style={{ ...S.btn(r.archived ? "#F0FDF4" : "#F1F5F9", r.archived ? "#15803D" : "#64748B"), padding: "5px 9px", fontSize: 11 }}>
+              {r.archived ? "Restore" : "Archive"}
+            </button>
+          </div>
+        ))}
+        <button type="button" style={{ ...S.btn("#F1F5F9", "#334155"), marginBottom: 10 }}
+          onClick={() => setRows([...rows, { name: "", color: "#94A3B8", kind: "active", archived: false }])}>+ Add a stage</button>
+        <p style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.5, background: "#F1F5F9", borderRadius: 8, padding: "8px 11px", marginBottom: 12 }}>
+          Rename, recolor, and reorder stages to match your shop — add "Paint" or "Materials Pulled" if that's how you work.
+          Mark which column means <strong>finished</strong>: that's how the Delivery Schedule knows a building is truly done, no matter what you call your columns.
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={onClose}>Cancel</button>
+          <button type="button" disabled={busy || !valid} style={S.btn(ACCENT, "#FFF")} title={valid ? "" : "Every stage needs a name, and one non-archived stage must be Finished"}
+            onClick={() => onSave(rows)}>Save stages</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
+  const [data, setData] = useState(null);        // { stages, jobs, stopByJob, tray, team } | null = loading
+  const [error, setError] = useState(null);
+  const [view, setView] = useState("board");     // board | table
+  const [query, setQuery] = useState("");
+  const [stageFilter, setStageFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("due_date");
+  const [sortDir, setSortDir] = useState("asc");
+  const [msg, setMsg] = useState(null);          // { ok } | { err }
+  const [busy, setBusy] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [dragId, setDragId] = useState(null);
+  const [dropStage, setDropStage] = useState(null);
+  const [editingStages, setEditingStages] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [manual, setManual] = useState({ title: "", customerName: "", dueDate: "" });
+
+  const call = async (body, okMsg) => {
+    const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body });
+    if (err || !d || d.error) {
+      setMsg({ err: (d && d.error) || (err ? await fnError(err) : "That didn't work.") });
+      return null;
+    }
+    if (okMsg) setMsg({ ok: okMsg });
+    return d;
+  };
+  const load = useCallback(async () => {
+    setError(null);
+    const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body: { action: "build_board" } });
+    if (err || !d || d.error) {
+      setError((d && d.error) || (err ? await fnError(err) : "Could not load the build schedule."));
+      setData({ stages: [], jobs: [], stopByJob: {}, tray: { orders: [], inventory: [], repairs: [] }, team: [] });
+      return;
+    }
+    setData(d);
+  }, [clientId]);
+  useEffect(() => { load(); }, [load]);
+
+  const stages = (data && data.stages) || [];
+  const jobs = (data && data.jobs) || [];
+  const stopByJob = (data && data.stopByJob) || {};
+  const tray = (data && data.tray) || { orders: [], inventory: [], repairs: [] };
+  const team = (data && data.team) || [];
+  const kindOf = {}; stages.forEach((s) => { kindOf[s.id] = s.kind; });
+  const stageName = {}; stages.forEach((s) => { stageName[s.id] = s.name; });
+  const nameOf = {}; team.forEach((m) => { nameOf[m.userId] = m.name; });
+  const visibleStages = stages.filter((s) => !s.archived);
+  const trayCount = tray.orders.length + tray.inventory.length + tray.repairs.length;
+
+  const counts = { queue: 0, active: 0, done: 0, pastDue: 0 };
+  jobs.forEach((j) => {
+    const k = kindOf[j.stage_id] || "queue";
+    counts[k] = (counts[k] || 0) + 1;
+    if (schedPastDue(j, k)) counts.pastDue++;
+  });
+
+  // Optimistic stage move; on server rejection the reload restores the truth.
+  const moveJob = async (job, stageId) => {
+    if (!stageId || stageId === job.stage_id) return;
+    setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, stage_id: stageId } : j) }));
+    const r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+    if (!r) load();
+  };
+  const addFromTray = async (body, label) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "create_job", ...body }, `${label} added to the board.`);
+    setBusy(false); if (r) load();
+  };
+  const createManual = async () => {
+    if (!manual.title.trim() && !manual.customerName.trim()) { setMsg({ err: "Give the job a title or customer." }); return; }
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "create_job", source: "manual", title: manual.title, customerName: manual.customerName, dueDate: manual.dueDate || null }, "Job added.");
+    setBusy(false);
+    if (r) { setManual({ title: "", customerName: "", dueDate: "" }); setAddOpen(false); load(); }
+  };
+  const saveJob = async (job, patch) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "update_job", jobId: job.id, ...patch }, "Saved.");
+    setBusy(false); if (r) load();
+  };
+  const completeJob = async (job) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "complete_job", jobId: job.id }, `${job.customer_name || job.title || "Job"} marked built.`);
+    setBusy(false); if (r) { setExpandedId(null); load(); }
+  };
+  const deleteJob = async (job) => {
+    if (!window.confirm(`Remove ${job.customer_name || job.title || "this job"} from the build schedule? The order/design itself is not touched.`)) return;
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "delete_job", jobId: job.id }, "Removed from the board.");
+    setBusy(false); if (r) { setExpandedId(null); load(); }
+  };
+  const addNote = async (job, text) => {
+    setBusy(true); setMsg(null);
+    await call({ action: "add_note", jobId: job.id, note: text }, "Note added.");
+    setBusy(false);
+  };
+  const saveStages = async (rows) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "save_stages", stages: rows.map((x) => ({ id: x.id, name: x.name, color: x.color, kind: x.kind, archived: x.archived })) }, "Stages saved.");
+    setBusy(false); if (r) { setEditingStages(false); load(); }
+  };
+
+  // ── Shared card face (board card + expanded editor) ──
+  const loadChip = (job) => {
+    const link = stopByJob[job.id];
+    if (!link || !link.load) return null;
+    const l = link.load;
+    const delivered = l.status === "delivered" || link.deliveredAt;
+    const c = delivered ? { bg: "#F0FDF4", fg: "#15803D" } : l.status === "out" ? { bg: "#FFFBEB", fg: "#B45309" } : { bg: "#EEF2FF", fg: "#3D3672" };
+    const when = l.load_date ? " · " + fmtDate(l.load_date) : "";
+    return <span style={schedChip(c.bg, c.fg)}>{delivered ? "Delivered" : `Load ${l.load_no}${when}`}</span>;
+  };
+  const jobCard = (job) => {
+    const kind = kindOf[job.stage_id] || "queue";
+    const late = schedPastDue(job, kind);
+    const src = SCHED_SRC_CHIP[job.source] || SCHED_SRC_CHIP.manual;
+    const open = expandedId === job.id;
+    return (
+      <div key={job.id} draggable={!open} tabIndex={0} role="button" aria-expanded={open}
+        onDragStart={(e) => { setDragId(job.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
+        onDragEnd={() => { setDragId(null); setDropStage(null); }}
+        onClick={() => setExpandedId(open ? null : job.id)}
+        onKeyDown={(e) => { if (e.key === "Enter") setExpandedId(open ? null : job.id); }}
+        style={{ background: "#FFF", border: "1px solid " + (open ? "#B9C4D6" : "#E2E8F0"), borderRadius: 10, padding: "9px 11px",
+          cursor: open ? "default" : "grab", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{job.serial ? "#" + job.serial : (job.source === "repair" ? "Repair" : "—")}</span>
+          <span style={{ ...schedChip(src.bg, src.fg), marginLeft: "auto" }}>{src.label}</span>
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 800, lineHeight: 1.25 }}>{job.customer_name || job.title || "—"}</div>
+        {(job.building_label || job.title) && job.customer_name && (
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#64748B", marginTop: 1 }}>{job.building_label || job.title}</div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 7, flexWrap: "wrap" }}>
+          {(job.scheduled_start || job.due_date) && (
+            <span style={{ ...schedChip(late ? "#FEF2F2" : "#F1F5F9", late ? "#DC2626" : "#475569"), fontVariantNumeric: "tabular-nums" }}>
+              {job.scheduled_start ? fmtDate(job.scheduled_start) : ""}{job.scheduled_start && job.due_date ? " → " : ""}{job.due_date ? fmtDate(job.due_date) : ""}{late ? " · past due" : ""}
+            </span>
+          )}
+          {loadChip(job)}
+          {job.assignee_user_id && (
+            <span title={nameOf[job.assignee_user_id] || ""} style={{ width: 21, height: 21, borderRadius: "50%", background: "#DBEAFF", border: "1px solid #C3D9F7", color: ACCENT, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 800, marginLeft: "auto", flexShrink: 0 }}>
+              {schedInitials(nameOf[job.assignee_user_id])}
+            </span>
+          )}
+        </div>
+        {job.notes && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600, marginTop: 6, whiteSpace: "pre-wrap" }}>{job.notes}</div>}
+        {open && (
+          <SchedJobEditor job={job} stages={stages} team={team} canAdmin={canAdmin} busy={busy}
+            onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
+            onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
+        )}
+      </div>
+    );
+  };
+
+  // ── Table view rows ──
+  const tableRows = jobs.filter((j) => {
+    if (stageFilter !== "all" && j.stage_id !== stageFilter) return false;
+    if (!query.trim()) return true;
+    return rowMatchesQuery(j, query,
+      (stageName[j.stage_id] || "") + " " + (nameOf[j.assignee_user_id] || "") + " #" + (j.serial || ""));
+  });
+  const sorted = sortRows(tableRows, (j) => j[sortKey], sortDir);
+  const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+
+  const trayItem = (key, chipConf, who, what, onAdd) => (
+    <div key={key} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", background: "#FBFCFE" }}>
+      <span style={schedChip(chipConf.bg, chipConf.fg)}>{chipConf.label}</span>
+      <div>
+        <div style={{ fontSize: 12.5, fontWeight: 700 }}>{who}</div>
+        {what && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{what}</div>}
+      </div>
+      {canAdmin && (
+        <button type="button" disabled={busy} onClick={onAdd} title="Add to the board"
+          style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Build Schedule" count={jobs.length}
+        right={<>
+          <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
+            {["board", "table"].map((v) => (
+              <button key={v} type="button" onClick={() => setView(v)}
+                style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
+                {v === "board" ? "Board" : "Table"}
+              </button>
+            ))}
+          </div>
+          <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          {canAdmin && <button type="button" onClick={() => setEditingStages(true)} style={S.btn("#FFF", "#475569")}>Edit stages</button>}
+          {canAdmin && <button type="button" onClick={() => setAddOpen(!addOpen)} style={S.btn(ACCENT, "#FFF")}>+ Add job</button>}
+        </>} />
+
+      {/* Summary tiles */}
+      {data && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
+          {[["In queue", counts.queue, "#1E293B"], ["In progress", counts.active, "#1E293B"], ["Built — awaiting delivery", counts.done, "#1E293B"], ["Past due", counts.pastDue, counts.pastDue ? "#DC2626" : "#1E293B"]].map(([t, n, c]) => (
+            <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
+              <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: c }}>{n}</div>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {error && <div style={S.err}>{error}</div>}
+      {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+
+      {/* Manual add (admin) */}
+      {addOpen && canAdmin && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+          <div style={{ flex: 2, minWidth: 160 }}><span style={S.lbl}>Job title</span><input style={S.input} value={manual.title} onChange={(e) => setManual({ ...manual, title: e.target.value })} placeholder='e.g. "Shop maintenance day"' /></div>
+          <div style={{ flex: 2, minWidth: 140 }}><span style={S.lbl}>Customer (optional)</span><input style={S.input} value={manual.customerName} onChange={(e) => setManual({ ...manual, customerName: e.target.value })} /></div>
+          <div style={{ flex: 1, minWidth: 120 }}><span style={S.lbl}>Due</span><input type="date" style={S.input} value={manual.dueDate} onChange={(e) => setManual({ ...manual, dueDate: e.target.value })} /></div>
+          <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={createManual}>Add</button>
+        </div>
+      )}
+
+      {/* Unscheduled tray — sold orders / available inventory / open repairs with no card yet */}
+      {data && trayCount > 0 && (
+        <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "10px 14px", marginBottom: 13, background: "#FFF" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+            <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>Unscheduled</span>
+            <span style={schedChip("#EEF2FF", "#3D3672")}>{trayCount}</span>
+            <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>— sold orders, inventory, and repairs that aren't on the board yet</span>
+          </div>
+          <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2 }}>
+            {tray.orders.map((o) => trayItem("o" + o.designShortCode, SCHED_SRC_CHIP.order, o.customerName || o.designShortCode, o.buildingLabel,
+              () => addFromTray({ source: "order", designShortCode: o.designShortCode }, o.customerName || "Order")))}
+            {tray.inventory.map((u) => trayItem("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory, "#" + u.serial, "Spec build for the lot",
+              () => addFromTray({ source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial)))}
+            {tray.repairs.map((rp) => trayItem("r" + rp.repairId, SCHED_SRC_CHIP.repair, rp.customerName, "R-" + rp.repairNo + " · " + (rp.description || "").slice(0, 60),
+              () => addFromTray({ source: "repair", repairId: rp.repairId }, "R-" + rp.repairNo)))}
+          </div>
+        </div>
+      )}
+
+      {/* ── BOARD ── */}
+      {data && view === "board" && visibleStages.length > 0 && (
+        <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+          <div style={{ display: "flex", gap: 11, alignItems: "flex-start", minWidth: "min-content" }}>
+            {visibleStages.map((s) => {
+              const colJobs = jobs.filter((j) => j.stage_id === s.id).sort((a, b) => Number(a.position) - Number(b.position));
+              return (
+                <div key={s.id} data-stage={s.id}
+                  onDragOver={(e) => { e.preventDefault(); setDropStage(s.id); }}
+                  onDragLeave={() => setDropStage((d) => d === s.id ? null : d)}
+                  onDrop={(e) => {
+                    e.preventDefault(); setDropStage(null);
+                    const job = jobs.find((j) => j.id === dragId);
+                    if (job) moveJob(job, s.id);
+                    setDragId(null);
+                  }}
+                  style={{ width: 268, flex: "0 0 268px", background: "#EEF2F8", borderRadius: 12, padding: 9, outline: dropStage === s.id ? `2px dashed ${ACCENT}` : "none", outlineOffset: -2 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "2px 4px 8px" }}>
+                    <span style={{ width: 9, height: 9, borderRadius: "50%", background: s.color, flexShrink: 0 }}></span>
+                    <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 0.3, color: "#334155" }}>{s.name}</span>
+                    <span style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8" }}>
+                      {s.kind === "queue" ? "waiting" : s.kind === "active" ? "in progress" : "finished"}
+                    </span>
+                    <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{colJobs.length}</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 36 }}>
+                    {colJobs.map(jobCard)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {data && view === "board" && jobs.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+          Nothing on the board yet. Sold orders, inventory builds, and repairs appear in the tray above — one click adds them. Every order job takes the next shop serial number automatically.
+        </p>
+      )}
+
+      {/* ── TABLE ── */}
+      {data && view === "table" && (<>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search — serial, customer, building, stage…"
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 10 }} />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          <button type="button" onClick={() => setStageFilter("all")} style={{ ...S.btn(stageFilter === "all" ? "#1E293B" : "#FFF", stageFilter === "all" ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (stageFilter === "all" ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>All {jobs.length}</button>
+          {visibleStages.map((s) => {
+            const n = jobs.filter((j) => j.stage_id === s.id).length;
+            const on = stageFilter === s.id;
+            return n > 0 && (
+              <button key={s.id} type="button" onClick={() => setStageFilter(on ? "all" : s.id)}
+                style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
+                {s.name} {n}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <SortTh label="Serial" col="serial" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Customer" col="customer_name" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Building" col="building_label" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <th style={S.th}>Size</th>
+              <th style={S.th}>Source</th>
+              <th style={S.th}>Stage</th>
+              <SortTh label="Start" col="scheduled_start" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Due" col="due_date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <th style={S.th}>Assigned</th>
+              <th style={S.th}>Delivery</th>
+            </tr></thead>
+            <tbody>
+              {sorted.map((j) => {
+                const kind = kindOf[j.stage_id] || "queue";
+                const late = schedPastDue(j, kind);
+                const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
+                const stg = stages.find((s) => s.id === j.stage_id);
+                const open = expandedId === j.id;
+                return (
+                  <React.Fragment key={j.id}>
+                    <tr onClick={() => setExpandedId(open ? null : j.id)} style={{ cursor: "pointer", background: open ? "#F7F9FF" : "transparent" }}>
+                      <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
+                      <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
+                      <td style={S.td}>{j.building_label || j.title || "—"}</td>
+                      <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
+                      <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
+                      <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{j.scheduled_start ? fmtDate(j.scheduled_start) : "—"}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{j.due_date ? fmtDate(j.due_date) + (late ? " · past due" : "") : "—"}</td>
+                      <td style={S.td}>{nameOf[j.assignee_user_id] || "—"}</td>
+                      <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
+                    </tr>
+                    {open && (
+                      <tr><td colSpan={10} style={{ ...S.td, background: "#F7F9FF" }}>
+                        <SchedJobEditor job={j} stages={stages} team={team} canAdmin={canAdmin} busy={busy}
+                          onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
+                          onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {sorted.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No jobs match.</p>}
+      </>)}
+
+      <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 12 }}>
+        Drag cards between stages — team members can move cards and add notes; dates, assignments, and new jobs are admin-only. Every move is logged with who and when. Click a card to see and edit everything in place.
+      </p>
+
+      {editingStages && (
+        <SchedStageEditor stages={stages} busy={busy} onClose={() => setEditingStages(false)} onSave={saveStages} />
+      )}
+    </div>
+  );
+}
+
 // ─── Sales locations + building serial numbers (Settings → Team) ───
 // Locations are where inventory buildings sit on display; the serial block sets the ONE
 // shared per-builder sequence (inventory now, orders when Build Scheduling ships).
@@ -8249,7 +8743,8 @@ function Dashboard({ session }) {
           {soonItem("view-3d", "3D Design", "3rd Qtr")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
-          {soonItem("build-schedule", "Build Schedule", "3rd Qtr")}
+          {/* Operators get the live board (In Dev badge, like Orders); tenants keep the teaser. */}
+          {isOperator ? soonItem("build-schedule", "Build Schedule", "In Dev") : soonItem("build-schedule", "Build Schedule", "3rd Qtr")}
           {soonItem("delivery-schedule", "Delivery Schedule", "3rd Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
         </nav>
@@ -8490,7 +8985,15 @@ function Dashboard({ session }) {
                 ]}
               />
             )}
+            {/* Real Build Schedule for OPERATORS (own tenant or view-as — reads/writes go
+                through portal-schedule, so view-as works and writes need can_write).
+                Tenants keep the teaser until the schedule_builds billing flip (Phase 5):
+                the launch change is swapping `isOperator` for the entitlement check. */}
             {!gateLocked && activeTab === "build-schedule" && (
+              isOperator ? (
+                <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
+                  onOpenDesign={(code) => openInDesigner(code)} />
+              ) : (
               <ComingSoon
                 title="Build Schedule"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>}
@@ -8501,6 +9004,7 @@ function Dashboard({ session }) {
                   "Keep the shop floor and the office on the same page",
                 ]}
               />
+              )
             )}
             {!gateLocked && activeTab === "delivery-schedule" && (
               <ComingSoon
