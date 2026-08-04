@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { withErrorLog } from "../_shared/logError.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -19,7 +20,7 @@ function json(body: unknown, status = 200) {
   });
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -27,7 +28,7 @@ Deno.serve(async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, imageUrl, betaMode, deliveryFee, declinedItems } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -48,7 +49,7 @@ Deno.serve(async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -186,8 +187,13 @@ Deno.serve(async (req: Request) => {
     }
   }
   if (!dynamicUserId) {
+    // This endpoint is reachable with the public anon key, so the caller-facing message must not
+    // carry the tenant's ghl_location_id — it lives in the service-role-only client_settings and
+    // every other surface deliberately masks it (portal-settings' maskId, admin-save-settings'
+    // slice). The full id goes to the server-side log instead, where triage can still see it.
+    console.warn(`submit-estimate: GHL location has no assignable user (client=${clientId} location=${locationId})`);
     return json({
-      error: `Can't create the estimate: the GHL location for "${clientId}" (${locationId}) has no user to assign it to. ` +
+      error: `Can't create the estimate: this business's CRM location has no user to assign it to. ` +
         `GHL requires a userId. Assign at least one user to that GHL sub-account (and ideally add a product for pricing), ` +
         `or set an explicit GHL user id in the client's settings, then resubmit.`,
     }, 400);
@@ -199,17 +205,33 @@ Deno.serve(async (req: Request) => {
   const summary = itemSummary || {};
   const targetItems: any[] = [];
 
+  // ── Line provenance (QuickBooks push, migration 066) ────────────────────────────
+  // Which catalog concept produced each line, recorded as it is built — it is not
+  // recoverable afterwards (a line's name is tenant-authored text). Kept in a SIDE map
+  // rather than on the line objects, so nothing foreign can leak into the GHL payload.
+  // Serialized into designs.estimate_lines at step 11, AFTER pct_estimate_total
+  // resolution and credit baking have finalized the amounts (both mutate in place).
+  // A line no site tagged serializes as kind "fallback" — the push's safety net.
+  const lineProv = new Map<any, { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean }>();
+  const tagLine = <T,>(line: T, p: { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean }): T => {
+    lineProv.set(line, p);
+    return line;
+  };
+
   // Per-line product image (the "image inside the app" the owner uploaded → shown on the
   // estimate line). Images live in this tenant's public 'branding' bucket; only attach a URL
   // under that tenant prefix so a tampered catalog row can't graft an arbitrary link onto the
   // branded estimate. GHL renders a line item's attachments as the product photo.
   const brandingPrefix = `${supabaseUrl}/storage/v1/object/public/branding/${clientId}/`;
+  // Door photos live in the 'fixtures' bucket; styles/layout images in 'branding'. Both are
+  // tenant-scoped under {clientId}/, which is the guard that matters.
+  const fixturesPrefix = `${supabaseUrl}/storage/v1/object/public/fixtures/${clientId}/`;
   // GHL line-item attachments are an array of plain image-URL STRINGS (proven by the working
   // n8n payload: `attachments: [imageUrl]`). An array of objects is rejected. Only attach a
-  // URL under this tenant's branding prefix so a tampered catalog row can't inject a link.
+  // URL under this tenant's own storage prefix so a tampered catalog row can't inject a link.
   const imgAttachments = (url: unknown): string[] => {
     const u = String(url || "");
-    if (!u || !u.startsWith(brandingPrefix)) return [];
+    if (!u || !(u.startsWith(brandingPrefix) || u.startsWith(fixturesPrefix))) return [];
     return [u];
   };
 
@@ -295,9 +317,10 @@ Deno.serve(async (req: Request) => {
   // non-taxable delivery and under-reduce tax. We keep a reference and finalize amount + description
   // after every credit is tallied (below). The item NAME stays the plain building name; the
   // original price + itemized credits go in the DESCRIPTION.
-  let bakedCredit = 0;               // total credit to subtract from the building line
-  const creditNotes: string[] = [];  // per-credit notes appended to the building description
-  let creditOverflow = 0;            // credit beyond the building price → falls back to a discount
+  let bakedCredit = 0;               // total DECLINED-item credit to subtract from the building line
+  const creditNotes: string[] = [];  // per-declined-item notes appended to the building description
+  let creditOverflow = 0;            // declined credit beyond the building price → falls back to a discount
+  let discountTotal = 0;             // "+ Add Discount" rows → GHL invoice discount total
   const buildingLine: any = {
     name: `${styleLabel} (${size})`,
     qty: 1,
@@ -307,9 +330,9 @@ Deno.serve(async (req: Request) => {
     attachments: styleShowImage ? imgAttachments(styleImageUrl) : [],
     currency: "USD",
     type: "one_time",
-    description: `Size: ${size}`,
+    description: "",   // size lives in the name; filled with the credit breakdown only when items are declined
   };
-  targetItems.push(buildingLine);
+  targetItems.push(tagLine(buildingLine, { kind: "building" }));
 
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
   // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
@@ -345,8 +368,23 @@ Deno.serve(async (req: Request) => {
   const includedMap = new Map<string, number>();
   if (sizeRowId) {
     try {
+      // An ARCHIVED option no longer counts as "included" — it's retired from new builds, so its
+      // base-price inclusion must not net on the quote (matches get_config, which drops the same
+      // rows from sizeInclusionQty). Skip any inclusion whose item_key is an archived built-in
+      // (client_layout_items.archived) or archived catalog fixture (fixture_items.archived).
+      const [archLayout, archFix] = await Promise.all([
+        supabase.from("client_layout_items").select("item_key").eq("client_id", clientId).eq("archived", true),
+        supabase.from("fixture_items").select("id").eq("client_id", clientId).eq("archived", true),
+      ]);
+      const archivedKeys = new Set<string>([
+        ...((archLayout.data || []) as any[]).map((r) => String(r.item_key)),
+        ...((archFix.data || []) as any[]).map((r) => String(r.id)),
+      ]);
       const incRes = await supabase.from("building_size_inclusions").select("item_key, qty").eq("size_id", sizeRowId).eq("included", true);
-      for (const r of (incRes.data || []) as any[]) includedMap.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
+      for (const r of (incRes.data || []) as any[]) {
+        if (archivedKeys.has(String(r.item_key))) continue;
+        includedMap.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
+      }
     } catch { /* no inclusions → everything placed is charged as-is */ }
   }
 
@@ -390,13 +428,25 @@ Deno.serve(async (req: Request) => {
     // Fully covered by the inclusion → a $0 line so the customer sees it's part of the building
     // at no charge (never a positive charge for an included item).
     if (includedQty > 0 && chargeable <= 0) {
-      targetItems.push({
+      targetItems.push(tagLine({
         name: `${searches[0]} (included)`, qty: placed, amount: 0,
         priceId: "", productId: "",
         attachments: lp ? imgAttachments(lp.imageUrl) : [],
         currency: "USD", type: "one_time",
         description: description || "Included with this size",
-      });
+      }, { kind: "layout_item", itemKey: itemKey || "" }));
+      // Under-placement credit: an AREA item placed SMALLER than its included quantity (e.g. a
+      // 32 sq ft loft when 48 is included) credits the shortfall, baked into the building line like
+      // a declined item. Scoped to sqft_option to stay in lock-step with the designer (lineal_ft /
+      // "each" are NOT under-credited). A placed loft keeps placedKeys.has("loft") true, so the
+      // declined loop never double-credits.
+      if (placed > 0 && placed < includedQty && method === "sqft_option") {
+        const credit = Math.round(rate * (includedQty - placed) * 100) / 100;
+        if (credit > 0) {
+          bakedCredit += credit;
+          creditNotes.push(`${searches[0]} smaller than included: ${includedQty - placed} sq ft credited (−$${credit.toFixed(2)})`);
+        }
+      }
       return;
     }
 
@@ -413,6 +463,22 @@ Deno.serve(async (req: Request) => {
       default:                   amount = rate; break;
     }
 
+    // Measured item (loft = sq ft, workbench = ft) charged only on the amount BEYOND its inclusion:
+    // the GHL qty cell shows the BILLABLE measure (chargeable), so spell out the full calc in the
+    // description — total placed, included in the base price, and billable. GHL's estimate view
+    // STRIPS <br> (concatenating the words, e.g. "placed56 sq ft"), so join with " · " — one clean
+    // spelled-out line whose spacing survives, matching the designer's live breakdown verbatim.
+    let desc = description;
+    if (includedQty > 0 && (method === "sqft_option" || method === "lineal_ft")) {
+      const u = method === "sqft_option" ? "sq ft" : "ft";
+      const breakdown = [
+        `${placed} ${u} placed`,
+        `${includedQty} ${u} included in base price`,
+        `${chargeable} ${u} billable @ $${(Number(rate) || 0).toFixed(2)}/${u}`,
+      ].join(" · ");
+      desc = desc ? `${desc} · ${breakdown}` : breakdown;
+    }
+
     const item = {
       name: searches[0],
       qty,
@@ -422,9 +488,9 @@ Deno.serve(async (req: Request) => {
       attachments: lp ? imgAttachments(lp.imageUrl) : [],
       currency: "USD",
       type: "one_time",
-      description,
+      description: desc,
     };
-    targetItems.push(item);
+    targetItems.push(tagLine(item, { kind: "layout_item", itemKey: itemKey || "" }));
     if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
 
@@ -458,9 +524,14 @@ Deno.serve(async (req: Request) => {
           .eq("client_id", clientId).eq("active", true);
         const palette = (colRes.data || []) as any[];
         const customRow = palette.find((c) => c.allow_custom);
+        // We only reach here when paintStatus === "Paint" (a non-default color was chosen). A
+        // named color matches by label; a blank/"TBD" value means the customer picked the Custom
+        // option but hasn't typed the exact color yet — that's still a committed charge at the
+        // tenant's allow-custom rate (this matches the designer's Details preview, which resolves
+        // "TBD" to the Custom color). Only an explicit "No Paint" yields no color.
         const resolve = (val: unknown) => {
           const v = String(val ?? "").trim();
-          if (!v || norm(v) === norm("No Paint") || norm(v) === norm("TBD")) return null;
+          if (norm(v) === norm("No Paint")) return null;
           return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
         };
         const seen = new Set<string>();
@@ -469,10 +540,10 @@ Deno.serve(async (req: Request) => {
         }
       } catch { /* colors lookup failed → still emit the line at $0 */ }
     }
-    targetItems.push({
+    targetItems.push(tagLine({
       name: "Paint Colors", qty: 1, amount: paintAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: paintDesc,
-    });
+    }, { kind: "paint" }));
   }
 
   // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
@@ -497,15 +568,63 @@ Deno.serve(async (req: Request) => {
         } catch { /* colors lookup failed → still emit the line at $0 */ }
       }
     }
-    targetItems.push({
+    targetItems.push(tagLine({
       name: "Roof", qty: 1, amount: roofAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: roofDesc,
-    });
+    }, { kind: "roof" }));
   }
 
   if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
   if (summary.singleDoors > 0) pushItem("Single Door", "singleDoor", "", { count: summary.singleDoors });
   if (summary.windows > 0) pushItem("Window", "window", "", { count: summary.windows });
+
+  // Catalog fixture doors (Options → Doors): each carries its OWN price, snapshotted at
+  // placement so re-pricing the catalog never shifts an already-sent estimate. Identical doors
+  // (same name + price) collapse into one line with a qty, matching the designer's live preview.
+  // Unpriced / $0 doors add no line (NULL-price contract = not charged). NOT matched against GHL
+  // products — pushed as ad-hoc lines like custom options.
+  if (Array.isArray(doors)) {
+    // Sizes are stored in inches; show them as feet/inches on the estimate line.
+    const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
+    // Each door's photo + "show on estimate" flag, read live from the catalog by fixtureItemId,
+    // so a door's line attaches its photo only when the owner has that toggle on.
+    const doorIds = [...new Set(doors.map((d: any) => d && d.fixtureItemId).filter(Boolean))];
+    const fxImg = new Map<string, { url: string | null; show: boolean }>();
+    if (doorIds.length) {
+      const fr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
+      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+    }
+    const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+    for (const d of doors) {
+      const price = d && d.price != null ? Number(d.price) : 0;
+      if (!(price > 0)) continue;
+      const name = (String(d.name || "Door").trim()) || "Door";
+      // Spell swing + operation out the same way the floor-plan PDF does (out-swing, right hinge)
+      // so the estimate line and the plan read identically.
+      const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : null;
+      const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : null;
+      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}`;
+      const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
+      g.qty++; dg.set(key, g);
+    }
+    for (const g of dg.values()) {
+      // Fixtures-catalog doors (2026-07-30) — their own line kind: they are neither a
+      // layout_item (no layout_item_pricing row) nor a custom option (catalog-priced).
+      // Net the size-included qty (building_size_inclusions keyed by the fixture id) — the first N
+      // are covered by the base price (shown as a $0 "(included)" line), extras are charged.
+      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      const chargeable = Math.max(0, g.qty - inc);
+      const im = g.fixtureItemId ? fxImg.get(String(g.fixtureItemId)) : null;
+      const atts = (im && im.show && im.url) ? imgAttachments(im.url) : [];
+      const included = inc > 0 && chargeable <= 0;
+      targetItems.push(tagLine({
+        name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
+        priceId: "", productId: "", attachments: atts,
+        currency: "USD", type: "one_time", description: g.desc || "",
+      }, { kind: "door" }));
+    }
+  }
 
   if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) {
     // ONE aggregated workbench line (total feet), so the inclusion is netted once — matching
@@ -520,7 +639,119 @@ Deno.serve(async (req: Request) => {
     // uses the loft count, per-area (sqft_option) uses total loft sqft.
     pushItem(["Loft", "Loft Kit", "Loft Storage"], "loft", "", { count: summary.lofts, optionSqft: Number(summary.loftSqft) || 0 });
   }
-  if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") pushItem("Ramp", "ramp", "", { count: 1 });
+  // rampCount = total ramps placed (any shape). Kept for the declined-item guard below; the
+  // actual line-pricing is done from the ramps[] schedule when present.
+  const rampCount = (() => {
+    const v = summary.ramp;
+    if (typeof v === "number") return v > 0 ? v : 0;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "yes") return 1;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
+  // Ramps (2026-08-01). Two shapes, both from the ramps[] schedule:
+  //  • CUSTOM ramp — a catalog style carrying its OWN snapshot price (like a fixture door):
+  //    grouped by style+price into one line each, photo attached from fixture_items.
+  //  • SIMPLE ramp — the built-in ramp, priced from the tenant's single ramp price on
+  //    client_settings: "each" per ramp, or "per_ft" × the attached door's width (doorWidthFt).
+  // Legacy builds that don't send ramps[] fall back to the old layout_item_pricing "ramp" rate.
+  if (Array.isArray(ramps) && ramps.length) {
+    const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
+    const sizeStr = (r: any) => (r && r.widthIn && r.heightIn) ? `${fmtFtIn(r.widthIn)}×${fmtFtIn(r.heightIn)}` : "";
+    const customRamps = ramps.filter((r: any) => r && r.price != null);
+    const simpleRamps = ramps.filter((r: any) => !r || r.price == null);
+    // --- custom ramps: priced by snapshot, grouped by style+price ---
+    if (customRamps.length) {
+      const rampIds = [...new Set(customRamps.map((r: any) => r && r.fixtureItemId).filter(Boolean))];
+      const rImg = new Map<string, { url: string | null; show: boolean }>();
+      if (rampIds.length) {
+        const rr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", rampIds);
+        for (const r of rr.data ?? []) rImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+      }
+      const rg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+      for (const r of customRamps) {
+        const price = r && r.price != null ? Number(r.price) : 0;
+        if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+        const name = (String(r.name || "Ramp").trim()) || "Ramp";
+        const desc = [sizeStr(r), r.wall ? `${r.wall} wall` : null].filter(Boolean).join(" · ");
+        const key = `${name}|${price}`;
+        const g = rg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (r.fixtureItemId || null) };
+        g.qty++; rg.set(key, g);
+      }
+      for (const g of rg.values()) {
+        const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+        const chargeable = Math.max(0, g.qty - inc);
+        const included = inc > 0 && chargeable <= 0;
+        const im = g.fixtureItemId ? rImg.get(String(g.fixtureItemId)) : null;
+        targetItems.push(tagLine({
+          name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
+          priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
+          currency: "USD", type: "one_time", description: g.desc || "",
+        }, { kind: "ramp" }));
+      }
+    }
+    // --- simple ramps: priced from the tenant's single ramp price ---
+    if (simpleRamps.length) {
+      const rampPrice = Number(settings.ramp_price) || 0;
+      const perFt = String(settings.ramp_price_method || "each") === "per_ft";
+      const showImg = settings.ramp_show_image !== false;
+      const atts = (showImg && settings.ramp_image_url) ? imgAttachments(settings.ramp_image_url) : [];
+      if (rampPrice > 0) {
+        if (perFt) {
+          let totalFt = 0;
+          for (const r of simpleRamps) totalFt += Number(r && r.doorWidthFt) || 0;
+          totalFt = Math.round(totalFt * 100) / 100;
+          if (totalFt > 0) targetItems.push(tagLine({
+            name: "Ramp", qty: totalFt, amount: rampPrice,
+            priceId: "", productId: "", attachments: atts,
+            currency: "USD", type: "one_time", description: `${simpleRamps.length} ramp${simpleRamps.length > 1 ? "s" : ""} · priced per ft of door width`,
+          }, { kind: "ramp" }));
+        } else {
+          targetItems.push(tagLine({
+            name: "Ramp", qty: simpleRamps.length, amount: rampPrice,
+            priceId: "", productId: "", attachments: atts,
+            currency: "USD", type: "one_time", description: "",
+          }, { kind: "ramp" }));
+        }
+      }
+    }
+  } else if (rampCount > 0) {
+    pushItem("Ramp", "ramp", "", { count: rampCount });
+  }
+
+  // Catalog windows (Options → Windows): each carries its OWN snapshot price (like fixture doors),
+  // grouped by style+price into one line, photo attached from fixture_items when the owner opts in.
+  // Built-in windows are counted in summary.windows and priced via the layout "window" rate above.
+  if (Array.isArray(windows) && windows.length) {
+    const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
+    const winIds = [...new Set(windows.map((w: any) => w && w.fixtureItemId).filter(Boolean))];
+    const wImg = new Map<string, { url: string | null; show: boolean }>();
+    if (winIds.length) {
+      const wr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", winIds);
+      for (const r of wr.data ?? []) wImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+    }
+    const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+    for (const w of windows) {
+      const price = w && w.price != null ? Number(w.price) : 0;
+      if (!(price > 0)) continue;   // $0 / unpriced = included, no line
+      const name = (String(w.name || "Window").trim()) || "Window";
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}`;
+      const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
+      g.qty++; wg.set(key, g);
+    }
+    for (const g of wg.values()) {
+      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      const chargeable = Math.max(0, g.qty - inc);
+      const included = inc > 0 && chargeable <= 0;
+      const im = g.fixtureItemId ? wImg.get(String(g.fixtureItemId)) : null;
+      targetItems.push(tagLine({
+        name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
+        priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
+        currency: "USD", type: "one_time", description: g.desc || "",
+      }, { kind: "window" }));
+    }
+  }
 
   // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
   // owner can charge their own price; no hardcoded amount). One line per placed RO at that
@@ -528,7 +759,7 @@ Deno.serve(async (req: Request) => {
   if (Array.isArray(roughOpenings)) {
     const roRate = layoutRates.get("roughOpening")?.rate || 0;
     roughOpenings.forEach((ro: any) => {
-      targetItems.push({
+      targetItems.push(tagLine({
         name: ro.name || "Rough Opening",
         qty: ro.qty || 1,
         amount: roRate,
@@ -538,31 +769,25 @@ Deno.serve(async (req: Request) => {
         currency: "USD",
         type: "one_time",
         description: ro.dimensions ? String(ro.dimensions) : "",
-      });
+      }, { kind: "layout_item", itemKey: "roughOpening" }));
     });
   }
 
-  // Custom options — name doubles as the line title; leaving description blank keeps GHL
-  // from rendering it as a duplicate subtitle. A custom option whose intended total (qty × amount)
-  // is NEGATIVE is a credit: GHL can't render a negative line (amount >= 0 AND qty >= 0.1), so the
-  // credit is folded into the building line (bakedCredit) and itemized in the building description.
+  // Custom options are POSITIVE-ONLY add-on line items (name = title; blank description avoids a
+  // duplicate subtitle). A reduction is NOT a custom option — it goes through the "+ Add Discount"
+  // rows below (GHL discount total). A negative amount here is ignored so nothing silently bakes
+  // into the building; only declined included items adjust the building price.
   if (Array.isArray(customOptions)) {
     customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
       const name = String(co.name).trim();
       const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
-      const rawQty = co.qty ? Number(co.qty) || 1 : 1;
-      const signedTotal = rawQty * rawAmt;   // intended line total; negative = a credit
-      if (signedTotal < 0) {
-        const credit = Math.round(Math.abs(signedTotal) * 100) / 100;
-        bakedCredit += credit;
-        creditNotes.push(`${name} −$${credit.toFixed(2)}`);
-      } else {
-        targetItems.push({
-          name, qty: Math.abs(rawQty) || 1, amount: Math.abs(rawAmt),
-          priceId: "", productId: "", attachments: [],
-          currency: "USD", type: "one_time", description: "",
-        });
-      }
+      if (rawAmt < 0) return;   // reductions use the Discount button, not custom options
+      const qty = co.qty ? Math.abs(Number(co.qty)) || 1 : 1;
+      targetItems.push(tagLine({
+        name, qty, amount: rawAmt,
+        priceId: "", productId: "", attachments: [],
+        currency: "USD", type: "one_time", description: "",
+      }, { kind: "custom_option" }));
     });
   }
 
@@ -581,20 +806,50 @@ Deno.serve(async (req: Request) => {
     if (summary.windows > 0) placedKeys.add("window");
     if (summary.lofts > 0) placedKeys.add("loft");
     if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) placedKeys.add("workbench");
-    if (summary.ramp && String(summary.ramp).toLowerCase() !== "no") placedKeys.add("ramp");
+    if (rampCount > 0) placedKeys.add("ramp");
     if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
+    // A placed catalog fixture (its id in doors/windows/ramps) is kept, not credited.
+    for (const d of (Array.isArray(doors) ? doors : [])) if (d?.fixtureItemId) placedKeys.add(String(d.fixtureItemId));
+    for (const w of (Array.isArray(windows) ? windows : [])) if (w?.fixtureItemId) placedKeys.add(String(w.fixtureItemId));
+    for (const r of (Array.isArray(ramps) ? ramps : [])) if (r?.fixtureItemId && r?.price != null) placedKeys.add(String(r.fixtureItemId));
+    // Declined catalog fixtures aren't in layout_item_pricing — credit the fixture's own price ×
+    // included qty. Look up prices for any declined fixture id (a UUID key, not a layout key).
+    const declFxPrice = new Map<string, number>();
+    const declFxIds = [...new Set(declinedItems.map((x: any) => String(x?.key ?? "").trim())
+      .filter((k: string) => k && !placedKeys.has(k) && !layoutRates.has(k)))];
+    if (declFxIds.length) {
+      const fr = await supabase.from("fixture_items").select("id, price").eq("client_id", clientId).in("id", declFxIds);
+      for (const r of fr.data ?? []) if (r.price != null) declFxPrice.set(String(r.id), Number(r.price));
+    }
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();
       if (!key) continue;
       if (placedKeys.has(key)) continue;   // placed = kept, not a decline → no credit
+      if (declFxPrice.has(key)) {
+        const q = includedMap.get(key) || 0;
+        if (q <= 0) continue;
+        const credit = Math.round(declFxPrice.get(key)! * q * 100) / 100;
+        if (credit <= 0) continue;
+        bakedCredit += credit;
+        creditNotes.push(`${d?.label || "Item"} declined (−$${credit.toFixed(2)})`);
+        continue;
+      }
       const lp = layoutRates.get(key);
       const rate = lp?.rate || 0;
       if (rate <= 0) continue;
       const method = lp?.method || "each";
-      // Credit the included quantity for this size (shared includedMap; defaults to 1 for rows
-      // imported before the quantity feature). pct_estimate_total can't be resolved before the
-      // subtotal exists, so it keeps a flat credit — qty clamped to 1 so % isn't scaled by sq ft.
-      const qty = method === "pct_estimate_total" ? 1 : (includedMap.get(key) ?? 1);
+      // Credit the included quantity for this size. pct_estimate_total can't be resolved before
+      // the subtotal exists, so it keeps a flat credit — qty clamped to 1 so % isn't scaled by
+      // sq ft.
+      // The default is 0, NOT 1, and must match the charge path's `includedMap.get(itemKey) || 0`
+      // above: includedMap only holds rows the size actually includes, and legacy rows are already
+      // floored at 1 when it is built. So a MISSING key means the size includes none of this item
+      // — there is nothing in the base price to give back, and defaulting to 1 invented a credit
+      // for it. That is reachable whenever the designer's includedItemKeys snapshot goes stale
+      // (an owner removes an inclusion while a shopper has the page open), which would under-price
+      // the emailed quote. A zero-qty credit is skipped below, exactly like a zero rate.
+      const qty = method === "pct_estimate_total" ? 1 : (includedMap.get(key) || 0);
+      if (qty <= 0) continue;
       // Per-unit value mirrors pushItem's amount for each method, rounded to cents so the
       // printed "qty × unit = credit" math is exact and the summed discount stays sub-cent-free.
       let unitValue = rate, unitLabel = "";
@@ -610,19 +865,46 @@ Deno.serve(async (req: Request) => {
       const credit = Math.round(unitValue * qty * 100) / 100;
       if (credit <= 0) continue;
       bakedCredit += credit;
-      const mathNote = qty > 1 ? `${qty}${unitLabel} × $${unitValue.toFixed(2)} = ` : "";
-      creditNotes.push(`${d?.label || key} declined (${mathNote}−$${credit.toFixed(2)})`);
+      creditNotes.push(`${d?.label || key} declined (−$${credit.toFixed(2)})`);
     }
   }
 
-  // Finalize the building line: subtract the tallied credits from its amount (so the taxable base
-  // drops by the full credit) and itemize them in the DESCRIPTION with the original price. If the
-  // credits exceed the building price (rare), zero the line and send the leftover as a discount.
+  // Finalize the building line: subtract the DECLINED-item credits from its amount (so the taxable
+  // base drops by the full credit) and itemize them in the DESCRIPTION — original price first, then
+  // one line per declined item (no math). With no declines the description stays empty (size is in
+  // the name). If credits exceed the building price (rare), zero the line and send the leftover as
+  // a discount.
   if (bakedCredit > 0) {
     const applied = Math.min(bakedCredit, buildingPrice);
     creditOverflow = Math.round((bakedCredit - applied) * 100) / 100;
     buildingLine.amount = Math.round((buildingPrice - applied) * 100) / 100;
-    buildingLine.description = `Size: ${size} · Original building price: $${buildingPrice.toFixed(2)} — credits: ${creditNotes.join(", ")}`;
+    // GHL renders the line description as HTML and collapses plain-text "\n" into one paragraph
+    // (same as termsNotes below), so escape each line and join with <br> to keep the requested
+    // one-per-line layout: original price first, then one line per declined item.
+    const escLine = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    buildingLine.description = [`Original building price: $${buildingPrice.toFixed(2)}`, ...creditNotes]
+      .map(escLine).join("<br>");
+  }
+
+  // "+ Add Discount" rows — a reduction with a reason. Each shows as a $0 line naming it (so the
+  // reason is visible on the estimate) and its amount goes into GHL's invoice discount total below
+  // (which prorates across lines, i.e. it reduces tax proportionally). Discounts do NOT touch the
+  // building line.
+  if (Array.isArray(discounts)) {
+    discounts.forEach((d: any) => {
+      const amt = Math.round(Math.abs(Number(d?.amount) || 0) * 100) / 100;
+      if (amt <= 0) return;
+      discountTotal += amt;
+      const desc = String(d?.description ?? "").trim();
+      // Display-only $0 marker; the money moves in the invoice-level discount, which the
+      // provenance records once as a synthetic top-level entry — so this line is skipped.
+      targetItems.push(tagLine({
+        name: desc ? `Discount — ${desc}` : "Discount",
+        qty: 1, amount: 0, priceId: "", productId: "", attachments: [],
+        currency: "USD", type: "one_time",
+        description: `−$${amt.toFixed(2)} (applied as a discount below)`,
+      }, { kind: "discount", skip: true }));
+    });
   }
 
 
@@ -649,7 +931,7 @@ Deno.serve(async (req: Request) => {
   // omitted entirely when 0/blank.
   const deliveryAmt = Number(deliveryFee) || 0;
   if (deliveryAmt > 0) {
-    targetItems.push({
+    targetItems.push(tagLine({
       name: "Delivery",
       qty: 1,
       amount: deliveryAmt,
@@ -660,7 +942,7 @@ Deno.serve(async (req: Request) => {
       type: "one_time",
       description: "Delivery fee (non-taxable)",
       automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
-    });
+    }, { kind: "delivery", nonTaxable: true }));
   }
 
   // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
@@ -669,15 +951,15 @@ Deno.serve(async (req: Request) => {
   // update it back to status "open". Failures here are non-fatal — the estimate still
   // goes out.
   const oppName = `${styleLabel} ${size}`.trim();
-  // Clamp the overflow discount to the positive line subtotal. A credit larger than the whole
-  // order (cheap building + a big included-item credit) would otherwise drive the net total
-  // negative, and GHL rejects the estimate ("amount must not be less than 0") — failing an
-  // otherwise-valid submission. Clamping here also protects the invoice discount below.
+  // Invoice-level discount = the "+ Add Discount" rows + any declined-credit overflow. Clamp it to
+  // the positive line subtotal: a discount larger than the whole order would drive the net total
+  // negative and GHL rejects the estimate ("amount must not be less than 0").
   const lineSubtotal = targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0);
-  if (creditOverflow > lineSubtotal) creditOverflow = Math.round(lineSubtotal * 100) / 100;
-  // Credits are already baked into the building line amount, so summing the line items reflects
-  // them; subtract only the rare overflow discount so the opportunity value matches the total.
-  const oppValue = Math.max(0, lineSubtotal - creditOverflow);
+  let totalDiscount = Math.round((discountTotal + creditOverflow) * 100) / 100;
+  if (totalDiscount > lineSubtotal) totalDiscount = Math.round(lineSubtotal * 100) / 100;
+  // Declined credits are already baked into the building line amount; subtract the invoice
+  // discount so the opportunity value matches the estimate total.
+  const oppValue = Math.max(0, lineSubtotal - totalDiscount);
   let opportunityId: string | null = existingDesign.ghl_opportunity_id || null;
   if (contactId) {
     try {
@@ -784,6 +1066,13 @@ Deno.serve(async (req: Request) => {
       type: "application/pdf",
       size: 15000,
     });
+    // Also surface the floor-plan PDF as the FIRST line of the building description — a clickable
+    // link right on the line item, not just an attachment. Reuses the tenant-prefix guard above, so
+    // only this tenant's own validated storage URL is embedded (never a caller-supplied link). GHL
+    // renders the description as HTML; if it keeps the <a> the link is clickable, otherwise the URL
+    // is at least visible/copyable.
+    const pdfLink = `<a href="${imageUrl}" target="_blank" rel="noopener noreferrer">View floor plan (PDF)</a>`;
+    buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
   const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
@@ -833,10 +1122,10 @@ Deno.serve(async (req: Request) => {
       ...(estimateAddress ? { address: estimateAddress } : {}),
       ...(contactId ? { id: String(contactId) } : {}),
     },
-    // Credits are baked into the building line (see above) so the full credit reduces the taxable
-    // base. The discount is used ONLY for the rare overflow when credits exceed the building price.
-    discount: creditOverflow > 0
-      ? { value: creditOverflow, type: "fixed" }
+    // GHL invoice discount = the "+ Add Discount" rows + any declined-credit overflow (clamped
+    // above). Declined-item credits themselves are baked into the building line, not here.
+    discount: totalDiscount > 0
+      ? { value: totalDiscount, type: "fixed" }
       : { value: 0, type: "percentage" },
     frequencySettings: { enabled: false },
     // Default the GHL "Enable Tax Automatically" toggle to ON. Reps can still flip it
@@ -858,6 +1147,9 @@ Deno.serve(async (req: Request) => {
   let estimateNumber: string | null = null;
   const hadLineImages = targetItems.some((it) => Array.isArray(it.attachments) && it.attachments.length > 0);
   let lineImagesStripped = false;
+  // Set when a stale ghl_estimate_id forced a create instead of an update — see below. Kept out
+  // of the try so the response can report it honestly as a create rather than an update.
+  let recreatedFromStale = false;
   try {
     const url = existingEstimateId
       ? `https://services.leadconnectorhq.com/invoices/estimate/${existingEstimateId}`
@@ -872,11 +1164,39 @@ Deno.serve(async (req: Request) => {
       const r2 = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(stripped) });
       if (r2.ok) { r = r2; lineImagesStripped = true; console.warn("Estimate retried without line-item images (GHL rejected attachments)."); }
     }
+    // A stored ghl_estimate_id goes stale in two real, observed ways: staff DELETE the estimate
+    // inside GHL while tidying the location (GHL then answers the PUT 404 "Unable to find estimate
+    // with the given estimateId"), or the customer ACCEPTS it and GHL refuses further edits with
+    // 400 "Estimate is already accepted". Until now either one returned a terminal 502, and since
+    // nothing cleared the column, EVERY later resubmit of that design failed identically — the
+    // design could never produce a quote again without hand-editing the row. Both shapes are in
+    // app_errors against a real tenant. So: fall back to creating a fresh estimate, and let the
+    // new id replace the stale one where it is persisted below.
+    if (!r.ok && existingEstimateId) {
+      const staleBody = await r.text();
+      const gone = r.status === 404;
+      const locked = r.status === 400 && /already\s*(been\s*)?accepted/i.test(staleBody);
+      if (gone || locked) {
+        console.warn(`submit-estimate: stale ghl_estimate_id (${r.status}) — creating a fresh estimate instead`);
+        // A fresh estimate number, NOT the old one: when the estimate was merely accepted it still
+        // exists in GHL, so reusing its number would collide. The deleted case does not care.
+        const recreatePayload = { ...finalPayload, invoiceNumber: uniqueSequence.toString() };
+        const rc = await fetch(`https://services.leadconnectorhq.com/invoices/estimate`,
+          { method: "POST", headers: ghlHeaders, body: JSON.stringify(recreatePayload) });
+        if (!rc.ok) {
+          return json({ error: `Failed to recreate estimate after a stale id: ${rc.status} ${await rc.text()}` }, 502);
+        }
+        r = rc;
+        recreatedFromStale = true;
+      } else {
+        return json({ error: `Failed to update estimate: ${r.status} ${staleBody}` }, 502);
+      }
+    }
     if (!r.ok) {
-      return json({ error: `Failed to ${existingEstimateId ? "update" : "create"} estimate: ${r.status} ${await r.text()}` }, 502);
+      return json({ error: `Failed to create estimate: ${r.status} ${await r.text()}` }, 502);
     }
     const d = await r.json();
-    estimateId = d?._id || d?.estimate?._id || existingEstimateId;
+    estimateId = d?._id || d?.estimate?._id || (recreatedFromStale ? null : existingEstimateId);
     estimateNumber = String(d?.estimateNumber ?? d?.estimate?.estimateNumber ?? d?.invoiceNumber ?? uniqueSequence);
   } catch (e) {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
@@ -921,7 +1241,31 @@ Deno.serve(async (req: Request) => {
     console.warn("Estimate send error:", (e as Error).message);
   }
 
-  // 11. Persist GHL IDs
+  // 11. Persist GHL IDs + the line provenance snapshot.
+  //
+  // Serialized HERE — after pct_estimate_total resolution, credit baking, and the
+  // discount clamp — so every amount is the FINAL number that went to GHL. The style id
+  // is stored once at the top level (every building/layout line shares it) and the
+  // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
+  const estimateLines = {
+    version: 1,
+    styleId: styleRowId,
+    discount: totalDiscount > 0 ? totalDiscount : 0,
+    lines: targetItems
+      .filter((li) => !lineProv.get(li)?.skip)
+      .map((li) => {
+        const p = lineProv.get(li);
+        return {
+          kind: p?.kind ?? "fallback",
+          itemKey: p?.itemKey ?? "",
+          name: String(li.name ?? ""),
+          qty: Number(li.qty) || 0,
+          amount: Number(li.amount) || 0,
+          nonTaxable: !!p?.nonTaxable,
+        };
+      }),
+  };
+
   await supabase
     .from("designs")
     .update({
@@ -929,6 +1273,7 @@ Deno.serve(async (req: Request) => {
       ghl_estimate_id: estimateId,
       ghl_estimate_number: estimateNumber || existingDesign.ghl_estimate_number || null,
       ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
+      estimate_lines: estimateLines,
       updated_at: new Date().toISOString(),
     })
     .eq("short_code", designId);
@@ -939,9 +1284,11 @@ Deno.serve(async (req: Request) => {
     estimateId,
     estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || null,
     opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
-    updated: Boolean(existingEstimateId),
+    // Honest about what actually happened: a stale id that forced a create is NOT an update.
+    updated: Boolean(existingEstimateId) && !recreatedFromStale,
+    recreatedFromStale,
     betaMode: effectiveBetaMode,
     lineImagesStripped,
     sendDebug,
   });
-});
+}));

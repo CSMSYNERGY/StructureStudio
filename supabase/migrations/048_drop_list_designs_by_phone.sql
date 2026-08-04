@@ -1,0 +1,11 @@
+-- 048_drop_list_designs_by_phone: reverse 047.
+-- Adversarial review (2026-07-23) found the anon phone-login it powered is a PII bridge:
+-- an anonymous visitor who knows/guesses a 10-digit phone gets the design's short_code, and
+-- opening that short_code via load_design prefills the FULL contact (name + home address).
+-- That turns a low-entropy phone into the previously-unguessable short_code capability.
+-- The phone-login ("find my saved designs") feature is DEFERRED until it can sit behind
+-- SMS/OTP phone verification; dropping the anon-callable RPC now removes the exposure surface
+-- entirely. Rebuild behind verification later (re-apply 047 only then).
+-- Hand-applied via Supabase MCP apply_migration and recorded as version 048 (never db push).
+drop function if exists public.list_designs_by_phone(text, text);
+-- Rollback: re-apply 047_list_designs_by_phone.sql (ONLY behind proper phone verification).

@@ -1,0 +1,105 @@
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │  ⛔ NEVER RUN `supabase config push` WITH THIS FILE.                          │
+# │                                                                              │
+# │  `config push` is DECLARATIVE, not a patch: anything absent here is applied  │
+# │  to the remote project as the CLI's DEFAULT. There is no `config pull`, so   │
+# │  the CLI cannot snapshot the live settings first.                            │
+# │                                                                              │
+# │  This file has NO [auth] section. Pushing it would set                       │
+# │  site_url = "http://127.0.0.1:3000", de-allow-list the real redirect, and    │
+# │  clear custom SMTP — undoing BOTH the canonical auth-redirect fix and the    │
+# │  SPF/sender-authentication work in a single command.                         │
+# │                                                                              │
+# │  This file exists for ONE reason: `supabase functions deploy` reads the      │
+# │  [functions.*] blocks below, so verify_jwt can no longer depend on somebody  │
+# │  remembering a CLI flag. That is all it is for.                              │
+# │                                                                              │
+# │  For one-off auth changes (email templates, SMTP, redirect URLs) use the     │
+# │  dashboard. If you ever genuinely need `config push`, first reproduce EVERY  │
+# │  current remote value here by reading them off the dashboard by hand.        │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+project_id = "jzeamjbhdrsbygdnphbm"
+
+# ── Edge function JWT gating ───────────────────────────────────────────────────
+# Values below mirror the LIVE state verified via list_edge_functions on 2026-07-30.
+#
+# verify_jwt = false means the API gateway does NOT require a JWT. It is correct only where
+# the function authenticates by some other means, and each one below says which. Everything
+# else is true — note that true is NOT itself authentication: the public anon key is a valid
+# JWT, so those functions still do their own auth (resolveTenant / adminAuth / a shared
+# secret) inside the handler.
+#
+# This history is why the file exists: billing-webhook was once redeployed without
+# --no-verify-jwt, which flipped it to true and made every real gateway callback fail at the
+# edge — invisibly, because the gateway rejects before any of our logging runs.
+
+# --- Public / non-JWT callers: verify_jwt MUST stay false ---
+
+[functions.billing-webhook]
+# Deposyt/NMI posts here server-to-server. Authenticated by an HMAC signature over the raw
+# body (DEPOSYT_WEBHOOK_SIGNING_KEY), not by a JWT. Payments break if this flips to true.
+verify_jwt = false
+
+[functions.feedback-monday-webhook]
+# monday.com posts here. Authenticated by a shared secret (FEEDBACK_SYNC_SECRET).
+verify_jwt = false
+
+[functions.admin-save-settings]
+# Called by the designer's ?admin=1 panel, which sends the anon key and authenticates with
+# the shared ADMIN_PASSWORD via _shared/adminAuth.ts (plus a per-operator can_write check).
+verify_jwt = false
+
+# --- Everything else: JWT required at the gateway, real auth inside ---
+
+[functions.admin-catalog]
+# Dual-credential (operator JWT OR ADMIN_PASSWORD step-up). true is correct: admin.html
+# reaches it through sb.functions.invoke, so the anon key satisfies the gateway and the
+# password gate does the real work. Do NOT "fix" this to false.
+verify_jwt = true
+
+[functions.portal-settings]
+verify_jwt = true
+
+[functions.portal-billing]
+verify_jwt = true
+
+[functions.portal-feedback]
+verify_jwt = true
+
+[functions.portal-commissions]
+# JWT-authenticated: the function resolves the real user via auth.getUser() and maps them
+# through client_users to their tenant + role. The confidential commission_members table is
+# service-role only, so all rate/grant access is gated here.
+verify_jwt = true
+
+[functions.operator-portal]
+verify_jwt = true
+
+[functions.submit-estimate]
+verify_jwt = true
+
+[functions.sync-design-status]
+verify_jwt = true
+
+[functions.capture-lead]
+# Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
+# protections are body validation, a tenant existence check, and the per-tenant rate cap
+# added 2026-07-30. Kept true so a bare unauthenticated request is still refused early.
+verify_jwt = true
+
+[functions.qbo-oauth-connect]
+# Starting an OAuth flow attaches a QuickBooks company to a tenant — an owner/admin action.
+verify_jwt = true
+
+[functions.qbo-oauth-callback]
+# ⛔ MUST STAY FALSE. Intuit redirects the user's BROWSER here with no Supabase JWT; with
+# verification on, the gateway 401s every callback before the function runs and connecting
+# QuickBooks silently becomes impossible — the exact shape of the billing-webhook outage.
+# Auth is the one-shot nonce stored on the tenant row, compared in constant time.
+verify_jwt = false
+
+# NOTE: `github-monday-bug` and `migrate-style-images` are deployed on the project but have
+# no directory in this repo, so they are deliberately absent here — a [functions] block for
+# a function the CLI cannot find is not something to invent. `github-monday-bug` runs with
+# verify_jwt = false; leave it alone unless it is brought into the repo.

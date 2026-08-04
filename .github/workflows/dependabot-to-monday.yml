@@ -2,7 +2,7 @@ name: Dependabot alerts to Monday (via Issues)
 
 on:
   schedule:
-    - cron: "0 13 * * *"
+    - cron: "0 10 * * *"   # 10:00 UTC daily
   workflow_dispatch: {}
 
 permissions:
@@ -60,15 +60,23 @@ jobs:
               continue
             fi
 
-            body="**Dependabot security alert ${marker}**
-
-- Package: \`$package\` ($ecosystem)
-- Manifest: \`$manifest\`
-- Severity: **$severity**
-- Advisory: $ghsa
-- Alert: $alert_url
-
-Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR."
+            # Built with printf, NOT a multi-line bash string. The previous version
+            # continued at column 1, which escaped this `run: |` block scalar and left the
+            # whole workflow file unparseable — GitHub could not read the `on:` block, so it
+            # created a FAILED run (with "No jobs were run") on every single push to beta.
+            # Indenting those lines to stay inside the scalar would instead put the leading
+            # whitespace inside the string, and 4+ spaces makes Markdown render the bullet
+            # list as a code block. printf keeps the YAML valid and the body clean.
+            body=$(printf '%s\n' \
+              "**Dependabot security alert ${marker}**" \
+              "" \
+              "- Package: \`$package\` ($ecosystem)" \
+              "- Manifest: \`$manifest\`" \
+              "- Severity: **$severity**" \
+              "- Advisory: $ghsa" \
+              "- Alert: $alert_url" \
+              "" \
+              "Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR.")
 
             echo "Creating issue for alert #$number ($ghsa)..."
             gh issue create --repo "$REPO" \

@@ -1,11 +1,12 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>StructureStudio — Operator Admin</title>
+<link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC;color:#1E293B}#root{max-width:1040px;margin:0 auto}</style>
 </head><body><div id="root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js" crossorigin="anonymous"></script>
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 const { createClient } = window.supabase;
@@ -20,7 +21,18 @@ const { createClient } = window.supabase;
 
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// SESSION-ISOLATED on purpose. With supabase-js defaults this page shares localStorage with
+// portal.html on the same origin, so it silently adopted (and auto-refreshed) whatever portal
+// session was signed in and sent THAT user's JWT instead of the anon key. admin-catalog's gate
+// is dual-credential, so a signed-in NON-operator then hit the hard 403 that
+// `checkAdminAuth` returns for a real-but-unauthorized user and could never reach the password
+// path at all — i.e. break-glass was broken in exactly the situation you'd reach for it.
+// Also stops `detectSessionInUrl` from consuming an auth fragment that lands on /admin.
+// The page's stated model is password-only, no session (see the header above); this makes the
+// code match it.
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+});
 
 // Hide the operator "Email Sender" card for now. Flip to true to restore it — all
 // the wiring (connect/disconnect/test + the admin-catalog actions) stays in place.
@@ -181,6 +193,8 @@ function downloadFile(name, text) {
 
 function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
 
+// ─── Read-only impersonation view (operator "view portal as <client>") ───
+// Renders the SAME Designs & Leads table the owner portal shows, from the
 function AdminApp() {
   const [pwd, setPwd] = useState("");
   const [authed, setAuthed] = useState(false);
@@ -201,6 +215,25 @@ function AdminApp() {
   const [ncCompany, setNcCompany] = useState("");
   const [ncTemplate, setNcTemplate] = useState("__none__");
   const [ncIdTouched, setNcIdTouched] = useState(false);
+  // Non-billable = CSM Synergy's own / demo / testing accounts: they skip the billing
+  // gate. A normal new client is billable, so this defaults OFF.
+  const [ncExempt, setNcExempt] = useState(false);
+  // Account-level discount (migration 058) — an attribute of the customer, not of a
+  // purchase, so it follows them onto every feature they add later.
+  const [ncDiscount, setNcDiscount] = useState("0");
+  // Scope: all features, or only the ones ticked. Empty list on the wire = everything.
+  const [ncAllFeat, setNcAllFeat] = useState(true);
+  const [ncFeat, setNcFeat] = useState([]);
+  // Per-client billing editor: the customers who need a discount usually already exist.
+  const [billOpen, setBillOpen] = useState(false);
+  const [billPct, setBillPct] = useState("0");
+  const [billExempt, setBillExempt] = useState(false);
+  const [billAllFeat, setBillAllFeat] = useState(true);
+  const [billFeat, setBillFeat] = useState([]);
+  // Dated free period (059) — yyyy-mm-dd, blank = none.
+  const [billUntil, setBillUntil] = useState("");
+  // Billable features, from billing_plans via list_clients — never hardcoded here.
+  const [features, setFeatures] = useState([]);
   const [linkOpen, setLinkOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState("");
   const [linkRole, setLinkRole] = useState("owner");
@@ -225,7 +258,7 @@ function AdminApp() {
     try {
       const c = await api("list_clients", pwd);
       const m = await api("get_master", pwd);
-      setClients(c.clients || []); setMaster(m); setAuthed(true);
+      setClients(c.clients || []); setFeatures(c.features || []); setMaster(m); setAuthed(true);
       loadEmailSender();   // best-effort; never blocks login
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
@@ -265,7 +298,7 @@ function AdminApp() {
     if (!to) return;
     setEmailTestBusy(true); setMsg(null);
     try {
-      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal.html" });
+      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal" });
       flash({ ok: `Test sent to ${r.sentTo}${r.senderEmail ? ` from ${r.senderEmail}` : ""} — check the inbox. It's a password-reset email; nothing changes unless you click the link.` });
     } catch (e) { flash({ err: e.message }); }
     setEmailTestBusy(false);
@@ -274,6 +307,14 @@ function AdminApp() {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null); setReassignFrom(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
     setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
+    setBillOpen(false);
+    // Seed the billing editor from the list row so it opens showing what is actually set.
+    const row = clients.find((c) => c.client_id === cid);
+    setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
+    // NULL / empty in the database means "every feature", which is the radio default.
+    const scoped = Array.isArray(row?.discountFeatures) ? row.discountFeatures : [];
+    setBillAllFeat(scoped.length === 0); setBillFeat(scoped);
+    setBillUntil(row?.exemptUntil ? String(row.exemptUntil).slice(0, 10) : "");
     if (!cid) return;
     setBusy(true);
     try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
@@ -285,11 +326,64 @@ function AdminApp() {
     if (!id || !ncCompany.trim()) return;
     setBusy(true); setMsg(null);
     try {
-      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate });
-      const c = await api("list_clients", pwd); setClients(c.clients || []);
-      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false);
+      await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt, discountPercent: ncExempt ? 0 : (Number(ncDiscount) || 0), discountFeatures: ncAllFeat ? [] : ncFeat });
+      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
+      setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false); setNcExempt(false); setNcDiscount("0"); setNcAllFeat(true); setNcFeat([]);
       await loadClient(id);
-      flash({ ok: `Client "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
+      flash({ ok: `Builder "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+  // Which features a discount covers. All (empty list on the wire) or a chosen few.
+  // Rendered in both the New client form and the per-client Billing panel.
+  const FeatureScope = ({ all, setAll, picked, setPicked, disabled }) => (
+    <div style={{ marginTop: 8, opacity: disabled ? 0.5 : 1, pointerEvents: disabled ? "none" : "auto" }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, color: "#1E293B" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="radio" checked={all} onChange={() => setAll(true)} />
+          <span>Every feature</span>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="radio" checked={!all} onChange={() => setAll(false)} />
+          <span>Only the ones I pick</span>
+        </label>
+      </div>
+      {!all && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginTop: 8, paddingLeft: 2 }}>
+          {features.length === 0 && <span style={{ fontSize: 12, color: "#B91C1C" }}>No billable features found.</span>}
+          {features.map((f) => (
+            <label key={f.feature} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+              <input type="checkbox" checked={picked.indexOf(f.feature) !== -1}
+                onChange={(e) => setPicked(e.target.checked
+                  ? picked.concat([f.feature])
+                  : picked.filter((x) => x !== f.feature))} />
+              <span>{f.name}{f.required ? " (required)" : ""}{f.availability === "coming_soon" ? " — soon" : ""}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {!all && picked.length === 0 && (
+        <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 6 }}>
+          Pick at least one feature, or choose "Every feature" — an empty list means no discount applies anywhere.
+        </div>
+      )}
+    </div>
+  );
+
+  const saveBilling = async () => {
+    if (!sel) return;
+    const pct = Math.round(Number(billPct));
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) { flash({ err: "Discount must be a whole number from 0 to 100." }); return; }
+    if (pct > 0 && !billExempt && !billAllFeat && billFeat.length === 0) {
+      flash({ err: "Choose which features the discount applies to, or select \"Every feature\"." }); return;
+    }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api("set_billing", pwd, { clientId: sel, billingExempt: billExempt, discountPercent: pct,
+        discountFeatures: billAllFeat ? [] : billFeat, exemptUntil: billUntil });
+      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
+      setBillOpen(false);
+      flash({ ok: `Billing saved for ${sel}. ${r.note || ""}`.trim() });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -302,7 +396,7 @@ function AdminApp() {
       const email = ownerEmail.trim();
       const r = await api("link_owner", pwd, {
         clientId: sel, email, role: linkRole,
-        portalUrl: location.origin + "/portal.html",
+        portalUrl: location.origin + "/portal",
         ...(reassign ? { reassign: true } : {}),
       });
       const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
@@ -317,7 +411,11 @@ function AdminApp() {
       // pull the current client out of its message so the prompt can name it.
       const errMsg = (e && e.message) || String(e);
       if (/reassign\s*:\s*true/i.test(errMsg)) {
-        const m = /already linked to client "([^"]+)"/.exec(errMsg);
+        // Tolerates BOTH wordings: the server said "client" before the 2026-08-02
+        // builder rename, and an operator's browser can be running a cached page
+        // against a newer function (or vice versa) — a strict match would silently
+        // stop naming the tenant in the reassign prompt.
+        const m = /already linked to (?:client|builder) "([^"]+)"/.exec(errMsg);
         setReassignFrom({ email: ownerEmail.trim(), role: linkRole, fromClient: m ? m[1] : null });
       } else {
         setReassignFrom(null);
@@ -327,17 +425,17 @@ function AdminApp() {
     setBusy(false);
   };
   // Operator hard-delete: server wipes the tenant + all its data (catalog,
-  // designs, settings, logins, storage). Guarded by typing the client id.
+  // designs, settings, logins, storage). Guarded by typing the builder id.
   const deleteClient = async () => {
     const id = sel;
     if (!id || delConfirm.trim() !== id) return;
     setBusy(true); setMsg(null);
     try {
       const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
-      const c = await api("list_clients", pwd); setClients(c.clients || []);
+      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
       const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
-      flash({ ok: `Client "${id}" deleted${parts ? ` (${parts})` : ""}.` });
+      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -488,20 +586,24 @@ function AdminApp() {
   return (
     <div>
       <div style={S.header}><div style={S.badge}>SS</div><div style={{ fontWeight: 800 }}>Operator Admin</div>
-        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} clients</div></div>
+        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} builders</div></div>
       <div style={S.wrap}>
         {msg && msg.err && <div style={S.err}>{msg.err}</div>}
         {msg && msg.ok && <div style={S.ok}>{msg.ok}</div>}
 
         <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={S.lbl}>Client</span>
+          <span style={S.lbl}>Builder</span>
           <select value={sel} onChange={(e) => loadClient(e.target.value)} style={{ ...S.input, minWidth: 240 }}>
-            <option value="">— select a client —</option>
+            <option value="">— select a builder —</option>
             {clients.map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id} ({c.client_id})</option>)}
           </select>
-          <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New client"}</button>
+          <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New builder"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
-          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a client first"}>{delOpen ? "Cancel" : "Delete client"}</button>
+          <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a builder first"}>{billOpen ? "Cancel" : "Billing"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
+          {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
+              client (portal.html auto-opens ?view= for logged-in operators). */}
+          {sel && <a href={`/portal?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -512,7 +614,7 @@ function AdminApp() {
 
         {newOpen && (
           <div style={{ ...S.card, background: "#DBEAFF", border: "1px solid #75E6DA" }}>
-            <div style={S.h2}>Create a new client</div>
+            <div style={S.h2}>Create a new builder</div>
             <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
               Creates the tenant config. <b>No template</b> starts blank (standard contact form, no sizes/options — you
               add everything in the tabs). Or clone a template to copy its contact fields, default sizes &amp; options.
@@ -521,13 +623,109 @@ function AdminApp() {
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input value={ncCompany} onChange={(e) => { const v = e.target.value; setNcCompany(v); if (!ncIdTouched) setNcId(slugify(v)); }} placeholder="Company name (e.g. Acme Barns)" style={{ ...S.input, minWidth: 220 }} />
-              <input value={ncId} onChange={(e) => { setNcId(e.target.value.toLowerCase()); setNcIdTouched(true); }} placeholder="client-id (auto from name)" title="Auto-generated from the company name; edit to override" style={{ ...S.input, minWidth: 200 }} />
+              <input value={ncId} onChange={(e) => { setNcId(e.target.value.toLowerCase()); setNcIdTouched(true); }} placeholder="builder-id (auto from name)" title="Auto-generated from the company name; edit to override" style={{ ...S.input, minWidth: 200 }} />
               <select value={ncTemplate} onChange={(e) => setNcTemplate(e.target.value)} style={{ ...S.input }}>
                 <option value="__none__">No template — blank (recommended)</option>
                 <option value="">Clone template: junior-barns</option>
                 {clients.map((c) => <option key={c.client_id} value={c.client_id}>Clone: {c.client_id}</option>)}
               </select>
-              <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create client</button>
+              <button onClick={createNewClient} disabled={busy || !ncId.trim() || !ncCompany.trim()} style={S.btn(busy || !ncId.trim() || !ncCompany.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create builder</button>
+            </div>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+              <input type="checkbox" checked={ncExempt} onChange={(e) => setNcExempt(e.target.checked)} style={{ marginTop: 2 }} />
+              <span>
+                <b>Non-billable</b> — CSM Synergy internal / demo / testing account
+                <div style={{ fontSize: 11.5, color: "#475569", marginTop: 2, lineHeight: 1.45 }}>
+                  Skips the billing gate: the portal opens normally with no subscription and is never charged.
+                  Leave this OFF for a real customer — they'll land on Billing and activate before anything unlocks.
+                </div>
+              </span>
+            </label>
+            {/* Account discount, not a coupon: it belongs to the ACCOUNT, so it applies to
+                whatever they subscribe to whenever, with no code to re-enter or share. */}
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 13, color: "#1E293B" }}>
+              <input type="number" min="0" max="100" step="1" value={ncDiscount}
+                onChange={(e) => setNcDiscount(e.target.value)} disabled={ncExempt}
+                style={{ ...S.input, width: 74, marginTop: -2, opacity: ncExempt ? 0.5 : 1 }} />
+              <span>
+                <b>% off</b> — ongoing discount on recurring price
+                <div style={{ fontSize: 11.5, color: "#475569", marginTop: 2, lineHeight: 1.45 }}>
+                  Leave 0 for full price. Applies for as long as each subscription runs — no coupon code to
+                  re-enter. Setup fees are never discounted.
+                  {ncExempt && <b> Not applicable to a non-billable account.</b>}
+                </div>
+              </span>
+            </div>
+            {/* Always rendered, greyed until a percentage exists — hiding it entirely meant
+                the per-feature option was undiscoverable unless you already knew it existed. */}
+            {!ncExempt && (
+              <div style={{ marginTop: 4, paddingLeft: 2 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: Number(ncDiscount) > 0 ? "#334155" : "#94A3B8" }}>
+                  Discount applies to
+                  {!(Number(ncDiscount) > 0) && <span style={{ fontWeight: 600 }}> — enter a % above to choose</span>}
+                </div>
+                <FeatureScope all={ncAllFeat} setAll={setNcAllFeat} picked={ncFeat} setPicked={setNcFeat}
+                  disabled={!(Number(ncDiscount) > 0)} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {billOpen && (
+          <div style={{ ...S.card, background: "#F0FDF4", border: "1px solid #86EFAC" }}>
+            <div style={S.h2}>Billing — {sel}</div>
+            <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
+              The discount belongs to the <b>account</b>, so it applies to every feature this tenant ever
+              subscribes to, for as long as each subscription runs. Recurring price only — setup fees are
+              never discounted.
+            </div>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                <input type="number" min="0" max="100" step="1" value={billPct}
+                  onChange={(e) => setBillPct(e.target.value)} disabled={billExempt}
+                  style={{ ...S.input, width: 74, opacity: billExempt ? 0.5 : 1 }} />
+                <b>% off recurring</b>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+                <input type="checkbox" checked={billExempt} onChange={(e) => setBillExempt(e.target.checked)} />
+                <b>Non-billable</b> (never charged, skips the gate)
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                <b>Free until</b>
+                <input type="date" value={billUntil} onChange={(e) => setBillUntil(e.target.value)} style={{ ...S.input, width: 160 }} />
+                {billUntil && <button type="button" onClick={() => setBillUntil("")} style={{ ...S.btn("#F1F5F9", "#64748B"), padding: "5px 9px", fontSize: 11 }}>clear</button>}
+              </label>
+              <button onClick={saveBilling} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save billing</button>
+            </div>
+            {!billExempt && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: Number(billPct) > 0 ? "#334155" : "#94A3B8" }}>
+                  Discount applies to
+                  {!(Number(billPct) > 0) && <span style={{ fontWeight: 600 }}> — enter a % above to choose</span>}
+                </div>
+                <FeatureScope all={billAllFeat} setAll={setBillAllFeat} picked={billFeat} setPicked={setBillFeat}
+                  disabled={!(Number(billPct) > 0)} />
+              </div>
+            )}
+            {/* Two ways to get this wrong, both expensive, so say them out loud. */}
+            <div style={{ fontSize: 12, color: "#166534", marginTop: 12, lineHeight: 1.55, background: "#DCFCE7", borderRadius: 8, padding: "9px 12px" }}>
+              <b>Applies to future subscriptions only.</b> The gateway stores the amount on each subscription,
+              so changing the discount does not re-price anything already running — it affects what they
+              subscribe to next.
+              <div style={{ marginTop: 6 }}>
+                <b>Non-billable vs Free until.</b> Non-billable is permanent and silent — a failed payment on
+                such an account produces no warning and no lock, because it bypasses the gate entirely. "Free
+                until" is a dated window: they keep working and see a countdown with their rate, then the normal
+                gate takes over. Subscribing ends the countdown early. Use the date for a customer you intend to
+                convert; use Non-billable for our own accounts.
+              </div>
+              {billExempt === false && clients.find((c) => c.client_id === sel)?.billingExempt && (
+                <div style={{ marginTop: 6, color: "#991B1B" }}>
+                  <b>Careful:</b> you are removing Non-billable. If {sel} has no active subscription they will be
+                  locked out of their portal the moment this saves. Set the discount first, have them subscribe,
+                  then remove the exemption.
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -536,7 +734,7 @@ function AdminApp() {
           <div style={{ ...S.card, background: "#EFF6FF", border: "1px solid #BFDBFE" }}>
             <div style={S.h2}>Link an owner login</div>
             {!sel ? (
-              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a builder above first.</div>
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#475569", marginBottom: 10, lineHeight: 1.5 }}>
@@ -554,7 +752,7 @@ function AdminApp() {
                 {reassignFrom && (
                   <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
                     <div style={{ fontSize: 13, color: "#1B7895", marginBottom: 8, lineHeight: 1.5 }}>
-                      <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another client"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other client"}'s designs &amp; leads.
+                      <b>{reassignFrom.email}</b> already has a login linked to {reassignFrom.fromClient ? <b>{reassignFrom.fromClient}</b> : "another builder"}. Reassigning <b>moves</b> that same login to <b>{sel}</b> — they'll no longer see {reassignFrom.fromClient || "the other builder"}'s designs &amp; leads.
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                       <button onClick={() => linkOwner(true)} disabled={busy} style={S.btn(busy ? "#9CA3AF" : "#B45309", "#FFF")}>{busy ? "Reassigning…" : `Reassign to ${sel}`}</button>
@@ -590,9 +788,9 @@ function AdminApp() {
 
         {delOpen && (
           <div style={{ ...S.card, background: "#FEF2F2", border: "1px solid #FECACA" }}>
-            <div style={S.h2}>⚠️ Delete client</div>
+            <div style={S.h2}>⚠️ Delete builder</div>
             {!sel ? (
-              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a client above first.</div>
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a builder above first.</div>
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
@@ -625,11 +823,12 @@ function AdminApp() {
                 </span>
               </div>
             ))}
-            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Global layout-item defaults. Per-client building styles &amp; sizes live under the <b>Building Styles</b> and <b>CSV / Pricing</b> tabs; new clients are seeded with the <b>Clone</b> feature.</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 12 }}>Global layout-item defaults. Per-builder building styles &amp; sizes live under the <b>Building Styles</b> and <b>CSV / Pricing</b> tabs; new builders are seeded with the <b>Clone</b> feature.</div>
           </div>
         )}
 
-        {tab !== "master" && !sel && <div style={S.card}>Select a client above to manage their styles and items.</div>}
+        {tab !== "master" && !sel && <div style={S.card}>Select a builder above to manage their styles and items.</div>}
+
 
         {tab === "items" && sel && cat && master && (() => {
           const saved = new Set((cat.clientLayoutItems || []).filter((i) => i.active).map((i) => i.item_key));
@@ -646,7 +845,7 @@ function AdminApp() {
                 </button>
               </div>
             </div>
-            <div style={{ fontSize: 12, color: "#64748B", margin: "8px 0 10px" }}>Tick the placeable items this client gets, then click <b>Save</b> to apply them all at once.</div>
+            <div style={{ fontSize: 12, color: "#64748B", margin: "8px 0 10px" }}>Tick the placeable items this builder gets, then click <b>Save</b> to apply them all at once.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {master.layoutItemTypes.map((it) => {
                 const on = itemSel.has(it.item_key);
@@ -668,7 +867,7 @@ function AdminApp() {
             <div style={S.h2}>Building styles for <span style={{ color: ACCENT }}>{sel}</span></div>
 
             {/* This client's own styles (created here or assigned from master) */}
-            <span style={S.lbl}>This client's styles</span>
+            <span style={S.lbl}>This builder's styles</span>
             {(cat.buildingStyles || []).length === 0 &&
               <div style={{ color: "#94A3B8", fontSize: 13, padding: "6px 0" }}>None yet — create one below.</div>}
             {(cat.buildingStyles || []).map((row) => {
@@ -707,14 +906,14 @@ function AdminApp() {
 
             {/* Create a new per-client style (name + image) */}
             <div style={{ marginTop: 16, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
-              <span style={S.lbl}>Create a new style for this client</span>
+              <span style={S.lbl}>Create a new style for this builder</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
                 <input value={newStyleName} onChange={(e) => setNewStyleName(e.target.value)} placeholder="Style name (e.g. Garage)" style={{ ...S.input, minWidth: 200 }} />
                 <input key={fileKey} type="file" accept="image/*" onChange={(e) => onPickStyleImg(e.target.files && e.target.files[0])} style={{ fontSize: 12 }} />
                 {newStyleImg && <img src={newStyleImg.base64} alt="" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />}
                 <button onClick={createStyle} disabled={busy || !newStyleName.trim()} style={S.btn(busy || !newStyleName.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Create style</button>
               </div>
-              <div style={{ fontSize: 11, color: "#1B7895", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this client.</div>
+              <div style={{ fontSize: 11, color: "#1B7895", marginTop: 6 }}>Add sizes &amp; prices afterward via CSV import. Styles are private to this builder.</div>
             </div>
 
           </div>
