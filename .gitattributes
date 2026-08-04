@@ -9,3 +9,8 @@
 # newline so the command silently splits in two. The old fail-open hook happened to survive
 # CRLF because it used neither construct; that was luck, not design. Verified 2026-08-04.
 .githooks/** text eol=lf
+
+# Same reasoning for shell scripts anywhere in the tree — scripts/pre-push-selftest.sh is
+# `sh`-executed and carries the same CRLF-fragile constructs (case statements, heredocs
+# whose terminator would gain a CR).
+*.sh text eol=lf
