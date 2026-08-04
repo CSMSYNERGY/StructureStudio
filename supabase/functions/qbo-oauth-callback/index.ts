@@ -16,8 +16,8 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { qboApiBase } from "../_shared/qboToken.ts";
+import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 
-const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
 const ALLOWED_HOSTS = new Set(["structurestudio.app", "beta.structurestudio.app"]);
 const DEFAULT_HOST = "structurestudio.app";
 
@@ -108,7 +108,10 @@ Deno.serve(async (req) => {
 
   let tok: any;
   try {
-    const res = await fetch(TOKEN_URL, {
+    // Discovery is capped at 4s and falls back to the pinned endpoint, so the worst case here is
+    // a slightly slower redirect — never a failed exchange. See _shared/qboDiscovery.ts.
+    const { token: tokenUrl } = await qboEndpoints();
+    const res = await fetch(tokenUrl, {
       method: "POST",
       headers: {
         Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,

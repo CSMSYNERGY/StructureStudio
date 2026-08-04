@@ -22,8 +22,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 import { logEdgeError } from "./logError.ts";
-
-const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+import { qboEndpoints } from "./qboDiscovery.ts";
 
 /** Sandbox and production share OAuth endpoints; only the API base differs. */
 function apiBase(): string {
@@ -178,9 +177,13 @@ async function refreshAtIntuit(admin: any, clientId: string, refreshToken: strin
     throw new QboTransient("QuickBooks app credentials are not configured.");
   }
 
+  // Resolved BEFORE the claim is at risk: qboEndpoints() cannot throw, but reading it here keeps
+  // the fetch below the only thing between us and Intuit.
+  const { token: tokenUrl } = await qboEndpoints();
+
   let res: Response;
   try {
-    res = await fetch(TOKEN_URL, {
+    res = await fetch(tokenUrl, {
       method: "POST",
       headers: {
         Authorization: `Basic ${btoa(`${creds.id}:${creds.secret}`)}`,

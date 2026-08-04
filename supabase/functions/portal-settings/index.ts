@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
+import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
@@ -2180,7 +2181,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // Best-effort revoke at Intuit — a failure here must not block the disconnect.
     const id = Deno.env.get("QBO_CLIENT_ID"), secret = Deno.env.get("QBO_CLIENT_SECRET");
     if (id && secret && cs?.qbo_refresh_token) {
-      await fetch("https://developer.api.intuit.com/v2/oauth2/tokens/revoke", {
+      const { revoke: revokeUrl } = await qboEndpoints();
+      await fetch(revokeUrl, {
         method: "POST",
         headers: {
           Authorization: `Basic ${btoa(`${id}:${secret}`)}`,
