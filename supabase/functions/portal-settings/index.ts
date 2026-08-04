@@ -1049,6 +1049,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, saved, deleted, skipped });
   }
 
+  // LEGACY (2026-08-03): the portal's catalog editors moved to per-line saves (save_fixture /
+  // delete_fixture below) and spreadsheet upsert (import_fixtures) — nothing in the current
+  // portal calls save_doors/save_ramps/save_windows anymore. Kept only so an older cached
+  // portal.html can still save; do not extend these.
+  //
   // Full-replace this tenant's DOORS (Options tab → Doors section, fixture_items). Takes the
   // COMPLETE desired door list: rows with an id update, rows without insert, and any existing
   // door absent from the list is deleted. Scoped to category='door' so windows/ramps (same
@@ -1209,6 +1214,143 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // ═══ Per-line fixture editing (2026-08-03) ════════════════════════════════════
+  // The catalog editors save one line at a time now. One validation source shared by
+  // save_fixture and import_fixtures, mirroring the legacy full-replace rules above exactly.
+  // Ramps/windows force swing/op false/null; ramp height_in holds LENGTH (error wording).
+  // price NULL is legal (NULL-price contract: not-yet-priced = not offered) — never coerce
+  // blank to 0. Op exclusivity (Double / Slide up are standalone) is normalized HERE because
+  // spreadsheet imports bypass the UI's setOp logic.
+  const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp"]);
+  const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
+    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
+    const name = String(row?.name ?? "").trim();
+    if (!name) return { err: `row ${i + 1}: blank name` };
+    const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
+    if (w === null || Number.isNaN(w) || (w as number) <= 0) return { err: `${name}: invalid width` };
+    if (h === null || Number.isNaN(h) || (h as number) <= 0) return { err: `${name}: invalid ${category === "ramp" ? "length" : "height"}` };
+    const price = numOrNull(row?.price);
+    if (Number.isNaN(price)) return { err: `${name}: invalid price` };
+    const isDoor = category === "door";
+    const swingIn = isDoor && row?.swingIn === true, swingOut = isDoor && row?.swingOut === true;
+    let opRight = isDoor && row?.opRight === true, opLeft = isDoor && row?.opLeft === true;
+    const opDouble = isDoor && row?.opDouble === true;
+    let opSlideUp = isDoor && row?.opSlideUp === true;
+    if (opDouble && opSlideUp) opSlideUp = false;
+    if (opDouble || opSlideUp) { opRight = false; opLeft = false; }
+    const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
+    const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
+    const rec: Record<string, unknown> = {
+      client_id: clientId, category, name,
+      plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
+      show_image_on_estimate: row?.showImageOnEstimate !== false,
+      width_in: w, height_in: h, price,
+      swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
+      op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
+      active: row?.active !== false,
+      archived: row?.archived === true,
+      internal_only: row?.internalOnly === true,
+      updated_at: new Date().toISOString(),
+    };
+    if (Object.prototype.hasOwnProperty.call(row ?? {}, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+    return { rec };
+  };
+
+  // Save ONE catalog fixture. Update is IN PLACE by uuid — building_size_inclusions
+  // references fixture ids with no FK (074), so delete+reinsert would orphan an item's
+  // inclusions. Scoped by id+client_id+category: a foreign or cross-category id matches
+  // nothing → 404, never a silent success. New rows go to the END of the palette
+  // (max+1 per client+category — a default 0 would pin them to the top of the picker).
+  if (action === "save_fixture") {
+    const category = String(payload?.category ?? "").trim();
+    if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
+    const v = validateFixtureRow(payload, category, 0);
+    if (v.err) return json({ error: v.err }, 400);
+    const id = String(payload?.id ?? "").trim();
+    if (id) {
+      const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
+        .eq("id", id).eq("client_id", clientId).eq("category", category);
+      if (error) return json({ error: error.message }, 500);
+      if (!count) return json({ error: "Item not found." }, 404);
+      return json({ ok: true, id });
+    }
+    const { data: maxRow } = await admin.from("fixture_items").select("sort_order")
+      .eq("client_id", clientId).eq("category", category)
+      .order("sort_order", { ascending: false }).limit(1).maybeSingle();
+    v.rec!.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
+    const ins = await admin.from("fixture_items").insert(v.rec!).select("id").maybeSingle();
+    if (ins.error) return json({ error: ins.error.message }, 500);
+    return json({ ok: true, id: ins.data!.id });
+  }
+
+  // Delete ONE catalog fixture. Deliberately does NOT clean building_size_inclusions —
+  // 074 documents stale fixture-id inclusion rows as benign, and the legacy full-replace
+  // delete leaves them too. Placed instances on saved designs keep rendering from their
+  // own snapshot.
+  if (action === "delete_fixture") {
+    const id = String(payload?.id ?? "").trim();
+    if (!id) return json({ error: "id is required." }, 400);
+    const { error, count } = await admin.from("fixture_items").delete({ count: "exact" })
+      .eq("id", id).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Item not found." }, 404);
+    return json({ ok: true });
+  }
+
+  // Persist drag-reorder of a category's fixtures (mirrors reorder_styles). sort_order
+  // drives the designer's picker order via get_fixtures.
+  if (action === "reorder_fixtures") {
+    const category = String(payload?.category ?? "").trim();
+    if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
+    if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    let i = 0;
+    for (const fid of payload.orderedIds) {
+      const sid = String(fid ?? "").trim();
+      if (!sid) continue;
+      const { error } = await admin.from("fixture_items").update({ sort_order: i })
+        .eq("client_id", clientId).eq("category", category).eq("id", sid);
+      if (error) return json({ error: error.message }, 500);
+      i++;
+    }
+    return json({ ok: true });
+  }
+
+  // Spreadsheet import (Export → edit in Excel → re-upload). UPSERT-ONLY by design: rows
+  // with a known id update in place, rows without one insert at the end; rows absent from
+  // the file are NEVER deleted (a partial or filtered sheet must not wipe the catalog —
+  // deletes happen only in the UI). Image URLs never ride in the sheet, so the
+  // hasOwnProperty gate in validateFixtureRow leaves each row's photo untouched.
+  if (action === "import_fixtures") {
+    const category = String(payload?.category ?? "").trim();
+    if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);
+    const exRes = await admin.from("fixture_items").select("id, sort_order").eq("client_id", clientId).eq("category", category);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    let nextSort = (exRes.data ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.sort_order) || 0), -1) + 1;
+    let saved = 0, added = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.rows) {
+      const v = validateFixtureRow(row, category, i);
+      if (v.err) { skipped.push(v.err); i++; continue; }
+      const rid = String(row?.id ?? "").trim();
+      if (rid && existingIds.has(rid)) {
+        const res = await admin.from("fixture_items").update(v.rec!)
+          .eq("id", rid).eq("client_id", clientId).eq("category", category);
+        if (res.error) { skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${res.error.message}`); i++; continue; }
+        saved++;
+      } else {
+        v.rec!.sort_order = nextSort++;
+        const res = await admin.from("fixture_items").insert(v.rec!);
+        if (res.error) { skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${res.error.message}`); i++; continue; }
+        added++;
+      }
+      i++;
+    }
+    return json({ ok: true, saved, added, skipped });
   }
 
   // Archive / un-archive a BUILT-IN layout option (singleDoor/doubleDoor/window/ramp/…). Archived =

@@ -2944,13 +2944,16 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   );
 }
 
-// ─── Doors (Options tab → its own section, like Colors) ───
-// The Fixtures catalog, doors first (fixture_items where category='door'). One flat row per
-// door — its own size + price + swing/operation + photo — mirroring the Colors sections.
-// Loads/saves via portal-settings (catalog / save_doors / upload_fixture_image); full-list
-// replace on save (server deletes any door not in the payload, scoped to category='door').
-// A swing/operation ★ default only shows — and is only saved — when BOTH opposite options are
-// checked; the customer can flip to the other on the plan. Checkboxes use the portal mint.
+// ─── Doors / Ramps / Windows (Options tab → the fixtures catalog) ───
+// fixture_items, one flat row per item (its own size + price + photo; doors also carry
+// swing/operation). Each item renders as ONE read-only summary line and is edited/saved
+// INDIVIDUALLY via save_fixture / delete_fixture — the old full-list-replace saves are gone
+// from the UI, so a save can never silently delete the rest of the list. Drag ⠿ to reorder
+// (reorder_fixtures → the designer's picker order). Export/Import is an Excel round-trip:
+// a real .xlsx (CSV fallback) with an ID column; re-import matches by ID and UPSERTS ONLY —
+// rows missing from the file are never deleted. A swing/operation ★ default only shows —
+// and is only saved — when BOTH opposite options are checked; the customer can flip to the
+// other on the plan. Checkboxes use the portal mint.
 const DOOR_MINT = "#75E6DA";
 // Door sizes are entered as feet/inches ( 8'  ·  6'3"  ·  36" ) but stored as inches. No
 // spaces allowed, so the width/height parse cleanly. parseFtIn -> inches (number), NaN if
@@ -2974,211 +2977,423 @@ function fmtFtIn(inches) {
   return ft + "'" + inch + '"';
 }
 function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number" && isFinite(v)) ? v : ""; }
-function DoorsView({ viewingLabel = null, clientId = null }) {
-  // Operator "view as": scope EVERY doors call to the client on screen explicitly (its own
-  // prop), not only the ambient ssTargetClientId transport override — so a door is always
-  // read/written for the tenant shown, never silently the operator's own. This also guards
-  // the full-list-replace save: the list you see and the list you save are the same tenant.
-  // Own-portal (no viewingLabel) sends nothing → normal own-tenant path, unchanged.
+
+// The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
+// ("height" for doors/windows, "length" for ramps — height_in holds the ramp LENGTH).
+function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null }) {
+  // Operator "view as": scope EVERY call to the client on screen explicitly, so an item is
+  // always read/written for the tenant shown, never silently the operator's own.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [imgBusyIdx, setImgBusyIdx] = useState(null);   // row index currently uploading a photo
-  const [imgFileKey, setImgFileKey] = useState(0);      // resets the hidden file inputs after a pick
-  const [sort, setSort] = useState({ key: null, dir: 1 });
+  const [edit, setEdit] = useState(null);            // { idx, draft } — idx -1 = adding a new item
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [imgBusy, setImgBusy] = useState(false);
+  const [imgFileKey, setImgFileKey] = useState(0);
+  const [dlBusy, setDlBusy] = useState(false);
+  const [fileKey, setFileKey] = useState(0);
 
+  const mapRow = (d) => ({
+    id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
+    width_in: d.width_in != null ? fmtFtIn(d.width_in) : "", height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
+    price: d.price != null ? String(d.price) : "",
+    swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
+    op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
+    image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
+  });
   const load = async () => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
-    const doors = (data.fixtures || []).filter((f) => (f.category || "door") === "door");
-    setRows(doors.map((d) => ({
-      id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
-      width_in: d.width_in != null ? fmtFtIn(d.width_in) : "",
-      height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
-      price: d.price != null ? String(d.price) : "",
-      swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
-      op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
-      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
-    })));
+    const list = (data.fixtures || []).filter((f) => (f.category || "door") === category).map(mapRow);
+    // Display order = the order drag persists: live items first, archived sink to the bottom.
+    setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
-  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: true, swing_default: null, op_right: true, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false, internalOnly: false }]);
-  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
-
-  // Header-click sort. Reorders the working list (and thus the saved sort_order) by the column.
-  const sortBy = (key, getVal) => setSort((s) => {
-    const dir = s.key === key ? -s.dir : 1;
-    setRows((rs) => rs.map((r) => r).sort((a, b) => { const av = getVal(a), bv = getVal(b); return (av < bv ? -1 : av > bv ? 1 : 0) * dir; }));
-    return { key, dir };
+  // One line's payload for save_fixture / import_fixtures. Sizes go over as inches.
+  const toPayload = (r) => ({
+    id: r.id || undefined, category, name: r.name, planLabel: r.plan_label,
+    showImageOnEstimate: r.show_image_on_estimate !== false,
+    widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
+    swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
+    opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
+    imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
   });
 
-  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const onRowImg = async (i, file) => {
-    if (!file) return;
-    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
-    setImgBusyIdx(i); setMsg(null);
-    try {
-      const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
-      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      setRow(i, { image_url: data.url });
-      setMsg({ ok: "Photo added — click “Save doors” to apply." });
-    } catch (e) { setMsg({ err: e.message }); }
-    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
-  };
-
-  const save = async () => {
-    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE door list with these ${rows.length} door(s)?
-
-Anything not shown here will be removed from their account.`)) return;
+  const saveLine = async () => {
+    if (!edit) return;
     setBusy(true); setMsg(null);
     try {
-      const doors = rows.map((r, i) => ({
-        id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
-        widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
-        swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
-        opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
-        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true, sortOrder: i,
-      }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_doors", doors }) });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_fixture", ...toPayload(edit.draft) }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      await load();
-      const skipped = data.skipped || [];
-      setMsg({ ok: `Saved ${data.saved || 0} door(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+      const saved = { ...edit.draft, id: edit.draft.id || (data && data.id) || null };
+      setRows((rs) => edit.idx < 0 ? [...rs, saved] : rs.map((r, j) => j === edit.idx ? saved : r));
+      setEdit(null);
+      setMsg({ ok: `Saved “${saved.name}”.` });
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
+  };
+
+  // Immediate toggle on a saved line (Archive / Unarchive): whole-row save with the patch
+  // applied — optimistic, rolled back on error.
+  const quickSave = async (idx, patch) => {
+    const before = rows[idx];
+    const after = { ...before, ...patch };
+    setBusy(true); setMsg(null);
+    setRows((rs) => rs.map((r, j) => j === idx ? after : r));
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_fixture", ...toPayload(after) }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    } catch (e) { setRows((rs) => rs.map((r, j) => j === idx ? before : r)); setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const confirmDelete = async () => {
+    const row = pendingDelete; if (!row) return;
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delete_fixture", id: row.id }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setRows((rs) => rs.filter((r) => r !== row));
+      setPendingDelete(null);
+      setMsg({ ok: `Deleted “${row.name}”.` });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const persistOrder = async (next) => {
+    setRows(next);
+    const ids = next.map((r) => r.id).filter(Boolean);
+    if (!ids.length) return;
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "reorder_fixtures", category, orderedIds: ids }) });
+    if (error || (data && data.error)) setMsg({ err: (error && error.message) || data.error });
+  };
+  const moveRow = (from, to) => {
+    if (from == null || to == null || from === to) return;
+    const next = rows.slice(); const [m] = next.splice(from, 1); next.splice(to, 0, m);
+    persistOrder(next);
+  };
+
+  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
+  const uploadImg = async (file) => {
+    const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
+    if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    return data.url;
+  };
+  const onDraftImg = async (file) => {
+    if (!file) return; if (!guardImg(file)) { setImgFileKey((k) => k + 1); return; }
+    setImgBusy(true); setMsg(null);
+    try { const url = await uploadImg(file); setDraft({ image_url: url }); } catch (e) { setMsg({ err: e.message }); }
+    setImgBusy(false); setImgFileKey((k) => k + 1);
+  };
+
+  // ── Excel round-trip. ASCII-only headers (a “×” becomes mojibake in Excel and the column
+  // silently drops on re-import). The ID column is the row key: keep it to update a row,
+  // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
+  const HEADERS = hasSwingOp
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Photo on estimate", "Active", "Internal only", "Archived"]
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", "Photo on estimate", "Active", "Internal only", "Archived"];
+  const yn = (b) => (b ? "yes" : "no");
+  const exportRows = () => rows.map((r) => hasSwingOp
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+  const doExport = async () => {
+    if (dlBusy || rows.length === 0) return;
+    const body = exportRows();
+    setDlBusy(true); setMsg(null);
+    let ExcelJS;
+    try { ExcelJS = await loadExcelJS(); }
+    catch (e) {
+      // Library unreachable → still hand back a usable CSV so the download never fully fails.
+      downloadFile(`${category}s-catalog.csv`, toCSV(HEADERS, body.map((r) => r.map((v) => (v == null ? "" : String(v))))));
+      setMsg({ err: `${e.message} Downloaded a plain CSV instead.` });
+      setDlBusy(false);
+      return;
+    }
+    try {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Catalog", { views: [{ state: "frozen", xSplit: 2, ySplit: 1 }] });
+      ws.addRow(HEADERS);
+      body.forEach((r) => ws.addRow(r));
+      const thin = { style: "thin", color: { argb: "FFCBD5E1" } };
+      const hdr = ws.getRow(1); hdr.height = 28;
+      for (let c = 1; c <= HEADERS.length; c++) {
+        const cell = hdr.getCell(c);
+        cell.font = { bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: c === 1 ? "FF94A3B8" : "FF334155" } };
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+        cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+      }
+      const nameW = Math.min(Math.max(10, ...body.map((r) => String(r[1] || "").length)) + 2, 34);
+      ws.columns.forEach((colObj, i) => { colObj.width = i === 0 ? 12 : i === 1 ? nameW : Math.min(Math.max(String(HEADERS[i]).length + 2, 9), 20); });
+      for (let r = 2; r <= ws.rowCount; r++) {
+        const row = ws.getRow(r);
+        for (let cc = 1; cc <= HEADERS.length; cc++) {
+          const cell = row.getCell(cc);
+          cell.border = { left: thin, right: thin, bottom: thin, top: thin };
+          cell.alignment = { vertical: "middle", horizontal: cc === 2 ? "left" : "center" };
+          if (cc === 2) cell.font = { bold: true };
+          if (cc === 1) cell.font = { size: 9, color: { argb: "FF94A3B8" } };
+        }
+        row.getCell(6).numFmt = '$#,##0';
+      }
+      ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: HEADERS.length } };
+      const buf = await wb.xlsx.writeBuffer();
+      downloadBlob(`${category}s-catalog.xlsx`, new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+      setMsg({ ok: "Exported. Edit in Excel, then Import — the ID column matches rows back up; leave it blank on rows you add. Rows you remove from the file are NOT deleted here." });
+    } catch (e) { setMsg({ err: `Could not build the Excel file: ${e.message}` }); }
+    setDlBusy(false);
+  };
+  const onImport = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null);
+    try {
+      if (file.size > 5_000_000) throw new Error("File too large (max 5MB).");
+      const isXlsx = /\.xlsx$/i.test(file.name) || file.type.includes("spreadsheetml");
+      const matrix = isXlsx ? await readXlsxMatrix(file, await loadExcelJS()) : parseCSV(await file.text());
+      if (matrix.length < 2) throw new Error("The sheet has no data rows.");
+      const lc = matrix[0].map((h) => String(h).trim().toLowerCase());
+      const col = (...names) => { for (const n of names) { const i = lc.indexOf(n); if (i >= 0) return i; } return -1; };
+      const iId = col("id"), iName = col("style", "name"), iLabel = col("label on plan", "label"),
+        iW = col("width"), iH = col(sizeWord === "length" ? "length" : "height", "height", "length"), iPrice = col("price"),
+        iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
+        iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
+        iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
+      if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
+      const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
+      const bool = (cols, i, dflt) => (i < 0 || String(cols[i] == null ? "" : cols[i]).trim() === "") ? dflt : truthy(cols[i]);
+      const importRows = matrix.slice(1).map((cols) => {
+        const row = {
+          id: iId >= 0 ? String(cols[iId] == null ? "" : cols[iId]).trim() : "",
+          name: cols[iName], planLabel: iLabel >= 0 ? cols[iLabel] : "",
+          widthIn: ftInToInches(String(cols[iW] == null ? "" : cols[iW]).replace(/\s/g, "")),
+          heightIn: ftInToInches(String(cols[iH] == null ? "" : cols[iH]).replace(/\s/g, "")),
+          price: cols[iPrice],
+          showImageOnEstimate: bool(cols, iPhoto, true), active: bool(cols, iActive, true),
+          internalOnly: bool(cols, iInternal, false), archived: bool(cols, iArch, false),
+        };
+        if (hasSwingOp) {
+          row.swingOut = bool(cols, iSwOut, false); row.swingIn = bool(cols, iSwIn, false);
+          const sd = String(iSwDef >= 0 ? (cols[iSwDef] == null ? "" : cols[iSwDef]) : "").trim().toLowerCase();
+          row.swingDefault = (sd === "in" || sd === "out") ? sd : null;
+          row.opRight = bool(cols, iOpR, false); row.opLeft = bool(cols, iOpL, false);
+          row.opDouble = bool(cols, iOpD, false); row.opSlideUp = bool(cols, iOpS, false);
+          const od = String(iOpDef >= 0 ? (cols[iOpDef] == null ? "" : cols[iOpDef]) : "").trim().toLowerCase();
+          row.opDefault = (od === "right" || od === "left") ? od : null;
+        }
+        return row;
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "import_fixtures", category, rows: importRows }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = (data && data.skipped) || [];
+      setMsg({ ok: `Imported: ${data.saved || 0} updated, ${data.added || 0} added` + (skipped.length ? `, ${skipped.length} skipped` : "") + ". Rows not in the file were left untouched.", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false); setFileKey((k) => k + 1);
+  };
+
+  // ── Draft editing (one line at a time) ──
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false, internalOnly: false });
+  const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
+  // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
+  // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
+  const setOpD = (field, on) => {
+    if (!on) { setDraft({ [field]: false }); return; }
+    if (field === "op_double") setDraft({ op_double: true, op_right: false, op_left: false, op_slideup: false, op_default: null });
+    else if (field === "op_slideup") setDraft({ op_slideup: true, op_right: false, op_left: false, op_double: false, op_default: null });
+    else setDraft({ [field]: true, op_double: false, op_slideup: false });
   };
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
-  const optLbl = { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "#334155", cursor: "pointer" };
-  const cbx = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setRow(i, { [field]: e.target.checked })} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
-  // Operation checkboxes: Double and Slide up are EXCLUSIVE — checking either clears the rest,
-  // and checking Right/Left clears Double/Slide up, so a door's operation stays coherent.
-  const setOp = (i, field, on) => {
-    if (!on) { setRow(i, { [field]: false }); return; }
-    if (field === "op_double") setRow(i, { op_double: true, op_right: false, op_left: false, op_slideup: false, op_default: null });
-    else if (field === "op_slideup") setRow(i, { op_slideup: true, op_right: false, op_left: false, op_double: false, op_default: null });
-    else setRow(i, { [field]: true, op_double: false, op_slideup: false });
-  };
-  const opChk = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setOp(i, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
+  const chip = (label, bg, fg, title) => <span title={title} style={{ fontSize: 10, fontWeight: 800, color: fg, background: bg, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap", flexShrink: 0 }}>{label}</span>;
   const star = (on, onClick) => <span onClick={onClick} title="Default the customer sees first" style={{ cursor: "pointer", color: on ? "#F59E0B" : "#CBD5E1", fontSize: 15 }}>★</span>;
-  const numInput = (i, field, ph, w) => <input type="number" min="0" step="any" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value })} style={{ ...S.input, width: w, minWidth: 0 }} />;
-  // Feet/inches text field (8' · 6'3" · 36"). Stored/sent as inches; no spaces.
-  const sizeInput = (i, field, ph, w) => <input type="text" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: w, minWidth: 0, textAlign: "center" }} />;
-  const caret = (key) => sort.key === key ? (sort.dir > 0 ? " ▲" : " ▼") : "";
-  const sortableTh = (label, key, getVal) => <th style={{ ...S.th, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => sortBy(key, getVal)}>{label}{caret(key)}</th>;
+  const fldLbl = { fontSize: 12, color: "#64748B", fontWeight: 600, marginBottom: 5 };
+  const dCbx = (field, label, title) => (
+    <label title={title} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer", whiteSpace: "nowrap" }}>
+      <input type="checkbox" checked={!!edit.draft[field]} onChange={(e) => setDraft({ [field]: e.target.checked })} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+      {label}
+    </label>
+  );
+  const dOpChk = (field, label) => (
+    <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "#334155", cursor: "pointer" }}>
+      <input type="checkbox" checked={!!edit.draft[field]} onChange={(e) => setOpD(field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+      {label}
+    </label>
+  );
+
+  // The read-only one-line summary of a saved item.
+  const summary = (r) => {
+    const parts = [];
+    if (r.plan_label) parts.push(r.plan_label);
+    if (r.width_in || r.height_in) parts.push(sizeWord === "length" ? `${r.width_in || "?"} wide x ${r.height_in || "?"} long` : `${r.width_in || "?"} x ${r.height_in || "?"}`);
+    parts.push(r.price !== "" ? `$${Number(r.price).toLocaleString()}` : "not priced");
+    if (hasSwingOp) {
+      if (r.swing_out && r.swing_in) parts.push(`swings out${r.swing_default === "out" ? " ★" : ""} / in${r.swing_default === "in" ? " ★" : ""}`);
+      else if (r.swing_out) parts.push("swings out");
+      else if (r.swing_in) parts.push("swings in");
+      if (r.op_double) parts.push("double");
+      else if (r.op_slideup) parts.push("slide up");
+      else if (r.op_right && r.op_left) parts.push(`opens right${r.op_default === "right" ? " ★" : ""} / left${r.op_default === "left" ? " ★" : ""}`);
+      else if (r.op_right) parts.push("opens right");
+      else if (r.op_left) parts.push("opens left");
+    }
+    if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
+    return parts.join("  ·  ");
+  };
+
+  const editPanel = () => (
+    <div style={{ border: `2px solid ${ACCENT}`, background: "#FAFAFF", borderRadius: 10, padding: "14px 16px", marginBottom: 8 }}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: ACCENT, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>{edit.idx < 0 ? `New ${noun}` : `Editing — ${edit.draft.name || noun}`}</div>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ flex: "2 1 220px", minWidth: 200 }}>
+          <div style={fldLbl}>Style name</div>
+          <input type="text" value={edit.draft.name} placeholder={namePh} onChange={(e) => setDraft({ name: e.target.value })} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div>
+          <div style={fldLbl}>Label <span style={{ fontWeight: 400 }}>on plan</span></div>
+          <input type="text" value={edit.draft.plan_label} placeholder={labelPh} maxLength={12} onChange={(e) => setDraft({ plan_label: e.target.value })} style={{ ...S.input, width: 80, minWidth: 0, textAlign: "center" }} />
+        </div>
+        <div>
+          <div style={fldLbl}>Width</div>
+          <input type="text" value={edit.draft.width_in} placeholder={wPh} onChange={(e) => setDraft({ width_in: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: 70, minWidth: 0, textAlign: "center" }} />
+        </div>
+        <div>
+          <div style={fldLbl}>{sizeWord === "length" ? "Length" : "Height"}</div>
+          <input type="text" value={edit.draft.height_in} placeholder={hPh} onChange={(e) => setDraft({ height_in: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: 70, minWidth: 0, textAlign: "center" }} />
+        </div>
+        <div>
+          <div style={fldLbl}>Price (USD)</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span><input type="number" min="0" step="any" value={edit.draft.price} placeholder="0" onChange={(e) => setDraft({ price: e.target.value })} style={{ ...S.input, width: 100, minWidth: 0 }} /></div>
+        </div>
+      </div>
+      {hasSwingOp && (
+        <div style={{ display: "flex", gap: 28, flexWrap: "wrap", marginBottom: 12 }}>
+          <div>
+            <div style={fldLbl}>Swing</div>
+            <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>{dCbx("swing_out", "Out")}{edit.draft.swing_in && edit.draft.swing_out && star(edit.draft.swing_default === "out", () => setDraft({ swing_default: "out" }))}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>{dCbx("swing_in", "In")}{edit.draft.swing_in && edit.draft.swing_out && star(edit.draft.swing_default === "in", () => setDraft({ swing_default: "in" }))}</span>
+            </div>
+          </div>
+          <div>
+            <div style={fldLbl}>Operation</div>
+            <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>{dOpChk("op_right", "Right")}{edit.draft.op_right && edit.draft.op_left && star(edit.draft.op_default === "right", () => setDraft({ op_default: "right" }))}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>{dOpChk("op_left", "Left")}{edit.draft.op_right && edit.draft.op_left && star(edit.draft.op_default === "left", () => setDraft({ op_default: "left" }))}</span>
+              {dOpChk("op_double", "Double")}
+              {dOpChk("op_slideup", "Slide up")}
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+        {edit.draft.image_url
+          ? <div style={{ display: "flex", alignItems: "center", gap: 6 }}><img src={edit.draft.image_url} alt="" style={thumb} /><button onClick={() => setDraft({ image_url: null })} disabled={imgBusy} style={S.btn("#F1F5F9", "#334155")}>Remove</button></div>
+          : <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusy ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>{imgBusy ? "Uploading…" : "Add image"}<input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusy} style={{ display: "none" }} onChange={(e) => onDraftImg(e.target.files && e.target.files[0])} /></label>}
+        {dCbx("show_image_on_estimate", "Photo on estimate", "Attach this item's photo to its line on the customer's estimate")}
+        {dCbx("active", "Active", "Unchecked = hidden from the designer entirely")}
+        {dCbx("internalOnly", "Internal only", "Reps can still place it in the designer; customers can't add it on the client-facing page (already-placed items still show)")}
+        <span style={{ flex: 1 }} />
+        <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+        <button onClick={saveLine} disabled={busy || !edit.draft.name.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim()) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
+      </div>
+    </div>
+  );
+
+  const line = (r, i) => (
+    <div key={r.id || `row-${i}`}
+      draggable={!busy && !edit}
+      onDragStart={(e) => { setDragIdx(i); e.dataTransfer.effectAllowed = "move"; }}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); moveRow(dragIdx, i); setDragIdx(null); }}
+      onDragEnd={() => setDragIdx(null)}
+      style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${dragIdx === i ? ACCENT : "#E2E8F0"}`, borderRadius: 8, padding: "7px 10px", marginBottom: 8, opacity: dragIdx === i ? 0.4 : (r.archived ? 0.55 : 1), background: "#FFF", cursor: (!busy && !edit) ? "grab" : "default" }}>
+      <span title="Drag to reorder — this is the order customers see" style={{ color: "#CBD5E1", fontSize: 16, userSelect: "none", flexShrink: 0 }}>⠿</span>
+      {r.image_url
+        ? <img src={r.image_url} alt="" style={thumb} />
+        : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, color: "#CBD5E1" }}>📷</div>}
+      <div style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }}>{r.name || "(unnamed)"}</span>
+        <span style={{ fontSize: 12.5, color: "#64748B" }}>{summary(r)}</span>
+      </div>
+      {!r.active && chip("Hidden", "#F1F5F9", "#64748B", "Active is off — not offered in the designer")}
+      {r.internalOnly && chip("Internal", "#E2E8F0", "#475569", "Internal Designer only — customers can't add it")}
+      {r.archived && chip("Archived", "#FEF3C7", "#B45309", "Retired from new builds; still shows on existing designs")}
+      <button onClick={() => setEdit({ idx: i, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
+      <button onClick={() => quickSave(i, { archived: !r.archived })} disabled={busy}
+        title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"}
+        style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>
+      <button onClick={() => setPendingDelete(r)} disabled={busy} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
+    </div>
+  );
 
   return (
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      <div style={S.card}>
-        <div style={S.h2}>Doors</div>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          The doors your customers can drop onto a building. Give each one a <b>Style</b> name, <b>size</b>, and <b>price</b>,
-          then check which ways it can <b>swing</b> and <b>open</b> — the <b style={{ color: "#F59E0B" }}>★</b> marks the default
-          the customer sees first (only needed when more than one is allowed; they can switch to any other you’ve checked).
-          Add a <b>photo</b> to show the door to the customer (and, later, in the 3D view) — tick <b>On estimate</b> to also attach
-          that photo to the door's line on the customer's estimate. The <b>Label</b> is the short initials
-          drawn on the door on the floor plan (e.g. SD, GD) — leave it blank to auto-use the name. <b>Active</b> shows/hides it.
-          Click a column heading to sort. Enter sizes in feet/inches — <b>8'</b>, <b>6'3"</b>, or <b>36"</b> (no spaces).
-          Rows that share the EXACT same <b>Style</b> name are one style: on the plan the customer picks the style, then its size.
-        </p>
-        {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
-          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No doors yet — click <b>Add door</b> below to create your first one.</div>
-        ) : (
-          <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>
-                <th style={S.th}>Photo</th>
-                <th style={S.th}>On estimate</th>
-                {sortableTh("Style", "name", (r) => (r.name || "").toLowerCase())}
-                <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
-                {sortableTh("Size (W × H)", "size", (r) => parseFtIn(r.width_in) || 0)}
-                {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
-                <th style={S.th}>Swing</th>
-                <th style={S.th}>Operation</th>
-                {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
-                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th>
-                <th style={S.th}></th>
-              </tr></thead>
-              <tbody>
-                {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
-                  <tr key={r.id || `new-${i}`} style={r.archived ? { opacity: 0.55 } : undefined}>
-                    <td style={S.td}>
-                      {r.image_url ? (
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <img src={r.image_url} alt="" style={thumb} />
-                          <button onClick={() => setRow(i, { image_url: null })} disabled={busy || imgBusyIdx === i} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
-                        </div>
-                      ) : (
-                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyIdx === i ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>
-                          {imgBusyIdx === i ? "Uploading…" : "Add image"}
-                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyIdx === i} style={{ display: "none" }} onChange={(e) => onRowImg(i, e.target.files && e.target.files[0])} />
-                        </label>
-                      )}
-                    </td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "show_image_on_estimate")}</td>
-                    <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Steel door" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
-                    <td style={S.td}><input type="text" value={r.plan_label} placeholder="SD" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
-                    <td style={S.td}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        {sizeInput(i, "width_in", '36"', 64)}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", '80"', 64)}
-                      </div>
-                    </td>
-                    <td style={S.td}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
-                    </td>
-                    <td style={S.td}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_out")} Out</label>{r.swing_in && r.swing_out && star(r.swing_default === "out", () => setRow(i, { swing_default: "out" }))}</span>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{cbx(i, "swing_in")} In</label>{r.swing_in && r.swing_out && star(r.swing_default === "in", () => setRow(i, { swing_default: "in" }))}</span>
-                      </div>
-                    </td>
-                    <td style={S.td}>
-                      <div style={{ display: "flex", gap: 10 }}>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_right")} Right</label>{r.op_right && r.op_left && star(r.op_default === "right", () => setRow(i, { op_default: "right" }))}</span>
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><label style={optLbl}>{opChk(i, "op_left")} Left</label>{r.op_right && r.op_left && star(r.op_default === "left", () => setRow(i, { op_default: "left" }))}</span>
-                        </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                          <label style={optLbl}>{opChk(i, "op_double")} Double</label>
-                          <label style={optLbl}>{opChk(i, "op_slideup")} Slide up</label>
-                        </div>
-                      </div>
-                    </td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "internalOnly")}</td>
-                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+        <>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+            <span style={{ flex: 1 }} />
+            <button onClick={doExport} disabled={dlBusy || busy || rows.length === 0} style={S.btn("#F1F5F9", "#334155")}>{dlBusy ? "Building…" : "⬇ Export Excel"}</button>
+            <label style={{ ...S.btn(busy ? "#9CA3AF" : "#F1F5F9", "#334155"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+              ⬆ Import
+              <input key={fileKey} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{ display: "none" }} onChange={(e) => onImport(e.target.files && e.target.files[0])} />
+            </label>
           </div>
-        )}
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add door</button>
-          <div style={{ flex: 1 }} />
-          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save doors"}</button>
+          {rows.length === 0 && !edit && <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Nothing here yet — click <b>+ {addLabel}</b> below to create your first one.</div>}
+          {rows.map((r, i) => (edit && edit.idx === i) ? <React.Fragment key={r.id || `edit-${i}`}>{editPanel()}</React.Fragment> : line(r, i))}
+          {edit && edit.idx < 0 && editPanel()}
+          <button onClick={() => setEdit({ idx: -1, draft: blank() })} disabled={busy || !!edit} style={{ ...S.btn("#1E293B", "#FFF"), opacity: (busy || !!edit) ? 0.55 : 1 }}>+ {addLabel}</button>
+        </>
+      )}
+      {msg && msg.skipped && msg.skipped.length > 0 && (
+        <div style={{ marginTop: 12, fontSize: 13 }}>
+          <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} row(s) skipped:</div>
+          <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>{msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}</ul>
         </div>
-        {msg && msg.skipped && msg.skipped.length > 0 && (
-          <div style={{ marginTop: 12, fontSize: 13 }}>
-            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} door(s) skipped:</div>
-            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
-              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
-            </ul>
+      )}
+      {pendingDelete && (
+        <div onClick={() => !busy && setPendingDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 10 }}>Delete “{pendingDelete.name}”?</div>
+            <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 18 }}>
+              This removes it from your catalog right away. Any one already placed on a saved design keeps
+              showing there. To stop offering it without deleting, use <b>Archive</b> instead.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setPendingDelete(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              <button onClick={confirmDelete} disabled={busy} style={S.btn(busy ? "#9CA3AF" : "#DC2626", "#FFF")}>{busy ? "Deleting…" : "Delete"}</button>
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </>
+  );
+}
+
+function DoorsView({ viewingLabel = null, clientId = null }) {
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Doors</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+        The doors your customers can drop onto a building. Each door is <b>one line</b> — click <b>Edit</b> to change it;
+        every line saves on its own. Drag <b>⠿</b> to set the order customers see. The <b style={{ color: "#F59E0B" }}>★</b> marks
+        the swing/operation default the customer sees first (only needed when more than one is allowed; they can switch to any
+        other you’ve checked). Sizes are feet/inches — 8', 6'3", 36" (no spaces). <b>Export Excel</b> to edit in bulk and
+        re-import — rows are matched by the ID column, and rows missing from the file are never deleted.
+      </p>
+      <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+    </div>
   );
 }
 
@@ -3235,19 +3450,18 @@ const METAL_LIBRARY = [
 ];
 
 // ─── Ramps (Options tab → its own section, below Doors) ───
-// Two modes: SIMPLE (one ramp, auto-sized to the door it attaches to; priced each or per-foot)
-// or CUSTOM (a catalog of ramp styles, category='ramp' in fixture_items — like doors, no swing/
-// operation). Mode + simple config live in client_settings; custom styles in fixture_items.
+// Two modes on client_settings (save_ramp_settings): SIMPLE = one auto-width ramp with one
+// price; CUSTOM = a fixture catalog (category='ramp', height_in holds the ramp LENGTH) that
+// edits per line via the shared FixtureCatalog. The Save button here applies only the
+// mode/offer/simple-price settings — catalog lines save themselves.
 function RampsView({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [mode, setMode] = useState("simple");
   const [enabled, setEnabled] = useState(true);   // does this client OFFER a ramp at all
   const [simple, setSimple] = useState({ price: "", method: "each", image_url: null, show_image_on_estimate: true });
-  const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [imgBusyIdx, setImgBusyIdx] = useState(null);
   const [simpleImgBusy, setSimpleImgBusy] = useState(false);
   const [imgFileKey, setImgFileKey] = useState(0);
 
@@ -3258,57 +3472,31 @@ function RampsView({ viewingLabel = null, clientId = null }) {
     setMode(rs.mode === "custom" ? "custom" : "simple");
     setEnabled(rs.enabled !== false);
     setSimple({ price: rs.price != null ? String(rs.price) : "", method: rs.method || "each", image_url: rs.imageUrl || null, show_image_on_estimate: rs.showImage !== false });
-    const ramps = (data.fixtures || []).filter((f) => (f.category || "") === "ramp");
-    setRows(ramps.map((d) => ({
-      id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
-      width_in: d.width_in != null ? fmtFtIn(d.width_in) : "", height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
-      price: d.price != null ? String(d.price) : "", image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
-    })));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
-  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false, internalOnly: false }]);
-  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
-
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
   const uploadImg = async (file) => {
     const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
     const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
     return data.url;
   };
-  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
-  const onRowImg = async (i, file) => {
-    if (!file) return; if (!guardImg(file)) { setImgFileKey((k) => k + 1); return; }
-    setImgBusyIdx(i); setMsg(null);
-    try { const url = await uploadImg(file); setRow(i, { image_url: url }); setMsg({ ok: "Photo added — click Save ramps to apply." }); } catch (e) { setMsg({ err: e.message }); }
-    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
-  };
   const onSimpleImg = async (file) => {
     if (!file) return; if (!guardImg(file)) { setImgFileKey((k) => k + 1); return; }
     setSimpleImgBusy(true); setMsg(null);
-    try { const url = await uploadImg(file); setSimple((s) => ({ ...s, image_url: url })); setMsg({ ok: "Photo added — click Save ramps to apply." }); } catch (e) { setMsg({ err: e.message }); }
+    try { const url = await uploadImg(file); setSimple((s) => ({ ...s, image_url: url })); setMsg({ ok: "Photo added — click Save ramp settings to apply." }); } catch (e) { setMsg({ err: e.message }); }
     setSimpleImgBusy(false); setImgFileKey((k) => k + 1);
   };
 
-  const save = async () => {
-    if (viewingLabel && mode === "custom" && !window.confirm(`Replace ${viewingLabel}'s ENTIRE ramp list with these ${rows.length} ramp style(s)?
-
-Anything not shown here will be removed.`)) return;
+  const saveSettings = async () => {
     setBusy(true); setMsg(null);
     try {
       const r1 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramp_settings", mode, enabled, price: simple.price, method: simple.method, imageUrl: simple.image_url || null, showImage: simple.show_image_on_estimate !== false }) });
       if (r1.error || (r1.data && r1.data.error)) throw new Error((r1.error && r1.error.message) || r1.data.error);
-      if (mode === "custom") {
-        const ramps = rows.map((r, i) => ({ id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false, widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price, imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true, sortOrder: i }));
-        const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_ramps", ramps }) });
-        if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
-        const skipped = (r2.data && r2.data.skipped) || [];
-        setMsg({ ok: `Saved ${(r2.data && r2.data.saved) || 0} ramp style(s)` + ((r2.data && r2.data.deleted) ? `, removed ${r2.data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
-      } else { setMsg({ ok: "Simple ramp saved." }); }
-      await load();
+      setMsg({ ok: "Ramp settings saved." });
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -3317,7 +3505,6 @@ Anything not shown here will be removed.`)) return;
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
   const cbx = (checked, onChange) => <input type="checkbox" checked={!!checked} onChange={onChange} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
-  const sizeInput = (i, field, ph) => <input type="text" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: 64, minWidth: 0, textAlign: "center" }} />;
   const imgCell = (url, busyOn, onPick, onRemove) => url
     ? <div style={{ display: "flex", alignItems: "center", gap: 6 }}><img src={url} alt="" style={thumb} /><button onClick={onRemove} disabled={busy || busyOn} style={S.btn("#F1F5F9", "#334155")}>Remove</button></div>
     : <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: busyOn ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>{busyOn ? "Uploading…" : "Add image"}<input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={busyOn} style={{ display: "none" }} onChange={onPick} /></label>;
@@ -3336,14 +3523,16 @@ Anything not shown here will be removed.`)) return;
         <div style={S.h2}>Ramps</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Pick how ramps work. <b>Simple</b> is one ramp that's automatically the width of the door it attaches to — you just set
-          the price. <b>Custom ramp styles</b> is a catalog with its own sizes and prices, like doors. Enter sizes in feet/inches (8', 6'3", 36").
+          the price. <b>Custom ramp styles</b> is a catalog with its own sizes and prices, like doors — each style is one line that
+          saves on its own. Enter sizes in feet/inches (8', 6'3", 36"). The <b>Save ramp settings</b> button applies the offer/mode
+          and simple-ramp price.
         </p>
         {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (<>
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, fontSize: 14, fontWeight: 700, color: "#334155", cursor: "pointer" }}>
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ width: 18, height: 18, cursor: "pointer", accentColor: DOOR_MINT }} />
             Offer a ramp on your buildings
           </label>
-          {!enabled && <div style={{ fontSize: 12.5, color: "#B45309", background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", marginBottom: 14 }}>Ramps are turned off — customers can't add one to a new build. Any ramp already on a saved design still shows and prices as before. (Click <b>Save ramps</b> to apply.)</div>}
+          {!enabled && <div style={{ fontSize: 12.5, color: "#B45309", background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", marginBottom: 14 }}>Ramps are turned off — customers can't add one to a new build. Any ramp already on a saved design still shows and prices as before. (Click <b>Save ramp settings</b> to apply.)</div>}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20, opacity: enabled ? 1 : 0.5, pointerEvents: enabled ? "auto" : "none" }}>
             {modeCard("simple", "Simple ramp", "One ramp, automatically the width of the door it attaches to. No sizes to manage.")}
             {modeCard("custom", "Custom ramp styles", "A catalog of ramp styles with their own sizes, prices, and photos.")}
@@ -3361,49 +3550,14 @@ Anything not shown here will be removed.`)) return;
               <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer" }}>{cbx(simple.show_image_on_estimate, (e) => setSimple((s) => ({ ...s, show_image_on_estimate: e.target.checked })))} On estimate</label>
             </div>
           ) : (
-            <>
-              {rows.length === 0 ? <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No ramp styles yet — click <b>Add ramp style</b> below.</div> : (
-                <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead><tr>
-                      <th style={S.th}>Photo</th><th style={S.th}>On estimate</th><th style={S.th}>Style</th>
-                      <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
-                      <th style={S.th}>Size (W × L)</th><th style={S.th}>Price (USD)</th><th style={S.th}>Active</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ ramp buttons on the client-facing page (already-placed ramps still show).">Internal</th><th style={S.th}></th>
-                    </tr></thead>
-                    <tbody>
-                      {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
-                        <tr key={r.id || `new-${i}`} style={r.archived ? { opacity: 0.55 } : undefined}>
-                          <td style={S.td}>{imgCell(r.image_url, imgBusyIdx === i, (e) => onRowImg(i, e.target.files && e.target.files[0]), () => setRow(i, { image_url: null }))}</td>
-                          <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.show_image_on_estimate, (e) => setRow(i, { show_image_on_estimate: e.target.checked }))}</td>
-                          <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Aluminum ramp" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
-                          <td style={S.td}><input type="text" value={r.plan_label} placeholder="RMP" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
-                          <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 5 }}>{sizeInput(i, "width_in", '48"')}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", "3'")}</div></td>
-                          <td style={S.td}><div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span><input type="number" min="0" step="any" value={r.price} placeholder="0" onChange={(e) => setRow(i, { price: e.target.value })} style={{ ...S.input, width: 90, minWidth: 0 }} /></div></td>
-                          <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.active, (e) => setRow(i, { active: e.target.checked }))}</td>
-                          <td style={{ ...S.td, textAlign: "center" }}>{cbx(r.internalOnly, (e) => setRow(i, { internalOnly: e.target.checked }))}</td>
-                          <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add ramp style</button>
-              <span style={{ fontSize: 12, color: "#94A3B8", marginLeft: 10 }}>Same Style name across rows = one style (customer picks the size). Ramps don't swing.</span>
-            </>
+            <FixtureCatalog category="ramp" noun="ramp style" addLabel="Add ramp style" namePh="e.g. Aluminum ramp" labelPh="RMP" wPh={'48"'} hPh={"3'"} sizeWord="length" viewingLabel={viewingLabel} clientId={clientId} />
           )}
 
           <div style={{ display: "flex", marginTop: 20 }}>
             <div style={{ flex: 1 }} />
-            <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save ramps"}</button>
+            <button onClick={saveSettings} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save ramp settings"}</button>
           </div>
         </>)}
-        {msg && msg.skipped && msg.skipped.length > 0 && (
-          <div style={{ marginTop: 12, fontSize: 13 }}>
-            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} ramp(s) skipped:</div>
-            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>{msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}</ul>
-          </div>
-        )}
       </div>
     </>
   );
@@ -3411,169 +3565,19 @@ Anything not shown here will be removed.`)) return;
 
 // ─── Windows (Options tab → its own section, below Ramps) ───
 // A straight catalog like doors, minus swing/operation (windows don't swing). category='window'
-// in fixture_items; height_in holds the window HEIGHT. Full-list-replace save via save_windows.
+// in fixture_items; height_in holds the window HEIGHT. Per-line saves via the shared FixtureCatalog.
 function WindowsView({ viewingLabel = null, clientId = null }) {
-  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
-  const [rows, setRows] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState(null);
-  const [imgBusyIdx, setImgBusyIdx] = useState(null);
-  const [imgFileKey, setImgFileKey] = useState(0);
-  const [sort, setSort] = useState({ key: null, dir: 1 });
-
-  const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
-    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
-    const wins = (data.fixtures || []).filter((f) => (f.category || "") === "window");
-    setRows(wins.map((d) => ({
-      id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
-      width_in: d.width_in != null ? fmtFtIn(d.width_in) : "",
-      height_in: d.height_in != null ? fmtFtIn(d.height_in) : "",
-      price: d.price != null ? String(d.price) : "",
-      image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
-    })));
-    setLoaded(true);
-  };
-  useEffect(() => { load(); }, []);
-
-  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
-  const addRow = () => setRows((rs) => [...rs, { id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", image_url: null, active: true, archived: false, internalOnly: false }]);
-  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
-
-  const sortBy = (key, getVal) => setSort((s) => {
-    const dir = s.key === key ? -s.dir : 1;
-    setRows((rs) => rs.map((r) => r).sort((a, b) => { const av = getVal(a), bv = getVal(b); return (av < bv ? -1 : av > bv ? 1 : 0) * dir; }));
-    return { key, dir };
-  });
-
-  const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const onRowImg = async (i, file) => {
-    if (!file) return;
-    if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
-    setImgBusyIdx(i); setMsg(null);
-    try {
-      const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
-      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      setRow(i, { image_url: data.url });
-      setMsg({ ok: "Photo added — click “Save windows” to apply." });
-    } catch (e) { setMsg({ err: e.message }); }
-    setImgBusyIdx(null); setImgFileKey((k) => k + 1);
-  };
-
-  const save = async () => {
-    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE window list with these ${rows.length} window(s)?
-
-Anything not shown here will be removed from their account.`)) return;
-    setBusy(true); setMsg(null);
-    try {
-      const windows = rows.map((r, i) => ({
-        id: r.id || undefined, name: r.name, planLabel: r.plan_label, showImageOnEstimate: r.show_image_on_estimate !== false,
-        widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
-        imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true, sortOrder: i,
-      }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_windows", windows }) });
-      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      await load();
-      const skipped = data.skipped || [];
-      setMsg({ ok: `Saved ${data.saved || 0} window(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
-    } catch (e) { setMsg({ err: e.message }); }
-    setBusy(false);
-  };
-
-  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
-  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
-  const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
-  const cbx = (i, field) => <input type="checkbox" checked={!!rows[i][field]} onChange={(e) => setRow(i, { [field]: e.target.checked })} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />;
-  const numInput = (i, field, ph, w) => <input type="number" min="0" step="any" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value })} style={{ ...S.input, width: w, minWidth: 0 }} />;
-  const sizeInput = (i, field, ph, w) => <input type="text" value={rows[i][field]} placeholder={ph} onChange={(e) => setRow(i, { [field]: e.target.value.replace(/\s/g, "") })} style={{ ...S.input, width: w, minWidth: 0, textAlign: "center" }} />;
-  const caret = (key) => sort.key === key ? (sort.dir > 0 ? " ▲" : " ▼") : "";
-  const sortableTh = (label, key, getVal) => <th style={{ ...S.th, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => sortBy(key, getVal)}>{label}{caret(key)}</th>;
-
   return (
-    <>
-      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
-      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      <div style={S.card}>
-        <div style={S.h2}>Windows</div>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          The windows your customers can drop onto a building. Give each one a <b>Style</b> name (e.g. Slider, Single-hung,
-          Picture), a <b>size</b> (width × height), and a <b>price</b>. Add a <b>photo</b> to show the window to the customer
-          (and, later, in the 3D view) — tick <b>On estimate</b> to also attach that photo to the window's line on the
-          customer's estimate. The <b>Label</b> is the short initials drawn on the window on the floor plan (e.g. SL, DH) —
-          leave it blank to auto-use the name. <b>Active</b> shows/hides it. Click a column heading to sort. Enter sizes in
-          feet/inches — <b>3'</b>, <b>2'6"</b>, or <b>36"</b> (no spaces). Rows that share the EXACT same <b>Style</b> name are
-          one style: on the plan the customer picks the style, then its size.
-        </p>
-        {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
-          <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>No windows yet — click <b>Add window</b> below to create your first one.</div>
-        ) : (
-          <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>
-                <th style={S.th}>Photo</th>
-                <th style={S.th}>On estimate</th>
-                {sortableTh("Style", "name", (r) => (r.name || "").toLowerCase())}
-                <th style={S.th}>Label <span style={{ fontWeight: 400, color: "#94A3B8" }}>on plan</span></th>
-                {sortableTh("Size (W × H)", "size", (r) => parseFtIn(r.width_in) || 0)}
-                {sortableTh("Price (USD)", "price", (r) => Number(r.price) || 0)}
-                {sortableTh("Active", "active", (r) => (r.active !== false ? 1 : 0))}
-                <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th>
-                <th style={S.th}></th>
-              </tr></thead>
-              <tbody>
-                {rows.map((r, i) => ({ r, i })).sort((a, b) => (a.r.archived ? 1 : 0) - (b.r.archived ? 1 : 0)).map(({ r, i }) => (
-                  <tr key={r.id || `new-${i}`} style={r.archived ? { opacity: 0.55 } : undefined}>
-                    <td style={S.td}>
-                      {r.image_url ? (
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <img src={r.image_url} alt="" style={thumb} />
-                          <button onClick={() => setRow(i, { image_url: null })} disabled={busy || imgBusyIdx === i} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
-                        </div>
-                      ) : (
-                        <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: imgBusyIdx === i ? "default" : "pointer", display: "inline-block", whiteSpace: "nowrap" }}>
-                          {imgBusyIdx === i ? "Uploading…" : "Add image"}
-                          <input key={imgFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imgBusyIdx === i} style={{ display: "none" }} onChange={(e) => onRowImg(i, e.target.files && e.target.files[0])} />
-                        </label>
-                      )}
-                    </td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "show_image_on_estimate")}</td>
-                    <td style={S.td}><input type="text" value={r.name} placeholder="e.g. Slider window" onChange={(e) => setRow(i, { name: e.target.value })} style={{ ...S.input, width: "100%", minWidth: 120, boxSizing: "border-box" }} /></td>
-                    <td style={S.td}><input type="text" value={r.plan_label} placeholder="SL" maxLength={12} onChange={(e) => setRow(i, { plan_label: e.target.value })} style={{ ...S.input, width: 70, minWidth: 0, boxSizing: "border-box", textAlign: "center" }} /></td>
-                    <td style={S.td}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        {sizeInput(i, "width_in", '36"', 64)}<span style={{ color: "#94A3B8" }}>×</span>{sizeInput(i, "height_in", '36"', 64)}
-                      </div>
-                    </td>
-                    <td style={S.td}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color: "#94A3B8" }}>$</span>{numInput(i, "price", "0", 90)}</div>
-                    </td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "active")}</td>
-                    <td style={{ ...S.td, textAlign: "center" }}>{cbx(i, "internalOnly")}</td>
-                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}><button onClick={() => setRow(i, { archived: !r.archived })} title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"} style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>{" "}<button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add window</button>
-          <div style={{ flex: 1 }} />
-          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save windows"}</button>
-        </div>
-        {msg && msg.skipped && msg.skipped.length > 0 && (
-          <div style={{ marginTop: 12, fontSize: 13 }}>
-            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} window(s) skipped:</div>
-            <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
-              {msg.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
-            </ul>
-          </div>
-        )}
-      </div>
-    </>
+    <div style={S.card}>
+      <div style={S.h2}>Windows</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+        The windows your customers can add to a building. Each window is <b>one line</b> — click <b>Edit</b> to change it;
+        every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are feet/inches — 8', 6'3", 36"
+        (no spaces). <b>Export Excel</b> to edit in bulk and re-import — rows are matched by the ID column, and rows missing
+        from the file are never deleted.
+      </p>
+      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+    </div>
   );
 }
 
