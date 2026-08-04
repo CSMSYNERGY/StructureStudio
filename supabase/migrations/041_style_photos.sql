@@ -1,3 +1,11 @@
+-- ⛔ DEAD — DO NOT APPLY (tombstoned 2026-08-04). This grants INSERT on the
+-- **floor-plans** bucket, and 071 pinned that bucket to `application/pdf` with a 5 MB
+-- cap: the storage API would reject every photo at the MIME gate even with these
+-- policies in place. Style reference photos go to the **branding** bucket instead, via
+-- portal-settings' `upload_style_photo` action (086/2026-08-04) — the same bucket the
+-- style images themselves have always used. Left in the tree because the numbering is
+-- referenced elsewhere; kept unapplied on purpose.
+--
 -- 017_style_photos: let authenticated tenant owners upload building-style
 -- reference photos (the four-side calibration sets, plan §"four-sided photos")
 -- to the floor-plans bucket under their own tenant prefix:

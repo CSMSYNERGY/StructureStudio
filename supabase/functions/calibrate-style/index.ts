@@ -6,10 +6,23 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 // wall height — that makes the 3D engine render true to that construction.
 // The photos are the calibration REFERENCE; the model never renders from them.
 //
-// Gated by the shared ADMIN_PASSWORD secret (same as admin-save-settings).
-// Requires the ANTHROPIC_API_KEY secret. NOT YET DEPLOYED as of 2026-07-02 —
-// deploy via Supabase MCP/CLI and set the secret before the "Draft from
-// photos (AI)" button works; the editor's manual fields work without it.
+// ⛔ SUPERSEDED 2026-08-04 and still NOT DEPLOYED. Use portal-settings'
+// `calibrate_style_ai` action instead: it resolves the tenant from a real JWT, so a
+// BUILDER can draft their own spec (the point of the feature), it counts calls per
+// tenant per day in ai_style_calls, and it inherits withErrorLog + operator auditing.
+// The prompt and the response validation now live in _shared/styleD3.ts, which both
+// paths import — this file's local copies are frozen history.
+//
+// If this is ever deployed anyway, fix two things FIRST: its gate is a bare
+// constant-time compare on the shared ADMIN_PASSWORD with no throttle and no audit
+// (its siblings all route through _shared/adminAuth.ts, whose header explains why a
+// sibling without the throttle is a free guessing oracle for the same secret) — and
+// there is no spend cap, so whoever holds the password holds our Anthropic bill.
+// Consequence of leaving it undeployed: the "Draft from photos (AI)" button on the
+// PUBLIC designer's ?admin=1 panel stays inert (it has no signed-in session to offer
+// portal-settings). Operators get the working path through the portal:
+// view-as → Designer tab → 3D Style Calibration. Manual fields and Copy-JSON work
+// everywhere, always.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",

@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls } from "../_shared/styleD3.ts";
 
 // Operator (super-admin) bootstrap tool, used by the designer's ?admin=1 panel.
 // Gated by the shared ADMIN_PASSWORD edge-function secret. Owners use the
@@ -77,48 +78,33 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     });
   }
 
-  // "save_style_d3" — writes a building style's 3D appearance spec (and its
-  // four-side reference photo URLs) into the tenant's config blob:
-  // config.buildingStyles[value == styleValue].d3 / .d3Photos. Used by the
-  // designer's ?admin=1 calibration editor. Additive: touches only the one
-  // style entry; everything else in the config row is preserved.
+  // "save_style_d3" — writes a building style's 3D appearance spec (and its reference
+  // photo URLs) to building_styles.d3 / .d3_photos for the designer's ?admin=1
+  // calibration editor. Request and response shape are unchanged.
+  //
+  // This used to read-modify-write `client_configs.config`, a jsonb column dropped back
+  // in migration 020 — so on live it returned "column client_configs.config does not
+  // exist" and no calibration was EVER saved. 086 gives the spec real columns and
+  // teaches get_config to emit it; the validation now lives in _shared/styleD3.ts so
+  // this and portal-settings' builder-facing twin cannot drift apart.
   if (action === "save_style_d3") {
     const { styleValue, d3, d3Photos } = payload || {};
     if (!styleValue || typeof styleValue !== "string") {
       return json({ error: "styleValue is required." }, 400);
     }
-    if (!d3 || typeof d3 !== "object" || !d3.roof || typeof d3.roof !== "object") {
-      return json({ error: "d3 spec with a roof object is required." }, 400);
-    }
-    const roofType = String(d3.roof.type || "");
-    if (!["shed", "gable", "gambrel"].includes(roofType)) {
-      return json({ error: `Unknown roof type "${roofType}" — expected shed|gable|gambrel.` }, 400);
-    }
-    const photos = Array.isArray(d3Photos)
-      ? d3Photos.filter((u: unknown) => typeof u === "string" && /^https?:\/\//.test(u)).slice(0, 4)
-      : [];
+    const clean = sanitizeD3Spec(d3);
+    if (!clean.ok) return json({ error: clean.error }, 400);
+    const photos = sanitizePhotoUrls(d3Photos);
 
-    const { data: row, error: cfgErr } = await supabase
-      .from("client_configs")
-      .select("config")
+    // Matched on the style KEY, which is what the editor knows as `value`;
+    // (client_id, key) is unique, so this touches exactly one row.
+    const { error: upErr, count } = await supabase
+      .from("building_styles")
+      .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
       .eq("client_id", clientId.trim())
-      .single();
-    if (cfgErr || !row) return json({ error: `No config row for client "${clientId}".` }, 404);
-
-    const config = row.config || {};
-    const styles = Array.isArray(config.buildingStyles) ? config.buildingStyles : [];
-    const idx = styles.findIndex((s: any) => s && s.value === styleValue);
-    if (idx === -1) {
-      return json({ error: `Style "${styleValue}" not found in this client's buildingStyles.` }, 404);
-    }
-    styles[idx] = { ...styles[idx], d3, d3Photos: photos };
-    config.buildingStyles = styles;
-
-    const { error: upErr } = await supabase
-      .from("client_configs")
-      .update({ config })
-      .eq("client_id", clientId.trim());
+      .eq("key", styleValue);
     if (upErr) return json({ error: `Config save failed: ${upErr.message}` }, 500);
+    if (!count) return json({ error: `Style "${styleValue}" not found for this client.` }, 404);
     return json({ ok: true });
   }
 

@@ -4,6 +4,7 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, SPEC_PROMPT } from "../_shared/styleD3.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
 // operator with can_write). Hoisted above the handler so the resolver can consult it.
@@ -410,7 +411,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
+      // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
+      // styles are calibrated and the editor can reopen one for tuning.
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -970,6 +973,116 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (error) return json({ error: error.message }, 500);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
+  }
+
+  // ─── 3D setup (086): the builder calibrates how their buildings look in 3D ───
+  // These three replace an operator-only path that could not work: admin-save-settings'
+  // save_style_d3 wrote client_configs.config, a column dropped in 020, so every save
+  // 404'd. Doing it here instead means the BUILDER can do it themselves against their own
+  // JWT — which is the whole product bet (no setup fees, no work queued on us).
+
+  // Save one style's 3D appearance spec. Keyed on styleValue (the style `key`) because
+  // that is all the embedded designer knows — get_config emits `value`, never the row id —
+  // and (client_id, key) is unique. styleId is accepted too for callers that have it.
+  if (action === "save_style_d3") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    const clean = sanitizeD3Spec(payload.d3);
+    if (!clean.ok) return json({ error: clean.error }, 400);
+    const photos = sanitizePhotoUrls(payload.d3Photos);
+    let q = admin.from("building_styles")
+      .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
+      .eq("client_id", clientId);
+    q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
+    const { error, count } = await q;
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, d3: clean.d3, d3Photos: photos });
+  }
+
+  // Upload-only: a reference photo of a real building, stored beside the style images in
+  // `branding` and handed back as a URL for a d3Photos slot. Mirrors upload_fixture_image.
+  // (Repo migration 041 proposed putting these in floor-plans; that bucket has been
+  // PDF-only since 071, so 041 is dead and must not be applied.)
+  if (action === "upload_style_photo") {
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+    const path = `${clientId}/style-photo-${Date.now()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
+  // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the
+  // result before anything is saved — this only ever returns a draft.
+  //
+  // Capped per tenant per day because it spends real money per call and is now reachable
+  // by any owner/admin rather than by whoever holds the operator password. The ledger row
+  // is written BEFORE the model call on purpose: a failing style would otherwise be a free
+  // retry loop against our API key.
+  if (action === "calibrate_style_ai") {
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls);
+    if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
+
+    const DAILY_CAP = 10;
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count: used, error: capErr } = await admin.from("ai_style_calls")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId).gt("called_at", since);
+    // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
+    // not brick calibration, and the per-call cost is cents.
+    if (capErr) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+        message: `AI calibration cap count failed, allowing the call: ${capErr.message}`,
+      });
+    } else if ((used ?? 0) >= DAILY_CAP) {
+      return json({ error: `Daily limit reached (${DAILY_CAP} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+    }
+    await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null });
+
+    let res: Response;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "claude-sonnet-5",
+          max_tokens: 700,
+          messages: [{
+            role: "user",
+            content: [
+              // URL sources: the photos live in public buckets, so Anthropic can fetch them
+              // and we never proxy the bytes through this function.
+              ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
+              { type: "text", text: SPEC_PROMPT },
+            ],
+          }],
+        }),
+      });
+    } catch (e) {
+      return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 300);
+      return json({ error: `AI service returned ${res.status}: ${body}` }, 502);
+    }
+    const data = await res.json().catch(() => null) as any;
+    const text = data?.content?.[0]?.text ?? "";
+    const drafted = parseModelSpec(text);
+    if (!drafted.ok) return json({ error: drafted.error }, 502);
+    return json({ ok: true, d3: drafted.d3 });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
