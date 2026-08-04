@@ -86,8 +86,11 @@ while read -r local_ref local_oid remote_ref remote_oid || [ -n "$local_ref" ]; 
     # We do not even have the remote's tip object, so we are certainly missing its work —
     # the verdict is already decided. This fetch runs ONLY to put a number in the message,
     # and the low-speed bounds keep a sick network from hanging an already-failing push.
-    if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 \
-         fetch --quiet "$remote_name" "$short" 2>/dev/null; then
+    # Kept on ONE line deliberately: a trailing-backslash continuation breaks outright if
+    # this file is ever checked out with CRLF, because the backslash escapes the CR instead
+    # of the newline (git then gets a literal "r" argument and the next line runs on its
+    # own). .gitattributes pins this file to LF, and this keeps it safe even if that slips.
+    if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 fetch --quiet "$remote_name" "$short" 2>/dev/null; then
       behind=$(git rev-list --count "$local_oid..$remote_oid" 2>/dev/null)
     fi
   fi
