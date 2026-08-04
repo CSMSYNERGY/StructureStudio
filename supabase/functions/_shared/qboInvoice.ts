@@ -5,7 +5,7 @@
  * the caller's response. It runs strictly AFTER the ledger row is marked 'sent' — the
  * money has already moved in GHL; QuickBooks is bookkeeping, and a bookkeeping failure
  * must not un-send an email. Every outcome, success or failure, is recorded on the
- * invoice_sends row (qbo_invoice_id / qbo_doc_number / qbo_pushed_at / qbo_error /
+ * invoice_sends row (qbo_invoice_id / qbo_doc_number / qbo_pushed_at / qbo_error / qbo_tid /
  * qbo_attempts) where the UI and the retry action can see it.
  *
  * DARK BY CONSTRUCTION: it skips silently unless the tenant has a live QuickBooks
@@ -20,7 +20,7 @@
  */
 
 // deno-lint-ignore-file no-explicit-any
-import { getQboConnection, qboFetch, QboBroken, QboNotConnected } from "./qboToken.ts";
+import { getQboConnection, qboFetch, QboApiError, QboBroken, QboNotConnected } from "./qboToken.ts";
 import { logEdgeError } from "./logError.ts";
 
 /** QBO query-language string literal. Backslash is the ESCAPE character in that dialect, so it
@@ -77,9 +77,12 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     // A swallowed failure here is a push that reports nothing anywhere: the caller already got
     // its 200 (see the contract above), so this row is the only channel. Fall back to app_errors
     // so the reason survives even when the row will not take it.
-    const fail = async (msg: string) => {
+    const fail = async (msg: string, tid?: string | null) => {
       const { error } = await admin.from("invoice_sends").update({
         qbo_error: msg.slice(0, 500),
+        // Only written when we actually have one: a null here would erase the tid of a previous
+        // attempt, which is the opposite of the point.
+        ...(tid ? { qbo_tid: tid } : {}),
         qbo_attempts: attempt,
         updated_at: new Date().toISOString(),
       }).eq("client_id", clientId).eq("short_code", shortCode);
@@ -231,9 +234,12 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
 
     // requestid = shortCode-attempt: Intuit dedupes identical requestids, so a network
     // timeout retried by the SAME attempt cannot create two invoices.
+    // createMeta collects the tid of THIS call — the one that creates the invoice — so the row
+    // records which Intuit request the books entry came from, not just that one succeeded.
+    const createMeta: { tid?: string | null } = {};
     const inv = await qboFetch(admin, clientId, realmId,
       `/invoice?minorversion=75&requestid=${encodeURIComponent(`${shortCode}-${attempt}`.slice(0, 50))}`,
-      { method: "POST", body: JSON.stringify(body) });
+      { method: "POST", body: JSON.stringify(body) }, createMeta);
 
     const created = inv?.Invoice;
     if (!created?.Id) { await fail("QuickBooks did not return an invoice id"); return; }
@@ -256,6 +262,7 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       qbo_doc_number: created.DocNumber ? String(created.DocNumber) : docNumber,
       qbo_pushed_at: new Date().toISOString(),
       qbo_error: note,
+      qbo_tid: createMeta.tid ?? null,
       qbo_attempts: attempt,
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId).eq("short_code", shortCode);
@@ -273,12 +280,18 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     }
   } catch (e) {
     // Includes QboBroken / QboNotConnected races (disconnected mid-push) and QBO 4xx/5xx.
+    const api = e instanceof QboApiError ? e : null;
     const msg = e instanceof QboBroken ? "QuickBooks needs to be reconnected"
       : e instanceof QboNotConnected ? "QuickBooks is not connected"
+      // `rejected:` marks a fault that will fail identically on every retry — the same prefix
+      // convention as `unmapped:` above, and for the same reason: it tells a reader (and, when
+      // the portal learns to read it, the Retry button) that the fix is upstream of retrying.
+      : api?.permanent ? `rejected: ${api.message}`
       : (e as Error).message || "QuickBooks push failed";
     try {
       await admin.from("invoice_sends").update({
         qbo_error: String(msg).slice(0, 500),
+        ...(api?.tid ? { qbo_tid: api.tid } : {}),
         updated_at: new Date().toISOString(),
       }).eq("client_id", clientId).eq("short_code", args.shortCode);
     } catch { /* the ledger write itself failed — nothing further to do safely */ }

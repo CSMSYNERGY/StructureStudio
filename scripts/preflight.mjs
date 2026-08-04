@@ -20,7 +20,11 @@
 //      silently changes behaviour for the shared module).
 //   3. Cache-buster lockstep: index.html and portal.html must reference the same
 //      structure-studio.component.js?v=… value.
-//   4. `deno check` over every supabase/functions/*/index.ts. The browser artifacts above
+//   4. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
+//      an edge function (qboFetch) — the client secret lives only there, and "we never call
+//      Intuit from the browser" is an answer we give Intuit in writing. Help links to
+//      quickbooks.intuit.com are deliberately still allowed.
+//   5. `deno check` over every supabase/functions/*/index.ts. The browser artifacts above
 //      have no compiler, but the edge functions DO — and nothing was running it, so type
 //      errors accumulated silently: two sat in portal-settings' list_inventory long enough
 //      that a later commit added two more on the very same line. This step is SKIPPED with
@@ -127,6 +131,26 @@ function run(files) {
   for (const f of ["portal.html", "admin.html"]) {
     if (cdnUrls(files[f]) !== lock) {
       errors.push(`${f}: CDN script URLs differ from index.html — the version lock (CLAUDE.md) is broken`);
+    }
+  }
+
+  // Intuit API/OAuth hosts must never appear in a browser-served file. Every QuickBooks call
+  // goes through qboFetch inside an edge function, and that is load-bearing twice over: the
+  // client secret exists only server-side, and it is what we attest to Intuit in the App
+  // Assessment questionnaire ("what platform do you make API calls from" → Web/SaaS, and "are
+  // the client id and secret stored securely, not displayed in browser console logs" → yes).
+  // A browser-side call would silently falsify both, and nothing else in the repo would notice.
+  // Scoped to the API/OAuth hosts on purpose: a help or marketing link to quickbooks.intuit.com
+  // is legitimate and must keep passing.
+  const INTUIT_API_HOST =
+    /(?:quickbooks\.api|sandbox-quickbooks\.api|oauth\.platform|appcenter|developer\.api)\.intuit\.com/i;
+  for (const f of ["index.html", "portal.html", "admin.html",
+                   "structure-studio.component.js", "StructureStudio.jsx"]) {
+    const hit = files[f].match(INTUIT_API_HOST);
+    if (hit) {
+      const line = files[f].slice(0, hit.index).split("\n").length;
+      errors.push(`${f}:${line}  Intuit API host "${hit[0]}" in a browser-served file — `
+        + "QuickBooks calls must go through an edge function (qboFetch), never the browser");
     }
   }
 
@@ -238,6 +262,27 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the RANK regression is caught by no-undef");
+
+  // ── The Intuit-host rule ───────────────────────────────────────────────────
+  // Same silent-pass risk as everything else in this file: a regex that never matches is
+  // indistinguishable from a clean repo. So prove BOTH directions — it fires on a real API call,
+  // and it does not fire on a help link. The second half matters as much as the first: a rule
+  // that flags legitimate links gets deleted by the next person it annoys.
+  const withApiCall = load();
+  withApiCall["portal.html"] = withApiCall["portal.html"].replace("</body>",
+    '<script>fetch("https://quickbooks.api.intuit.com/v3/company/1/companyinfo/1")</script></body>');
+  if (!run(withApiCall).some((e) => e.includes("Intuit API host"))) {
+    console.error("self-test FAILED: an Intuit API host in portal.html was not caught");
+    process.exit(1);
+  }
+  const withHelpLink = load();
+  withHelpLink["portal.html"] = withHelpLink["portal.html"].replace("</body>",
+    '<a href="https://quickbooks.intuit.com/learn-support/">QuickBooks help</a></body>');
+  if (run(withHelpLink).some((e) => e.includes("Intuit API host"))) {
+    console.error("self-test FAILED: a quickbooks.intuit.com help link tripped the Intuit-host rule");
+    process.exit(1);
+  }
+  console.log("self-test passed: Intuit API hosts are refused in browser files, help links are not");
 
   // ── The deno step ──────────────────────────────────────────────────────────
   // Asserts the MECHANISM, not a historical bug. A subprocess check whose clean result and

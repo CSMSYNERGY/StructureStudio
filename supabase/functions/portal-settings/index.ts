@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
-import { getQboConnection, qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
+import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
 // Any linked account may read these; everything else requires owner/admin (or an
@@ -2125,7 +2125,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Still reachable: the connection can die between the check above and the call landing.
       if (e instanceof QboBroken) return json({ items: [], broken: true, clientId });
       if (e instanceof QboNotConnected) return json({ items: [], notConnected: true, clientId });
-      return json({ error: "Could not load items from QuickBooks. Try again shortly." }, 502);
+      // The tid rides along as a support ref rather than a second app_errors row: withErrorLog
+      // already records this 502 and reads its message from the body, so appending the ref puts
+      // the trace id in app_errors through the path that exists — and gives whoever reports the
+      // problem something Intuit can look up. Opaque id, no customer data, safe to show.
+      const ref = e instanceof QboApiError && e.tid ? ` (ref ${e.tid})` : "";
+      return json({ error: `Could not load items from QuickBooks. Try again shortly.${ref}` }, 502);
     }
   }
 
@@ -2153,7 +2158,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ ok: true, companyName: name, clientId });
     } catch (e) {
       if (e instanceof QboBroken) return json({ ok: false, broken: true, error: "QuickBooks refused the connection — reconnect to restore it.", clientId }, 200);
-      return json({ ok: false, error: "Could not reach QuickBooks. Try again shortly.", clientId }, 200);
+      // Same support ref as list_qbo_items. This one answers 200 deliberately (see above), so
+      // the app_errors row comes from portal.html's invoke wrapper filing any `error` body —
+      // which means the ref reaches triage by that route instead.
+      const ref = e instanceof QboApiError && e.tid ? ` (ref ${e.tid})` : "";
+      return json({ ok: false, error: `Could not reach QuickBooks. Try again shortly.${ref}`, clientId }, 200);
     }
   }
 
