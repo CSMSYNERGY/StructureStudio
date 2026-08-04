@@ -1198,6 +1198,124 @@ function d3MakeTexture(THREE, kind) {
   return tex;
 }
 
+// ─── Catalog fixture photos as 3D textures ───
+// A builder uploads a straight-on photo of THEIR door/window in the portal
+// (Options → Doors/Windows); the 3D masks that photo onto the opening's slab, so
+// the customer sees the real product instead of a generic panel. No model
+// library to maintain on our side — the builder owns the photo.
+//
+// Three constraints drive this design:
+//  1. `queueRebuild` disposes and rebuilds the whole model EVERY animation frame
+//     during a drag, so these textures must be shared across builds and must NOT
+//     be freed by disposeShed3DModel (hence userData.ssShared, honored there).
+//  2. The renderer draws on demand only, so a photo arriving later has to ask for
+//     a frame — d3OnFixtureTexSettle lets the viewer register that listener.
+//  3. A texture whose image hasn't loaded renders BLACK. So the cache serves a 1x1
+//     canvas in the parametric fill color until the photo arrives — a loading (or
+//     permanently failed) photo looks exactly like the painted fallback.
+//     The arriving photo becomes a BRAND-NEW texture object and every material
+//     built against the placeholder is re-pointed at it. Verified the hard way on
+//     three 0.167: swapping `texture.image` (or `texture.source.data`) and setting
+//     needsUpdate does NOT re-upload an already-uploaded texture — the GPU kept
+//     showing the 1x1 placeholder while `material.map.image.width` read 1024.
+//     Only assigning a new texture to `material.map` takes effect. Do not
+//     "optimize" this back into a mutation.
+//     Re-pointing (rather than rebuilding the model) is also what keeps this
+//     working in a BACKGROUNDED tab: requestAnimationFrame does not fire there, so
+//     a rebuild-based repaint would never land and the customer would close the
+//     view — and snapshot their quote — with blank doors.
+// Photos are downscaled to <=1024px: a 4000px phone photo is ~48MB of GPU memory
+// per opening, and the 3D has to survive a mid-range phone.
+const _d3FxTexCache = new Map();       // url → { tex, status: "loading" | "ready" | "error" }
+const _d3FxMatBinds = new Map();       // placeholder tex → Set<material> awaiting the photo
+let _d3FxTexPending = 0;
+const _d3FxTexWaiters = [];            // one-shot resolvers (see d3WaitFixtureTextures)
+const _d3FxTexListeners = new Set();   // per-viewer settle callbacks
+const D3_FX_TEX_MAX = 1024;
+
+function _d3FxTexSettle() {
+  _d3FxTexPending = Math.max(0, _d3FxTexPending - 1);
+  if (_d3FxTexPending === 0) { while (_d3FxTexWaiters.length) { const r = _d3FxTexWaiters.pop(); try { r(); } catch (_e) { /* noop */ } } }
+  _d3FxTexListeners.forEach((cb) => { try { cb(); } catch (_e) { /* a listener must never break the load */ } });
+}
+
+// Shared, session-lived texture for a fixture photo URL. Never evicted: a
+// disposed texture under a live model is exactly the hazard the grass-singleton
+// note above warns about, and a tenant only has a handful of fixture photos.
+function d3FixtureTexture(THREE, url, placeholderCss) {
+  if (!url || typeof document === "undefined") return null;
+  const hit = _d3FxTexCache.get(url);
+  if (hit) return hit.tex;                      // placeholder / photo / failed all render safely
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 1;
+  const g = cv.getContext("2d");
+  g.fillStyle = d3CssColor(placeholderCss, D3_COLORS.door);
+  g.fillRect(0, 0, 1, 1);
+  const tex = new THREE.CanvasTexture(cv);
+  if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;   // photos are sRGB, not linear
+  tex.userData = { ssShared: true };            // disposeShed3DModel must skip this map
+  const entry = { tex, status: "loading" };
+  _d3FxTexCache.set(url, entry);
+  _d3FxTexPending++;
+  const img = new Image();
+  // Required: without CORS the downscale canvas is tainted and texImage2D throws.
+  // Supabase public buckets send Access-Control-Allow-Origin, so this is clean.
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    try {
+      const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+      const s = Math.min(1, D3_FX_TEX_MAX / Math.max(w, h));
+      const dw = Math.max(1, Math.round(w * s)), dh = Math.max(1, Math.round(h * s));
+      const out = document.createElement("canvas");
+      out.width = dw; out.height = dh;
+      out.getContext("2d").drawImage(img, 0, 0, dw, dh);
+      // A NEW texture, not a mutation of the placeholder (see the note above).
+      const photoTex = new THREE.CanvasTexture(out);
+      if (THREE.SRGBColorSpace) photoTex.colorSpace = THREE.SRGBColorSpace;
+      photoTex.userData = { ssShared: true };
+      const placeholder = entry.tex;
+      entry.tex = photoTex;
+      entry.status = "ready";
+      // Re-point everything already built against the placeholder. The placeholder
+      // itself is left undisposed: it is one pixel, and disposing a texture a live
+      // material might still reference buys nothing.
+      const waiting = _d3FxMatBinds.get(placeholder);
+      if (waiting) { waiting.forEach((m) => { m.map = photoTex; m.needsUpdate = true; }); _d3FxMatBinds.delete(placeholder); }
+    } catch (_e) { entry.status = "error"; }     // keep the placeholder — never a black slab
+    _d3FxTexSettle();
+  };
+  img.onerror = () => { entry.status = "error"; _d3FxTexSettle(); };
+  img.src = url;
+  return tex;
+}
+// Remember a material built against a still-loading placeholder so the photo can be
+// swapped in the moment it lands. Materials built after the load get the real
+// texture from the cache directly and need no bookkeeping.
+function d3BindFixtureMaterial(tex, mat) {
+  if (!tex || !mat) return mat;
+  let placeholderEntry = null;
+  _d3FxTexCache.forEach((e) => { if (e.tex === tex && e.status === "loading") placeholderEntry = e; });
+  if (!placeholderEntry) return mat;
+  let set = _d3FxMatBinds.get(tex);
+  if (!set) { set = new Set(); _d3FxMatBinds.set(tex, set); }
+  set.add(mat);
+  return mat;
+}
+function d3FixtureTexturesPending() { return _d3FxTexPending; }
+// Resolves when every in-flight photo has settled, or when the cap elapses —
+// the quote PDF must not be captured with placeholder doors, but it must also
+// never hang on a dead image host.
+function d3WaitFixtureTextures(timeoutMs) {
+  if (_d3FxTexPending === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const fire = () => { if (!done) { done = true; resolve(); } };
+    _d3FxTexWaiters.push(fire);
+    setTimeout(fire, Math.max(0, timeoutMs || 1500));
+  });
+}
+function d3OnFixtureTexSettle(cb) { _d3FxTexListeners.add(cb); return () => _d3FxTexListeners.delete(cb); }
+
 // ─── Environment (competitor-parity presentation: grass, sky, labels) ───
 // SmartBuild-style scene dressing, all procedural canvases — no image assets.
 // Grass: mottled two-green field tile. Sky: vertical gradient with soft cloud
@@ -1281,6 +1399,18 @@ function buildShed3DModel(THREE, p) {
   const wallMat = mat(bodyColor);
   const trimMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
+  // Catalog fixture photos. Resolved LIVE from the catalog by fixtureItemId
+  // rather than stamped on the item at placement (unlike price/name, which must
+  // not move under a saved quote): re-uploading a better photo improves designs
+  // already saved, and an archived fixture — dropped by get_fixtures — quietly
+  // falls back to the painted slab instead of leaving a hole.
+  const fxById = new Map((Array.isArray(p.fixtures) ? p.fixtures : []).map((fx) => [String(fx.id), fx]));
+  const fixturePhotoTex = (it) => {
+    if (it.fixtureItemId == null) return null;                 // built-in door/window
+    const fx = fxById.get(String(it.fixtureItemId));
+    if (!fx || !fx.imageUrl) return null;
+    return d3FixtureTexture(THREE, fx.imageUrl, it.type === "window" ? D3_COLORS.glass : D3_COLORS.door);
+  };
   // Siding texture (vertical groove panel by default; horizontal lap boards when
   // the customer picked a lap-siding upgrade) — multiplies the body color.
   const wallTex = d3MakeTexture(THREE, (p.styleSpec && p.styleSpec.siding === "lap") ? "lap" : "groove");
@@ -1358,13 +1488,23 @@ function buildShed3DModel(THREE, p) {
 
   // Opening vertical extent: item-stamped fields first (Phase 5 — placed items
   // carry openingHeightFt/sillFt), D3 defaults for legacy designs.
+  // Catalog fixtures carry their real size as widthIn/heightIn instead of the
+  // Phase 5 stamps, so a 7 ft roll-up finally reads taller than a walk door.
+  // Everything is clamped to leave a header strip under the plate: the customer
+  // can pick 6 ft walls in this very modal, and an unclamped 6'8" door would
+  // push its casing into the roof and silently skip the header segment.
   const openingSpan = (it) => {
+    const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
+    const maxTop = H - 0.2;
     if (it.type === "window") {
-      const s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
-      return [s0, s0 + (it.openingHeightFt || D3.WINDOW_H)];
+      const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
+      let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
+      if (s0 + wh > maxTop) s0 = Math.max(0.35, maxTop - wh);   // tall window, short wall: drop the sill
+      return [s0, s0 + wh];
     }
-    if (it.type === "roughOpening") return [0, it.openingHeightFt || D3.RO_H];
-    return [0, it.openingHeightFt || D3.DOOR_H]; // singleDoor / doubleDoor
+    if (it.type === "roughOpening") return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
+    // singleDoor / doubleDoor / fixtureDoor (every catalog door placement)
+    return [0, Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop)];
   };
 
   Object.keys(WALLS).forEach((wname) => {
@@ -1446,19 +1586,43 @@ function buildShed3DModel(THREE, p) {
       og.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
       og.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
       og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
+      // A catalog fixture's own photo is masked onto the slab when the builder
+      // uploaded one. MeshBasicMaterial, not Lambert: a photo already carries the
+      // light it was shot in, and shading it again reads as a dirty smudge.
+      // The photo stretches to the opening on purpose — one photo serves a door's
+      // 4/5/6 ft variants, which is the whole point of not keeping a model library.
       if (o.it.type === "window") {
         og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
-        og.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
-        const midY = (o.y0 + o.y1) / 2;
-        og.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
-        og.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
-      } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor") {
-        const doorMat = mat(D3_COLORS.door);
-        if (o.it.type === "doubleDoor") {
-          og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
-          og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+        const winTex = fixturePhotoTex(o.it);
+        if (winTex) {
+          // The photo shows the real sash and grid, so it replaces glass + muntins.
+          og.add(wallBox(d3BindFixtureMaterial(winTex, new THREE.MeshBasicMaterial({ map: winTex })), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
         } else {
-          og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+          og.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+          const midY = (o.y0 + o.y1) / 2;
+          og.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
+          og.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
+        }
+      } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
+        const photoTex = fixturePhotoTex(o.it);
+        if (photoTex) {
+          // One slab even for a double or a roll-up: the photo already shows both
+          // leaves / the panel seams, so splitting the geometry would double them.
+          og.add(wallBox(d3BindFixtureMaterial(photoTex, new THREE.MeshBasicMaterial({ map: photoTex })), wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+        } else {
+          const doorMat = mat(D3_COLORS.door);
+          if (o.it.type === "doubleDoor" || o.it.operation === "double") {
+            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
+            og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+          } else {
+            if (o.it.operation === "slideup") {
+              // Roll-up read: reuse the lap texture as ~1 ft horizontal panel
+              // seams, matching the segmented glyph the 2D plan draws.
+              const seamTex = d3MakeTexture(THREE, "lap");
+              if (seamTex) { seamTex.repeat.set(1, Math.max(2, Math.round(o.y1 - 0.1))); doorMat.map = seamTex; }
+            }
+            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+          }
         }
       }
       openingsGroup.add(og);
@@ -1622,7 +1786,9 @@ function disposeShed3DModel(model) {
     if (o.geometry) o.geometry.dispose();
     if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
   });
-  mats.forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
+  // Fixture photo textures are shared across every rebuild (see d3FixtureTexture)
+  // — disposing one here would blank every catalog door on the first drag frame.
+  mats.forEach((m) => { if (m.map && !(m.map.userData && m.map.userData.ssShared)) m.map.dispose(); m.dispose(); });
 }
 
 // Full-screen orbitable 3D view of the current design. Mounted only while open:
@@ -1631,7 +1797,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -1698,7 +1864,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
       let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
-      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY });
+      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures });
       scene.add(model.root);
       scene.add(new THREE.HemisphereLight(0xFFFFFF, 0x8D8573, 1.8));
       // Start the camera on the FRONT side (same wall the 2D labels call FRONT),
@@ -1829,14 +1995,21 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
         return null;
       };
-      // Vertical extent of an opening — item-stamped fields first (Phase 5),
-      // D3 defaults for legacy items. Mirrors the builder's openingSpan.
+      // Vertical extent of an opening — item-stamped fields first (Phase 5), then a
+      // catalog fixture's own heightIn, then D3 defaults for legacy items. Mirrors
+      // the builder's openingSpan, INCLUDING its clamps, so drag highlights track
+      // a wall-height pick (spec.wallHeightFt is mutated live by setWallHeight).
       const openSpanOf = (it) => {
+        const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
+        const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
         if (it.type === "window") {
-          const s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
-          return [s0, s0 + (it.openingHeightFt || D3.WINDOW_H)];
+          const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
+          let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
+          if (s0 + wh > maxTop) s0 = Math.max(0.35, maxTop - wh);
+          return [s0, s0 + wh];
         }
-        return [0, it.openingHeightFt || (it.type === "roughOpening" ? D3.RO_H : D3.DOOR_H)];
+        if (it.type === "roughOpening") return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
+        return [0, Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop)];
       };
       const placeHighlight = (it) => {
         const c = itemTypes[it.type] || {};
@@ -1883,7 +2056,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           disposeShed3DModel(e.model);
           // Recompute FRONT from the live items — dragging the only door to a
           // different wall re-orients the roof exactly like the 2D labels.
-          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY });
+          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY, fixtures });
           scene.add(e.model.root);
           applyShellMode(e);
           render();
@@ -2135,7 +2308,21 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
       if (ro && wrapRef.current) ro.observe(wrapRef.current);
       window.addEventListener("resize", resize);
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, interior: false, roofOn: true, envOn: true };
+      // A fixture photo that arrives after the scene is built has already been swapped
+      // into its materials by the cache (see d3FixtureTexture) — all that is left is
+      // asking for a frame, since this renderer draws on demand. Deliberately a direct
+      // render, NOT queueRebuild: rAF does not fire in a backgrounded tab, and a
+      // customer who switches tabs must not come back to blank doors.
+      // Also un-arm any snapshot already taken: it shows placeholder slabs, so the
+      // close handler should replace it with the real thing.
+      const offFxTex = d3OnFixtureTexSettle(() => {
+        const e2 = engineRef.current;
+        if (!e2) return;
+        e2.render();
+        capturedRef.current = false;
+        setShotTaken(false);
+      });
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, offFxTex, interior: false, roofOn: true, envOn: true };
       resize();
       setPhase("ready");
     }).catch((err) => {
@@ -2149,6 +2336,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       engineRef.current = null;
       window.removeEventListener("resize", e.resize);
       if (e.ro) e.ro.disconnect();
+      if (e.offFxTex) e.offFxTex();   // no rendering into a disposed renderer, no setState after unmount
       e.controls.dispose();
       e.disposeInteraction();
       disposeShed3DModel(e.model);
@@ -2183,17 +2371,27 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       return { url: c.toDataURL("image/jpeg", 0.9), w: c.width, h: c.height };
     } catch (_) { return null; }
   };
-  const takeSnapshot = () => {
+  // This image becomes page 2 of the quote the customer signs against, so it must
+  // never be read while a fixture photo is still loading — that would ship a quote
+  // showing blank placeholder doors. Capped so a dead image host can't hang the
+  // shutter; a warm cache waits for nothing.
+  // The photo lands directly in the materials, and capture() renders before it reads
+  // the buffer, so waiting for the loads is the whole guard. No animation frame is
+  // involved on purpose — see the settle listener.
+  const awaitFixturePhotos = () => (d3FixtureTexturesPending() > 0 ? d3WaitFixtureTextures(1500) : Promise.resolve());
+  const takeSnapshot = async () => {
+    await awaitFixturePhotos();
     const shot = capture();
-    if (!shot) return;
+    if (!shot) return;                 // also covers a close mid-await
     capturedRef.current = true;
     onSnapshot(shot);
     setShotTaken(true);
   };
-  const handleClose = () => {
+  const handleClose = async () => {
     // Never-captured close still contributes the last viewed angle — opening
     // the 3D view at all means the customer gets the 3D page in their quote.
     if (!capturedRef.current && phase === "ready") {
+      await awaitFixturePhotos();
       const shot = capture();
       if (shot) onSnapshot(shot);
     }
@@ -6843,6 +7041,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           painted={false} paintBody="" paintTrim=""
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
+          fixtures={C.fixtures}
           paintEnabled={false}
           onSnapshot={() => {}}
           onClose={() => setAdminCalPreview(false)}
@@ -6858,6 +7057,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
+          fixtures={C.fixtures}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
