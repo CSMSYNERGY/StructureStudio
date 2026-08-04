@@ -2696,7 +2696,7 @@ function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
   );
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -2799,6 +2799,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("admin") === "1";
   }, [embedded]);
+  // The 3D calibration editor is reachable by an operator on the public page AND by the
+  // builder in their own portal (the host opts in by passing setup3d, and only does so for
+  // owner/admin roles). This must stay SEPARATE from isAdmin: isAdmin also unlocks the GHL
+  // credentials panel, and the whole reason it is forced false when embedded is that
+  // /portal.html?admin=1 must never surface that panel inside a tenant's portal.
+  const showCal3D = isAdmin || Boolean(setup3d);
 
   // Options the user currently sees. Options without scoping are always in the
   // list; scoped options join/leave as the user picks/changes building style.
@@ -4872,16 +4878,58 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSetRoof = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, roof: { ...p.spec.roof, ...patch } } }));
   const calSetColor = (k, v) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, colors: { ...p.spec.colors, [k]: v } } }));
   const calSetPhoto = (i, v) => setAdminCal((p) => { const ph = p.photos.slice(); ph[i] = v; return { ...p, photos: ph }; });
+  // A drafted spec MERGES into the draft rather than replacing it: the model reports only
+  // what the photos actually show, so anything it leaves out keeps the value the editor
+  // (or the style default) already had.
+  const applyDraftedSpec = (d3) => setAdminCal((p) => ({
+    ...p,
+    spec: {
+      roof: { ...p.spec.roof, ...(d3.roof || {}) },
+      siding: d3.siding !== undefined ? d3.siding : p.spec.siding,
+      colors: { ...p.spec.colors, ...(d3.colors || {}) },
+      wallHeightFt: d3.wallHeightFt || p.spec.wallHeightFt,
+    },
+  }));
   const copyCalJson = () => {
     const out = JSON.stringify({ d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) }, null, 2);
     try {
       navigator.clipboard.writeText(out);
-      setAdminCalMsg({ ok: true, msg: "d3 JSON copied — paste into this style's entry in client_configs.config.buildingStyles." });
+      setAdminCalMsg({ ok: true, msg: "d3 JSON copied — paste into this style's building_styles.d3 column." });
     } catch (_) {
       setAdminCalMsg({ ok: false, msg: "Clipboard blocked — JSON: " + out });
     }
   };
+  // Photo slots can take an upload in the portal (the host owns the authed call); the
+  // public page keeps pasting URLs, since it has no session to upload with.
+  const calUploadPhoto = async (i, file) => {
+    if (!file || !(setup3d && setup3d.onUploadPhoto)) return;
+    if (file.size > 3_000_000) { setAdminCalMsg({ ok: false, msg: "That photo is over 3MB — please use a smaller one." }); return; }
+    setAdminCalBusy(true); setAdminCalMsg(null);
+    try {
+      const url = await setup3d.onUploadPhoto(file);
+      if (!url) throw new Error("Upload returned no URL.");
+      calSetPhoto(i, url);
+      setAdminCalMsg({ ok: true, msg: "Photo uploaded." });
+    } catch (e) {
+      setAdminCalMsg({ ok: false, msg: e.message || "Upload failed" });
+    } finally { setAdminCalBusy(false); }
+  };
+  // Both writes below have two callers with different credentials. In the portal the host
+  // passes `setup3d` and owns the I/O, because it holds the signed-in session — THIS
+  // component's supabase client is the anon one, and calling portal-settings with it would
+  // 401 at resolveTenant. On the public page (?admin=1) there is no session at all, so the
+  // operator path keeps going through admin-save-settings with the shared password.
   const saveCalSpec = async () => {
+    if (setup3d && setup3d.onSaveSpec) {
+      setAdminCalBusy(true); setAdminCalMsg(null);
+      try {
+        await setup3d.onSaveSpec(adminCal.styleValue, adminCal.spec, adminCal.photos.filter(Boolean));
+        setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Designer tab to refresh it here." });
+      } catch (e) {
+        setAdminCalMsg({ ok: false, msg: e.message || "Save failed" });
+      } finally { setAdminCalBusy(false); }
+      return;
+    }
     if (!adminPwd) { setAdminCalMsg({ ok: false, msg: "Enter the admin password first (top row)." }); return; }
     setAdminCalBusy(true); setAdminCalMsg(null);
     try {
@@ -4890,15 +4938,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
-      setAdminCalMsg({ ok: true, msg: "Saved to the config row — reload the page to see it live." });
+      setAdminCalMsg({ ok: true, msg: "Saved — reload the page to see it live." });
     } catch (e) {
-      setAdminCalMsg({ ok: false, msg: e.message + " (If the deployed function predates save_style_d3, redeploy admin-save-settings — or use Copy JSON meanwhile.)" });
+      setAdminCalMsg({ ok: false, msg: e.message + " (Or use Copy d3 JSON and set building_styles.d3 by hand.)" });
     } finally { setAdminCalBusy(false); }
   };
   const calibrateFromPhotos = async () => {
     const photos = adminCal.photos.filter(Boolean);
+    if (photos.length === 0) { setAdminCalMsg({ ok: false, msg: "Add at least one photo first." }); return; }
+    if (setup3d && setup3d.onDraftFromPhotos) {
+      setAdminCalBusy(true); setAdminCalMsg(null);
+      try {
+        const d3 = await setup3d.onDraftFromPhotos(photos, adminCal.styleValue);
+        if (!d3) throw new Error("The draft came back empty.");
+        applyDraftedSpec(d3);
+        setAdminCalMsg({ ok: true, msg: "Draft read from your photos — preview it, tweak anything, then save." });
+      } catch (e) {
+        setAdminCalMsg({ ok: false, msg: e.message || "Drafting failed" });
+      } finally { setAdminCalBusy(false); }
+      return;
+    }
     if (!adminPwd) { setAdminCalMsg({ ok: false, msg: "Enter the admin password first (top row)." }); return; }
-    if (photos.length === 0) { setAdminCalMsg({ ok: false, msg: "Add at least one photo URL first." }); return; }
     setAdminCalBusy(true); setAdminCalMsg(null);
     try {
       const { data, error } = await supabase.functions.invoke("calibrate-style", {
@@ -4906,18 +4966,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       });
       if (error) throw new Error(error.message || "Calibration failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Calibration failed");
-      setAdminCal((p) => ({
-        ...p,
-        spec: {
-          roof: { ...p.spec.roof, ...(data.d3.roof || {}) },
-          siding: data.d3.siding !== undefined ? data.d3.siding : p.spec.siding,
-          colors: { ...p.spec.colors, ...(data.d3.colors || {}) },
-          wallHeightFt: data.d3.wallHeightFt || p.spec.wallHeightFt,
-        },
-      }));
+      applyDraftedSpec(data.d3);
       setAdminCalMsg({ ok: true, msg: "Draft spec read from the photos — preview it, tweak, then save." });
     } catch (e) {
-      setAdminCalMsg({ ok: false, msg: e.message + " (calibrate-style must be deployed with ANTHROPIC_API_KEY set.)" });
+      setAdminCalMsg({ ok: false, msg: e.message + " (On the public page this needs calibrate-style deployed; in the portal it runs through Settings.)" });
     } finally { setAdminCalBusy(false); }
   };
 
@@ -5620,102 +5672,122 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {adminMsg.msg}
             </div>
           )}
+        </div>
+      )}
 
-          {/* ── 3D Style Calibration (operator onboarding tool) ── */}
-          <div style={{ marginTop: 14, borderTop: "1px dashed #F59E0B", paddingTop: 10 }}>
-            <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
-            <span style={{ fontSize: 11, color: "#92400E", marginLeft: 8 }}>
-              Pick a style, paste its four-side photo URLs, tune the spec against the live preview, then Save (or Copy JSON into the config row).
-            </span>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
-              {C.buildingStyles.map((s) => (
-                <button key={s.value} onClick={() => openCalEditor(s)}
-                  style={{ ...S.btn(adminCal && adminCal.styleValue === s.value ? "#92400E" : "#FFF", adminCal && adminCal.styleValue === s.value ? "#FFF" : "#92400E"), border: "1px solid #FCD34D" }}>
-                  {s.label}
-                </button>
-              ))}
-            </div>
-            {adminCal && (
-              <div>
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
-                    <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                      <option value="gable">gable</option>
-                      <option value="shed">shed</option>
-                      <option value="gambrel">gambrel</option>
-                    </select>
-                  </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
-                    <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (standard look)
-                    <select value={adminCal.spec.siding || ""} onChange={(e) => calSet({ siding: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                      <option value="">plain</option>
-                      <option value="batten">batten (vertical)</option>
-                      <option value="lap">lap (horizontal)</option>
-                    </select>
-                  </label>
-                </div>
-                {adminCal.spec.roof.type === "gambrel" && (
-                  <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
-                    <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
-                      <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                    </label>
-                    <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Knee rise (× half-span)
-                      <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                    </label>
-                    <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge rise (× half-span)
-                      <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                    </label>
-                  </div>
-                )}
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
-                  {["body", "trim", "roof"].map((k) => (
-                    <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
-                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                        <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                        <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
-                      </div>
-                    </label>
-                  ))}
-                </div>
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
-                  {["Front", "Back", "Left", "Right"].map((side, i) => (
-                    <label key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{side} photo URL
-                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                        <input type="text" placeholder="https://…" value={adminCal.photos[i] || ""} onChange={(e) => calSetPhoto(i, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                        {adminCal.photos[i] ? <img src={adminCal.photos[i]} alt={side} style={{ width: 44, height: 32, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", flexShrink: 0 }} /> : null}
-                      </div>
-                    </label>
-                  ))}
-                </div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <button onClick={() => setAdminCalPreview(true)} style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>🧊 Preview in 3D</button>
-                  <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>
-                  <button onClick={calibrateFromPhotos} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
-                    {adminCalBusy ? "Working…" : "✨ Draft from photos (AI)"}
-                  </button>
-                  <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
-                    {adminCalBusy ? "Saving…" : "Save to config"}
-                  </button>
-                </div>
-                {adminCalMsg && (
-                  <div style={{ marginTop: 8, fontSize: 12, color: adminCalMsg.ok ? "#166534" : "#DC2626", fontWeight: 600, wordBreak: "break-all" }}>
-                    {adminCalMsg.msg}
-                  </div>
-                )}
-              </div>
-            )}
+      {/* 3D Style Calibration. Two ways in: the operator panel on the public page
+          (?admin=1), and -- through the setup3d contract -- the BUILDER inside their own
+          portal, which is the point of the feature. Deliberately a sibling of the admin
+          panel rather than a child: that panel also carries the GHL credentials, which
+          must never surface inside a tenant portal. */}
+      {showCal3D && (
+        <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
+          <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
+          <span style={{ fontSize: 11, color: "#92400E", marginLeft: 8 }}>
+            {setup3d
+              ? "Pick one of your styles, add photos of a real building, tune it against the live 3D preview, then Save. This is what your customers see in 3D."
+              : "Pick a style, paste its four-side photo URLs, tune the spec against the live preview, then Save (or Copy JSON into building_styles.d3)."}
+          </span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
+            {C.buildingStyles.map((s) => (
+              <button key={s.value} onClick={() => openCalEditor(s)}
+                style={{ ...S.btn(adminCal && adminCal.styleValue === s.value ? "#92400E" : "#FFF", adminCal && adminCal.styleValue === s.value ? "#FFF" : "#92400E"), border: "1px solid #FCD34D" }}>
+                {s.label}
+              </button>
+            ))}
           </div>
+          {adminCal && (
+            <div>
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
+                  <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="gable">gable</option>
+                    <option value="shed">shed</option>
+                    <option value="gambrel">gambrel</option>
+                  </select>
+                </label>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
+                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
+                  <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
+                  <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
+                  <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (standard look)
+                  <select value={adminCal.spec.siding || ""} onChange={(e) => calSet({ siding: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="">plain</option>
+                    <option value="batten">batten (vertical)</option>
+                    <option value="lap">lap (horizontal)</option>
+                  </select>
+                </label>
+              </div>
+              {adminCal.spec.roof.type === "gambrel" && (
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Knee rise (× half-span)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge rise (× half-span)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                </div>
+              )}
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                {["body", "trim", "roof"].map((k) => (
+                  <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
+                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                      <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
+                    </div>
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
+                {["Front", "Back", "Left", "Right"].map((side, i) => (
+                  <label key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{side} photo{setup3d ? "" : " URL"}
+                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <input type="text" placeholder="https://…" value={adminCal.photos[i] || ""} onChange={(e) => calSetPhoto(i, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                      {/* In the portal a builder picks a file; the host uploads it and hands
+                          back a URL. The public page has no session, so it stays URL-only. */}
+                      {setup3d && setup3d.onUploadPhoto && (
+                        <label title="Upload a photo" style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "6px 8px", cursor: adminCalBusy ? "wait" : "pointer", flexShrink: 0, marginBottom: 0 }}>
+                          ⬆
+                          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={adminCalBusy}
+                            onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; calUploadPhoto(i, f); }}
+                            style={{ display: "none" }} />
+                        </label>
+                      )}
+                      {adminCal.photos[i] ? <img src={adminCal.photos[i]} alt={side} style={{ width: 44, height: 32, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", flexShrink: 0 }} /> : null}
+                    </div>
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button onClick={() => setAdminCalPreview(true)} style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>🧊 Preview in 3D</button>
+                {/* Copy-JSON is the operator's escape hatch when a save path is down; a
+                    builder has no use for it and no place to paste it. */}
+                {!setup3d && <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>}
+                <button onClick={calibrateFromPhotos} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                  {adminCalBusy ? "Working…" : "✨ Draft from photos (AI)"}
+                </button>
+                <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                  {adminCalBusy ? "Saving…" : (setup3d ? "Save 3D look" : "Save to config")}
+                </button>
+              </div>
+              {adminCalMsg && (
+                <div style={{ marginTop: 8, fontSize: 12, color: adminCalMsg.ok ? "#166534" : "#DC2626", fontWeight: 600, wordBreak: "break-all" }}>
+                  {adminCalMsg.msg}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -7034,7 +7106,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       {/* Operator calibration preview: the current layout rendered with the
           DRAFT spec being edited — tune numbers against the reference photos. */}
-      {isAdmin && adminCal && adminCalPreview && (
+      {showCal3D && adminCal && adminCalPreview && (
         <Structure3DViewer
           bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
           styleValue={adminCal.styleValue} frontWall={frontWall}
@@ -7146,7 +7218,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null }) {
+export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -7279,5 +7351,5 @@ export default function StructureStudio({ config: configProp = null, clientId: c
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} /></DesignerErrorBoundary>;
 }

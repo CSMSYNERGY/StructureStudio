@@ -120,7 +120,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260804b" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260804c" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -2648,6 +2648,13 @@ function PricingCsv({ viewingLabel = null }) {
                       ? <img src={s.image_url} alt="" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    {/* Whether this style has a 3D look of its own yet. Read-only here —
+                        setting one needs the live 3D preview, so it lives in the Designer
+                        tab's 3D Style Calibration panel. */}
+                    <span title={s.d3 ? "This style has its own 3D look — tune it in Designer → 3D Style Calibration" : "No 3D look set yet: 3D falls back to a generic shape. Set one in Designer → 3D Style Calibration."}
+                      style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 7px", border: "1px solid " + (s.d3 ? "#A7F3D0" : "#E2E8F0"), background: s.d3 ? "#ECFDF5" : "#F8FAFC", color: s.d3 ? "#047857" : "#94A3B8" }}>
+                      {s.d3 ? "3D ✓" : "3D —"}
+                    </span>
                     <label title="Attach this style's photo to the CRM estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
@@ -5209,14 +5216,92 @@ function LocationsCard() {
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
 // — the loader then skips URL parsing entirely and can never hit its bare-root
 // /portal.html redirect (which would loop the portal).
-function DesignerTab({ clientId, onSaved, openDesign = null }) {
+// 3D Design tab. Replaced a "3rd Qtr" coming-soon panel: 3D ships, so this reports the
+// only thing a builder can act on — which of their styles has a 3D look of its own, and
+// which is still falling back to a generic shape. Read-only by design; setting a look
+// needs the live 3D preview, which lives in the Designer tab's calibration panel.
+function Studio3DStatus({ clientId, canAdmin, navigate }) {
+  const [state, setState] = useState({ loading: true, err: null, styles: [] });
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+        if (error) throw new Error(error.message || "Could not load your styles.");
+        if (!data || !data.ok) throw new Error((data && data.error) || "Could not load your styles.");
+        if (!dead) setState({ loading: false, err: null, styles: data.styles || [] });
+      } catch (e) {
+        if (!dead) setState({ loading: false, err: e.message, styles: [] });
+      }
+    })();
+    return () => { dead = true; };
+  }, [clientId]);
+
+  const done = state.styles.filter((s) => s.d3).length;
+  return (
+    <div style={{ maxWidth: 860, margin: "0 auto", width: "100%" }}>
+      <h2 style={{ margin: "0 0 6px", fontSize: 20, fontWeight: 800, color: "#0F172A" }}>3D Design</h2>
+      <p style={{ margin: "0 0 16px", fontSize: 13.5, color: "#475569", lineHeight: 1.5 }}>
+        Customers can spin their design in 3D and see their own size, colors, doors and windows on the building.
+        Photos you upload for a door or window are shown on that door in 3D, so it looks like the one you actually sell.
+        Give each building style its own 3D look below and the shape matches your real buildings too.
+      </p>
+      {state.loading && <div style={{ fontSize: 13, color: "#64748B" }}>Loading your styles…</div>}
+      {state.err && <div style={{ fontSize: 13, color: "#DC2626", fontWeight: 600 }}>{state.err}</div>}
+      {!state.loading && !state.err && state.styles.length === 0 && (
+        <div style={{ fontSize: 13, color: "#64748B" }}>No building styles yet — add one in Settings → Structures first.</div>
+      )}
+      {!state.loading && !state.err && state.styles.length > 0 && (
+        <>
+          <div style={{ fontSize: 12.5, color: "#475569", fontWeight: 700, marginBottom: 8 }}>
+            {done} of {state.styles.length} styles have their own 3D look
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {state.styles.map((s) => {
+              const photos = Array.isArray(s.d3_photos) ? s.d3_photos.filter(Boolean).length : 0;
+              return (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px" }}>
+                  {s.image_url
+                    ? <img src={s.image_url} alt="" style={{ width: 48, height: 36, objectFit: "cover", borderRadius: 6, border: "1px solid #E2E8F0", flexShrink: 0 }} />
+                    : <div style={{ width: 48, height: 36, borderRadius: 6, border: "1px solid #E2E8F0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>🏠</div>}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: "#0F172A" }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <div style={{ fontSize: 12, color: s.d3 ? "#047857" : "#94A3B8", fontWeight: 600 }}>
+                      {s.d3
+                        ? `3D look set${s.d3.roof && s.d3.roof.type ? ` — ${s.d3.roof.type} roof` : ""}${photos ? ` · ${photos} reference photo${photos === 1 ? "" : "s"}` : ""}`
+                        : "Using a generic shape — set its 3D look to match your real building"}
+                    </div>
+                  </div>
+                  {canAdmin && (
+                    <button type="button" onClick={() => navigate("designer")}
+                      style={{ flexShrink: 0, background: s.d3 ? "#F1F5F9" : "#7C3AED", color: s.d3 ? "#334155" : "#FFF", border: s.d3 ? "1px solid #E2E8F0" : "none", borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer" }}>
+                      {s.d3 ? "Adjust" : "Set up 3D"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {canAdmin && (
+            <p style={{ margin: "14px 0 0", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              Setting a style's 3D look happens in the <strong>Designer</strong> tab, under <strong>🧊 3D Style Calibration</strong> —
+              it needs the live 3D preview so you can see each change on a real building as you make it.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null }) {
   const SS = window.StructureStudio;
   if (!SS) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
   }
   return (
     <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
-      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} />
+      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} />
     </div>
   );
 }
@@ -8101,6 +8186,37 @@ function Dashboard({ session }) {
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions.
   const effClientId = viewing ? viewing.clientId : tenant.clientId;
+  // 3D setup contract handed to the embedded designer's calibration editor. The editor
+  // itself lives in the designer component (it needs the live 3D preview); the I/O lives
+  // here because THIS is where the signed-in session is — the component's own supabase
+  // client is the anon one and would 401 at resolveTenant. Null unless the user may
+  // administer the tenant, which is what keeps a role-"user" salesperson out of it.
+  const setup3d = useMemo(() => (!canAdmin ? null : {
+    onSaveSpec: async (styleValue, d3, d3Photos) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_d3", styleValue, d3, d3Photos } });
+      if (error) throw new Error(error.message || "Save failed");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
+      return data;
+    },
+    onDraftFromPhotos: async (photoUrls, styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue } });
+      if (error) throw new Error(error.message || "Drafting failed");
+      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Drafting failed");
+      return data.d3;
+    },
+    onUploadPhoto: async (file) => {
+      const imageBase64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result || "").split(",")[1] || "");
+        fr.onerror = () => rej(new Error("Could not read that file."));
+        fr.readAsDataURL(file);
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_style_photo", imageBase64, imageContentType: file.type || "image/jpeg" } });
+      if (error) throw new Error(error.message || "Upload failed");
+      if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
+      return data.url;
+    },
+  }), [canAdmin]);
   // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
@@ -8246,7 +8362,9 @@ function Dashboard({ session }) {
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
           {soonItem("repairs", "Repairs", "3rd Qtr")}
-          {soonItem("view-3d", "3D Design", "3rd Qtr")}
+          {/* No longer "3rd Qtr": 3D renders today, and this tab now reports which of the
+              tenant's styles have a 3D look set rather than advertising the feature. */}
+          {navItem("view-3d", "3D Design", "New")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("build-schedule", "Build Schedule", "3rd Qtr")}
@@ -8358,7 +8476,7 @@ function Dashboard({ session }) {
           {designerOpened && !gateLocked && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
               <DesignerTab key={"d-" + effClientId} clientId={effClientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
-                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} />
+                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} setup3d={setup3d} />
             </div>
           )}
           <div className="ss-inner">
@@ -8534,17 +8652,7 @@ function Dashboard({ session }) {
               />
             )}
             {!gateLocked && activeTab === "view-3d" && (
-              <ComingSoon
-                title="3D Design"
-                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>}
-                blurb="Let customers see the building they just designed in 3D, not just as a floor plan. Spin it, look at it from any angle, and see their real style, size, and color choices on the actual structure — so they know exactly what's showing up on their lot."
-                bullets={[
-                  "Turn any design into a 3D view — no extra work for you",
-                  "Their own siding, trim, and roof colors shown on the building",
-                  "Doors, windows, and lofts appear right where they placed them",
-                  "Share the 3D view alongside the estimate to help close the sale",
-                ]}
-              />
+              <Studio3DStatus clientId={effClientId} canAdmin={canAdmin} navigate={navigate} />
             )}
             {!gateLocked && activeTab === "rent-to-own-contracts" && (
               <ComingSoon
