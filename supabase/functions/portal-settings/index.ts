@@ -1694,7 +1694,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const unitIds = units.map((u: any) => u.id);
     const [mastersRes, estRes] = await Promise.all([
       codes.length
-        ? admin.from("designs").select("short_code, selections, image_url").in("short_code", codes).eq("client_id", clientId)
+        ? admin.from("designs").select("short_code, selections, image_url, paint_colors").in("short_code", codes).eq("client_id", clientId)
         : Promise.resolve({ data: [], error: null } as any),
       unitIds.length
         ? admin.from("designs")
@@ -1717,6 +1717,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const out = units.map((u: any) => {
       const m = masterByCode.get(u.design_short_code);
       const sel = (m && m.selections) || {};
+      const paint = (m && m.paint_colors) || {};
       const loc = u.location_id ? locById.get(u.location_id) : null;
       return {
         id: u.id, serial: u.serial, shortCode: u.design_short_code,
@@ -1724,6 +1725,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         askingPriceCents: u.asking_price_cents, status: u.status,
         soldDesignShortCode: u.sold_design_short_code,
         style: sel.style ?? null, size: sel.size ?? null, imageUrl: m?.image_url ?? null,
+        roofType: sel.roofType ?? null, roofColor: sel.roofColor ?? null,
+        bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
         createdAt: u.created_at, updatedAt: u.updated_at,
         estimates: estsByUnit.get(u.id) ?? [],
       };

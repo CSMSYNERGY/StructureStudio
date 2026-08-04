@@ -4921,6 +4921,7 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
     const q = query.trim().toLowerCase();
     if (!q) return true;
     const hay = ["#" + u.serial, String(u.serial), titleCase(u.style || ""), u.size || "", u.locationName || "",
+      u.roofType || "", u.roofColor || "", u.bodyColor || "", u.trimColor || "",
       ...(u.estimates || []).map((e) => (e.name || "") + " " + (e.estimateNumber ? "EST-" + e.estimateNumber : ""))].join(" ").toLowerCase();
     return hay.includes(q);
   });
@@ -5005,7 +5006,7 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              {["Serial #", "Building", "Location", "Asking price", "Estimates", "Added", "Status", "Actions"].map((h) => (
+              {["Serial #", "Building", "Roof", "Colors", "Location", "Asking price", "Estimates", "Added", "Status", "Actions"].map((h) => (
                 <th key={h} style={S.th}>{h}</th>
               ))}
             </tr></thead>
@@ -5020,6 +5021,8 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
                     <tr>
                       <td style={{ ...S.td, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>#{u.serial}</td>
                       <td style={S.td}><strong>{[titleCase(u.style || ""), u.size].filter(Boolean).join(" ") || "—"}</strong></td>
+                      <td style={S.td}>{u.roofType ? <>{u.roofType}{u.roofColor ? <span style={{ color: "#94A3B8" }}> · {u.roofColor}</span> : null}</> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
+                      <td style={S.td}>{(u.bodyColor || u.trimColor) ? <>{u.bodyColor || "—"}<span style={{ color: "#94A3B8" }}> / {u.trimColor || "—"}</span></> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={S.td}>{u.locationName ? <>{u.locationName}{u.locationCity ? <span style={{ color: "#94A3B8" }}> · {u.locationCity}</span> : null}</> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={S.td}><strong>{invMoney(u.askingPriceCents)}</strong></td>
                       <td style={S.td}>
@@ -5056,7 +5059,7 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
                       </td>
                     </tr>
                     {isOpen && ests.length > 0 && (
-                      <tr><td colSpan={8} style={{ padding: "2px 8px 12px" }}>
+                      <tr><td colSpan={10} style={{ padding: "2px 8px 12px" }}>
                         <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>
                           <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "#94A3B8", textTransform: "uppercase", marginBottom: 9 }}>
                             Estimates on building #{u.serial}
