@@ -10,7 +10,9 @@
 # CRLF because it used neither construct; that was luck, not design. Verified 2026-08-04.
 .githooks/** text eol=lf
 
-# Same reasoning for shell scripts anywhere in the tree — scripts/pre-push-selftest.sh is
-# `sh`-executed and carries the same CRLF-fragile constructs (case statements, heredocs
-# whose terminator would gain a CR).
+# Pre-emptive: same reasoning for any shell script added later. There is deliberately no
+# .sh in the tree right now — the pre-push self-test was one for a single commit and is now
+# scripts/pre-push-selftest.mjs, because npm on Windows runs scripts through cmd.exe where
+# no `sh` is on PATH. Node driver, no shell, no CRLF exposure. The rule stays so the next
+# .sh someone adds is born correct.
 *.sh text eol=lf
