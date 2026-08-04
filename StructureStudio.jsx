@@ -5068,8 +5068,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {invDialog.err && (
                   <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
                 )}
-                {(() => { const loc = invLocations.find((l) => String(l.id) === String(invLocationId)); return (
-                  <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 12 }}>Location: <b>{loc ? `${loc.name}${loc.city ? ` — ${loc.city}` : ""}` : "none yet"}</b>{" "}<span style={{ color: "#94A3B8" }}>(set beside the Save button)</span></div>
+                {(() => { const loc = invLocations.find((l) => String(l.id) === String(invLocationId)); const name = loc ? (loc.city && loc.city !== loc.name ? `${loc.name} — ${loc.city}` : loc.name) : "none yet"; return (
+                  <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 12 }}>Location: <b>{name}</b></div>
                 ); })()}
                 <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Asking price</label>
                 <input value={invDialog.price} inputMode="decimal" placeholder="0.00"
@@ -5106,7 +5106,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           )}
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
-              {hasExistingEstimate
+              {(inventoryNew || inventoryMaster)
+                ? <>Design the building and pick its location, then click <strong>{inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}</strong>.</>
+                : hasExistingEstimate
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
             </p>
@@ -5144,18 +5146,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </button>
               </div>
             )}
-            <button
-              onClick={submitQuote}
-              disabled={submitting}
-              style={{
-                background: submitting ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 10,
-                padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
-                letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
-                transition: "all 0.2s", minWidth: 160,
-              }}
-            >
-              {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
-            </button>
+            {/* Get Quote is a customer action — hidden while building/editing an inventory unit
+                (a lot building is quoted later via "Send estimate" on the Inventory tab). */}
+            {!(inventoryNew || inventoryMaster) && (
+              <button
+                onClick={submitQuote}
+                disabled={submitting}
+                style={{
+                  background: submitting ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 10,
+                  padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
+                  letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
+                  transition: "all 0.2s", minWidth: 160,
+                }}
+              >
+                {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
+              </button>
+            )}
           </div>
           {estimateVersions.length > 0 && (() => {
             const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
