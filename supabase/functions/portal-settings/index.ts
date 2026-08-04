@@ -1703,11 +1703,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         : Promise.resolve({ data: [], error: null } as any),
     ]);
     if (mastersRes.error) return json({ error: mastersRes.error.message }, 500);
-    // Explicit generics + the tuple cast: without them TS infers the value as `{}` from the
-    // `any[][]` the .map() produces, and every read below (m.selections, m.image_url) fails
-    // `deno check`. Same shape as estsByUnit on the next line.
-    const masterByCode = new Map<string, any>(
-      (mastersRes.data ?? []).map((d: any) => [d.short_code, d] as [string, any]),
+    // Spell out the master rows' shape. The empty-input branch above is `as any`, so
+    // `mastersRes.data` is `any` and a bare `new Map(rows.map(...))` has nothing to infer
+    // K/V from — it quietly becomes Map<unknown, unknown>, `.get()` returns `unknown`, and
+    // the truthiness / `?.` checks below narrow `unknown` to `{}`, so every field read off a
+    // master was a TS2339. Those errors kept `deno check` on this function permanently
+    // non-zero, which is exactly how a genuinely new type error would have gone unnoticed.
+    // A `Map<string, any>` also silences them, but it makes every read here unchecked
+    // forever — which defeats the point of having the gate — so name the fields instead.
+    // Both jsonb columns are optional-everything: they read back null on rows that predate
+    // them (roofType/roofColor and paint_colors each shipped later than the master itself),
+    // and save_inventory writes `{}` when unset.
+    interface MasterSelections { style?: string; size?: string; roofType?: string; roofColor?: string }
+    interface MasterPaint { body?: string; trim?: string }
+    interface MasterRow {
+      short_code: string;
+      image_url: string | null;
+      selections: MasterSelections | null;
+      paint_colors: MasterPaint | null;
+    }
+    const masterByCode = new Map<string, MasterRow>(
+      ((mastersRes.data ?? []) as MasterRow[]).map((d): [string, MasterRow] => [d.short_code, d]),
     );
     const estsByUnit = new Map<string, any[]>();
     for (const d of estRes.data ?? []) {
@@ -1721,8 +1737,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
     const out = units.map((u: any) => {
       const m = masterByCode.get(u.design_short_code);
-      const sel = (m && m.selections) || {};
-      const paint = (m && m.paint_colors) || {};
+      // Annotated, not inferred: without it the `|| {}` fallback puts a bare `{}` into the
+      // union and the reads below break again. The `||` (not `??`) is deliberate — an unset
+      // jsonb column reads back as null, and a legacy row can hold "".
+      const sel: MasterSelections = (m && m.selections) || {};
+      const paint: MasterPaint = (m && m.paint_colors) || {};
       const loc = u.location_id ? locById.get(u.location_id) : null;
       return {
         id: u.id, serial: u.serial, shortCode: u.design_short_code,
