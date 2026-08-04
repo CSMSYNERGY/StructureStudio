@@ -1703,7 +1703,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         : Promise.resolve({ data: [], error: null } as any),
     ]);
     if (mastersRes.error) return json({ error: mastersRes.error.message }, 500);
-    const masterByCode = new Map((mastersRes.data ?? []).map((d: any) => [d.short_code, d]));
+    // Explicit generics + the tuple cast: without them TS infers the value as `{}` from the
+    // `any[][]` the .map() produces, and every read below (m.selections, m.image_url) fails
+    // `deno check`. Same shape as estsByUnit on the next line.
+    const masterByCode = new Map<string, any>(
+      (mastersRes.data ?? []).map((d: any) => [d.short_code, d] as [string, any]),
+    );
     const estsByUnit = new Map<string, any[]>();
     for (const d of estRes.data ?? []) {
       const list = estsByUnit.get(d.inventory_unit_id) ?? [];
