@@ -30,3 +30,4 @@ wrangler.beta.jsonc
 # two are never fetched at runtime (FeedbackWidget import removed 2026-07-26).
 StructureStudio.jsx
 FeedbackWidget.jsx
+# First Workers Builds trigger: 2026-08-05 (deploy-freshness verification)
