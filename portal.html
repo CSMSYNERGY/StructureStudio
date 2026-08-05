@@ -120,7 +120,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260805c" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260805d" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -10288,11 +10288,43 @@ function Dashboard({ session }) {
     // Reference photos are no longer in the customer-facing config (migration 093 stopped
     // get_config broadcasting a builder's photos of their real buildings to anonymous
     // shoppers), so the editor asks for them here, over the authenticated session.
-    onLoadPhotos: async (styleValue) => {
+    // A 10-40MB mesh cannot go through an edge function (it would have to be buffered as
+    // base64 inside a 256MB / 2s worker), so the browser writes straight into the PRIVATE
+    // `models` bucket with the builder's own session — the same route portal.html already uses
+    // for feedback attachments, and the RLS policy in 094 confines it to their own folder.
+    onUploadModel: async (file, styleValue) => {
+      // supabase-js IGNORES the contentType option when the body is a Blob (it builds a
+      // FormData and reads Blob.type), and a .glb usually arrives as application/octet-stream
+      // or "". Re-tag it with a zero-copy slice so the stored mime matches the bucket's
+      // allow-list instead of failing at the storage gate for an undiagnosable reason.
+      const typed = file.slice(0, file.size, "model/gltf-binary");
+      const safe = String(styleValue || "style").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
+      const path = effClientId + "/" + safe + "-" + Date.now() + ".glb";
+      const up = await sb.storage.from("models").upload(path, typed, { contentType: "model/gltf-binary", upsert: false });
+      if (up.error) throw new Error(up.error.message || "Upload failed");
+      return path;
+    },
+    onSaveModel: async (styleValue, modelPath, modelMeta) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_model", styleValue, modelPath, modelMeta } });
+      if (error) throw new Error(error.message || "Could not save that scan");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Could not save that scan");
+      return data;
+    },
+    onSetModelStatus: async (styleValue, status) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_model_status", styleValue, status } });
+      if (error) throw new Error(error.message || "Could not change that");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Could not change that");
+      return data;
+    },
+    onLoadStyle3D: async (styleValue) => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
-      if (error || !data || !data.ok) return [];
+      if (error || !data || !data.ok) return null;
       const st = (data.styles || []).find((x) => x.key === styleValue);
-      return (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [];
+      return {
+        photos: (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [],
+        modelStatus: (st && st.model_status) || "none",
+        aiReady: data.aiReady !== false,
+      };
     },
     onDraftFromPhotos: async (photoUrls, styleValue) => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue } });

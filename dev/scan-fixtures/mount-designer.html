@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>scan UI mount check</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
+</head><body><div id="root"></div>
+<!-- Same CDN set as index.html / portal.html, byte-for-byte (preflight step 2 keeps them locked). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js" crossorigin="anonymous"></script>
+<script src="/structure-studio.component.js?v=dev" type="text/babel"></script>
+<script type="text/babel">
+// Mounts the REAL designer the way portal.html does — with a setup3d prop — so the
+// calibration editor's Building Scan block is reachable. Callbacks are stubs that record
+// their calls; nothing here touches the live project.
+window.__calls = [];
+const rec = (name) => (...a) => {
+  window.__calls.push([name, a.map((x) => (x instanceof File ? "File(" + x.name + "," + x.size + ")" : x))]);
+  return Promise.resolve(name === "onUploadModel" ? "junior-barns/stub-123.glb" : true);
+};
+const setup3d = {
+  onSaveSpec: rec("onSaveSpec"), onDraftFromPhotos: rec("onDraftFromPhotos"),
+  onUploadPhoto: rec("onUploadPhoto"),
+  onUploadModel: rec("onUploadModel"), onSaveModel: rec("onSaveModel"),
+  onSetModelStatus: rec("onSetModelStatus"),
+  onLoadStyle3D: () => Promise.resolve({ photos: [], modelStatus: "none", aiReady: true }),
+};
+window.__ready = false;
+const { useEffect } = React;
+function Harness() {
+  useEffect(() => { window.__ready = true; }, []);
+  return <StructureStudio clientId="junior-barns" embedded={false} setup3d={setup3d} />;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Harness />);
+</script>
+</body></html>

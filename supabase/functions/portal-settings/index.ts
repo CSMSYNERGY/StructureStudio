@@ -414,7 +414,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -435,7 +435,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings });
+    // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
+    // builder click a button that can only fail: the Anthropic key is an edge secret, so the
+    // browser has no other way to know whether the feature is configured.
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -985,6 +988,23 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Save one style's 3D appearance spec. Keyed on styleValue (the style `key`) because
   // that is all the embedded designer knows — get_config emits `value`, never the row id —
   // and (client_id, key) is unique. styleId is accepted too for callers that have it.
+  // Resolve one of this tenant's styles by key-or-id, and report whether its 3D setup is
+  // LOCKED. Shared by every write below so the lock cannot be enforced in one place and
+  // forgotten in another.
+  const findStyleFor3D = async (styleValue: string, styleId: string) => {
+    let q = admin.from("building_styles").select("id, key, model_status, model_url").eq("client_id", clientId);
+    q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
+    const { data, error } = await q.maybeSingle();
+    if (error) return { err: json({ error: error.message }, 500) };
+    if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
+    return { style: data as { id: string; key: string; model_status: string; model_url: string | null } };
+  };
+  // The lock freezes SETUP only. Prices, sizes, active/hidden and the estimate-image flag stay
+  // editable on a locked style on purpose: those are commercial decisions a builder makes every
+  // week, while the geometry is the thing that must stop moving once it matches a real building
+  // customers are being quoted against.
+  const LOCKED_MSG = "This style's 3D setup is locked. Unlock it first if you really need to change the shape.";
+
   if (action === "save_style_d3") {
     const styleValue = String(payload.styleValue ?? "").trim();
     const styleId = String(payload.styleId ?? "").trim();
@@ -992,14 +1012,114 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const clean = sanitizeD3Spec(payload.d3);
     if (!clean.ok) return json({ error: clean.error }, 400);
     const photos = sanitizePhotoUrls(payload.d3Photos);
-    let q = admin.from("building_styles")
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    const { error, count } = await admin.from("building_styles")
       .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
-      .eq("client_id", clientId);
-    q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
-    const { error, count } = await q;
+      .eq("client_id", clientId).eq("id", found.style!.id);
     if (error) return json({ error: error.message }, 500);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, d3: clean.d3, d3Photos: photos });
+  }
+
+  // ─── Building scan (094) ───────────────────────────────────────────────────────────────
+  // The browser uploads the .glb straight into the PRIVATE `models` bucket with its own
+  // session (the same route portal.html already uses for feedback attachments) — a 10-40 MB
+  // mesh cannot go through an edge function, which would have to buffer it as base64 inside a
+  // 256 MB / 2 s worker. These actions therefore handle the metadata and the lifecycle, and
+  // one of them hands back a short-lived signed URL so the editor can load a mesh that is
+  // deliberately not public.
+
+  // Record an uploaded scan against a style. `modelPath` is an object path, never a URL, and
+  // it is re-derived from the tenant here so a caller cannot point a style at another
+  // tenant's object by sending a crafted path.
+  if (action === "save_style_model") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const rawPath = String(payload.modelPath ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    if (!rawPath) return json({ error: "modelPath is required." }, 400);
+    if (!rawPath.startsWith(`${clientId}/`) || rawPath.includes("..") || !/\.glb$/i.test(rawPath)) {
+      return json({ error: "That scan path does not belong to this builder." }, 400);
+    }
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    // Confirm the object really is there and really is a GLB before pointing a style at it:
+    // catches a failed upload, a renamed file, or anything that is not glTF, instead of
+    // storing a reference that breaks later. Deliberately a RANGE request rather than
+    // storage.download(): the client SDK has no range option, so downloading would pull the
+    // whole 10-40 MB mesh into a 256 MB worker to read twelve bytes.
+    const sbUrl = Deno.env.get("SUPABASE_URL");
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!sbUrl || !svcKey) return json({ error: "Storage is not configured on the server." }, 500);
+    let magic: Uint8Array;
+    try {
+      const headRes = await fetch(`${sbUrl}/storage/v1/object/models/${rawPath.split("/").map(encodeURIComponent).join("/")}`, {
+        headers: { Authorization: `Bearer ${svcKey}`, apikey: svcKey, Range: "bytes=0-11" },
+      });
+      if (!headRes.ok && headRes.status !== 206) {
+        return json({ error: "That scan is not in storage — the upload did not finish. Try uploading it again." }, 400);
+      }
+      magic = new Uint8Array(await headRes.arrayBuffer());
+    } catch (e) {
+      return json({ error: `Could not read that scan: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+    // "glTF" — the GLB container magic. Anything else is a renamed .obj/.usdz/.zip.
+    const isGlb = magic.length >= 4 && magic[0] === 0x67 && magic[1] === 0x6C && magic[2] === 0x54 && magic[3] === 0x46;
+    if (!isGlb) return json({ error: "That file is not a .glb scan — its header does not say glTF. Re-export it as GLB." }, 400);
+    const meta = (payload.modelMeta && typeof payload.modelMeta === "object" && !Array.isArray(payload.modelMeta))
+      ? payload.modelMeta : null;
+    if (meta && JSON.stringify(meta).length > 4096) return json({ error: "Those scan measurements are implausibly large." }, 400);
+    const { error, count } = await admin.from("building_styles").update({
+      model_url: rawPath, model_status: "uploaded", model_uploaded_at: new Date().toISOString(),
+      model_meta: meta, model_locked_at: null, updated_at: new Date().toISOString(),
+    }, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, modelPath: rawPath });
+  }
+
+  // Move a style through the scan lifecycle. `locked` is what Carolyn asked for: once the 3D
+  // matches the real building, stop the shape moving. Unlocking is allowed — a builder who
+  // rebuilds a model or re-scans must not need us — but it is an explicit act, which is the
+  // whole point of the state.
+  if (action === "set_style_model_status") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const status = String(payload.status ?? "").trim();
+    if (!["none", "uploaded", "calibrated", "locked"].includes(status)) {
+      return json({ error: `Unknown 3D status "${status}".` }, 400);
+    }
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (status !== "none" && !found.style!.model_url && status !== "calibrated") {
+      return json({ error: "There is no scan on this style yet." }, 400);
+    }
+    const patch: Record<string, unknown> = { model_status: status, updated_at: new Date().toISOString() };
+    patch.model_locked_at = status === "locked" ? new Date().toISOString() : null;
+    if (status === "none") { patch.model_url = null; patch.model_meta = null; patch.model_uploaded_at = null; }
+    const { error, count } = await admin.from("building_styles")
+      .update(patch, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, status });
+  }
+
+  // Short-lived signed URL so the editor can load a scan out of the private bucket. Ten
+  // minutes is long enough to download and parse a 40 MB mesh and short enough that a URL
+  // pasted somewhere by accident stops working.
+  if (action === "style_model_url") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    const path = found.style!.model_url;
+    if (!path) return json({ ok: true, url: null, status: found.style!.model_status });
+    const signed = await admin.storage.from("models").createSignedUrl(path, 600);
+    if (signed.error || !signed.data) return json({ error: `Could not open that scan: ${signed.error?.message ?? "unknown"}` }, 500);
+    return json({ ok: true, url: signed.data.signedUrl, status: found.style!.model_status });
   }
 
   // Upload-only: a reference photo of a real building, stored beside the style images in

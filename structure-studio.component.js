@@ -1036,6 +1036,274 @@ function loadThree() {
   return _threeLoadPromise;
 }
 
+// ─── Building scan (094): read a phone LiDAR export, measure it, keep the parametric model ───
+// A scan is a REFERENCE, never the customer-facing model. The file is one fused shell of
+// triangles with no idea which part is a wall, so it cannot be edited, priced or quoted. What
+// it IS good for is measurements — LiDAR output is metric — and, later, appearance. So we
+// measure it and drive the parametric building from the numbers.
+//
+// Loaded separately from loadThree so a shopper opening the 3D view never pays for it. The
+// esm.sh specifier MUST interpolate the same fully-pinned THREE_VERSION: the subpath build
+// imports three by a RELATIVE path inside its own version directory, so an exact match is what
+// guarantees ONE three instance. A looser range (three@0.167 resolves to 0.167.1) or
+// ?external=three (emits a bare "three" specifier these no-build pages cannot resolve) both
+// break instanceof in ways that surface as nonsense errors.
+let _gltfLoadPromise = null;
+function loadGLTFLoader() {
+  if (_gltfLoadPromise) return _gltfLoadPromise;
+  const base = `https://esm.sh/three@${THREE_VERSION}`;
+  _gltfLoadPromise = loadThree()
+    .then((bundle) => nativeImport(`${base}/examples/jsm/loaders/GLTFLoader.js`)
+      .then((m) => ({ THREE: bundle.THREE, GLTFLoader: m.GLTFLoader })))
+    .catch((err) => { _gltfLoadPromise = null; throw err; });
+  return _gltfLoadPromise;
+}
+
+const SCAN_MAX_BYTES = 60 * 1024 * 1024;   // matches the models bucket cap in 094
+const M_TO_FT = 1 / 0.3048;
+
+// Cheap gate BEFORE any WebGL or geometry decode: the GLB container is a 12-byte header then
+// length-prefixed chunks, and the JSON chunk alone (a few hundred KB of a 40 MB file) answers
+// every question worth refusing on. Runs on any phone — no three.js, no GPU.
+function scanInspectGlb(buf) {
+  const dv = new DataView(buf);
+  if (buf.byteLength < 20) return { err: "That file is too small to be a scan." };
+  if (dv.getUint32(0, true) !== 0x46546C67) return { err: "That is not a .glb file — its header does not say glTF. Re-export as GLB." };
+  const version = dv.getUint32(4, true);
+  if (version !== 2) return { err: `That scan is glTF version ${version}; this needs version 2. Re-export as GLB 2.0.` };
+  let off = 12, json = null;
+  while (off + 8 <= buf.byteLength) {
+    const len = dv.getUint32(off, true), type = dv.getUint32(off + 4, true);
+    const start = off + 8;
+    if (start + len > buf.byteLength) break;
+    if (type === 0x4E4F534A) { json = new TextDecoder().decode(new Uint8Array(buf, start, len)); break; }
+    off = start + len + ((4 - (len % 4)) % 4);
+  }
+  if (!json) return { err: "That scan has no readable glTF data." };
+  let doc;
+  try { doc = JSON.parse(json); } catch (_e) { return { err: "That scan's glTF data is malformed." }; }
+  // Compression extensions need decoder modules we deliberately do not ship. Saying which
+  // export setting to change beats a stack trace from inside the loader.
+  const needed = [].concat(doc.extensionsRequired || [], doc.extensionsUsed || []);
+  const hard = ["KHR_draco_mesh_compression", "EXT_meshopt_compression", "KHR_texture_basisu"];
+  const hit = hard.find((x) => needed.indexOf(x) !== -1);
+  if (hit) return { err: `That scan uses ${hit}, which needs a decoder we don't load. Re-export it without compression (Draco/meshopt) or texture compression.` };
+  // A GLB may legally point at external files. One that does would fire cross-origin fetches
+  // and arrive half-empty, so refuse it rather than measure a partial building.
+  const ext = []
+    .concat((doc.buffers || []).map((b) => b && b.uri), (doc.images || []).map((i) => i && i.uri))
+    .filter((u) => typeof u === "string" && !/^data:/i.test(u));
+  if (ext.length) return { err: "That export references separate files. Re-export as a single self-contained GLB." };
+  return { doc };
+}
+
+// Sample points ON THE SURFACE, area-weighted, not at the vertices. This is the correction
+// that makes the whole thing work: occupancy and density are surface properties, and a scan
+// exporter is free to emit a few huge triangles, so iterating POSITION would put four points
+// on a whole wall and every histogram below would read noise. Triangle interiors sampled in
+// proportion to area give a density that means something regardless of tessellation.
+function scanSamplePoints(THREE, root, budget) {
+  root.updateMatrixWorld(true);
+  const meshes = [];
+  root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.getAttribute("position")) meshes.push(o); });
+  if (!meshes.length) return null;
+  const tri = [], areas = [];
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), cr = new THREE.Vector3();
+  let total = 0;
+  for (const m of meshes) {
+    const pos = m.geometry.getAttribute("position");
+    const idx = m.geometry.getIndex();
+    const n = idx ? idx.count : pos.count;
+    for (let i = 0; i + 2 < n; i += 3) {
+      const i0 = idx ? idx.getX(i) : i, i1 = idx ? idx.getX(i + 1) : i + 1, i2 = idx ? idx.getX(i + 2) : i + 2;
+      a.fromBufferAttribute(pos, i0).applyMatrix4(m.matrixWorld);
+      b.fromBufferAttribute(pos, i1).applyMatrix4(m.matrixWorld);
+      c.fromBufferAttribute(pos, i2).applyMatrix4(m.matrixWorld);
+      ab.subVectors(b, a); ac.subVectors(c, a);
+      const area = cr.crossVectors(ab, ac).length() * 0.5;
+      if (!(area > 0)) continue;
+      tri.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+      areas.push(area); total += area;
+    }
+  }
+  if (!tri.length || !(total > 0)) return null;
+  const want = Math.max(2000, Math.min(budget || 120000, 200000));
+  const pts = new Float64Array(want * 3);
+  let k = 0;
+  for (let t = 0; t < areas.length && k < want; t++) {
+    // Proportional allocation, with every triangle guaranteed at least one point so a small
+    // but meaningful face (a gable end) is never sampled away entirely.
+    let take = Math.max(1, Math.round((areas[t] / total) * want));
+    const o = t * 9;
+    for (let s = 0; s < take && k < want; s++) {
+      let u = Math.random(), v = Math.random();
+      if (u + v > 1) { u = 1 - u; v = 1 - v; }           // fold into the triangle
+      const w = 1 - u - v;
+      pts[k * 3]     = tri[o] * w + tri[o + 3] * u + tri[o + 6] * v;
+      pts[k * 3 + 1] = tri[o + 1] * w + tri[o + 4] * u + tri[o + 7] * v;
+      pts[k * 3 + 2] = tri[o + 2] * w + tri[o + 5] * u + tri[o + 8] * v;
+      k++;
+    }
+  }
+  return { pts, count: k, triangles: areas.length, area: total };
+}
+
+// Turn sampled surface points into the handful of numbers the parametric model needs, all in
+// METRES until the single conversion at the end. The sequence matters: find the ground before
+// any height, because bbox.min.y is always some artefact (a curb, drift, a dark hole) and
+// using it puts every height 10-40 cm out.
+function scanMeasure(sample) {
+  const { pts, count } = sample;
+  if (!count) return { err: "That scan has no geometry to measure." };
+  let minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < count; i++) { const y = pts[i * 3 + 1]; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  const span = maxY - minY;
+  if (!(span > 0.5)) return { err: "That scan is too flat to be a building." };
+
+  // GROUND = the densest horizontal slab in the lower part of the scan. In any yard capture
+  // that is the ground, and it is far more reliable than the lowest point.
+  const BIN = 0.02, lowCut = minY + span * 0.4;
+  const bins = new Map();
+  for (let i = 0; i < count; i++) {
+    const y = pts[i * 3 + 1];
+    if (y > lowCut) continue;
+    const k = Math.floor((y - minY) / BIN);
+    bins.set(k, (bins.get(k) || 0) + 1);
+  }
+  let bestBin = -1, bestN = 0;
+  bins.forEach((n, k) => { if (n > bestN) { bestN = n; bestBin = k; } });
+  const ground = bestBin >= 0 ? minY + (bestBin + 0.5) * BIN : minY;
+
+  // WAIST CUT kills most junk for free: ground, grass, driveway, low clutter, the operator's
+  // feet. What is left is the building (plus anything tall next to it, which is why the
+  // builder confirms the numbers rather than us trusting them).
+  const waist = ground + 1.2;
+  const wall = [];
+  for (let i = 0; i < count; i++) {
+    const y = pts[i * 3 + 1];
+    if (y >= waist) wall.push(pts[i * 3], y, pts[i * 3 + 2]);
+  }
+  const wn = wall.length / 3;
+  if (wn < 50) return { err: "That scan does not have enough of a building above ground level to measure." };
+
+  // ORIENTED footprint. A phone's X/Z axes are wherever the AR session happened to start, so a
+  // building at an angle to them has an axis-aligned box up to 41% too big in BOTH directions.
+  // Sweep the yaw and keep the angle whose rectangle is smallest.
+  let bestA = 0, bestArea = Infinity, bestW = 0, bestD = 0;
+  for (let deg = 0; deg < 90; deg += 1) {
+    const t = deg * Math.PI / 180, cs = Math.cos(t), sn = Math.sin(t);
+    let lo1 = Infinity, hi1 = -Infinity, lo2 = Infinity, hi2 = -Infinity;
+    for (let i = 0; i < wn; i++) {
+      const x = wall[i * 3], z = wall[i * 3 + 2];
+      const u = x * cs + z * sn, v = -x * sn + z * cs;
+      if (u < lo1) lo1 = u; if (u > hi1) hi1 = u;
+      if (v < lo2) lo2 = v; if (v > hi2) hi2 = v;
+    }
+    const w = hi1 - lo1, d = hi2 - lo2, area = w * d;
+    if (area < bestArea) { bestArea = area; bestA = t; bestW = w; bestD = d; }
+  }
+
+  // EAVE vs PEAK from a SPAN profile in the building's own axes. Span, not cross-sectional
+  // area: a scan is a hollow shell full of holes (windows, the doorway, drop-out where
+  // tracking failed), so any area/flood-fill measure collapses at a random height. Walls hold
+  // their span; a roof narrows. The axis that collapses names the ridge, which gives the roof
+  // type for free.
+  const cs = Math.cos(bestA), sn = Math.sin(bestA);
+  const peak = maxY;
+  const BAND = 0.05;
+  const nb = Math.max(1, Math.ceil((peak - waist) / BAND));
+  const su = new Float64Array(nb), sv = new Float64Array(nb), cnt = new Float64Array(nb);
+  const loU = new Float64Array(nb).fill(Infinity), hiU = new Float64Array(nb).fill(-Infinity);
+  const loV = new Float64Array(nb).fill(Infinity), hiV = new Float64Array(nb).fill(-Infinity);
+  for (let i = 0; i < wn; i++) {
+    const x = wall[i * 3], y = wall[i * 3 + 1], z = wall[i * 3 + 2];
+    const bi = Math.min(nb - 1, Math.max(0, Math.floor((y - waist) / BAND)));
+    const u = x * cs + z * sn, v = -x * sn + z * cs;
+    if (u < loU[bi]) loU[bi] = u; if (u > hiU[bi]) hiU[bi] = u;
+    if (v < loV[bi]) loV[bi] = v; if (v > hiV[bi]) hiV[bi] = v;
+    cnt[bi]++;
+  }
+  for (let i = 0; i < nb; i++) { su[i] = cnt[i] ? hiU[i] - loU[i] : 0; sv[i] = cnt[i] ? hiV[i] - loV[i] : 0; }
+  // Eave = the highest band where BOTH spans still hold most of the full footprint.
+  const KEEP = 0.92;
+  let eaveBand = -1;
+  for (let i = 0; i < nb; i++) {
+    if (cnt[i] < 5) continue;
+    if (su[i] >= bestW * KEEP && sv[i] >= bestD * KEEP) eaveBand = i;
+  }
+  const eaveY = eaveBand >= 0 ? waist + (eaveBand + 1) * BAND : peak;
+  const eave = Math.max(0.3, eaveY - ground);
+  const peakH = peak - ground;
+
+  // Which span collapses above the eave names the ridge axis, and the rise over the half-span
+  // across the ridge is the pitch.
+  let uTop = 0, vTop = 0, tn = 0;
+  for (let i = Math.max(0, eaveBand); i < nb; i++) { if (cnt[i] < 5) continue; uTop += su[i]; vTop += sv[i]; tn++; }
+  if (tn) { uTop /= tn; vTop /= tn; }
+  const ridgeAlongU = uTop >= vTop;                 // the axis that KEEPS its span holds the ridge
+  const acrossSpan = ridgeAlongU ? bestD : bestW;
+  const rise = Math.max(0, peak - eaveY);
+  // PITCH comes from the roof's TAPER, not from the eave. Deriving it as rise/(span/2) inherits
+  // the eave estimate's bias, and that bias is systematic: with little or no overhang the span is
+  // still ~full a few centimetres ABOVE the eave, so any "span is still 92% of the footprint"
+  // rule sits high by about (1 - KEEP) * rise and the pitch comes out low. Across a gable the
+  // span instead shrinks linearly with height -- s(h) = span - 2h/pitch -- so a least-squares fit
+  // of across-span against height over the roof bands gives pitch = -2 / slope with no dependence
+  // on where the eave was judged to be. Found by a fixture whose true pitch (7.5:12) sits exactly
+  // on a rounding boundary, which is precisely where the old estimator flipped a whole step.
+  let pitch = acrossSpan > 0.2 ? rise / (acrossSpan / 2) : 0;
+  {
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (let i = 0; i < nb; i++) {
+      if (cnt[i] < 5) continue;
+      const y = waist + (i + 0.5) * BAND;
+      if (y <= eaveY + BAND) continue;                       // roof bands only
+      const sp = ridgeAlongU ? sv[i] : su[i];
+      if (!(sp > 0)) continue;
+      n++; sx += y; sy += sp; sxx += y * y; sxy += y * sp;
+    }
+    const denom = n * sxx - sx * sx;
+    if (n >= 3 && Math.abs(denom) > 1e-9) {
+      const slope = (n * sxy - sx * sy) / denom;              // span lost per metre of height
+      if (slope < -1e-6) pitch = -2 / slope;
+    }
+  }
+  let roofType = "gable";
+  if (rise < 0.15) { roofType = "shed"; pitch = 0.25; }            // flat-ish reads as a low shed
+  else if (Math.abs(uTop - vTop) < Math.min(bestW, bestD) * 0.15) roofType = "shed";  // both taper -> not a gable
+  return {
+    widthM: Math.max(bestW, bestD), depthM: Math.min(bestW, bestD),
+    eaveM: eave, peakM: peakH, pitch, roofType,
+    headingDeg: bestA * 180 / Math.PI, groundY: ground, sampled: count,
+  };
+}
+
+// Metres to the numbers a builder reads and the spec stores, rounded where rounding helps:
+// footprint to the foot (then a caller can snap to a size they actually sell), wall height to
+// the half foot, pitch to 0.01 rise-over-run. Pitch is NOT snapped to a 1/12 step: a real
+// roof is rarely exactly n:12, and rounding a measured 0.62 up to 0.667 (8:12) visibly
+// changes the building. The operator sees the measured value and can type an exact one. The plausibility gate catches a unit error, an unscaled photogrammetry
+// export, or a failed isolation — all of which otherwise produce a confident wrong building.
+function scanToFeet(m) {
+  const ft = (v) => v * M_TO_FT;
+  const out = {
+    widthFt: Math.round(ft(m.widthM)), depthFt: Math.round(ft(m.depthM)),
+    eaveFt: Math.round(ft(m.eaveM) * 2) / 2, peakFt: Math.round(ft(m.peakM) * 2) / 2,
+    pitch: Math.max(0, Math.round(m.pitch * 100) / 100), roofType: m.roofType,
+    headingDeg: Math.round(m.headingDeg), sampled: m.sampled,
+  };
+  const bad = [];
+  if (out.widthFt < 5 || out.widthFt > 100) bad.push(`width ${out.widthFt} ft`);
+  if (out.depthFt < 4 || out.depthFt > 100) bad.push(`depth ${out.depthFt} ft`);
+  if (out.eaveFt < 4 || out.eaveFt > 20) bad.push(`wall height ${out.eaveFt} ft`);
+  if (out.peakFt < out.eaveFt) bad.push("a peak below the wall");
+  out.warn = bad.length
+    ? `These measurements look wrong (${bad.join(", ")}) — the scan may include the ground or something next to the building, or may not be to scale. Check them before saving.`
+    : null;
+  return out;
+}
+
 // Vertical dimensions the layout data model doesn't store yet (plan §6). Until
 // wall_height_ft lives in building_sizes and opening heights live on items,
 // every style renders with these defaults (feet):
@@ -3306,6 +3574,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [adminCalMsg, setAdminCalMsg] = useState(null);  // {ok, msg} | null
   const [adminCalBusy, setAdminCalBusy] = useState(false);
   const [adminCalPreview, setAdminCalPreview] = useState(false);
+  // Building scan (094): { busy, step, err, measured, file, status } for the selected style.
+  const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
@@ -4925,14 +5195,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // session below; the standalone ?admin=1 path has no session and so starts blank.
       photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
     });
-    if (setup3d && setup3d.onLoadPhotos) {
-      setup3d.onLoadPhotos(s.value).then((urls) => {
-        if (!Array.isArray(urls) || urls.length === 0) return;
-        // Ignore a late reply for a style the operator has already navigated away from.
-        setAdminCal((p) => (p && p.styleValue === s.value
-          ? { ...p, photos: urls.filter(Boolean).concat(["", "", "", ""]).slice(0, 4) }
+    setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
+    // One authenticated read gives everything the customer config deliberately does not carry:
+    // the reference photos (a builder's own buildings — see 093), this style's scan status, and
+    // whether AI drafting is even configured on the server.
+    if (setup3d && setup3d.onLoadStyle3D) {
+      setup3d.onLoadStyle3D(s.value).then((meta) => {
+        if (!meta) return;
+        setAdminCal((p) => (p && p.styleValue === s.value && Array.isArray(meta.photos) && meta.photos.length
+          ? { ...p, photos: meta.photos.filter(Boolean).concat(["", "", "", ""]).slice(0, 4) }
           : p));
-      }).catch(() => { /* photos are a convenience; never block the editor */ });
+        setScan((p) => ({ ...p, status: meta.modelStatus || "none", aiReady: meta.aiReady !== false }));
+      }).catch(() => { /* a convenience read; never block the editor */ });
     }
   };
   const calSet = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, ...patch } }));
@@ -4975,6 +5249,80 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setAdminCalMsg({ ok: false, msg: e.message || "Upload failed" });
     } finally { setAdminCalBusy(false); }
   };
+
+  // ─── Building scan: read it, measure it, then drive the parametric model from the numbers ──
+  // Measuring happens BEFORE any upload, on purpose: nothing is stored until we know the file
+  // is a usable GLB of something building-shaped, and the builder has seen the numbers.
+  const scanPick = async (file) => {
+    if (!file) return;
+    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status });
+    try {
+      if (file.size > SCAN_MAX_BYTES) {
+        throw new Error(`That scan is ${(file.size / 1048576).toFixed(0)}MB. Export it at Medium or High instead of Ultra — the limit is ${SCAN_MAX_BYTES / 1048576}MB.`);
+      }
+      const buf = await file.arrayBuffer();
+      // Header gate first: no three.js, no GPU, works on a phone, and refuses the whole class
+      // of files that would otherwise fail deep inside the loader with an opaque message.
+      const gate = scanInspectGlb(buf);
+      if (gate.err) throw new Error(gate.err);
+      setScan((p) => ({ ...p, step: "Measuring the building…" }));
+      const { THREE, GLTFLoader } = await loadGLTFLoader();
+      const gltf = await new GLTFLoader().parseAsync(buf, "");
+      if (!(gltf.scene instanceof THREE.Object3D)) throw new Error("Two copies of three.js loaded — check the version pin.");
+      const sample = scanSamplePoints(THREE, gltf.scene, 120000);
+      if (!sample) throw new Error("That scan has no mesh in it.");
+      const m = scanMeasure(sample);
+      if (m.err) throw new Error(m.err);
+      const measured = scanToFeet(m);
+      // The mesh itself is not kept: it is big, and everything downstream needs only these
+      // numbers. Dispose immediately so a 40MB scan does not sit in memory behind the editor.
+      gltf.scene.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+        mats.forEach((mm) => { if (mm.map) mm.map.dispose(); mm.dispose(); });
+      });
+      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status });
+    } catch (e) {
+      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status });
+    }
+  };
+  // Push the measured numbers into the draft spec. Geometry owns dimensions; the AI photo read
+  // (and the builder's eye) still own siding and colour, which a scan's phone-white-balanced
+  // texture is genuinely bad at.
+  const scanApply = () => {
+    const m = scan.measured;
+    if (!m) return;
+    calSet({ wallHeightFt: m.eaveFt });
+    calSetRoof({ type: m.roofType, pitch: m.pitch });
+    setAdminCalMsg({ ok: true, msg: `Using the scan: ${m.widthFt}×${m.depthFt} ft, ${m.eaveFt} ft walls, ${m.roofType} roof at ${m.pitch}. Preview it, then save.` });
+  };
+  // Store the scan against the style so it can be re-measured later (an algorithm improvement
+  // should not need the builder to walk round the building again).
+  const scanUpload = async () => {
+    if (!scan.file || !(setup3d && setup3d.onUploadModel && setup3d.onSaveModel)) return;
+    setScan((p) => ({ ...p, busy: true, step: "Uploading…", err: null }));
+    try {
+      const path = await setup3d.onUploadModel(scan.file, adminCal.styleValue);
+      if (!path) throw new Error("Upload returned no path.");
+      await setup3d.onSaveModel(adminCal.styleValue, path, scan.measured);
+      setScan((p) => ({ ...p, busy: false, step: null, status: "uploaded" }));
+      setAdminCalMsg({ ok: true, msg: "Scan saved to this style." });
+    } catch (e) {
+      setScan((p) => ({ ...p, busy: false, step: null, err: e.message || "Upload failed" }));
+    }
+  };
+  const scanSetStatus = async (status) => {
+    if (!(setup3d && setup3d.onSetModelStatus)) return;
+    setScan((p) => ({ ...p, busy: true, err: null }));
+    try {
+      await setup3d.onSetModelStatus(adminCal.styleValue, status);
+      setScan((p) => ({ ...p, busy: false, status }));
+      setAdminCalMsg({ ok: true, msg: status === "locked" ? "3D setup locked for this style." : "3D setup unlocked." });
+    } catch (e) {
+      setScan((p) => ({ ...p, busy: false, err: e.message || "Could not change that." }));
+    }
+  };
+
   // Both writes below have two callers with different credentials. In the portal the host
   // passes `setup3d` and owns the I/O, because it holds the signed-in session — THIS
   // component's supabase client is the anon one, and calling portal-settings with it would
@@ -5759,6 +6107,57 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </div>
           {adminCal && (
             <div>
+              {/* ── Building scan. Only in the portal: it needs the builder's own session to
+                  upload into a private bucket, and a scan is theirs, not ours. The scan is a
+                  REFERENCE — we measure it and build the parametric model from the numbers,
+                  because the mesh itself cannot be edited, priced or quoted. ── */}
+              {setup3d && setup3d.onUploadModel && (
+                <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📐 Scan of a real building</span>
+                    {scan.status !== "none" && (
+                      <span style={{ fontSize: 11, fontWeight: 800, borderRadius: 5, padding: "2px 6px",
+                        background: scan.status === "locked" ? "#ECFDF5" : "#F1F5F9",
+                        color: scan.status === "locked" ? "#047857" : "#475569" }}>
+                        {scan.status === "locked" ? "locked" : scan.status}
+                      </span>
+                    )}
+                    <span style={{ flex: 1 }} />
+                    {scan.status === "locked"
+                      ? <button onClick={() => scanSetStatus("uploaded")} disabled={scan.busy} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 11.5 }}>Unlock</button>
+                      : <button onClick={() => scanSetStatus("locked")} disabled={scan.busy || scan.status === "none"} style={{ ...S.btn("#FFF", "#047857"), border: "1px solid #A7F3D0", fontSize: 11.5 }}>Lock this 3D setup</button>}
+                  </div>
+                  <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
+                    Walk around one of your real buildings with a phone scanning app and export a <b>.glb</b>. We read its
+                    size and roof shape and set the 3D up to match — the scan itself is never shown to customers.
+                  </p>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: scan.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
+                      {scan.busy ? (scan.step || "Working…") : "Choose a .glb scan"}
+                      <input type="file" accept=".glb,model/gltf-binary" disabled={scan.busy || scan.status === "locked"}
+                        onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; scanPick(f); }}
+                        style={{ display: "none" }} />
+                    </label>
+                    {scan.measured && !scan.busy && (
+                      <>
+                        <button onClick={scanApply} style={{ ...S.btn("#0E7490", "#FFF"), fontSize: 12 }}>Use these measurements</button>
+                        <button onClick={scanUpload} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Save the scan to this style</button>
+                      </>
+                    )}
+                  </div>
+                  {scan.err && <div style={{ marginTop: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{scan.err}</div>}
+                  {scan.measured && (
+                    <div style={{ marginTop: 8, fontSize: 12, color: "#0F172A" }}>
+                      <b>{scan.measured.widthFt} × {scan.measured.depthFt} ft</b>{" · "}
+                      walls <b>{scan.measured.eaveFt} ft</b>{" · "}
+                      peak <b>{scan.measured.peakFt} ft</b>{" · "}
+                      <b>{scan.measured.roofType}</b> roof, pitch <b>{scan.measured.pitch}</b>
+                      <span style={{ color: "#64748B" }}>{" "}(from {scan.measured.sampled.toLocaleString()} surface points)</span>
+                      {scan.measured.warn && <div style={{ marginTop: 4, color: "#B45309", fontWeight: 600 }}>⚠ {scan.measured.warn}</div>}
+                    </div>
+                  )}
+                </div>
+              )}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
                   <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
@@ -5835,7 +6234,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {/* Copy-JSON is the operator's escape hatch when a save path is down; a
                     builder has no use for it and no place to paste it. */}
                 {!setup3d && <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>}
-                <button onClick={calibrateFromPhotos} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                {/* Disabled with a reason when the Anthropic key is not set on the server: the
+                    browser cannot see an edge secret, so `aiReady` from the catalog action is the
+                    only way to avoid offering a button that always fails. */}
+                <button onClick={calibrateFromPhotos} disabled={adminCalBusy || scan.aiReady === false}
+                  title={scan.aiReady === false ? "AI drafting isn't switched on for this site yet — tune the numbers by hand, or ask CSM Synergy to enable it." : "Read the roof, siding and colours off the photos"}
+                  style={{ ...S.btn(adminCalBusy || scan.aiReady === false ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
                   {adminCalBusy ? "Working…" : "✨ Draft from photos (AI)"}
                 </button>
                 <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>

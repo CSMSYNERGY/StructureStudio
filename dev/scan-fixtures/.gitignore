@@ -1,0 +1,3 @@
+# Generated fixtures. `make_scan_fixture.py --write` recreates them byte-for-byte;
+# binaries do not belong in the repo.
+*.glb

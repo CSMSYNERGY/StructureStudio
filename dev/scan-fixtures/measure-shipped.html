@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8"><title>scan pipeline — shipped-source check</title>
+<pre id="out">running…</pre>
+<script type="module">
+// Unlike harness.js (a hand-copy), this pulls the measurement functions OUT OF THE
+// SHIPPED FILE and runs those exact bytes, so a divergence between what I validated and
+// what a customer downloads is impossible.
+import * as THREE from 'https://esm.sh/three@0.167.0';
+import { GLTFLoader } from 'https://esm.sh/three@0.167.0/examples/jsm/loaders/GLTFLoader.js';
+
+const out = document.getElementById('out');
+const report = { steps: [] };
+window.__done = false;
+
+function sliceFn(src, name) {
+  const at = src.indexOf('function ' + name + '(');
+  if (at < 0) throw new Error('not found in shipped source: ' + name);
+  let i = src.indexOf('{', at), depth = 0;
+  for (; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (!depth) return src.slice(at, i + 1); }
+  }
+  throw new Error('unbalanced braces for ' + name);
+}
+
+(async () => {
+  try {
+    const src = await (await fetch('/structure-studio.component.js?probe=1')).text();
+    const names = ['scanSamplePoints', 'scanMeasure', 'scanToFeet', 'scanInspectGlb'];
+    const bodies = names.map((n) => sliceFn(src, n));
+    // The functions close over two module-level constants; take those from the shipped
+    // source as well rather than restating them here (a restated cap could drift).
+    const consts = src.split(/\r?\n/).filter((l) => /^const (SCAN_MAX_BYTES|M_TO_FT)\s*=/.test(l));
+    if (consts.length !== 2) throw new Error('expected 2 scan consts, found ' + consts.length);
+    report.steps.push({ step: 'extract', from: 'structure-studio.component.js',
+      bytes: src.length, consts, fns: names.map((n, i) => [n, bodies[i].length]) });
+    // eslint-disable-next-line no-new-func
+    const api = new Function(consts.join('\n') + '\n' + bodies.join('\n') + '\nreturn {' + names.join(',') + '};')();
+
+    // ── measurement, against the three synthetic captures ──
+    const EXPECT = {
+      'shed_12x8_gable.glb':            { widthFt: 12, depthFt: 8, eaveFt: 6.5, peakFt: 9, roof: 'gable' },
+      'shed_12x8_gable_ground.glb':     { widthFt: 12, depthFt: 8, eaveFt: 6.5, peakFt: 9, roof: 'gable' },
+      'shed_12x8_gable_offset_rot.glb': { widthFt: 12, depthFt: 8, eaveFt: 6.5, peakFt: 9, roof: 'gable' },
+    };
+    const loader = new GLTFLoader();
+    let allExact = true;
+    for (const f of Object.keys(EXPECT)) {
+      const buf = await (await fetch(f)).arrayBuffer();
+      const inspect = api.scanInspectGlb(buf);
+      const gltf = await loader.parseAsync(buf, '');
+      const sample = api.scanSamplePoints(THREE, gltf.scene, 120000);
+      const m = api.scanMeasure(sample);
+      const ft = m && !m.err ? api.scanToFeet(m) : null;
+      const want = EXPECT[f];
+      const got = ft && !ft.err ? ft : null;
+      const exact = Boolean(got) && ['widthFt', 'depthFt', 'eaveFt', 'peakFt'].every((k) => got[k] === want[k])
+        && got.roofType === want.roof && Math.abs(got.pitch - 0.625) <= 0.02;
+      if (!exact) allExact = false;
+      report.steps.push({ step: 'measure', file: f, inspect, got, want, pitchWant: 0.625, exact });
+    }
+    report.allExact = allExact;
+
+    // ── negative: a file that is not a GLB at all ──
+    const notGlb = new TextEncoder().encode('%PDF-1.7 this is a pdf, not a scan').buffer;
+    report.steps.push({ step: 'reject-non-glb', result: api.scanInspectGlb(notGlb) });
+
+    // ── negative: correct magic, truncated/incoherent chunk table ──
+    const bad = new Uint8Array(64);
+    new DataView(bad.buffer).setUint32(0, 0x46546c67, true);   // "glTF"
+    new DataView(bad.buffer).setUint32(4, 2, true);
+    new DataView(bad.buffer).setUint32(8, 999999, true);       // length lies
+    report.steps.push({ step: 'reject-corrupt-glb', result: api.scanInspectGlb(bad.buffer) });
+
+    // ── negative: geometry that is a flat slab, not a building ──
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(9, 9).rotateX(-Math.PI / 2));
+    const flat = api.scanMeasure(api.scanSamplePoints(THREE, plane, 20000));
+    report.steps.push({ step: 'reject-flat-scan', result: flat });
+
+    // ── negative: a building far too big to be a shed (plausibility gate) ──
+    const huge = new THREE.Mesh(new THREE.BoxGeometry(40, 14, 30));
+    huge.position.y = 7;
+    const hugeFt = api.scanToFeet(api.scanMeasure(api.scanSamplePoints(THREE, huge, 40000)));
+    report.steps.push({ step: 'warn-implausible-size', result: hugeFt });
+
+    report.ok = allExact
+      && Boolean(report.steps.find((s) => s.step === 'reject-non-glb').result.err)
+      && Boolean(report.steps.find((s) => s.step === 'reject-corrupt-glb').result.err)
+      && Boolean(report.steps.find((s) => s.step === 'reject-flat-scan').result.err)
+      && Boolean(report.steps.find((s) => s.step === 'warn-implausible-size').result.warn);
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    report.ok = false;
+  }
+  window.__result = report;
+  window.__done = true;
+  out.textContent = JSON.stringify(report, null, 1);
+})();
+</script>
