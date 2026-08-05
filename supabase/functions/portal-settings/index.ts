@@ -1373,7 +1373,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
       if (error) return json({ error: error.message }, 500);
-      if (!count) return json({ error: "Item not found." }, 404);
+      // Name the three ways this can match nothing, because "Item not found." sent a builder
+      // round in circles on 2026-08-05: the row can be gone, or belong to another builder,
+      // or — the one nobody guesses — be filed under a different category than the tab it is
+      // being saved from, since the update is scoped by category too.
+      if (!count) {
+        return json({ error: `That ${category} is no longer in ${clientId}'s catalog — it may have been deleted, or it is saved under a different category. Reload the page and try again.` }, 404);
+      }
       return json({ ok: true, id });
     }
     const { data: maxRow } = await admin.from("fixture_items").select("sort_order")
@@ -1391,11 +1397,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // own snapshot.
   if (action === "delete_fixture") {
     const id = String(payload?.id ?? "").trim();
-    if (!id) return json({ error: "id is required." }, 400);
+    // A row the page never managed to save has no id, and the old wording ("id is required")
+    // read as a bug in the app rather than as "this line was never saved".
+    if (!id) return json({ error: "That line was never saved, so there is nothing to delete — reload the page to clear it." }, 400);
     const { error, count } = await admin.from("fixture_items").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
     if (error) return json({ error: error.message }, 500);
-    if (!count) return json({ error: "Item not found." }, 404);
+    // Already gone is the common case and is harmless — say so rather than implying failure.
+    if (!count) return json({ error: `That item is not in ${clientId}'s catalog any more — it was probably already deleted. Reload the page.` }, 404);
     return json({ ok: true });
   }
 
