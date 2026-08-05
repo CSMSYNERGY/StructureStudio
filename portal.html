@@ -5160,19 +5160,26 @@ const SCHED_SRC_CHIP = {
 };
 const schedChip = (bg, fg) => ({ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, fontWeight: 800, borderRadius: 999, padding: "3px 9px", whiteSpace: "nowrap", background: bg, color: fg });
 const schedInitials = (name) => String(name || "").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?";
-// Past due = has a due date, that date is before today, and the stage isn't finished.
+// ONE build date per job (Carolyn 2026-08-04): due_date is canonical (every cross-check —
+// past due, delivery conflicts, the pool — already keys on it); scheduled_start is kept
+// equal for compatibility. Older rows that only set a start date still read correctly.
+const schedBuildDate = (job) => job.due_date || job.scheduled_start || null;
+// Past due = has a build date, that date is before today, and the stage isn't finished.
 const schedPastDue = (job, kind) => {
-  if (!job.due_date || kind === "done") return false;
-  return job.due_date < new Date().toISOString().slice(0, 10);
+  const d = schedBuildDate(job);
+  if (!d || kind === "done") return false;
+  return d < new Date().toISOString().slice(0, 10);
 };
 const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
 
 // Inline editor rendered INSIDE the expanded card/row — job info stays at face value,
 // never in a popout (scope decision 6). Admin edits fields; every role can add a note.
 function SchedJobEditor({ job, stages, team, canAdmin, busy, onSave, onComplete, onDelete, onMove, onNote, onOpenDesign }) {
+  // ONE build date (Carolyn 2026-08-04: most builds finish within a day). It writes both
+  // date columns so every existing check (past due, delivery conflicts, pool) keys off it.
   const [f, setF] = useState({
     title: job.title || "", customerName: job.customer_name || "", buildingLabel: job.building_label || "",
-    scheduledStart: job.scheduled_start || "", dueDate: job.due_date || "",
+    buildDate: job.due_date || job.scheduled_start || "",
     assigneeUserId: job.assignee_user_id || "", notes: job.notes || "",
   });
   const [note, setNote] = useState("");
@@ -5185,20 +5192,19 @@ function SchedJobEditor({ job, stages, team, canAdmin, busy, onSave, onComplete,
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 10px", marginBottom: 8 }}>
           <div><span style={lbl}>Customer</span><input style={inp} value={f.customerName} onChange={set("customerName")} /></div>
           <div><span style={lbl}>Building</span><input style={inp} value={f.buildingLabel} onChange={set("buildingLabel")} /></div>
-          <div><span style={lbl}>Start</span><input type="date" style={inp} value={f.scheduledStart} onChange={set("scheduledStart")} /></div>
-          <div><span style={lbl}>Due</span><input type="date" style={inp} value={f.dueDate} onChange={set("dueDate")} /></div>
+          <div><span style={lbl}>Build date</span><input type="date" style={inp} value={f.buildDate} onChange={set("buildDate")} /></div>
           <div><span style={lbl}>Assigned to</span>
             <select style={inp} value={f.assigneeUserId} onChange={set("assigneeUserId")}>
               <option value="">— Unassigned —</option>
               {team.map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)}</option>)}
             </select>
           </div>
-          <div><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
+          <div style={{ gridColumn: "1 / -1" }}><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
         </div>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
           <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={() => onSave({
             customerName: f.customerName, buildingLabel: f.buildingLabel, title: f.title,
-            scheduledStart: f.scheduledStart || null, dueDate: f.dueDate || null,
+            scheduledStart: f.buildDate || null, dueDate: f.buildDate || null,
             assigneeUserId: f.assigneeUserId || null, notes: f.notes,
           })}>Save</button>
           <button type="button" disabled={busy} style={S.btn("#F0FDF4", "#15803D")} onClick={onComplete}>✓ Mark built</button>
@@ -5277,7 +5283,10 @@ function SchedStageEditor({ stages, busy, onClose, onSave }) {
 function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   const [data, setData] = useState(null);        // { stages, jobs, stopByJob, tray, team } | null = loading
   const [error, setError] = useState(null);
-  const [view, setView] = useState("board");     // board | table
+  const [view, setView] = useState("board");     // board | table | calendar
+  const [calView, setCalView] = useState("week"); // week | month
+  const [cursorMs, setCursorMs] = useState(() => Date.now());
+  const [crewFilter, setCrewFilter] = useState("all"); // "all" | userId — each crew gets their own calendar
   const [query, setQuery] = useState("");
   const [stageFilter, setStageFilter] = useState("all");
   const [sortKey, setSortKey] = useState("due_date");
@@ -5337,6 +5346,19 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
     const r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
     if (!r) load();
   };
+  // Calendar drop = the reschedule (one build date per job; both date columns kept equal).
+  // Dropping while viewing a CREW'S calendar also hands the job to that crew.
+  const moveJobDate = async (job, iso) => {
+    const assignTo = iso && crewFilter !== "all" ? crewFilter : null;
+    setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? {
+      ...j, scheduled_start: iso, due_date: iso,
+      assignee_user_id: assignTo || j.assignee_user_id,
+    } : j) }));
+    const patch = { action: "update_job", jobId: job.id, scheduledStart: iso, dueDate: iso };
+    if (assignTo) patch.assigneeUserId = assignTo;
+    const r = await call(patch);
+    if (!r) load();
+  };
   const addFromTray = async (body, label) => {
     setBusy(true); setMsg(null);
     const r = await call({ action: "create_job", ...body }, `${label} added to the board.`);
@@ -5386,13 +5408,15 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
     const when = l.load_date ? " · " + fmtDate(l.load_date) : "";
     return <span style={schedChip(c.bg, c.fg)}>{delivered ? "Delivered" : `Load ${l.load_no}${when}`}</span>;
   };
-  const jobCard = (job) => {
+  const jobCard = (job, opts = {}) => {
     const kind = kindOf[job.stage_id] || "queue";
     const late = schedPastDue(job, kind);
     const src = SCHED_SRC_CHIP[job.source] || SCHED_SRC_CHIP.manual;
+    const stg = stages.find((s) => s.id === job.stage_id);
     const open = expandedId === job.id;
+    const bd = schedBuildDate(job);
     return (
-      <div key={job.id} draggable={!open} tabIndex={0} role="button" aria-expanded={open}
+      <div key={job.id} draggable={!open && (opts.dragAdmin ? canAdmin : true)} tabIndex={0} role="button" aria-expanded={open}
         onDragStart={(e) => { setDragId(job.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
         onDragEnd={() => { setDragId(null); setDropStage(null); }}
         onClick={() => setExpandedId(open ? null : job.id)}
@@ -5408,9 +5432,14 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
           <div style={{ fontSize: 11.5, fontWeight: 600, color: "#64748B", marginTop: 1 }}>{job.building_label || job.title}</div>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 7, flexWrap: "wrap" }}>
-          {(job.scheduled_start || job.due_date) && (
+          {/* Stage chip on calendar cards (there the column is a DATE, so the stage needs a home). */}
+          {opts.showStage && stg && (
+            <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>
+          )}
+          {/* One build date per job; hidden on the calendar where the column says it. */}
+          {!opts.hideDate && bd && (
             <span style={{ ...schedChip(late ? "#FEF2F2" : "#F1F5F9", late ? "#DC2626" : "#475569"), fontVariantNumeric: "tabular-nums" }}>
-              {job.scheduled_start ? fmtDate(job.scheduled_start) : ""}{job.scheduled_start && job.due_date ? " → " : ""}{job.due_date ? fmtDate(job.due_date) : ""}{late ? " · past due" : ""}
+              {fmtDate(bd)}{late ? " · past due" : ""}
             </span>
           )}
           {loadChip(job)}
@@ -5459,10 +5488,10 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
       <CardHead title="Build Schedule" count={jobs.length}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
-            {["board", "table"].map((v) => (
+            {[["board", "Board"], ["table", "Table"], ["calendar", "Calendar"]].map(([v, label]) => (
               <button key={v} type="button" onClick={() => setView(v)}
                 style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
-                {v === "board" ? "Board" : "Table"}
+                {label}
               </button>
             ))}
           </div>
@@ -5543,7 +5572,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
                     <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{colJobs.length}</span>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 36 }}>
-                    {colJobs.map(jobCard)}
+                    {colJobs.map((j) => jobCard(j))}
                   </div>
                 </div>
               );
@@ -5583,8 +5612,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
               <th style={S.th}>Size</th>
               <th style={S.th}>Source</th>
               <th style={S.th}>Stage</th>
-              <SortTh label="Start" col="scheduled_start" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-              <SortTh label="Due" col="due_date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Build date" col="due_date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <th style={S.th}>Assigned</th>
               <th style={S.th}>Delivery</th>
             </tr></thead>
@@ -5604,13 +5632,12 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
                       <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
                       <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
                       <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
-                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{j.scheduled_start ? fmtDate(j.scheduled_start) : "—"}</td>
-                      <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{j.due_date ? fmtDate(j.due_date) + (late ? " · past due" : "") : "—"}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedBuildDate(j)) + (late ? " · past due" : "") : "—"}</td>
                       <td style={S.td}>{nameOf[j.assignee_user_id] || "—"}</td>
                       <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
                     </tr>
                     {open && (
-                      <tr><td colSpan={10} style={{ ...S.td, background: "#F7F9FF" }}>
+                      <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
                         <SchedJobEditor job={j} stages={stages} team={team} canAdmin={canAdmin} busy={busy}
                           onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
                           onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
@@ -5624,6 +5651,160 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
         </div>
         {sorted.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No jobs match.</p>}
       </>)}
+
+      {/* ── CALENDAR — real dates, one build date per card, per-crew calendars ── */}
+      {data && view === "calendar" && (() => {
+        const DAY = 86400000;
+        const isoLocal = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        const todayIso = isoLocal(new Date());
+        const cur = new Date(cursorMs); cur.setHours(0, 0, 0, 0);
+        // ALL unscheduled jobs stay at the top, whichever crew calendar is showing.
+        const unscheduled = jobs.filter((j) => !schedBuildDate(j) && !j.completed_at);
+        const dated = jobs.filter((j) => schedBuildDate(j) && (crewFilter === "all" || j.assignee_user_id === crewFilter));
+        const byDate = {}; dated.forEach((j) => { const k = schedBuildDate(j); (byDate[k] = byDate[k] || []).push(j); });
+        const stageColor = {}; stages.forEach((s) => { stageColor[s.id] = s.color; });
+
+        const mon = new Date(cur); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7));
+        const weekDays = []; for (let i = 0; i < 7; i++) weekDays.push(new Date(mon.getTime() + i * DAY));
+        const m0 = new Date(cur.getFullYear(), cur.getMonth(), 1);
+        const gridStart = new Date(m0); gridStart.setDate(gridStart.getDate() - gridStart.getDay());
+        const monthCells = []; for (let i = 0; i < 42; i++) monthCells.push(new Date(gridStart.getTime() + i * DAY));
+        const fmtShort = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        const label = calView === "week"
+          ? fmtShort(weekDays[0]) + " – " + fmtShort(weekDays[6]) + ", " + weekDays[6].getFullYear()
+          : cur.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+        const step = (dir) => {
+          const c = new Date(cursorMs);
+          if (calView === "week") c.setDate(c.getDate() + dir * 7); else c.setMonth(c.getMonth() + dir);
+          setCursorMs(c.getTime());
+        };
+        const dropProps = (iso) => canAdmin ? {
+          onDragOver: (e) => { e.preventDefault(); setDropStage("cal:" + (iso || "none")); },
+          onDragLeave: () => setDropStage((d) => d === "cal:" + (iso || "none") ? null : d),
+          onDrop: (e) => {
+            e.preventDefault(); setDropStage(null);
+            const job = jobs.find((j) => j.id === dragId);
+            if (job) moveJobDate(job, iso);
+            setDragId(null);
+          },
+        } : {};
+        const dropGlow = (iso) => dropStage === "cal:" + (iso || "none") ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -2 } : {};
+
+        return (
+          <div>
+            {/* Nav + crew calendars */}
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
+                {[["week", "Week"], ["month", "Month"]].map(([v, l]) => (
+                  <button key={v} type="button" onClick={() => setCalView(v)}
+                    style={{ border: "none", background: calView === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: calView === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: calView === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>{l}</button>
+                ))}
+              </div>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => step(-1)}>‹</button>
+              <span style={{ fontSize: 14, fontWeight: 800 }}>{label}</span>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => step(1)}>›</button>
+              <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={() => setCursorMs(Date.now())}>Today</button>
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 11, alignItems: "center" }}>
+              {[["all", "All crews"]].concat(team.map((m) => [m.userId, m.name || m.userId.slice(0, 8)])).map(([k, l]) => {
+                const on = crewFilter === k;
+                const n = k === "all" ? jobs.filter((j) => schedBuildDate(j)).length : jobs.filter((j) => schedBuildDate(j) && j.assignee_user_id === k).length;
+                return (
+                  <button key={k} type="button" onClick={() => setCrewFilter(on && k !== "all" ? "all" : k)}
+                    style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
+                    {l} {n > 0 ? n : ""}
+                  </button>
+                );
+              })}
+              {crewFilter !== "all" && (
+                <span style={{ fontSize: 11.5, fontWeight: 700, color: ACCENT }}>
+                  — {nameOf[crewFilter] || "this crew"}'s calendar: dropping a card here schedules it AND assigns it to them
+                </span>
+              )}
+            </div>
+
+            {/* Unscheduled — always on top, whatever calendar is showing */}
+            <div {...dropProps(null)} style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "10px 14px", marginBottom: 13, background: "#FFF", ...dropGlow(null) }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: unscheduled.length ? 9 : 0 }}>
+                <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>Unscheduled</span>
+                <span style={schedChip("#EEF2FF", "#3D3672")}>{unscheduled.length}</span>
+                <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>— drag a card onto a day to set its build date{canAdmin ? "; drag back here to clear it" : ""}</span>
+              </div>
+              {unscheduled.length > 0 && (
+                <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2 }}>
+                  {unscheduled.map((j) => <div key={j.id} style={{ flex: "0 0 230px" }}>{jobCard(j, { hideDate: true, showStage: true, dragAdmin: true })}</div>)}
+                </div>
+              )}
+            </div>
+
+            {/* WEEK — the kanban feel, with days as the columns */}
+            {calView === "week" && (
+              <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
+                  {weekDays.map((d) => {
+                    const iso = isoLocal(d);
+                    const isToday = iso === todayIso;
+                    const wknd = d.getDay() === 0 || d.getDay() === 6;
+                    const dayJobs = byDate[iso] || [];
+                    return (
+                      <div key={iso} {...dropProps(iso)}
+                        style={{ width: 218, flex: "0 0 218px", background: isToday ? "#E9F0FF" : wknd ? "#F4F6F9" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 190, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2, ...dropGlow(iso) }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "1px 3px 8px" }}>
+                          <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B" }}>{d.toLocaleDateString("en-US", { weekday: "short" })}</span>
+                          <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
+                          <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px", fontVariantNumeric: "tabular-nums" }}>{dayJobs.length}</span>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 7, minHeight: 40 }}>
+                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true, dragAdmin: true }))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* MONTH — the planning radar */}
+            {calView === "month" && (
+              <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 6, minWidth: 880 }}>
+                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((h) => (
+                    <div key={h} style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8", padding: "0 4px 2px" }}>{h}</div>
+                  ))}
+                  {monthCells.map((d) => {
+                    const iso = isoLocal(d);
+                    const inMonth = d.getMonth() === cur.getMonth();
+                    const isToday = iso === todayIso;
+                    const dayJobs = byDate[iso] || [];
+                    const shown = dayJobs.slice(0, 3);
+                    return (
+                      <div key={iso} {...dropProps(iso)}
+                        style={{ background: inMonth ? "#FFF" : "#F8FAFC", opacity: inMonth ? 1 : 0.55, border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 92, padding: "6px 7px", outline: isToday ? `2px solid ${ACCENT}` : "none", outlineOffset: -2, ...dropGlow(iso) }}>
+                        <div style={{ fontSize: 11.5, fontWeight: 800, color: isToday ? ACCENT : "#475569", marginBottom: 5 }}>{d.getDate()}</div>
+                        {shown.map((j) => (
+                          <div key={j.id} title={(j.customer_name || j.title || "") + " · " + (j.building_label || "")}
+                            onClick={() => { setCursorMs(d.getTime()); setCalView("week"); }}
+                            style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 700, background: "#F1F5F9", borderRadius: 6, padding: "3px 6px", marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", cursor: "pointer" }}>
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: stageColor[j.stage_id] || "#94A3B8", flexShrink: 0 }}></span>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{j.serial ? "#" + j.serial + " " : ""}{j.customer_name || j.title || ""}</span>
+                          </div>
+                        ))}
+                        {dayJobs.length > 3 && (
+                          <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94A3B8", cursor: "pointer" }}
+                            onClick={() => { setCursorMs(d.getTime()); setCalView("week"); }}>+{dayJobs.length - 3} more</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
+              One build date per card — dropping a card on a day IS the reschedule. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a month pill to open that week. Rescheduling from the calendar is admin-only.
+            </p>
+          </div>
+        );
+      })()}
 
       <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 12 }}>
         Drag cards between stages — team members can move cards and add notes; dates, assignments, and new jobs are admin-only. Every move is logged with who and when. Click a card to see and edit everything in place.
