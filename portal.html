@@ -9897,9 +9897,10 @@ function Dashboard({ session }) {
   const gateLocked = !viewing && !!entitlement && entitlement.locked;
   // Scheduling suite (Build Schedule + Delivery Schedule + Repairs — ONE feature,
   // decision 12): live for operators (own tenant or view-as) and for tenants whose
-  // entitlement carries schedule_builds (active/grace subscription, exempt, or
-  // transition — portal-billing computes it server-side). Everyone else sees the
-  // teaser with a Billing call-to-action.
+  // entitlement carries schedule_builds. PAY-ONLY (Carolyn 2026-08-04): portal-billing
+  // requires a real active/grace subscription for this feature — the exempt and
+  // free-period blankets deliberately do NOT cover it, so grandfathered tenants see
+  // the teaser like everyone else until they subscribe.
   const schedUnlocked = isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features.schedule_builds));
   const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt

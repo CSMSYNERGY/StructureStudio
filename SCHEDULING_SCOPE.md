@@ -12,9 +12,10 @@ calendar + the entitlement gate (`schedUnlocked` = operator OR
 blocked by tooling permissions — correctly; it's a money switch):
 1. `update public.billing_plans set availability='available', updated_at=now()
    where feature='schedule_builds';` — until this runs, no tenant can subscribe, so only
-   operators and **billing-exempt tenants** see the live tabs (portal-billing grants exempt
-   tenants every feature — grandfathered accounts get scheduling free the moment this
-   code promotes; that is the platform's existing exempt semantic, flagged to Carolyn).
+   operators see the live tabs. **PAY-ONLY (Carolyn 2026-08-04: "No one gets grandfathered
+   into this"):** portal-billing's `PAID_ONLY_FEATURES` excludes `schedule_builds` from the
+   exempt/transition blankets — grandfathered, internal, and free-period tenants all need a
+   real subscription like everyone else (deployed + diff-verified same day).
 2. The What's New entry (hand-authored INSERT into release_notes; drafted in the launch
    notes, NO pricing per CLAUDE.md) — publish together with switch 1.
 `price_visible` stays false on both plans (055 decision; presentation-only).

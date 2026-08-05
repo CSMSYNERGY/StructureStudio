@@ -106,10 +106,12 @@ Rules that are easy to break and expensive to get wrong:
    stamped on the load. The width rule (building wider than the driver's `max_width_ft`) has
    NO override anywhere — keep it that way.
 5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` = operator OR
-   `entitlement.features.schedule_builds`. The `schedule_builds` plans' `availability` flip
+   `entitlement.features.schedule_builds`. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
+   grandfathered into this."** portal-billing's `PAID_ONLY_FEATURES` set excludes
+   `schedule_builds` from the exempt/transition blankets — a real subscription is the only
+   tenant path in; do not "fix" that back to the blanket. The plans' `availability` flip
    (coming_soon → available) is a HUMAN-run data change — see SCHEDULING_SCOPE.md's launch
-   switches. Exempt tenants get every feature the moment code promotes (portal-billing's
-   exempt semantic).
+   switches.
 6. The "to be loaded" pool is a QUERY, not a table — don't invent an "unassigned stops" row.
 
 ## What's New changelog — what must NEVER be published
