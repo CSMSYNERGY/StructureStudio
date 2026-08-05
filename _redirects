@@ -1,9 +1,23 @@
-/portal /portal.html 200
+# Parsed by Cloudflare Workers static assets (and by Netlify — the syntax is shared and
+# every rule below behaves identically on both platforms, so this one file serves both
+# hosts during the migration). First match wins; static rules stay above the splat.
+
+# Workers runs with html_handling "none" (see wrangler.jsonc), so the implicit
+# / -> index.html mapping other hosts do for free must be explicit here.
+/            /index.html    200
+
+# The bare /portal rule stays FIRST and separate: it is the oldest link we hand out
+# and it must keep resolving exactly as it always has.
+/portal      /portal.html   200
+# Trailing-slash variant pinned explicitly so /portal/ never depends on either
+# platform's slash normalization (Netlify rewrote it via the splat; Workers gets it here).
+/portal/     /portal.html   200
+/admin       /admin.html    200
+# Netlify 301-normalizes /admin/ -> /admin today (probed 2026-08-05); make that explicit
+# so behavior can't drift between hosts.
+/admin/      /admin         301
+
 # Every portal page has its own URL (/portal/settings/colors, /portal/admin/clients). The
 # splat rewrites them all to the same document — 200, never 301, so the address the user
 # typed is the address they keep and the SPA can read the path on boot.
-#
-# The bare /portal rule above stays FIRST and separate: it is the oldest link we hand out
-# and it must keep resolving exactly as it always has.
-/portal/* /portal.html 200
-/admin /admin.html 200
+/portal/*    /portal.html   200

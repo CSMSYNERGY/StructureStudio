@@ -1,0 +1,32 @@
+# What the web host must NOT serve (gitignore syntax, read by Cloudflare Workers
+# static assets). Netlify served the ENTIRE repo root — /README.md and every
+# supabase/functions/*/index.ts were publicly downloadable. Nothing below is
+# referenced by the app at runtime (grep-verified), and edge-function source,
+# internal docs, and repo tooling do not belong on a public web host.
+#
+# _redirects is deliberately NOT listed: it must upload so the platform parses it,
+# and Cloudflare never serves it publicly.
+node_modules
+.git
+.gitattributes
+.githooks
+.github
+.gitignore
+.claude
+.temp
+.wrangler
+supabase
+scripts
+package.json
+package-lock.json
+deno.lock
+README.md
+CLAUDE.md
+SCHEDULING_SCOPE.md
+wrangler.jsonc
+wrangler.beta.jsonc
+.assetsignore
+# Dev-only source mirrors — the browser loads structure-studio.component.js; these
+# two are never fetched at runtime (FeedbackWidget import removed 2026-07-26).
+StructureStudio.jsx
+FeedbackWidget.jsx

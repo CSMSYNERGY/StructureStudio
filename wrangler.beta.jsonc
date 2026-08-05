@@ -1,0 +1,16 @@
+// Cloudflare Worker config — BETA frontend (beta.structurestudio.app, deploys branch `beta`).
+// Identical to wrangler.jsonc except the worker name; see that file for the reasoning
+// behind every setting (html_handling "none" is load-bearing — read before changing).
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "structurestudio-beta",
+  "compatibility_date": "2026-08-05",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+  "assets": {
+    "directory": ".",
+    "html_handling": "none",
+    "not_found_handling": "404-page"
+  },
+  "workers_dev": true,
+  "preview_urls": true
+}
