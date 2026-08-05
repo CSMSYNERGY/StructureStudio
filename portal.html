@@ -120,7 +120,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260805b" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260805c" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -3155,8 +3155,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 20_000_000) { setMsg({ err: "That photo is over 20MB — take it at a lower resolution." }); return false; } return true; };
   const uploadImg = async (file) => {
+    file = await ssFitImageForUpload(file);
     const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
     const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -3579,8 +3580,9 @@ function RampsView({ viewingLabel = null, clientId = null }) {
   useEffect(() => { load(); }, []);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 20_000_000) { setMsg({ err: "That photo is over 20MB — take it at a lower resolution." }); return false; } return true; };
   const uploadImg = async (file) => {
+    file = await ssFitImageForUpload(file);
     const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
     const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -7123,11 +7125,14 @@ function ssWarpQuad(img, quad, aspect, maxPx) {
       // Bilinear, not nearest-neighbour: a 4000px phone photo lands on a <=1024px output,
       // and point-sampling that ratio aliases every straight edge into a staircase.
       const u0 = Math.floor(fu), v0 = Math.floor(fv);
-      if (u0 < 0 || v0 < 0 || u0 + 1 >= src.width || v0 + 1 >= src.height) continue;   // keep the fill
+      if (u0 < 0 || v0 < 0 || u0 >= src.width || v0 >= src.height) continue;   // outside: keep the fill
+      // Clamp the far neighbour rather than skipping the pixel: a quad drawn right to the
+      // photo edge used to lose its last row/column to a 1px line of fill colour.
+      const u1 = Math.min(u0 + 1, src.width - 1), v1 = Math.min(v0 + 1, src.height - 1);
       const au = fu - u0, av = fv - v0;
       for (let c = 0; c < 4; c++) {
-        const p00 = sd.data[(v0 * src.width + u0) * 4 + c], p10 = sd.data[(v0 * src.width + u0 + 1) * 4 + c];
-        const p01 = sd.data[((v0 + 1) * src.width + u0) * 4 + c], p11 = sd.data[((v0 + 1) * src.width + u0 + 1) * 4 + c];
+        const p00 = sd.data[(v0 * src.width + u0) * 4 + c], p10 = sd.data[(v0 * src.width + u1) * 4 + c];
+        const p01 = sd.data[(v1 * src.width + u0) * 4 + c], p11 = sd.data[(v1 * src.width + u1) * 4 + c];
         od.data[o + c] = (p00 * (1 - au) + p10 * au) * (1 - av) + (p01 * (1 - au) + p11 * au) * av;
       }
       // The source may itself be a cut-out PNG; anything see-through composites onto the
@@ -7142,12 +7147,50 @@ function ssWarpQuad(img, quad, aspect, maxPx) {
     }
   }
   octx.putImageData(od, 0, 0);
+  // Sanity-check the result. A source the browser refused to decode reads as fully
+  // transparent, which the fill above turns into a flat door-coloured rectangle: better
+  // than the old all-black JPEG, but still not the builder's photo. If almost nothing was
+  // sampled, report failure so the caller keeps the original file.
+  let sampled = 0;
+  for (let i = 0; i < od.data.length; i += 4 * 97) {
+    if (!(od.data[i] === 0x77 && od.data[i + 1] === 0x66 && od.data[i + 2] === 0x4C)) sampled++;
+  }
+  if (sampled < Math.ceil((od.data.length / (4 * 97)) * 0.02)) return null;
   return out;
 }
 
 // Drag the four corners onto the door/window itself, then straighten. "Use as-is" exists
 // because a photo that is already square-on needs nothing, and forcing a four-corner
 // ritual on every upload would be its own reason not to upload.
+// Guarantee an upload fits the server's 3MB cap. The file picker deliberately accepts a
+// big original now (a modern phone photo is 4-12MB and the straightener shrinks it to a
+// couple of hundred KB), but 'Use as-is' hands the original straight through -- so the
+// last step before upload re-encodes anything still too large. Longest edge 1600px is
+// well above the 1024px the 3D texture cache downsamples to anyway.
+async function ssFitImageForUpload(file, maxBytes = 2_800_000, maxPx = 1600) {
+  if (!file || file.size <= maxBytes) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode failed')); i.src = url; });
+    const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const g = cv.getContext('2d');
+    // Flatten onto white: JPEG has no alpha, and a transparent PNG would otherwise
+    // encode its see-through areas as black.
+    g.fillStyle = '#FFFFFF'; g.fillRect(0, 0, cv.width, cv.height);
+    g.drawImage(img, 0, 0, cv.width, cv.height);
+    for (const q of [0.9, 0.8, 0.7]) {
+      const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', q));
+      if (blob && blob.size <= maxBytes) return new File([blob], 'photo.jpg', { type: 'image/jpeg' });
+    }
+    return file;   // could not get it under the cap; let the server say so
+  } catch (_e) {
+    return file;
+  } finally { URL.revokeObjectURL(url); }
+}
+
 function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
   const [img, setImg] = useState(null);
   const [quad, setQuad] = useState(null);        // [[x,y]×4] in natural image pixels
@@ -10241,6 +10284,15 @@ function Dashboard({ session }) {
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
       return data;
+    },
+    // Reference photos are no longer in the customer-facing config (migration 093 stopped
+    // get_config broadcasting a builder's photos of their real buildings to anonymous
+    // shoppers), so the editor asks for them here, over the authenticated session.
+    onLoadPhotos: async (styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+      if (error || !data || !data.ok) return [];
+      const st = (data.styles || []).find((x) => x.key === styleValue);
+      return (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [];
     },
     onDraftFromPhotos: async (photoUrls, styleValue) => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue } });

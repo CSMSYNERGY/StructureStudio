@@ -2336,8 +2336,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const e2 = engineRef.current;
         if (!e2) return;
         e2.render();
+        // The shot taken before this photo landed shows a painted door, not the builder's.
+        // Drop it on BOTH sides: the modal's own button state AND the parent's stored shot,
+        // which otherwise kept the toolbar claiming "3D checked" for a stale image.
         capturedRef.current = false;
         setShotTaken(false);
+        onSnapshot(null);
       });
       engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, offFxTex, interior: false, roofOn: true, envOn: true };
       resize();
@@ -4913,8 +4917,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setAdminCal({
       styleValue: s.value,
       spec: d3ResolveStyleSpec(s, s.value, C.wallHeightFt),
+      // s.d3Photos is empty as of migration 093: these are a builder's photos of their own
+      // REAL buildings, and get_config is the call the anonymous customer page makes, so they
+      // are no longer in that payload. The portal re-fetches them over its authenticated
+      // session below; the standalone ?admin=1 path has no session and so starts blank.
       photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
     });
+    if (setup3d && setup3d.onLoadPhotos) {
+      setup3d.onLoadPhotos(s.value).then((urls) => {
+        if (!Array.isArray(urls) || urls.length === 0) return;
+        // Ignore a late reply for a style the operator has already navigated away from.
+        setAdminCal((p) => (p && p.styleValue === s.value
+          ? { ...p, photos: urls.filter(Boolean).concat(["", "", "", ""]).slice(0, 4) }
+          : p));
+      }).catch(() => { /* photos are a convenience; never block the editor */ });
+    }
   };
   const calSet = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, ...patch } }));
   const calSetRoof = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, roof: { ...p.spec.roof, ...patch } } }));
@@ -7189,7 +7206,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           onItemAdd={(ni) => setItems((p) => [...p, ni])}
           onItemSelect={(id) => setSelectedId(id)}
           onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}
-          onSnapshot={(shot) => { render3DSnapshotRef.current = shot; setHas3DSnapshot(true); }}
+          onSnapshot={(shot) => { render3DSnapshotRef.current = shot || null; setHas3DSnapshot(Boolean(shot)); }}
           onClose={() => setShow3D(false)}
         />
       )}
