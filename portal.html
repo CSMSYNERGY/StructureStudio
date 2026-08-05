@@ -120,7 +120,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260805a" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260805b" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -245,10 +245,34 @@ __ssFunctions.invoke = async (name, opts) => {
     opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
   }
   const res = await __ssInvoke(name, opts);
+  // Recover the SERVER'S message on a non-2xx. supabase-js reports every 4xx/5xx as
+  // FunctionsHttpError("Edge Function returned a non-2xx status code") and leaves the JSON
+  // body — which holds the actual reason — unread on error.context. Every call site here
+  // does `throw new Error(error.message || data.error)`, and because `error` is truthy the
+  // real reason was never even looked at: the builder got "non-2xx", and so did app_errors.
+  // That is how seven fixture failures on 2026-08-05 recorded nothing anyone could act on.
+  // Reading it once, here, fixes the message for every action and every call site at once.
+  if (res && res.error && res.error.context && typeof res.error.context.json === "function"
+      && /non-2xx/i.test(res.error.message || "")) {
+    try {
+      const body = await res.error.context.clone().json();
+      const serverMsg = body && (body.error || body.message);
+      if (serverMsg) {
+        const status = res.error.context.status;
+        res.error.message = String(serverMsg);
+        res.error.ssStatus = status;
+        // 401/403 are the two a builder can act on themselves, so say what to do.
+        if (status === 401) res.error.message += " — sign out and back in.";
+        else if (status === 403) res.error.message += " — ask an owner or admin to do this.";
+      }
+    } catch (_) { /* body already consumed, or not JSON — keep the generic message */ }
+  }
   try {
     if (res && (res.error || (res.data && res.data.error))) {
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
-        (res.error && res.error.name) || null, { fn: name, action: opts && opts.body && opts.body.action, target: injected });
+        (res.error && res.error.name) || null,
+        { fn: name, action: opts && opts.body && opts.body.action, target: injected,
+          status: (res.error && res.error.ssStatus) || null });
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
@@ -3097,6 +3121,15 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
 
   const confirmDelete = async () => {
     const row = pendingDelete; if (!row) return;
+    // A line that never reached the server has no id. Drop it locally instead of asking the
+    // server to delete nothing — that round trip could only ever come back as an error, and
+    // it left the builder unable to clear a row they could see.
+    if (!row.id) {
+      setRows((rs) => rs.filter((r) => r !== row));
+      setPendingDelete(null);
+      setMsg({ ok: "Removed the unsaved line." });
+      return;
+    }
     setBusy(true); setMsg(null);
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delete_fixture", id: row.id }) });
