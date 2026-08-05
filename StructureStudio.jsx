@@ -1239,22 +1239,22 @@ function _d3FxTexSettle() {
   _d3FxTexListeners.forEach((cb) => { try { cb(); } catch (_e) { /* a listener must never break the load */ } });
 }
 
-// Shared, session-lived texture for a fixture photo URL. Never evicted: a
-// disposed texture under a live model is exactly the hazard the grass-singleton
-// note above warns about, and a tenant only has a handful of fixture photos.
-function d3FixtureTexture(THREE, url, placeholderCss) {
+// Shared, session-lived cache entry for a fixture photo URL: { tex, status }, where
+// `tex` is null until the image has decoded. Never evicted — a disposed texture under a
+// live model is exactly the hazard the grass-singleton note above warns about, and a
+// tenant only has a handful of fixture photos.
+//
+// There is deliberately NO stand-in texture for the loading state. An earlier version
+// served a 1x1 canvas in the door colour, which was wrong twice over: unlit, it landed
+// within 12/255 of the SIDING colour, so a photo that never arrived read as a doorless
+// wall rather than as the painted door it claims to fall back to. The painted door is now
+// a real mesh that is always built, and the photo rides in front of it (see the fill
+// branches) — so "loading", "failed" and "no photo" all look identical and correct.
+function d3FixtureTexture(THREE, url) {
   if (!url || typeof document === "undefined") return null;
   const hit = _d3FxTexCache.get(url);
-  if (hit) return hit.tex;                      // placeholder / photo / failed all render safely
-  const cv = document.createElement("canvas");
-  cv.width = cv.height = 1;
-  const g = cv.getContext("2d");
-  g.fillStyle = d3CssColor(placeholderCss, D3_COLORS.door);
-  g.fillRect(0, 0, 1, 1);
-  const tex = new THREE.CanvasTexture(cv);
-  if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;   // photos are sRGB, not linear
-  tex.userData = { ssShared: true };            // disposeShed3DModel must skip this map
-  const entry = { tex, status: "loading" };
+  if (hit) return hit;
+  const entry = { tex: null, status: "loading" };
   _d3FxTexCache.set(url, entry);
   _d3FxTexPending++;
   const img = new Image();
@@ -1268,37 +1268,37 @@ function d3FixtureTexture(THREE, url, placeholderCss) {
       const dw = Math.max(1, Math.round(w * s)), dh = Math.max(1, Math.round(h * s));
       const out = document.createElement("canvas");
       out.width = dw; out.height = dh;
+      // No fill behind it: builders upload background-REMOVED cut-outs (every photo in
+      // production is an RGBA PNG that is 50-65% fully transparent), and that alpha has
+      // to survive into the texture so the painted door shows through instead of black.
       out.getContext("2d").drawImage(img, 0, 0, dw, dh);
-      // A NEW texture, not a mutation of the placeholder (see the note above).
       const photoTex = new THREE.CanvasTexture(out);
-      if (THREE.SRGBColorSpace) photoTex.colorSpace = THREE.SRGBColorSpace;
-      photoTex.userData = { ssShared: true };
-      const placeholder = entry.tex;
+      if (THREE.SRGBColorSpace) photoTex.colorSpace = THREE.SRGBColorSpace;  // photos are sRGB
+      photoTex.userData = { ssShared: true };     // disposeShed3DModel must skip this map
       entry.tex = photoTex;
       entry.status = "ready";
-      // Re-point everything already built against the placeholder. The placeholder
-      // itself is left undisposed: it is one pixel, and disposing a texture a live
-      // material might still reference buys nothing.
-      const waiting = _d3FxMatBinds.get(placeholder);
-      if (waiting) { waiting.forEach((m) => { m.map = photoTex; m.needsUpdate = true; }); _d3FxMatBinds.delete(placeholder); }
-    } catch (_e) { entry.status = "error"; }     // keep the placeholder — never a black slab
+      // Show the photo on everything already built for it. Assigning a NEW texture is the
+      // only thing three 0.167 honours (see the note above), and revealing the mesh here
+      // rather than rebuilding keeps this working in a backgrounded tab, where rAF stops.
+      const waiting = _d3FxMatBinds.get(entry);
+      if (waiting) {
+        waiting.forEach((b) => { b.mat.map = photoTex; b.mat.needsUpdate = true; if (b.mesh) b.mesh.visible = true; });
+        _d3FxMatBinds.delete(entry);
+      }
+    } catch (_e) { entry.status = "error"; }       // painted door stays — never a black slab
     _d3FxTexSettle();
   };
   img.onerror = () => { entry.status = "error"; _d3FxTexSettle(); };
   img.src = url;
-  return tex;
+  return entry;
 }
-// Remember a material built against a still-loading placeholder so the photo can be
-// swapped in the moment it lands. Materials built after the load get the real
-// texture from the cache directly and need no bookkeeping.
-function d3BindFixtureMaterial(tex, mat) {
-  if (!tex || !mat) return mat;
-  let placeholderEntry = null;
-  _d3FxTexCache.forEach((e) => { if (e.tex === tex && e.status === "loading") placeholderEntry = e; });
-  if (!placeholderEntry) return mat;
-  let set = _d3FxMatBinds.get(tex);
-  if (!set) { set = new Set(); _d3FxMatBinds.set(tex, set); }
-  set.add(mat);
+// Remember a photo mesh + material built while the image was still loading, so the photo
+// can be revealed the moment it lands. Anything built after the load already has it.
+function d3BindFixturePhoto(entry, mat, mesh) {
+  if (!entry || entry.status !== "loading") return mat;
+  let set = _d3FxMatBinds.get(entry);
+  if (!set) { set = new Set(); _d3FxMatBinds.set(entry, set); }
+  set.add({ mat, mesh });
   return mat;
 }
 function d3FixtureTexturesPending() { return _d3FxTexPending; }
@@ -1405,11 +1405,13 @@ function buildShed3DModel(THREE, p) {
   // already saved, and an archived fixture — dropped by get_fixtures — quietly
   // falls back to the painted slab instead of leaving a hole.
   const fxById = new Map((Array.isArray(p.fixtures) ? p.fixtures : []).map((fx) => [String(fx.id), fx]));
+  // Returns the shared cache ENTRY ({ tex, status }) — not a texture — because the caller
+  // needs to know whether the photo has decoded yet to decide if its layer is visible.
   const fixturePhotoTex = (it) => {
     if (it.fixtureItemId == null) return null;                 // built-in door/window
     const fx = fxById.get(String(it.fixtureItemId));
     if (!fx || !fx.imageUrl) return null;
-    return d3FixtureTexture(THREE, fx.imageUrl, it.type === "window" ? D3_COLORS.glass : D3_COLORS.door);
+    return d3FixtureTexture(THREE, fx.imageUrl);
   };
   // Siding texture (vertical groove panel by default; horizontal lap boards when
   // the customer picked a lap-siding upgrade) — multiplies the body color.
@@ -1586,36 +1588,48 @@ function buildShed3DModel(THREE, p) {
       og.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
       og.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
       og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
-      // A catalog fixture's own photo is masked onto the slab when the builder
-      // uploaded one. MeshBasicMaterial, not Lambert: a photo already carries the
-      // light it was shot in, and shading it again reads as a dirty smudge.
-      // The photo stretches to the opening on purpose — one photo serves a door's
-      // 4/5/6 ft variants, which is the whole point of not keeping a model library.
+      // A catalog fixture's own photo is masked onto the opening when the builder
+      // uploaded one — but it is LAYERED IN FRONT of the parametric door/glass, never
+      // instead of it, for two reasons that both bit us:
+      //   · builders upload background-REMOVED cut-outs (every photo in production is an
+      //     RGBA PNG, 50-65% fully transparent), so the parametric fill is what shows
+      //     through the cut-away parts. Without it those pixels rendered pure BLACK, and
+      //     that black door went onto the customer's quote.
+      //   · while the photo loads (or if it 404s), there is something correct on screen.
+      // MeshBasicMaterial for the photo, not Lambert: a photo already carries the light it
+      // was shot in, and shading it again reads as a dirty smudge. The photo stretches to
+      // the opening on purpose — one photo serves a door's 4/5/6 ft variants, which is the
+      // whole point of not keeping a model library.
+      const photoLayer = (entry, a0, a1, y0, y1, depth) => {
+        // alphaTest discards the transparent surround (cheaper and better-sorted than
+        // blending it); transparent:true keeps the feathered edges of a soft cut-out.
+        const pm = new THREE.MeshBasicMaterial({ map: entry.tex, transparent: true, alphaTest: 0.06 });
+        const mesh = wallBox(pm, wf, a0, a1, y0, y1, 0.02, depth);   // 0.02 ft proud: no z-fight
+        mesh.visible = Boolean(entry.tex);        // hidden until the photo has decoded
+        d3BindFixturePhoto(entry, pm, mesh);
+        og.add(mesh);
+      };
       if (o.it.type === "window") {
         og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
-        const winTex = fixturePhotoTex(o.it);
-        if (winTex) {
-          // The photo shows the real sash and grid, so it replaces glass + muntins.
-          og.add(wallBox(d3BindFixtureMaterial(winTex, new THREE.MeshBasicMaterial({ map: winTex })), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+        og.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+        const winEntry = fixturePhotoTex(o.it);
+        if (winEntry) {
+          photoLayer(winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08);
         } else {
-          og.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+          // Muntins only without a photo: a real sash photo already shows its own grid.
           const midY = (o.y0 + o.y1) / 2;
           og.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
           og.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
         }
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
-        const photoTex = fixturePhotoTex(o.it);
-        if (photoTex) {
-          // One slab even for a double or a roll-up: the photo already shows both
-          // leaves / the panel seams, so splitting the geometry would double them.
-          og.add(wallBox(d3BindFixtureMaterial(photoTex, new THREE.MeshBasicMaterial({ map: photoTex })), wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
-        } else {
+        const photoEntry = fixturePhotoTex(o.it);
+        {
           const doorMat = mat(D3_COLORS.door);
           if (o.it.type === "doubleDoor" || o.it.operation === "double") {
             og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
             og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
           } else {
-            if (o.it.operation === "slideup") {
+            if (o.it.operation === "slideup" && !photoEntry) {
               // Roll-up read: reuse the lap texture as ~1 ft horizontal panel
               // seams, matching the segmented glyph the 2D plan draws.
               const seamTex = d3MakeTexture(THREE, "lap");
@@ -1624,6 +1638,9 @@ function buildShed3DModel(THREE, p) {
             og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
           }
         }
+        // One photo layer even for a double or a roll-up: the photo already shows both
+        // leaves / the panel seams, so splitting it would draw them twice.
+        if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0.16);
       }
       openingsGroup.add(og);
     });
@@ -1797,7 +1814,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paletteKeys, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -2368,7 +2385,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     e.render(); // fresh buffer right before reading it back
     try {
       const c = e.renderer.domElement;
-      return { url: c.toDataURL("image/jpeg", 0.9), w: c.width, h: c.height };
+      // A collapsed canvas (a hidden/backgrounded tab, or a resize race) makes toDataURL
+      // return the bare "data:," and a 0x0 page. That passed the caller's !shot check and
+      // became an empty page 2 of the quote with degenerate placement maths — better to
+      // report no snapshot and keep the plan-only PDF.
+      if (!c.width || !c.height) return null;
+      const url = c.toDataURL("image/jpeg", 0.9);
+      if (!url || url.length < 128) return null;
+      return { url, w: c.width, h: c.height };
     } catch (_) { return null; }
   };
   // This image becomes page 2 of the quote the customer signs against, so it must
@@ -2422,7 +2446,18 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         {/* Add-item palette: wall items place with the same pipeline as 2D clicks */}
         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
           <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Add</span>
-          {Object.keys(itemTypes).filter((k) => itemTypes[k].wallOnly).map((k) => (
+          {/* The placeable set is handed in by the parent — the SAME list the 2D tool row
+              builds — rather than re-derived here. Deriving it locally is what went wrong:
+              this palette filtered on `wallOnly` alone, so it offered render-only types
+              (built-in singleDoor/doubleDoor/window, the fixtureDoor stand-in) whose
+              placements carry none of the fixture stamps the estimate prices from, plus
+              `internalOnly` staff items that the public 2D palette deliberately hides.
+              The door/window PICKER tools are excluded too: in 2D they open a chooser
+              modal (see the isDoorPicker branch in the click handler), and 3D has no such
+              flow — placing one here produced a raw `doorPicker` item that no renderer
+              draws and no pricing recognises. Catalog fixtures get placed on the 2D plan
+              and then show up in 3D with their photo. */}
+          {(paletteKeys || []).map((k) => (
             <button key={k} onClick={() => setTool3((t) => (t === k ? null : k))} disabled={phase !== "ready"}
               style={{ background: tool3 === k ? accent : "#1E293B", color: tool3 === k ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               {itemTypes[k].icon} {itemTypes[k].shortLabel || itemTypes[k].label}
@@ -3998,6 +4033,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "fixtureDoor", fixtureItemId: fx.id, doorName: fx.name || "Door",
         planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
         price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+        // Drop the height a BUILT-IN placement stamped: openingHeightFt wins over heightIn
+        // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
+        // matter what the builder's door actually measures.
+        openingHeightFt: undefined, sillFt: undefined,
         widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null } : it));
       setSwapId(null); setDoorPick(null); setToast(null); return;
     }
@@ -4033,7 +4072,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wFt = (Number(fx.widthIn) || 24) / 12;
       setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
         planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
-        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, widthFt: wFt } : it));
+        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+        // As on the door swap: a built-in window stamped openingHeightFt/sillFt, and those
+        // beat the catalog window's own heightIn in openingSpan.
+        openingHeightFt: undefined, sillFt: undefined, widthFt: wFt } : it));
       setSwapId(null); setWindowPick(null); setToast(null); return;
     }
     if (!windowPick || !fx) return;
@@ -6047,7 +6089,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               so opening it on an inventory unit would bypass planLocked. A view-only 3D for
               locked plans is a planned follow-up. (Beta's "coming soon" 3D teaser is
               superseded on this branch — the real button ships here.) */}
-          {!planLocked && <button onClick={() => setShow3D(true)} style={S.btn("#7C3AED", "#FFF")}>{has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View"}</button>}
+          {/* The gate has to hold here too: the 3D view is not a preview, it PLACES and
+              DRAGS items through the same pipeline as the 2D canvas, so without this an
+              anonymous shopper could design a whole building without ever being asked who
+              they are — which is the one thing the gate exists to prevent. */}
+          {!planLocked && <button onClick={() => { if (gateRequired) { setGateOpen(true); return; } setShow3D(true); }} style={S.btn("#7C3AED", "#FFF")}>{has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View"}</button>}
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
         </div>
       </div>
@@ -7114,6 +7160,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
           fixtures={C.fixtures}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && ITEMS[k].wallOnly && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
+            && !ITEMS[k].isDoorPicker && !ITEMS[k].isWindowPicker)}
           paintEnabled={false}
           onSnapshot={() => {}}
           onClose={() => setAdminCalPreview(false)}
@@ -7130,6 +7178,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && ITEMS[k].wallOnly && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
+            && !ITEMS[k].isDoorPicker && !ITEMS[k].isWindowPicker)}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
