@@ -13,8 +13,8 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { qboOauthReady } from "../_shared/qboToken.ts";
+import { qboEndpoints, withParams } from "../_shared/qboDiscovery.ts";
 
-const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const SCOPE = "com.intuit.quickbooks.accounting";
 const STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -106,13 +106,21 @@ Deno.serve(async (req) => {
   await ctx.audit("qbo_oauth_start", 1, null);
 
   const state = b64url(JSON.stringify({ cid: ctx.clientId, n: nonce, rt: returnHost }));
-  const authorizeUrl = `${AUTHORIZE_URL}?${new URLSearchParams({
+  // Read AFTER the nonce is saved and the audit row is written: those are the steps that must not
+  // be skipped, and qboEndpoints() falls back rather than failing, so ordering it here costs
+  // nothing and keeps a slow metadata host from delaying a write we care about.
+  const { authorize } = await qboEndpoints();
+  // withParams, NOT `${authorize}?${new URLSearchParams(params)}`. The left-hand side is no longer
+  // a constant we control — it comes from Intuit's discovery document — and a query component is
+  // legal there (RFC 6749 §3.1), so concatenating a second "?" would corrupt the request. The
+  // reasoning and the unit tests live with the helper in _shared/qboDiscovery.ts.
+  const authorizeUrl = withParams(authorize, {
     client_id: Deno.env.get("QBO_CLIENT_ID")!,
     response_type: "code",
     scope: SCOPE,
     redirect_uri: redirectUri,
     state,
-  })}`;
+  });
 
   // clientId is echoed as the operator view-as tripwire the portal already checks.
   return json({ oauthReady: true, authorizeUrl, clientId: ctx.clientId });

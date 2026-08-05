@@ -1,0 +1,25 @@
+// Cloudflare Worker config — PRODUCTION frontend (structurestudio.app, deploys branch `main`).
+// Beta twin: wrangler.beta.jsonc (structurestudio-beta, branch `beta`). Assets-only Worker:
+// no "main" script, no bindings, no vars — this repo is PUBLIC, so nothing secret may ever
+// be added here (worker name + account_id are non-secret identifiers).
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "structurestudio-app",
+  "compatibility_date": "2026-08-05",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+  "assets": {
+    "directory": ".",
+    // "none" is load-bearing: the default (auto-trailing-slash) 307-redirects
+    // /offline.html -> /offline, and sw.js caches /offline.html at install — a cached
+    // redirected response makes Chrome fail the offline navigation for every installed
+    // PWA. "none" serves every .html file as-is (what Netlify did); _redirects supplies
+    // the / -> /index.html mapping that "none" drops.
+    "html_handling": "none",
+    "not_found_handling": "404-page"
+  },
+  "workers_dev": true,
+  "preview_urls": true
+  // NO "routes" here until the migration reaches steady state: during cutover the zone
+  // routes are dashboard-managed rollback levers, and a route listed here would be
+  // re-created by the next git deploy right after an operator deleted it mid-incident.
+}

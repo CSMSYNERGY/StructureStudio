@@ -4,7 +4,7 @@
   "description": "Dev tooling only - the product itself has NO build step (babel-standalone in the browser). These devDependencies exist solely for scripts/preflight.mjs, the pre-push correctness gate.",
   "scripts": {
     "preflight": "node scripts/preflight.mjs",
-    "selftest:pre-push": "sh scripts/pre-push-selftest.sh"
+    "selftest:pre-push": "node scripts/pre-push-selftest.mjs"
   },
   "devDependencies": {
     "eslint": "^9.0.0",

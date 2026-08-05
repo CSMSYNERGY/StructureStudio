@@ -20,11 +20,23 @@
 //      silently changes behaviour for the shared module).
 //   3. Cache-buster lockstep: index.html and portal.html must reference the same
 //      structure-studio.component.js?v=… value.
-//   4. `deno check` over every supabase/functions/*/index.ts. The browser artifacts above
+//   4. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
+//      an edge function (qboFetch) — the client secret lives only there, and "we never call
+//      Intuit from the browser" is an answer we give Intuit in writing. Help links to
+//      quickbooks.intuit.com are deliberately still allowed.
+//   5. `deno check` over every supabase/functions/*/index.ts. The browser artifacts above
 //      have no compiler, but the edge functions DO — and nothing was running it, so type
 //      errors accumulated silently: two sat in portal-settings' list_inventory long enough
 //      that a later commit added two more on the very same line. This step is SKIPPED with
 //      a warning when Deno isn't installed (it is not an npm devDependency).
+//   6. `deno test` over the edge-function unit tests — the parts of supabase/functions that
+//      cannot be exercised any other way. Two groups with different invocations: the
+//      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
+//      validation, which guards where the client secret gets sent), and the pre-existing
+//      `_shared/_test_stubs/*_test.ts`, which needs its own import map. Same skip-with-a-warning
+//      policy as step 5.
+//
+// Steps are numbered in the order they RUN.
 //
 // Zero output on success. Any failure prints the file, line, and message, and exits 1 —
 // which makes the pre-push hook refuse the push.
@@ -130,6 +142,26 @@ function run(files) {
     }
   }
 
+  // Intuit API/OAuth hosts must never appear in a browser-served file. Every QuickBooks call
+  // goes through qboFetch inside an edge function, and that is load-bearing twice over: the
+  // client secret exists only server-side, and it is what we attest to Intuit in the App
+  // Assessment questionnaire ("what platform do you make API calls from" → Web/SaaS, and "are
+  // the client id and secret stored securely, not displayed in browser console logs" → yes).
+  // A browser-side call would silently falsify both, and nothing else in the repo would notice.
+  // Scoped to the API/OAuth hosts on purpose: a help or marketing link to quickbooks.intuit.com
+  // is legitimate and must keep passing.
+  const INTUIT_API_HOST =
+    /(?:quickbooks\.api|sandbox-quickbooks\.api|oauth\.platform|appcenter|developer\.api)\.intuit\.com/i;
+  for (const f of ["index.html", "portal.html", "admin.html",
+                   "structure-studio.component.js", "StructureStudio.jsx"]) {
+    const hit = files[f].match(INTUIT_API_HOST);
+    if (hit) {
+      const line = files[f].slice(0, hit.index).split("\n").length;
+      errors.push(`${f}:${line}  Intuit API host "${hit[0]}" in a browser-served file — `
+        + "QuickBooks calls must go through an edge function (qboFetch), never the browser");
+    }
+  }
+
   // Cache-buster lockstep between the two hosts of the shared module.
   const buster = (html) => (html.match(/structure-studio\.component\.js\?v=([a-z0-9]+)/) || [])[1];
   const vi = buster(files["index.html"]);
@@ -218,6 +250,74 @@ function denoCheck() {
   };
 }
 
+// ── Edge functions: deno test ────────────────────────────────────────────────────────────
+// Unit tests for the parts of supabase/functions that CANNOT be exercised any other way. The
+// first of them (_shared/qboDiscovery.test.ts) pins the validation on Intuit's OAuth discovery
+// document — the token endpoint it names is where the client secret is sent, so a document that
+// could move it is a credential-exfiltration primitive, and the only live way to test the module
+// is to complete a real OAuth round trip. Same skip-with-a-warning policy as denoCheck().
+//
+// TWO GROUPS, because they need different invocations and the difference is not cosmetic:
+//
+//   _shared/*.test.ts          — self-contained (no jsr:/npm: imports), run with no import map.
+//   _shared/_test_stubs/*_test.ts — the pre-existing resolveTenant suite. It REQUIRES its own
+//                                import map (which rewrites jsr:@supabase/supabase-js@2 to a
+//                                stub); without it 12 of its 14 cases fail on module resolution.
+//
+// The second group existed before this step did and nothing ran it automatically — it guards
+// resolveTenant, which its own header notes sits in front of every tenant's settings, billing and
+// designs. Discovering it by convention rather than listing it means a new file in either shape is
+// covered the day it lands.
+function testGroups() {
+  const shared = join(root, FUNCTIONS_DIR, "_shared");
+  const stubs = join(shared, "_test_stubs");
+  const groups = [];
+
+  if (existsSync(shared)) {
+    const files = readdirSync(shared)
+      .filter((f) => f.endsWith(".test.ts"))
+      .map((f) => `_shared/${f}`)
+      .sort();
+    if (files.length) groups.push({ label: "_shared", files, importMap: null });
+  }
+
+  if (existsSync(stubs)) {
+    const files = readdirSync(stubs)
+      .filter((f) => f.endsWith("_test.ts"))
+      .map((f) => `_shared/_test_stubs/${f}`)
+      .sort();
+    const map = "_shared/_test_stubs/import_map.json";
+    if (files.length && existsSync(join(root, FUNCTIONS_DIR, map))) {
+      groups.push({ label: "_test_stubs", files, importMap: map });
+    }
+  }
+
+  return groups;
+}
+
+function denoTest() {
+  const groups = testGroups();
+  const total = groups.reduce((n, g) => n + g.files.length, 0);
+  if (!total) return { errors: [], skipped: true, why: `no test files under ${FUNCTIONS_DIR}/_shared/` };
+  if (!denoInstalled()) return { errors: [], skipped: true, why: "deno is not installed or not on PATH" };
+
+  const errors = [];
+  for (const g of groups) {
+    // --allow-env only: the tests stub globalThis.fetch / inject fake clients, so no network
+    // permission is needed — and withholding it means a test that accidentally reaches the real
+    // internet fails loudly instead of passing slowly.
+    const args = ["test", "--quiet", "--allow-env", "--node-modules-dir=none"];
+    if (g.importMap) args.push(`--import-map=${g.importMap}`);
+    args.push(...g.files);
+    const res = runDeno(args, join(root, FUNCTIONS_DIR));
+    if (res.status !== 0) {
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
+      errors.push(`edge functions: deno test failed in ${g.label} (${g.files.length} file(s))\n${out}`);
+    }
+  }
+  return { errors, skipped: false, count: total, groups: groups.length };
+}
+
 if (process.argv.includes("--self-test")) {
   // The gate must FAIL on the exact incident that motivated it: commit a763b3b shipped
   // `RANK[st]` after the RANK definition was removed. Reconstruct that state by reverting
@@ -238,6 +338,27 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the RANK regression is caught by no-undef");
+
+  // ── The Intuit-host rule ───────────────────────────────────────────────────
+  // Same silent-pass risk as everything else in this file: a regex that never matches is
+  // indistinguishable from a clean repo. So prove BOTH directions — it fires on a real API call,
+  // and it does not fire on a help link. The second half matters as much as the first: a rule
+  // that flags legitimate links gets deleted by the next person it annoys.
+  const withApiCall = load();
+  withApiCall["portal.html"] = withApiCall["portal.html"].replace("</body>",
+    '<script>fetch("https://quickbooks.api.intuit.com/v3/company/1/companyinfo/1")</script></body>');
+  if (!run(withApiCall).some((e) => e.includes("Intuit API host"))) {
+    console.error("self-test FAILED: an Intuit API host in portal.html was not caught");
+    process.exit(1);
+  }
+  const withHelpLink = load();
+  withHelpLink["portal.html"] = withHelpLink["portal.html"].replace("</body>",
+    '<a href="https://quickbooks.intuit.com/learn-support/">QuickBooks help</a></body>');
+  if (run(withHelpLink).some((e) => e.includes("Intuit API host"))) {
+    console.error("self-test FAILED: a quickbooks.intuit.com help link tripped the Intuit-host rule");
+    process.exit(1);
+  }
+  console.log("self-test passed: Intuit API hosts are refused in browser files, help links are not");
 
   // ── The deno step ──────────────────────────────────────────────────────────
   // Asserts the MECHANISM, not a historical bug. A subprocess check whose clean result and
@@ -268,6 +389,39 @@ if (process.argv.includes("--self-test")) {
     rmSync(tmp, { recursive: true, force: true });
   }
   console.log(`self-test passed: deno check fails on a type error, and ${entrypoints.length} edge-function entrypoint(s) are covered`);
+
+  // ── The deno test step ─────────────────────────────────────────────────────
+  // Same silent-pass hazard, one level up: if the discovery glob matched nothing, denoTest()
+  // would skip and this gate would report clean while running zero tests. Assert files were
+  // found, and that the runner really does fail a failing test.
+  const groups = testGroups();
+  const found = groups.flatMap((g) => g.files);
+  if (!found.length) {
+    console.error(`self-test FAILED: found no test files under ${FUNCTIONS_DIR}/_shared/`);
+    process.exit(1);
+  }
+  // BOTH groups must be discovered. The _test_stubs suite was already in the repo and this step
+  // originally missed it twice over — wrong directory AND a `_test.ts` rather than `.test.ts`
+  // suffix — so it ran zero of those 14 cases while reporting clean.
+  for (const want of ["_shared", "_test_stubs"]) {
+    if (!groups.some((g) => g.label === want)) {
+      console.error(`self-test FAILED: test group "${want}" was not discovered`);
+      process.exit(1);
+    }
+  }
+  const tmpT = mkdtempSync(join(tmpdir(), "ss-preflight-test-"));
+  try {
+    writeFileSync(join(tmpT, "fails.test.ts"),
+      'Deno.test("deliberately failing", () => { throw new Error("boom"); });\n');
+    const res = runDeno(["test", "--quiet", "--allow-env", "--node-modules-dir=none", "fails.test.ts"], tmpT);
+    if (res.status === 0) {
+      console.error("self-test FAILED: deno test passed a failing test — the unit-test step would never fail a push");
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpT, { recursive: true, force: true });
+  }
+  console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered`);
   process.exit(0);
 }
 
@@ -280,6 +434,12 @@ errors.push(...deno.errors);
 if (deno.skipped) {
   console.error(`preflight: edge-function type check SKIPPED — ${deno.why}.`);
   console.error("           supabase/functions/ is NOT covered by this run. Install Deno: https://docs.deno.com/runtime/getting_started/installation/");
+}
+
+const tests = denoTest();
+errors.push(...tests.errors);
+if (tests.skipped) {
+  console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
 if (errors.length) {

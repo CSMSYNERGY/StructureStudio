@@ -274,8 +274,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   }
 
   const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
+  // PAID-ONLY features: the exempt/transition blankets deliberately do NOT cover these.
+  // Carolyn 2026-08-04: "No one gets grandfathered into this" — the scheduling suite
+  // (Build Schedule + Delivery Schedule + Repairs + drivers/territories) is available
+  // ONLY with a real subscription, for every tenant: grandfathered, internal, and
+  // free-period accounts included. Operators still see the tabs via the portal's own
+  // isOperator branch, which never consults this map.
+  const PAID_ONLY_FEATURES = new Set(["schedule_builds"]);
   const features: Record<string, boolean> = {};
-  for (const p of plans) features[p.feature] = exempt || inTransition || Boolean(featureState.get(p.feature)?.usable);
+  for (const p of plans) {
+    features[p.feature] = PAID_ONLY_FEATURES.has(p.feature)
+      ? Boolean(featureState.get(p.feature)?.usable)
+      : (exempt || inTransition || Boolean(featureState.get(p.feature)?.usable));
+  }
 
   let entState = "active";
   let reason = "active";

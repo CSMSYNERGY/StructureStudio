@@ -73,6 +73,12 @@ verify_jwt = true
 # service-role only, so all rate/grant access is gated here.
 verify_jwt = true
 
+[functions.portal-schedule]
+# Build/Delivery Scheduling + Repairs backend. JWT-authenticated via resolveTenant
+# (auth.getUser() → client_users; READ/STAFF/ADMIN action tiers; operator override with
+# can_write). driver_profiles is service-role only, so all driver setup goes through here.
+verify_jwt = true
+
 [functions.operator-portal]
 verify_jwt = true
 
