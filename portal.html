@@ -5283,7 +5283,7 @@ function SchedStageEditor({ stages, busy, onClose, onSave }) {
 function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   const [data, setData] = useState(null);        // { stages, jobs, stopByJob, tray, team } | null = loading
   const [error, setError] = useState(null);
-  const [view, setView] = useState("board");     // board | table | calendar
+  const [view, setView] = useState("calendar"); // calendar (main) | board | table
   const [calView, setCalView] = useState("week"); // week | month
   const [cursorMs, setCursorMs] = useState(() => Date.now());
   const [crewFilter, setCrewFilter] = useState("all"); // "all" | userId — each crew gets their own calendar
@@ -5295,6 +5295,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [dragId, setDragId] = useState(null);
+  const [dragIntake, setDragIntake] = useState(null); // a tray item (not on the board yet) being dragged onto a date
   const [dropStage, setDropStage] = useState(null);
   const [editingStages, setEditingStages] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -5338,6 +5339,8 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
     counts[k] = (counts[k] || 0) + 1;
     if (schedPastDue(j, k)) counts.pastDue++;
   });
+  // Board jobs with no build date — they live in the ONE Unscheduled tray on the calendar.
+  const undatedJobs = jobs.filter((j) => !schedBuildDate(j) && !j.completed_at);
 
   // Optimistic stage move; on server rejection the reload restores the truth.
   const moveJob = async (job, stageId) => {
@@ -5362,6 +5365,16 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   const addFromTray = async (body, label) => {
     setBusy(true); setMsg(null);
     const r = await call({ action: "create_job", ...body }, `${label} added to the board.`);
+    setBusy(false); if (r) load();
+  };
+  // Dragging a tray item (not on the board yet) straight onto a calendar date creates the
+  // job WITH that build date — and assigns the crew whose calendar is showing.
+  const addFromTrayDated = async (body, label, iso) => {
+    setBusy(true); setMsg(null);
+    const extra = { dueDate: iso, scheduledStart: iso };
+    if (crewFilter !== "all") extra.assigneeUserId = crewFilter;
+    const r = await call({ action: "create_job", ...body, ...extra },
+      `${label} scheduled for ${fmtDate(iso)}${crewFilter !== "all" ? " with " + (nameOf[crewFilter] || "crew") : ""}.`);
     setBusy(false); if (r) load();
   };
   const createManual = async () => {
@@ -5469,26 +5482,35 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   const sorted = sortRows(tableRows, (j) => j[sortKey], sortDir);
   const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
 
-  const trayItem = (key, chipConf, who, what, onAdd) => (
-    <div key={key} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", background: "#FBFCFE" }}>
-      <span style={schedChip(chipConf.bg, chipConf.fg)}>{chipConf.label}</span>
-      <div>
-        <div style={{ fontSize: 12.5, fontWeight: 700 }}>{who}</div>
-        {what && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{what}</div>}
+  // In calendar view a tray item is DRAGGABLE — drop it on a date and the job is created
+  // with that build date (addFromTrayDated). The + button still adds it unscheduled.
+  const trayItem = (key, chipConf, who, what, addBody, label) => {
+    const draggable = canAdmin && view === "calendar";
+    return (
+      <div key={key} draggable={draggable}
+        onDragStart={draggable ? () => setDragIntake({ body: addBody, label }) : undefined}
+        onDragEnd={draggable ? () => { setDragIntake(null); setDropStage(null); } : undefined}
+        style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", background: "#FBFCFE", cursor: draggable ? "grab" : "default" }}>
+        <span style={schedChip(chipConf.bg, chipConf.fg)}>{chipConf.label}</span>
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 700 }}>{who}</div>
+          {what && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{what}</div>}
+        </div>
+        {canAdmin && (
+          <button type="button" disabled={busy} onClick={() => addFromTray(addBody, label)}
+            title={view === "calendar" ? "Add without a date (or drag onto a day below)" : "Add to the board"}
+            style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
+        )}
       </div>
-      {canAdmin && (
-        <button type="button" disabled={busy} onClick={onAdd} title="Add to the board"
-          style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
-      )}
-    </div>
-  );
+    );
+  };
 
   return (
     <div style={S.card}>
       <CardHead title="Build Schedule" count={jobs.length}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
-            {[["board", "Board"], ["table", "Table"], ["calendar", "Calendar"]].map(([v, label]) => (
+            {[["calendar", "Calendar"], ["board", "Board"], ["table", "Table"]].map(([v, label]) => (
               <button key={v} type="button" onClick={() => setView(v)}
                 style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
                 {label}
@@ -5527,21 +5549,40 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
         </div>
       )}
 
-      {/* Unscheduled tray — sold orders / available inventory / open repairs with no card yet */}
-      {data && trayCount > 0 && (
-        <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "10px 14px", marginBottom: 13, background: "#FFF" }}>
+      {/* ONE Unscheduled tray (Carolyn 2026-08-04) — intake items that aren't on the board
+          yet AND, on the calendar, board jobs without a build date. Everything here drags
+          straight onto a date below; dropping a scheduled card back clears its date. */}
+      {data && (trayCount > 0 || (view === "calendar" && undatedJobs.length > 0)) && (
+        <div
+          onDragOver={view === "calendar" && canAdmin ? (e) => { e.preventDefault(); setDropStage("cal:none"); } : undefined}
+          onDragLeave={view === "calendar" && canAdmin ? () => setDropStage((d) => d === "cal:none" ? null : d) : undefined}
+          onDrop={view === "calendar" && canAdmin ? (e) => {
+            e.preventDefault(); setDropStage(null);
+            const job = jobs.find((j) => j.id === dragId);
+            if (job && schedBuildDate(job)) moveJobDate(job, null);
+            setDragId(null); setDragIntake(null);
+          } : undefined}
+          style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "10px 14px", marginBottom: 13, background: "#FFF",
+            outline: dropStage === "cal:none" ? `2px dashed ${ACCENT}` : "none", outlineOffset: -2 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
             <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>Unscheduled</span>
-            <span style={schedChip("#EEF2FF", "#3D3672")}>{trayCount}</span>
-            <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>— sold orders, inventory, and repairs that aren't on the board yet</span>
+            <span style={schedChip("#EEF2FF", "#3D3672")}>{trayCount + (view === "calendar" ? undatedJobs.length : 0)}</span>
+            <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>
+              {view === "calendar"
+                ? "— drag anything here onto a day below to schedule it" + (canAdmin ? "; drag a scheduled card back here to clear its date" : "")
+                : "— sold orders, inventory, and repairs that aren't on the board yet"}
+            </span>
           </div>
           <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2 }}>
+            {view === "calendar" && undatedJobs.map((j) => (
+              <div key={j.id} style={{ flex: "0 0 230px" }}>{jobCard(j, { hideDate: true, showStage: true, dragAdmin: true })}</div>
+            ))}
             {tray.orders.map((o) => trayItem("o" + o.designShortCode, SCHED_SRC_CHIP.order, o.customerName || o.designShortCode, o.buildingLabel,
-              () => addFromTray({ source: "order", designShortCode: o.designShortCode }, o.customerName || "Order")))}
+              { source: "order", designShortCode: o.designShortCode }, o.customerName || "Order"))}
             {tray.inventory.map((u) => trayItem("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory, "#" + u.serial, "Spec build for the lot",
-              () => addFromTray({ source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial)))}
+              { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial))}
             {tray.repairs.map((rp) => trayItem("r" + rp.repairId, SCHED_SRC_CHIP.repair, rp.customerName, "R-" + rp.repairNo + " · " + (rp.description || "").slice(0, 60),
-              () => addFromTray({ source: "repair", repairId: rp.repairId }, "R-" + rp.repairNo)))}
+              { source: "repair", repairId: rp.repairId }, "R-" + rp.repairNo))}
           </div>
         </div>
       )}
@@ -5658,8 +5699,6 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
         const isoLocal = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
         const todayIso = isoLocal(new Date());
         const cur = new Date(cursorMs); cur.setHours(0, 0, 0, 0);
-        // ALL unscheduled jobs stay at the top, whichever crew calendar is showing.
-        const unscheduled = jobs.filter((j) => !schedBuildDate(j) && !j.completed_at);
         const dated = jobs.filter((j) => schedBuildDate(j) && (crewFilter === "all" || j.assignee_user_id === crewFilter));
         const byDate = {}; dated.forEach((j) => { const k = schedBuildDate(j); (byDate[k] = byDate[k] || []).push(j); });
         const stageColor = {}; stages.forEach((s) => { stageColor[s.id] = s.color; });
@@ -5685,7 +5724,9 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
             e.preventDefault(); setDropStage(null);
             const job = jobs.find((j) => j.id === dragId);
             if (job) moveJobDate(job, iso);
-            setDragId(null);
+            // A tray item (not on the board yet) dropped on a date: create it scheduled.
+            else if (dragIntake && iso) addFromTrayDated(dragIntake.body, dragIntake.label, iso);
+            setDragId(null); setDragIntake(null);
           },
         } : {};
         const dropGlow = (iso) => dropStage === "cal:" + (iso || "none") ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -2 } : {};
@@ -5723,19 +5764,8 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
               )}
             </div>
 
-            {/* Unscheduled — always on top, whatever calendar is showing */}
-            <div {...dropProps(null)} style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "10px 14px", marginBottom: 13, background: "#FFF", ...dropGlow(null) }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: unscheduled.length ? 9 : 0 }}>
-                <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>Unscheduled</span>
-                <span style={schedChip("#EEF2FF", "#3D3672")}>{unscheduled.length}</span>
-                <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>— drag a card onto a day to set its build date{canAdmin ? "; drag back here to clear it" : ""}</span>
-              </div>
-              {unscheduled.length > 0 && (
-                <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2 }}>
-                  {unscheduled.map((j) => <div key={j.id} style={{ flex: "0 0 230px" }}>{jobCard(j, { hideDate: true, showStage: true, dragAdmin: true })}</div>)}
-                </div>
-              )}
-            </div>
+            {/* The ONE Unscheduled tray sits above (shared with all views) — nothing
+                unscheduled renders inside the calendar itself (Carolyn 2026-08-04). */}
 
             {/* WEEK — the kanban feel, with days as the columns */}
             {calView === "week" && (
