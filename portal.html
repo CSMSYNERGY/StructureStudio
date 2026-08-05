@@ -6127,10 +6127,12 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const stopsByLoad = {}; stops.forEach((s) => { (stopsByLoad[s.load_id] = stopsByLoad[s.load_id] || []).push(s); });
   Object.keys(stopsByLoad).forEach((k) => stopsByLoad[k].sort((a, b) => a.stop_order - b.stop_order));
 
-  const poolOrders = (pool && pool.orders) || [];
+  // `jobs` = every non-repair building on the build board without a stop (orders,
+  // inventory spec builds, manual); older function versions called it `orders`.
+  const poolJobs = (pool && (pool.jobs || pool.orders)) || [];
   const poolInv = (pool && pool.inventory) || [];
   const poolRepairs = (pool && pool.repairs) || [];
-  const poolCount = poolOrders.length + poolInv.length + poolRepairs.length;
+  const poolCount = poolJobs.length + poolInv.length + poolRepairs.length;
   const plannedLoads = loads.filter((l) => l.status === "planned");
 
   // A stop conflicts when its load has a date but the linked build isn't done and is due
@@ -6259,9 +6261,12 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
     if (s.source === "repair") return <span style={schedChip("#FDF2F8", "#BE185D")}>Field work</span>;
     return <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12 }}>—</span>;
   };
-  const poolRow = (key, serial, customer, building, size, wide, ready, extraSub, addBody, label) => (
+  const poolRow = (key, src, serial, customer, building, size, wide, ready, extraSub, addBody, label) => (
     <tr key={key}>
-      <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{serial}</td>
+      <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+        <span style={{ fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{serial}</span>
+        {src && <div style={{ marginTop: 3 }}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></div>}
+      </td>
       <td style={S.td}><strong>{customer}</strong>{extraSub && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{extraSub}</div>}</td>
       <td style={S.td}>{building}</td>
       <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>{size}{wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), marginLeft: 5 }}>WIDE</span>}</td>
@@ -6343,16 +6348,23 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>{["Serial", "Customer", "Building", "Size", "Ready", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
               <tbody>
-                {poolOrders.map((o) => poolRow("o" + o.buildJobId, o.serial ? "#" + o.serial : "—", o.customerName || "—", o.buildingLabel || "—",
-                  (o.widthFt && o.lengthFt) ? `${Number(o.widthFt)}×${Number(o.lengthFt)}` : "—", o.wide,
-                  o.buildKind === "done"
-                    ? <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓{o.completedAt ? " " + fmtDate(o.completedAt) : ""}</span>
-                    : <span style={schedChip("#FFFBEB", "#B45309")}>{o.buildStage || "In build"}{o.dueDate ? " · due " + fmtDate(o.dueDate) : ""}</span>,
-                  null, { source: "order", buildJobId: o.buildJobId }, o.customerName || "Building"))}
-                {poolInv.map((u) => poolRow("u" + u.inventoryUnitId, "#" + u.serial, u.location ? u.location.name : "Sales lot", "Sold lot building", "—", false,
+                {poolJobs.map((j) => poolRow("j" + j.buildJobId, SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual,
+                  j.serial ? "#" + j.serial : "—",
+                  j.customerName || j.title || (j.source === "inventory" ? "Spec build" : "—"),
+                  j.buildingLabel || j.title || "—",
+                  (j.widthFt && j.lengthFt) ? `${Number(j.widthFt)}×${Number(j.lengthFt)}` : "—", j.wide,
+                  j.buildKind === "done"
+                    ? <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓{j.completedAt ? " " + fmtDate(j.completedAt) : ""}</span>
+                    : <span style={schedChip("#FFFBEB", "#B45309")}>{j.buildStage || "In build"}{j.dueDate ? " · due " + fmtDate(j.dueDate) : ""}</span>,
+                  j.source === "inventory" ? "spec build → haul to the sales lot" : null,
+                  { source: j.source, buildJobId: j.buildJobId },
+                  j.customerName || (j.serial ? "#" + j.serial : "Building")))}
+                {poolInv.map((u) => poolRow("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory,
+                  "#" + u.serial, u.location ? u.location.name : "Sales lot", "Sold lot building", "—", false,
                   <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>,
-                  "sold — needs delivery", { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial))}
-                {poolRepairs.map((rp) => poolRow("r" + rp.id, "R-" + rp.repair_no, rp.customer_name, (rp.description || "").slice(0, 50), "—", false,
+                  "sold — deliver to the buyer", { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial))}
+                {poolRepairs.map((rp) => poolRow("r" + rp.id, SCHED_SRC_CHIP.repair,
+                  "R-" + rp.repair_no, rp.customer_name, (rp.description || "").slice(0, 50), "—", false,
                   <span style={schedChip("#FDF2F8", "#BE185D")}>{(REPAIR_STATUS[rp.status] || {}).label || rp.status}</span>,
                   rp.serial ? "building #" + rp.serial : null, { source: "repair", repairId: rp.id }, "R-" + rp.repair_no))}
               </tbody>

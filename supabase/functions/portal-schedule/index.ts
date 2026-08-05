@@ -192,11 +192,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     return isWide;
   };
 
-  // Delivered write-back for ORDER stops: the design becomes delivered. Never touches
-  // draft/inventory rows; sync-design-status gets its delivered_at fence in Phase 4.
+  // Delivered write-back: the customer's design becomes delivered — for ORDER stops and
+  // for a sold unit's SALE stop (which carries the buyer's design code). Never touches
+  // draft/inventory master rows (the status filter below); the sync-design-status
+  // delivered_at fence keeps GHL from downgrading it.
   // deno-lint-ignore no-explicit-any
   const writeBackDelivered = async (stop: any) => {
-    if (stop.source !== "order" || !stop.design_short_code) return;
+    if ((stop.source !== "order" && stop.source !== "inventory") || !stop.design_short_code) return;
     await admin.from("designs")
       .update({ status: "delivered", delivered_at: new Date().toISOString() })
       .eq("client_id", clientId)
@@ -298,23 +300,28 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     }
 
     if (action === "pool") {
-      // To-be-loaded: order build jobs without a stop + sold units without a stop +
-      // open repairs without a stop. A query, not a table (no double bookkeeping).
+      // To-be-loaded — a QUERY, never a table (no double bookkeeping). Carolyn 2026-08-04:
+      // "every building that is in the build schedule should also show in the delivery
+      // schedule" — so EVERY non-repair build job without a stop is here (an inventory
+      // spec build gets hauled shop → sales lot like any other building; repairs appear
+      // once, via the repairs section, whether or not they have shop work).
+      // Plus: sold units without their SALE delivery (a unit legitimately rides twice —
+      // shop → lot while available, lot → customer once sold; the sale stop is the one
+      // carrying the buyer's design code), and open repairs without a stop.
       const { data: stops } = await admin
-        .from("delivery_stops").select("build_job_id, inventory_unit_id, repair_id")
+        .from("delivery_stops").select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at")
         .eq("client_id", clientId);
       const stopJob = new Set((stops ?? []).map((s) => s.build_job_id).filter(Boolean));
-      const stopUnit = new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean));
       const stopRepair = new Set((stops ?? []).map((s) => s.repair_id).filter(Boolean));
 
       const stagesAll = await getStages();
       const stageById = Object.fromEntries(stagesAll.map((s) => [s.id, s]));
-      const { data: jobs } = await admin
-        .from("build_jobs").select("*").eq("client_id", clientId).eq("source", "order").limit(500);
-      const orders = (jobs ?? []).filter((j) => !stopJob.has(j.id)).map((j) => ({
-        buildJobId: j.id, serial: j.serial, customerName: j.customer_name,
-        buildingLabel: j.building_label, widthFt: j.width_ft, lengthFt: j.length_ft,
-        designShortCode: j.design_short_code,
+      const { data: jobsAll } = await admin
+        .from("build_jobs").select("*").eq("client_id", clientId).neq("source", "repair").limit(500);
+      const jobs = (jobsAll ?? []).filter((j) => !stopJob.has(j.id)).map((j) => ({
+        buildJobId: j.id, source: j.source, serial: j.serial, customerName: j.customer_name,
+        title: j.title, buildingLabel: j.building_label, widthFt: j.width_ft, lengthFt: j.length_ft,
+        designShortCode: j.design_short_code, inventoryUnitId: j.inventory_unit_id,
         buildStage: stageById[j.stage_id]?.name ?? null,
         buildKind: stageById[j.stage_id]?.kind ?? null,
         dueDate: j.due_date, completedAt: j.completed_at,
@@ -322,12 +329,17 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       }));
 
       const { data: sold } = await admin
-        .from("inventory_units").select("id, serial, design_short_code, location_id, status")
+        .from("inventory_units").select("id, serial, design_short_code, sold_design_short_code, location_id, status")
         .eq("client_id", clientId).eq("status", "sold").limit(500);
       const { data: locs } = await admin
         .from("builder_locations").select("id, name, city").eq("client_id", clientId);
       const locById = Object.fromEntries((locs ?? []).map((l) => [l.id, l]));
-      const inventory = (sold ?? []).filter((u) => !stopUnit.has(u.id)).map((u) => ({
+      // A sold unit needs its SALE delivery unless one already exists (the stop carrying
+      // the buyer's design code) or the unit is actively on a load right now.
+      const inventory = (sold ?? []).filter((u) => !(stops ?? []).some((s) =>
+        s.inventory_unit_id === u.id &&
+        (!s.delivered_at || (u.sold_design_short_code && s.design_short_code === u.sold_design_short_code))
+      )).map((u) => ({
         inventoryUnitId: u.id, serial: u.serial, designShortCode: u.design_short_code,
         location: locById[u.location_id ?? ""] ?? null,
       }));
@@ -337,7 +349,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500);
       const repairs = (openRepairs ?? []).filter((rp) => !stopRepair.has(rp.id));
 
-      return json({ orders, inventory, repairs, territories: await getTerritories(), drivers: await getDrivers() });
+      // `orders` kept as an alias of `jobs` for one deploy cycle (the page may be older
+      // than this function); remove after the next beta→main promotion.
+      return json({ jobs, orders: jobs, inventory, repairs, territories: await getTerritories(), drivers: await getDrivers() });
     }
 
     if (action === "list_drivers") {
@@ -738,37 +752,52 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         row.territory_id = t.id;
       }
 
-      if (source === "order") {
-        // Normally linked through its build job; a bare design code is allowed for
-        // tenants who skip the build board.
-        if (payload?.buildJobId) {
-          const job = await requireRow("build_jobs", payload.buildJobId, "Job");
-          row.build_job_id = job.id;
-          row.design_short_code = job.design_short_code;
-          row.serial = job.serial;
-          row.customer_name = row.customer_name ?? job.customer_name;
-          row.building_label = row.building_label ?? job.building_label;
-          row.width_ft = row.width_ft ?? job.width_ft;
-          row.length_ft = row.length_ft ?? job.length_ft;
-        } else {
-          const code = str(payload?.designShortCode);
-          if (!code) return json({ error: "buildJobId or designShortCode is required for an order stop." }, 400);
-          const { data: design } = await admin.from("designs").select("short_code, contact, selections")
-            .eq("client_id", clientId).eq("short_code", code).maybeSingle();
-          if (!design) return json({ error: "That design isn't in your account." }, 404);
-          row.design_short_code = design.short_code;
-          row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
-          row.customer_phone = row.customer_phone ?? str((design.contact as Record<string, unknown>)?.phone);
-          row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
-          const dims = parseSize((design.selections as Record<string, unknown>)?.buildingSize);
-          row.width_ft = row.width_ft ?? dims.widthFt;
-          row.length_ft = row.length_ft ?? dims.lengthFt;
-        }
+      // A build job link works for ANY source (Carolyn 2026-08-04: every building on the
+      // build schedule shows in delivery) — the stop inherits the job's snapshots and the
+      // built-before-delivered check applies. An inventory SPEC build hauled shop → lot
+      // rides exactly like an order.
+      if (payload?.buildJobId) {
+        const job = await requireRow("build_jobs", payload.buildJobId, "Job");
+        row.build_job_id = job.id;
+        row.design_short_code = job.design_short_code;
+        row.inventory_unit_id = job.inventory_unit_id;
+        row.repair_id = job.repair_id;
+        row.serial = job.serial;
+        row.customer_name = row.customer_name ?? job.customer_name;
+        row.building_label = row.building_label ?? job.building_label ?? job.title;
+        row.width_ft = row.width_ft ?? job.width_ft;
+        row.length_ft = row.length_ft ?? job.length_ft;
+      } else if (source === "order") {
+        // Bare design code is allowed for tenants who skip the build board.
+        const code = str(payload?.designShortCode);
+        if (!code) return json({ error: "buildJobId or designShortCode is required for an order stop." }, 400);
+        const { data: design } = await admin.from("designs").select("short_code, contact, selections")
+          .eq("client_id", clientId).eq("short_code", code).maybeSingle();
+        if (!design) return json({ error: "That design isn't in your account." }, 404);
+        row.design_short_code = design.short_code;
+        row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
+        row.customer_phone = row.customer_phone ?? str((design.contact as Record<string, unknown>)?.phone);
+        row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
+        const dims = parseSize((design.selections as Record<string, unknown>)?.buildingSize);
+        row.width_ft = row.width_ft ?? dims.widthFt;
+        row.length_ft = row.length_ft ?? dims.lengthFt;
       } else if (source === "inventory") {
         const unit = await requireRow("inventory_units", payload?.inventoryUnitId, "Inventory unit");
         row.inventory_unit_id = unit.id;
         row.serial = unit.serial;
         row.pickup = str(payload?.pickup) ?? (unit.location_id ? String(unit.location_id) : "shop");
+        // The SALE delivery of a sold unit carries the buyer's design code — that's how
+        // the pool knows the sale is scheduled, and how delivered writes back to the
+        // buyer's estimate.
+        if (unit.status === "sold" && unit.sold_design_short_code) {
+          row.design_short_code = unit.sold_design_short_code;
+          if (!row.customer_name) {
+            const { data: buyer } = await admin.from("designs").select("contact")
+              .eq("client_id", clientId).eq("short_code", unit.sold_design_short_code).maybeSingle();
+            row.customer_name = str((buyer?.contact as Record<string, unknown>)?.name);
+            row.customer_phone = row.customer_phone ?? str((buyer?.contact as Record<string, unknown>)?.phone);
+          }
+        }
         if (!row.building_label && unit.design_short_code) {
           const { data: master } = await admin.from("designs").select("selections")
             .eq("client_id", clientId).eq("short_code", unit.design_short_code).maybeSingle();
@@ -786,6 +815,16 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         row.building_label = row.building_label ?? `Repair R-${repair.repair_no}`;
       } else if (!row.customer_name && !row.building_label) {
         return json({ error: "A manual stop needs a customer or description." }, 400);
+      }
+
+      // A unit rides at most one load AT A TIME (migration 092 dropped the per-unit unique
+      // index so a unit can be hauled shop → lot and later delivered to its buyer — but
+      // never be on two open loads at once).
+      if (row.inventory_unit_id) {
+        const { data: activeStops } = await admin.from("delivery_stops").select("id")
+          .eq("client_id", clientId).eq("inventory_unit_id", row.inventory_unit_id)
+          .is("delivered_at", null).limit(1);
+        if (activeStops?.length) return json({ error: "That building is already on a load." }, 409);
       }
 
       // The one rule with NO override: it physically doesn't fit on the truck.
