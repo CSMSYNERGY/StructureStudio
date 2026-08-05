@@ -732,6 +732,57 @@ function CardHead({ title, count, desc, right, children }) {
   );
 }
 
+// ─── Facet filter bar (Designs / Contacts / Orders) ───
+// Pattern lifted from the Commissions report's filter bar: labeled controls in a wrap row, a
+// red Clear button, and a "Showing N of M" note whenever any facet is active. Facet OPTION
+// LISTS must be derived from ALL loaded rows (never the filtered subset) so a filter can never
+// hide its own options; status-chip counts likewise stay full-list so they don't shuffle.
+const FCTRL = { display: "flex", flexDirection: "column", gap: 3 };
+function FacetSelect({ label, value, onChange, options, allLabel = "All" }) {
+  return (
+    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...S.input, padding: "6px 8px", minWidth: 120 }}>
+        <option value="all">{allLabel}</option>
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
+  );
+}
+function DateRange({ label, from, to, onFrom, onTo }) {
+  return (
+    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+      <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+        <input type="date" value={from} onChange={(e) => onFrom(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} />
+        <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>
+        <input type="date" value={to} onChange={(e) => onTo(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} />
+      </div>
+    </div>
+  );
+}
+// from/to are yyyy-mm-dd strings from <input type=date>; blank = open-ended. `to` is INCLUSIVE
+// of the whole end day (compared against the start of the NEXT local day), matching what a
+// person means by "to Aug 5". Rows with no date only show when no range is set.
+function inDateRange(dateStr, from, to) {
+  if (!from && !to) return true;
+  if (!dateStr) return false;
+  const t = new Date(dateStr).getTime();
+  if (!Number.isFinite(t)) return false;
+  if (from) { const f = new Date(from + "T00:00:00").getTime(); if (t < f) return false; }
+  if (to) { const e = new Date(to + "T00:00:00").getTime() + 86400000; if (t >= e) return false; }
+  return true;
+}
+function FilterBar({ children, hasFilters, onClear, shown, total, noun = "row" }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        {children}
+        {hasFilters && <button onClick={onClear} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "6px 12px" }}>Clear</button>}
+      </div>
+      {hasFilters && <div style={{ fontSize: 12, color: "#64748B", marginTop: 8 }}>Showing <b>{shown}</b> of {total} {noun}{total === 1 ? "" : "s"}.{shown === 0 ? " Nothing matches — adjust the filters." : ""}</div>}
+    </div>
+  );
+}
+
 // ─── Delete a design ───
 // Carolyn, 2026-06-24: until now a deletion meant going into Supabase by hand.
 //
@@ -911,6 +962,17 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // narrows within it.
   const [statusFilter, setStatusFilter] = useState("all");
   const statusCounts = (rows || []).reduce((a, r) => { const k = normStatus(r.status); a[k] = (a[k] || 0) + 1; return a; }, {});
+  // Facet filters (building style / size / created date-range / versions). Option lists are
+  // derived from ALL loaded rows — same rule as the chip counts above.
+  const [fStyle, setFStyle] = useState("all");
+  const [fSize, setFSize] = useState("all");
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+  const [fVersions, setFVersions] = useState("all");
+  const styleOpts = [...new Set((rows || []).map((r) => titleCase((r.selections || {}).style)).filter(Boolean))].sort();
+  const sizeOpts = [...new Set((rows || []).map((r) => String((r.selections || {}).size || "")).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const hasFacets = fStyle !== "all" || fSize !== "all" || !!fFrom || !!fTo || fVersions !== "all";
+  const clearFacets = () => { setFStyle("all"); setFSize("all"); setFFrom(""); setFTo(""); setFVersions("all"); };
   // Which design the delete dialog is aimed at (null = closed), plus the outcome banner.
   const [delTarget, setDelTarget] = useState(null);
   const [delMsg, setDelMsg] = useState(null);
@@ -949,9 +1011,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     load();
   };
 
-  // Chip filter first, then the free-text search over what survives.
+  // Chip filter first, then facets, then the free-text search over what survives.
   const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((r) => normStatus(r.status) === statusFilter);
-  const filtered = byStatus.filter((r) => {
+  const byFacets = byStatus.filter((r) => {
+    const sel = r.selections || {};
+    if (fStyle !== "all" && titleCase(sel.style) !== fStyle) return false;
+    if (fSize !== "all" && String(sel.size || "") !== fSize) return false;
+    if (!inDateRange(r.created_at, fFrom, fTo)) return false;
+    // "2+ versions" = the rows that show the ▾ versions chip (vmap includes the latest).
+    if (fVersions === "multi" && (vmap[r.short_code] || []).length <= 1) return false;
+    return true;
+  });
+  const filtered = byFacets.filter((r) => {
     const st = normStatus(r.status);
     const extra = [r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : "", STATUS_LABELS[st], fmtDate(r.created_at), titleCase((r.selections || {}).style)].join(" ");
     return rowMatchesQuery(r, query, extra);
@@ -979,11 +1050,19 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     <div style={S.card}>
       <CardHead
         title="Designs"
-        count={rows ? ((query || statusFilter !== "all") ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       />
       {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
+      {rows && rows.length > 0 && (
+        <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="design">
+          {styleOpts.length > 1 && <FacetSelect label="Building style" value={fStyle} onChange={setFStyle} options={styleOpts.map((s) => ({ value: s, label: s }))} allLabel="All styles" />}
+          {sizeOpts.length > 1 && <FacetSelect label="Size" value={fSize} onChange={setFSize} options={sizeOpts.map((s) => ({ value: s, label: s }))} allLabel="All sizes" />}
+          <DateRange label="Created" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
+          <FacetSelect label="Versions" value={fVersions} onChange={setFVersions} options={[{ value: "multi", label: "2+ versions" }]} allLabel="All" />
+        </FilterBar>
+      )}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {error && <div style={S.err}>{error}</div>}
@@ -994,8 +1073,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       {rows && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           {query
-            ? <>No designs match “{query}”{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}.</>
-            : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
+            ? <>No designs match “{query}”{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
+            : hasFacets
+              ? <>No designs match the current filters{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}. Adjust or <button onClick={clearFacets} style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 13, padding: 0, fontFamily: "inherit", textDecoration: "underline" }}>clear the filters</button>.</>
+              : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
       {rows && filtered.length > 0 && (
@@ -1286,10 +1367,23 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   // no design behind it at all.
   const [statusFilter, setStatusFilter] = useState("all");
   const statusCounts = (rows || []).reduce((a, g) => { a[g.topStatus] = (a[g.topStatus] || 0) + 1; return a; }, {});
+  // Facet filters: last-activity date-range + contact-info presence.
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+  const [fContact, setFContact] = useState("all");
+  const hasFacets = !!fFrom || !!fTo || fContact !== "all";
+  const clearFacets = () => { setFFrom(""); setFTo(""); setFContact("all"); };
 
-  // Chip filter first, then the free-text search over what survives.
+  // Chip filter first, then facets, then the free-text search over what survives.
   const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((g) => g.topStatus === statusFilter);
-  const filtered = byStatus.filter((g) => {
+  const byFacets = byStatus.filter((g) => {
+    if (!inDateRange(g.lastActivity, fFrom, fTo)) return false;
+    const has = !!(g.email || g.phone);
+    if (fContact === "has" && !has) return false;
+    if (fContact === "missing" && has) return false;
+    return true;
+  });
+  const filtered = byFacets.filter((g) => {
     const extra = [STATUS_LABELS[g.topStatus], fmtDate(g.firstSeen), fmtDate(g.lastActivity)].join(" ");
     return rowMatchesQuery(g, query, extra);
   });
@@ -1341,7 +1435,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     <div style={S.card}>
       <CardHead
         title="Contacts"
-        count={rows ? ((query || statusFilter !== "all") ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         desc="Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only."
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       >
@@ -1360,6 +1454,13 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter}
           extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
       )}
+      {rows && rows.length > 0 && (
+        <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="contact">
+          <DateRange label="Last activity" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
+          <FacetSelect label="Contact info" value={fContact} onChange={setFContact}
+            options={[{ value: "has", label: "Has email or phone" }, { value: "missing", label: "No contact info" }]} allLabel="All" />
+        </FilterBar>
+      )}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
@@ -1368,8 +1469,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       {rows && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           {query
-            ? <>No contacts match “{query}”{statusFilter !== "all" ? <> in <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong></> : null}.</>
-            : <>No contacts are <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong> yet.</>}
+            ? <>No contacts match “{query}”{statusFilter !== "all" ? <> in <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
+            : hasFacets
+              ? <>No contacts match the current filters. Adjust or <button onClick={clearFacets} style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 13, padding: 0, fontFamily: "inherit", textDecoration: "underline" }}>clear the filters</button>.</>
+              : <>No contacts are <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
       {rows && filtered.length > 0 && (
@@ -4507,6 +4610,13 @@ function OrdersView({ clientId }) {
   const [openId, setOpenId] = useState(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  // Facet filters: ordered date-range + amount min/max (dollars, against the order total).
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+  const [fMin, setFMin] = useState("");
+  const [fMax, setFMax] = useState("");
+  const hasFacets = !!fFrom || !!fTo || fMin !== "" || fMax !== "";
+  const clearFacets = () => { setFFrom(""); setFTo(""); setFMin(""); setFMax(""); };
 
   const load = useCallback(async () => {
     setError(null);
@@ -4584,6 +4694,15 @@ function OrdersView({ clientId }) {
   const all = rows || [];
   const shown = all.filter((r) => {
     if (filter !== "all" && stateOf(r).key !== filter) return false;
+    if (!inDateRange(r.o.ordered_at, fFrom, fTo)) return false;
+    // Amount range compares the ORDER TOTAL in dollars; an order with no total yet only
+    // shows while no amount bound is set (it has no amount to compare).
+    if (fMin !== "" || fMax !== "") {
+      const tot = r.o.total_cents == null ? null : r.o.total_cents / 100;
+      if (tot == null) return false;
+      if (fMin !== "" && tot < Number(fMin)) return false;
+      if (fMax !== "" && tot > Number(fMax)) return false;
+    }
     const extra = [nameOf(r), bldgOf(r), "#" + r.o.order_no, r.o.short_code,
       (r.d && r.d.ghl_estimate_number) ? "EST-" + r.d.ghl_estimate_number : "", stateOf(r).label, fmtDate(r.o.ordered_at)].join(" ");
     return rowMatchesQuery(r.o, query, extra);
@@ -4629,7 +4748,7 @@ function OrdersView({ clientId }) {
 
       <div style={S.card}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
-          <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders {rows ? (query || filter !== "all" ? `(${shown.length} of ${all.length})` : `(${all.length})`) : ""}</div>
+          <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders {rows ? (query || filter !== "all" || hasFacets ? `(${shown.length} of ${all.length})` : `(${all.length})`) : ""}</div>
           {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}{chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
           {needsTotal > 0 && chip("nototal", "Needs total")}
           {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
@@ -4638,6 +4757,18 @@ function OrdersView({ clientId }) {
           </div>
           <button onClick={syncFromGhl} disabled={syncing} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", opacity: syncing ? 0.6 : 1 }}>{syncing ? "Syncing…" : "↻ Refresh"}</button>
         </div>
+        {all.length > 0 && (
+          <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={shown.length} total={all.length} noun="order">
+            <DateRange label="Ordered" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
+            <div style={FCTRL}><span style={S.lbl}>Amount ($)</span>
+              <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                <input type="number" min="0" step="any" value={fMin} onChange={(e) => setFMin(e.target.value)} placeholder="Min" style={{ ...S.input, padding: "6px 8px", width: 90 }} />
+                <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>
+                <input type="number" min="0" step="any" value={fMax} onChange={(e) => setFMax(e.target.value)} placeholder="Max" style={{ ...S.input, padding: "6px 8px", width: 90 }} />
+              </div>
+            </div>
+          </FilterBar>
+        )}
 
         {all.length === 0 && (
           <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
@@ -4645,7 +4776,9 @@ function OrdersView({ clientId }) {
           </p>
         )}
         {all.length > 0 && shown.length === 0 && (
-          <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No orders match this filter.</p>
+          <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+            No orders match this filter{hasFacets ? <>. Adjust or <button onClick={clearFacets} style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 13, padding: 0, fontFamily: "inherit", textDecoration: "underline" }}>clear the filters</button></> : null}.
+          </p>
         )}
         {shown.length > 0 && (
           <div style={{ overflowX: "auto" }}>
