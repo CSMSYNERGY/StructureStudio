@@ -16,4 +16,8 @@
 // "there is exactly one destination". Two functions each holding their own copy IS the
 // drift this is meant to prevent, so any new function that sends an auth email must
 // import this rather than re-declare it.
-export const AUTH_PORTAL_URL = "https://structurestudio.app/portal";
+// Rebrand 2026-08-05: canonical host moved to app.structurestudiosuite.com
+// (structurestudio.app is being sunset behind a redirect). Until the Supabase
+// allow-list contains this URL, Supabase substitutes Site URL — i.e. the old
+// behavior — so deploying this ahead of the allow-list change is safe.
+export const AUTH_PORTAL_URL = "https://app.structurestudiosuite.com/portal";

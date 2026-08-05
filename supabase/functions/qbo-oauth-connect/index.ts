@@ -24,7 +24,13 @@ const STATE_TTL_MS = 10 * 60 * 1000;
  * the callback appends. Re-checked on the callback side too — never trust that the value
  * that comes back is the value we issued.
  */
-const ALLOWED_HOSTS = new Set(["structurestudio.app", "beta.structurestudio.app"]);
+// Rebrand 2026-08-05: keep the old-domain entries until its sunset redirect ships.
+const ALLOWED_HOSTS = new Set([
+  "app.structurestudiosuite.com",
+  "beta.structurestudiosuite.com",
+  "structurestudio.app",
+  "beta.structurestudio.app",
+]);
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",

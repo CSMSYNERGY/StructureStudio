@@ -512,7 +512,7 @@ function ssAllowedOrigin(origin) {
     if (!origin || origin === "null") return false;
     if (origin === window.location.origin) return true;
     const h = new URL(origin).hostname;
-    return h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
+    return h === "structurestudiosuite.com" || h.endsWith(".structurestudiosuite.com") || h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
   } catch { return false; }
 }
 

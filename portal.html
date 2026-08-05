@@ -120,7 +120,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260803d" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260805a" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -413,7 +413,7 @@ function LoginView({ onRecoverySent, notice }) {
     // Safe because beta and production share one Supabase project: the password set
     // here works on beta immediately.
     const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: "https://structurestudio.app/portal",
+      redirectTo: "https://app.structurestudiosuite.com/portal",
     });
     setBusy(false);
     if (err) setError(err.message);

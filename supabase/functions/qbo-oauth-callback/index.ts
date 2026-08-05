@@ -18,8 +18,16 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { qboApiBase } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 
-const ALLOWED_HOSTS = new Set(["structurestudio.app", "beta.structurestudio.app"]);
-const DEFAULT_HOST = "structurestudio.app";
+// Rebrand 2026-08-05: *.structurestudiosuite.com are the live hosts; the two
+// structurestudio.app entries stay until that domain's sunset redirect ships,
+// so a connect started from the old host still lands where it began.
+const ALLOWED_HOSTS = new Set([
+  "app.structurestudiosuite.com",
+  "beta.structurestudiosuite.com",
+  "structurestudio.app",
+  "beta.structurestudio.app",
+]);
+const DEFAULT_HOST = "app.structurestudiosuite.com";
 
 function land(host: string, params: Record<string, string>): Response {
   const safeHost = ALLOWED_HOSTS.has(host) ? host : DEFAULT_HOST;
