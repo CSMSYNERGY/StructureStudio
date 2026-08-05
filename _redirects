@@ -9,12 +9,12 @@
 # The bare /portal rule stays FIRST and separate: it is the oldest link we hand out
 # and it must keep resolving exactly as it always has.
 /portal      /portal.html   200
-# Trailing-slash variant pinned explicitly so /portal/ never depends on either
-# platform's slash normalization (Netlify rewrote it via the splat; Workers gets it here).
-/portal/     /portal.html   200
+# Netlify 301-normalizes trailing slashes BEFORE _redirects runs (probed 2026-08-05:
+# /portal/ -> 301 /portal, /admin/ -> 301 /admin), so these two 301 rules are inert on
+# Netlify and exist to make Workers behave byte-identically instead of depending on
+# html_handling slash rules.
+/portal/     /portal        301
 /admin       /admin.html    200
-# Netlify 301-normalizes /admin/ -> /admin today (probed 2026-08-05); make that explicit
-# so behavior can't drift between hosts.
 /admin/      /admin         301
 
 # Every portal page has its own URL (/portal/settings/colors, /portal/admin/clients). The
