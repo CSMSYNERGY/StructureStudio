@@ -144,7 +144,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   // 3. Load the tenant's designs for these codes (service role, tenant-scoped).
   const { data: designs, error: dErr } = await admin
     .from("designs")
-    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id")
+    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at")
     .eq("client_id", clientId)
     .in("short_code", shortCodes);
   if (dErr) return json({ error: dErr.message }, 500);
@@ -225,6 +225,11 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     // portal-settings' save_inventory, and 'sent' here would surface a lot building as a
     // customer estimate on the Designs tab.
     if (d.status === "draft" || d.status === "inventory") { statuses[d.short_code] = d.status; continue; }
+    // THE DELIVERED FENCE (migration 091 / SCHEDULING_SCOPE.md): a delivery marked done in
+    // the portal sets designs.delivered_at + status='delivered' — a state GHL never reports
+    // (no tenant maps ghl_stage_delivered_id), so recomputing here would DOWNGRADE it back
+    // to invoiced on the very next sync. Locally-delivered is terminal: skip the recompute.
+    if (d.delivered_at) { statuses[d.short_code] = "delivered"; continue; }
     // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
     // Otherwise start from what we already believe, so the computation below can raise the status
     // but never lower it (see dataComplete above).

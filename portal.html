@@ -5959,6 +5959,792 @@ function RepairsTab({ clientId, canAdmin }) {
   );
 }
 
+// ─── Delivery Schedule = the Load Planner (SCHEDULING_SCOPE.md Phase 4, decision 5) ───
+// NOT a kanban: the unit of scheduling is a LOAD — one driver (with their truck), one day,
+// one route — holding ordered STOPS. The "to be loaded" pool is a QUERY (built order jobs /
+// sold units / open repairs without a stop), never a table. Deck-fit runs against the
+// DRIVER'S snapshotted deck length; WIDE is computed from real dimensions. The
+// built-before-delivered rule blocks going out/delivered, with an owner/admin override
+// (required reason, audit-logged, permanent chip — decision 11). Width has NO override.
+// Everything renders at face value — the load card reads as the driver's run sheet.
+// Same operator-only gate as Build Schedule until the Phase 5 billing flip.
+const schedFtNum = (v) => v == null ? null : Number(v);
+const schedDayLabel = (iso) => {
+  if (!iso) return "No date yet";
+  try {
+    return new Date(iso + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  } catch (_e) { return iso; }
+};
+const SCHED_LOAD_STATUS = {
+  planned:   { label: "Planned",   bg: "#EEF2FF", fg: "#3D3672" },
+  out:       { label: "Out",       bg: "#FFFBEB", fg: "#B45309" },
+  delivered: { label: "Delivered", bg: "#F0FDF4", fg: "#15803D" },
+};
+
+// Inline stop editor (expand-in-place; no popouts).
+function SchedStopEditor({ stop, territories, busy, onSave, onCancel }) {
+  const [f, setF] = useState({
+    destStreet: stop.dest_street || "", destCity: stop.dest_city || "", destState: stop.dest_state || "", destZip: stop.dest_zip || "",
+    territoryId: stop.territory_id || "", legMiles: stop.leg_miles == null ? "" : String(stop.leg_miles),
+    timeWindow: stop.time_window || "", siteNotes: stop.site_notes || "", customerPhone: stop.customer_phone || "",
+  });
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const inp = { ...S.input, padding: "5px 7px", fontSize: 12 };
+  const lbl = { ...S.lbl, marginBottom: 2, fontSize: 10 };
+  return (
+    <div style={{ background: "#F7F9FF", borderRadius: 8, padding: "9px 11px", margin: "2px 0 4px" }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: "7px 9px" }}>
+        <div style={{ gridColumn: "span 2" }}><span style={lbl}>Street</span><input style={inp} value={f.destStreet} onChange={set("destStreet")} /></div>
+        <div><span style={lbl}>City</span><input style={inp} value={f.destCity} onChange={set("destCity")} /></div>
+        <div><span style={lbl}>State</span><input style={inp} value={f.destState} onChange={set("destState")} /></div>
+        <div><span style={lbl}>Zip</span><input style={inp} value={f.destZip} onChange={set("destZip")} /></div>
+        <div>
+          <span style={lbl}>Territory</span>
+          <select style={inp} value={f.territoryId} onChange={set("territoryId")}>
+            <option value="">—</option>
+            {territories.filter((t) => t.active !== false).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+        <div><span style={lbl}>Leg (mi from previous)</span><input style={inp} value={f.legMiles} onChange={set("legMiles")} /></div>
+        <div><span style={lbl}>Window</span><input style={inp} value={f.timeWindow} onChange={set("timeWindow")} placeholder="8–10 AM" /></div>
+        <div><span style={lbl}>Phone</span><input style={inp} value={f.customerPhone} onChange={set("customerPhone")} /></div>
+        <div style={{ gridColumn: "1 / -1" }}><span style={lbl}>Site notes (gate codes, ground, dogs…)</span><input style={inp} value={f.siteNotes} onChange={set("siteNotes")} /></div>
+      </div>
+      <div style={{ display: "flex", gap: 7, justifyContent: "flex-end", marginTop: 8 }}>
+        <button type="button" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 11px", fontSize: 12 }} onClick={onCancel}>Cancel</button>
+        <button type="button" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 11px", fontSize: 12 }}
+          onClick={() => onSave({
+            destStreet: f.destStreet, destCity: f.destCity, destState: f.destState, destZip: f.destZip,
+            territoryId: f.territoryId || null, legMiles: f.legMiles === "" ? null : Number(f.legMiles),
+            timeWindow: f.timeWindow, siteNotes: f.siteNotes, customerPhone: f.customerPhone,
+          })}>Save stop</button>
+      </div>
+    </div>
+  );
+}
+
+function DeliveryScheduleTab({ clientId, canAdmin }) {
+  const [data, setData] = useState(null);      // loads payload
+  const [pool, setPool] = useState(null);      // pool payload
+  const [error, setError] = useState(null);
+  const [view, setView] = useState("loads");   // loads | table
+  const [driverFilter, setDriverFilter] = useState("all");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [newLoad, setNewLoad] = useState(null);          // { driverUserId, loadDate, routeLabel } | null
+  const [editLoadId, setEditLoadId] = useState(null);    // header edit
+  const [editStopId, setEditStopId] = useState(null);
+  const [override, setOverride] = useState(null);        // { loadId, action, unbuilt, reason, complete }
+
+  // Full-body call: on a non-2xx we still need the JSON (the 409 carries blocked+unbuilt).
+  const callFull = async (body) => {
+    const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body });
+    if (d && !d.error) return { ok: true, data: d };
+    let payload = d || null;
+    try {
+      const ctx = err && err.context;
+      if (!payload && ctx && typeof ctx.json === "function") {
+        payload = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+      }
+    } catch (_e) { /* fall through */ }
+    return { ok: false, data: payload || {}, message: (payload && payload.error) || (err && err.message) || "That didn't work." };
+  };
+  const call = async (body, okMsg) => {
+    const r = await callFull(body);
+    if (!r.ok) { setMsg({ err: r.message }); return null; }
+    if (okMsg) setMsg({ ok: okMsg });
+    return r.data;
+  };
+  const load = useCallback(async () => {
+    setError(null);
+    const [l, p] = await Promise.all([
+      sb.functions.invoke("portal-schedule", { body: { action: "loads" } }),
+      sb.functions.invoke("portal-schedule", { body: { action: "pool" } }),
+    ]);
+    if (l.error || !l.data || l.data.error) {
+      setError((l.data && l.data.error) || (l.error ? await fnError(l.error) : "Could not load the delivery schedule."));
+      setData({ loads: [], stops: [], buildByJob: {}, drivers: [], territories: [], team: [] });
+    } else setData(l.data);
+    if (!p.error && p.data && !p.data.error) setPool(p.data);
+    else setPool({ orders: [], inventory: [], repairs: [] });
+  }, [clientId]);
+  useEffect(() => { load(); }, [load]);
+
+  const loads = (data && data.loads) || [];
+  const stops = (data && data.stops) || [];
+  const buildByJob = (data && data.buildByJob) || {};
+  const drivers = (data && data.drivers) || [];
+  const territories = (data && data.territories) || [];
+  const team = (data && data.team) || [];
+  const nameOf = {}; team.forEach((m) => { nameOf[m.userId] = m.name; });
+  const driverOf = {}; drivers.forEach((p) => { driverOf[p.user_id] = p; });
+  const terrName = {}; territories.forEach((t) => { terrName[t.id] = t.name; });
+  const stopsByLoad = {}; stops.forEach((s) => { (stopsByLoad[s.load_id] = stopsByLoad[s.load_id] || []).push(s); });
+  Object.keys(stopsByLoad).forEach((k) => stopsByLoad[k].sort((a, b) => a.stop_order - b.stop_order));
+
+  const poolOrders = (pool && pool.orders) || [];
+  const poolInv = (pool && pool.inventory) || [];
+  const poolRepairs = (pool && pool.repairs) || [];
+  const poolCount = poolOrders.length + poolInv.length + poolRepairs.length;
+  const plannedLoads = loads.filter((l) => l.status === "planned");
+
+  // A stop conflicts when its load has a date but the linked build isn't done and is due
+  // after that date (or has no due date at all).
+  const stopConflict = (s, l) => {
+    if (!s.build_job_id || !l || !l.load_date) return false;
+    const b = buildByJob[s.build_job_id];
+    if (!b || b.kind === "done") return false;
+    return !b.dueDate || b.dueDate > l.load_date;
+  };
+  const loadConflicts = {};
+  loads.forEach((l) => { loadConflicts[l.id] = (stopsByLoad[l.id] || []).some((s) => stopConflict(s, l)); });
+  const conflictCount = Object.keys(loadConflicts).filter((k) => loadConflicts[k]).length;
+  const wideCount = loads.filter((l) => l.is_wide && l.status !== "delivered").length;
+  const weekAhead = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const thisWeek = loads.filter((l) => l.status !== "delivered" && l.load_date && l.load_date >= todayIso && l.load_date <= weekAhead).length;
+
+  const visibleLoads = loads.filter((l) => driverFilter === "all" || l.driver_user_id === driverFilter);
+  // Group by day (date-less loads last, under "No date yet").
+  const dayKeys = []; const byDay = {};
+  visibleLoads.slice().sort((a, b) => String(a.load_date || "9999").localeCompare(String(b.load_date || "9999"))).forEach((l) => {
+    const k = l.load_date || "";
+    if (!byDay[k]) { byDay[k] = []; dayKeys.push(k); }
+    byDay[k].push(l);
+  });
+
+  // ── Actions ──
+  const createLoad = async (fields) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "create_load", driverUserId: fields.driverUserId || null, loadDate: fields.loadDate || null, routeLabel: fields.routeLabel || null });
+    setBusy(false);
+    if (r && r.load) { setNewLoad(null); await load(); return r.load; }
+    return null;
+  };
+  const addToLoad = async (loadId, body, label) => {
+    let target = loadId;
+    if (target === "new") {
+      const l = await createLoad({});
+      if (!l) return;
+      target = l.id;
+    }
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "add_stop", loadId: target, ...body }, `${label} added to the load.`);
+    setBusy(false); if (r) load();
+  };
+  const saveLoadHeader = async (l, fields) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "update_load", loadId: l.id, ...fields }, "Load saved.");
+    setBusy(false); if (r) { setEditLoadId(null); load(); }
+  };
+  const deleteLoad = async (l) => {
+    if (!window.confirm(`Delete Load ${l.load_no}? Its stops go back to the pool.`)) return;
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "delete_load", loadId: l.id }, `Load ${l.load_no} deleted.`);
+    setBusy(false); if (r) load();
+  };
+  const saveStop = async (s, patch) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "update_stop", stopId: s.id, ...patch }, "Stop saved.");
+    setBusy(false); if (r) { setEditStopId(null); load(); }
+  };
+  const removeStop = async (s) => {
+    if (!window.confirm("Take this building off the load? It returns to the pool.")) return;
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "remove_stop", stopId: s.id }, "Removed — back in the pool.");
+    setBusy(false); if (r) load();
+  };
+  const bumpStop = async (l, s, dir) => {
+    const list = (stopsByLoad[l.id] || []).map((x) => x.id);
+    const i = list.indexOf(s.id); const j = i + dir;
+    if (j < 0 || j >= list.length) return;
+    const t = list[i]; list[i] = list[j]; list[j] = t;
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "reorder_stops", loadId: l.id, stopIds: list });
+    setBusy(false); if (r) load();
+  };
+  const markLoad = async (l, toDelivered, withOverride) => {
+    setBusy(true); setMsg(null);
+    const body = { action: toDelivered ? "mark_load_delivered" : "mark_load_out", loadId: l.id };
+    if (withOverride) {
+      body.override = true;
+      body.overrideReason = withOverride.reason;
+      body.alsoCompleteBuilds = !!withOverride.complete;
+    }
+    const r = await callFull(body);
+    setBusy(false);
+    if (r.ok) {
+      setOverride(null);
+      setMsg({ ok: toDelivered ? `Load ${l.load_no} delivered.` : `Load ${l.load_no} is out.` });
+      load();
+      return;
+    }
+    if (r.data && r.data.blocked && canAdmin) {
+      setOverride({ loadId: l.id, toDelivered, unbuilt: r.data.unbuilt || [], reason: "", complete: true });
+      return;
+    }
+    setMsg({ err: r.message });
+  };
+  const markStopDelivered = async (s) => {
+    setBusy(true); setMsg(null);
+    const r = await callFull({ action: "mark_stop_delivered", stopId: s.id });
+    setBusy(false);
+    if (r.ok) { setMsg({ ok: "Stop delivered." }); load(); }
+    else setMsg({ err: r.message });
+  };
+
+  const lbl = { ...S.lbl, marginBottom: 3 };
+  const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
+  const driverLabel = (uid) => {
+    const p = driverOf[uid];
+    if (!uid) return "No driver";
+    return (nameOf[uid] || "Driver") + (p && p.truck_name ? " · " + p.truck_name : "");
+  };
+  const builtCell = (s, l) => {
+    if (s.delivered_at) return <span style={schedChip("#F0FDF4", "#15803D")}>Delivered ✓</span>;
+    if (s.build_job_id) {
+      const b = buildByJob[s.build_job_id];
+      if (b && b.kind === "done") return <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓</span>;
+      const conflict = stopConflict(s, l);
+      return <span style={schedChip(conflict ? "#FEF2F2" : "#FFFBEB", conflict ? "#DC2626" : "#B45309")}>
+        {(b && b.stage) || "In build"}{b && b.dueDate ? " · due " + fmtDate(b.dueDate) : ""}{conflict ? " ⚠" : ""}
+      </span>;
+    }
+    if (s.source === "inventory") return <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>;
+    if (s.source === "repair") return <span style={schedChip("#FDF2F8", "#BE185D")}>Field work</span>;
+    return <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12 }}>—</span>;
+  };
+  const poolRow = (key, serial, customer, building, size, wide, ready, extraSub, addBody, label) => (
+    <tr key={key}>
+      <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{serial}</td>
+      <td style={S.td}><strong>{customer}</strong>{extraSub && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{extraSub}</div>}</td>
+      <td style={S.td}>{building}</td>
+      <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>{size}{wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), marginLeft: 5 }}>WIDE</span>}</td>
+      <td style={S.td}>{ready}</td>
+      <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+        {canAdmin && (
+          <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addToLoad(e.target.value, addBody, label); }}
+            style={{ ...inp, width: "auto", fontWeight: 700 }}>
+            <option value="">Add to load…</option>
+            {plannedLoads.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}{l.driver_user_id ? " · " + (nameOf[l.driver_user_id] || "") : ""}</option>)}
+            <option value="new">➕ New load</option>
+          </select>
+        )}
+      </td>
+    </tr>
+  );
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Delivery Schedule" count={loads.length}
+        right={<>
+          <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
+            {[["loads", "Loads"], ["table", "Table"]].map(([v, label]) => (
+              <button key={v} type="button" onClick={() => setView(v)}
+                style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
+                {label}
+              </button>
+            ))}
+            <button type="button" disabled title="Week-at-a-glance calendar — coming in Phase 5"
+              style={{ border: "none", background: "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: "#B9C4D6", fontFamily: "inherit" }}>Calendar · soon</button>
+          </div>
+          <button type="button" disabled title="Coming later: fits buildings to each driver's deck, groups stops by territory, routes by map"
+            style={{ ...S.btn("#FFF", "#B9C4D6"), border: "1px solid #E2E8F0", cursor: "default" }}>⚡ Auto-plan · soon</button>
+          <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          {canAdmin && <button type="button" onClick={() => setNewLoad(newLoad ? null : { driverUserId: "", loadDate: "", routeLabel: "" })} style={S.btn(ACCENT, "#FFF")}>+ New load</button>}
+        </>} />
+
+      {data && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
+          {[["To be loaded", poolCount, "#1E293B"], ["Loads this week", thisWeek, "#1E293B"], ["Wide loads", wideCount, wideCount ? "#92400E" : "#1E293B"], ["Date conflicts", conflictCount, conflictCount ? "#DC2626" : "#1E293B"]].map(([t, n, c]) => (
+            <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
+              <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: c }}>{n}</div>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {error && <div style={S.err}>{error}</div>}
+      {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+
+      {/* ── New load form ── */}
+      {newLoad && canAdmin && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+          <div style={{ minWidth: 180 }}>
+            <span style={lbl}>Driver</span>
+            <select style={inp} value={newLoad.driverUserId} onChange={(e) => setNewLoad({ ...newLoad, driverUserId: e.target.value })}>
+              <option value="">— Pick later —</option>
+              {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.user_id} value={p.user_id}>{driverLabel(p.user_id)}</option>)}
+            </select>
+            {drivers.filter((p) => p.is_driver).length === 0 && <div style={{ fontSize: 10.5, color: "#B45309", fontWeight: 700, marginTop: 3 }}>No drivers set up yet — add trucks in Settings → Team.</div>}
+          </div>
+          <div><span style={lbl}>Date</span><input type="date" style={inp} value={newLoad.loadDate} onChange={(e) => setNewLoad({ ...newLoad, loadDate: e.target.value })} /></div>
+          <div style={{ flex: 1, minWidth: 160 }}><span style={lbl}>Route</span><input style={inp} value={newLoad.routeLabel} onChange={(e) => setNewLoad({ ...newLoad, routeLabel: e.target.value })} placeholder='e.g. "Shop → Sedalia → Warrensburg · Hwy 50 W"' /></div>
+          <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={() => createLoad(newLoad)}>Create load</button>
+        </div>
+      )}
+
+      {/* ── LOADS VIEW ── */}
+      {data && pool && view === "loads" && (<>
+        {/* Pool */}
+        {poolCount > 0 && (
+          <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "8px 12px 2px", marginBottom: 14, overflowX: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 6px" }}>
+              <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>To be loaded</span>
+              <span style={schedChip("#EEF2FF", "#3D3672")}>{poolCount}</span>
+              <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>— sorted by when each building is ready; pick a load, or start a new one</span>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>{["Serial", "Customer", "Building", "Size", "Ready", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+              <tbody>
+                {poolOrders.map((o) => poolRow("o" + o.buildJobId, o.serial ? "#" + o.serial : "—", o.customerName || "—", o.buildingLabel || "—",
+                  (o.widthFt && o.lengthFt) ? `${Number(o.widthFt)}×${Number(o.lengthFt)}` : "—", o.wide,
+                  o.buildKind === "done"
+                    ? <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓{o.completedAt ? " " + fmtDate(o.completedAt) : ""}</span>
+                    : <span style={schedChip("#FFFBEB", "#B45309")}>{o.buildStage || "In build"}{o.dueDate ? " · due " + fmtDate(o.dueDate) : ""}</span>,
+                  null, { source: "order", buildJobId: o.buildJobId }, o.customerName || "Building"))}
+                {poolInv.map((u) => poolRow("u" + u.inventoryUnitId, "#" + u.serial, u.location ? u.location.name : "Sales lot", "Sold lot building", "—", false,
+                  <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>,
+                  "sold — needs delivery", { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial))}
+                {poolRepairs.map((rp) => poolRow("r" + rp.id, "R-" + rp.repair_no, rp.customer_name, (rp.description || "").slice(0, 50), "—", false,
+                  <span style={schedChip("#FDF2F8", "#BE185D")}>{(REPAIR_STATUS[rp.status] || {}).label || rp.status}</span>,
+                  rp.serial ? "building #" + rp.serial : null, { source: "repair", repairId: rp.id }, "R-" + rp.repair_no))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Driver filter chips */}
+        {drivers.filter((p) => p.is_driver).length > 0 && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+            {[["all", `All drivers (${loads.length})`]].concat(drivers.filter((p) => p.is_driver).map((p) => [p.user_id, driverLabel(p.user_id) + ` (${loads.filter((l) => l.driver_user_id === p.user_id).length})`])).map(([k, label]) => {
+              const on = driverFilter === k;
+              return (
+                <button key={k} type="button" onClick={() => setDriverFilter(on && k !== "all" ? "all" : k)}
+                  style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {data && loads.length === 0 && !error && (
+          <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+            No loads yet. Click <strong>+ New load</strong> to plan a truck day, then pull buildings from the pool above.
+          </p>
+        )}
+
+        {dayKeys.map((day) => (
+          <div key={day || "nodate"}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, margin: "16px 2px 8px" }}>
+              <span style={{ fontSize: 12.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#334155" }}>{schedDayLabel(day || null)}</span>
+              <span style={{ flex: 1, height: 1, background: "#E2E8F0" }}></span>
+            </div>
+            {byDay[day].map((l) => {
+              const lStops = stopsByLoad[l.id] || [];
+              const used = lStops.reduce((a, s) => a + (Number(s.length_ft) || 0), 0);
+              const deck = schedFtNum(l.deck_length_ft);
+              const pct = deck ? Math.min(100, Math.round(used / deck * 100)) : null;
+              const conflict = loadConflicts[l.id];
+              const st = SCHED_LOAD_STATUS[l.status] || SCHED_LOAD_STATUS.planned;
+              const ov = override && override.loadId === l.id;
+              return (
+                <div key={l.id} style={{ background: "#FFF", border: "1px solid " + (conflict ? "#FCA5A5" : "#E2E8F0"), borderRadius: 12, marginBottom: 12, overflow: "hidden" }}>
+                  {/* Header */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 14px", background: "#F8FAFF", borderBottom: "1px solid #E2E8F0", flexWrap: "wrap", boxShadow: conflict ? "inset 3px 0 0 #DC2626" : "none" }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 800 }}>Load {l.load_no}</span>
+                    <span style={schedChip(st.bg, st.fg)}>{st.label}</span>
+                    <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>
+                      {driverLabel(l.driver_user_id)}
+                      {deck ? ` · ${deck}' deck` : ""}{l.max_width_ft ? ` · max ${Number(l.max_width_ft)}' wide` : ""}
+                    </span>
+                    {l.route_label && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>📍 {l.route_label}</span>}
+                    {(l.miles_out || l.miles_back) && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{l.miles_out ? Number(l.miles_out) + " mi out" : ""}{l.miles_out && l.miles_back ? " + " : ""}{l.miles_back ? Number(l.miles_back) + " back" : ""}</span>}
+                    {l.is_wide && <span style={schedChip("#FEF3C7", "#92400E")}>WIDE LOAD{l.permit_status === "on_file" ? " · permit ✓" : l.permit_status === "needed" ? " · permit needed" : ""}</span>}
+                    {conflict && <span style={schedChip("#FEF2F2", "#DC2626")}>⚠ building not built by this date</span>}
+                    {l.override_reason && <span style={schedChip("#FEF3C7", "#92400E")} title={l.override_reason}>Overridden — {String(l.override_reason).slice(0, 40)}{l.overridden_at ? " · " + fmtDate(l.overridden_at) : ""}</span>}
+                    <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 7 }}>
+                      {deck != null && (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: "#475569", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{used}' of {deck}' deck</span>
+                          <span style={{ width: 90, height: 8, background: "#F1F5F9", borderRadius: 99, overflow: "hidden", display: "inline-block" }}>
+                            <span style={{ display: "block", height: "100%", width: pct + "%", background: pct >= 100 ? "#B45309" : ACCENT, borderRadius: 99 }}></span>
+                          </span>
+                        </span>
+                      )}
+                      {canAdmin && l.status === "planned" && <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "4px 10px", fontSize: 11.5 }} onClick={() => setEditLoadId(editLoadId === l.id ? null : l.id)}>{editLoadId === l.id ? "Close" : "Edit"}</button>}
+                      {canAdmin && l.status === "planned" && <button type="button" disabled={busy} style={{ ...S.btn("#FFFBEB", "#B45309"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => markLoad(l, false)}>Mark out →</button>}
+                      {canAdmin && l.status !== "delivered" && <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => markLoad(l, true)}>✓ Delivered</button>}
+                      {canAdmin && l.status === "planned" && lStops.length === 0 && <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => deleteLoad(l)}>Delete</button>}
+                    </span>
+                  </div>
+
+                  {/* Header edit (in place) */}
+                  {editLoadId === l.id && canAdmin && (
+                    <SchedLoadHeaderEditor l={l} drivers={drivers} nameOf={nameOf} busy={busy}
+                      onSave={(fields) => saveLoadHeader(l, fields)} onCancel={() => setEditLoadId(null)} />
+                  )}
+
+                  {/* Override confirm (in place, admin) */}
+                  {ov && (
+                    <div style={{ margin: "10px 14px", border: "1px solid #FCA5A5", background: "#FEF2F2", borderRadius: 10, padding: "10px 13px" }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 800, color: "#DC2626", marginBottom: 6 }}>
+                        {override.unbuilt.length === 1 ? "1 building on this load isn't marked Built:" : override.unbuilt.length + " buildings on this load aren't marked Built:"}
+                      </div>
+                      <ul style={{ margin: "0 0 8px 18px", padding: 0 }}>
+                        {override.unbuilt.map((u) => (
+                          <li key={u.stopId} style={{ fontSize: 12, fontWeight: 600, color: "#7F1D1D" }}>
+                            {u.serial ? "#" + u.serial + " · " : ""}{u.customerName || "stop " + u.stopOrder}{u.buildStage ? " — " + u.buildStage : ""}{u.buildDue ? " · due " + fmtDate(u.buildDue) : ""}
+                          </li>
+                        ))}
+                      </ul>
+                      <input style={{ ...inp, width: "100%", boxSizing: "border-box", marginBottom: 7 }} value={override.reason}
+                        onChange={(e) => setOverride({ ...override, reason: e.target.value })}
+                        placeholder='Why is this okay? (required — e.g. "build finished, board not updated")' />
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 8, cursor: "pointer" }}>
+                        <input type="checkbox" checked={override.complete} onChange={(e) => setOverride({ ...override, complete: e.target.checked })} />
+                        Also mark {override.unbuilt.length === 1 ? "this build" : "these builds"} as Built
+                      </label>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button type="button" disabled={busy || !override.reason.trim()} style={S.btn("#DC2626", "#FFF")}
+                          onClick={() => markLoad(l, override.toDelivered, { reason: override.reason.trim(), complete: override.complete })}>
+                          Override &amp; {override.toDelivered ? "mark delivered" : "send out"}
+                        </button>
+                        <button type="button" style={S.btn("#FFF", "#475569")} onClick={() => setOverride(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Stops */}
+                  {lStops.length > 0 && (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead><tr>{["", "Serial", "Customer", "Building", "Size", "Built", "Destination", "Leg", "Window", ""].map((h, i) => <th key={i} style={S.th}>{h}</th>)}</tr></thead>
+                        <tbody>
+                          {lStops.map((s) => (
+                            <React.Fragment key={s.id}>
+                              <tr style={{ background: stopConflict(s, l) ? "#FFF8F8" : "transparent" }}>
+                                <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                                  <span style={{ width: 20, height: 20, borderRadius: "50%", background: "#F1F5F9", color: "#475569", fontSize: 10.5, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{s.stop_order}</span>
+                                </td>
+                                <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.serial ? "#" + s.serial : (s.repair_id ? "Repair" : "—")}</td>
+                                <td style={S.td}><strong>{s.customer_name || "—"}</strong>{s.customer_phone && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{s.customer_phone}</div>}</td>
+                                <td style={S.td}>{s.building_label || "—"}</td>
+                                <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>
+                                  {(s.width_ft && s.length_ft) ? `${Number(s.width_ft)}×${Number(s.length_ft)}` : "—"}
+                                  {Number(s.width_ft) > 8.5 && <span style={{ ...schedChip("#FEF3C7", "#92400E"), marginLeft: 5 }}>W</span>}
+                                </td>
+                                <td style={S.td}>{builtCell(s, l)}</td>
+                                <td style={S.td}>
+                                  {[s.dest_street, s.dest_city].filter(Boolean).join(", ") || (terrName[s.territory_id] || "—")}
+                                  {(s.site_notes || s.territory_id) && (
+                                    <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>
+                                      {terrName[s.territory_id] ? terrName[s.territory_id] + (s.site_notes ? " · " : "") : ""}{s.site_notes || ""}
+                                    </div>
+                                  )}
+                                </td>
+                                <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.leg_miles != null ? Number(s.leg_miles) + " mi" : "—"}</td>
+                                <td style={{ ...S.td, whiteSpace: "nowrap" }}>{s.time_window || "—"}</td>
+                                <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right" }}>
+                                  {l.status === "out" && !s.delivered_at && <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "3px 8px", fontSize: 11 }} onClick={() => markStopDelivered(s)}>✓ Delivered</button>}
+                                  {canAdmin && l.status === "planned" && (<>
+                                    <button type="button" onClick={() => bumpStop(l, s, -1)} title="Move up" style={{ border: "none", background: "none", cursor: "pointer", color: "#94A3B8", fontSize: 11, padding: "0 2px" }}>▲</button>
+                                    <button type="button" onClick={() => bumpStop(l, s, 1)} title="Move down" style={{ border: "none", background: "none", cursor: "pointer", color: "#94A3B8", fontSize: 11, padding: "0 2px" }}>▼</button>
+                                    <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "3px 8px", fontSize: 11, marginLeft: 4 }} onClick={() => setEditStopId(editStopId === s.id ? null : s.id)}>{editStopId === s.id ? "Close" : "Edit"}</button>
+                                    <button type="button" style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "3px 8px", fontSize: 11, marginLeft: 4 }} onClick={() => removeStop(s)}>×</button>
+                                  </>)}
+                                </td>
+                              </tr>
+                              {editStopId === s.id && (
+                                <tr><td colSpan={10} style={{ padding: "0 10px" }}>
+                                  <SchedStopEditor stop={s} territories={territories} busy={busy}
+                                    onSave={(patch) => saveStop(s, patch)} onCancel={() => setEditStopId(null)} />
+                                </td></tr>
+                              )}
+                            </React.Fragment>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {lStops.length === 0 && <p style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600, padding: "10px 14px" }}>No stops yet — add buildings from the pool above.</p>}
+                  {deck != null && lStops.length > 0 && l.status === "planned" && used < deck && (
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 700, padding: "0 14px 10px" }}>{deck - used}' of deck left</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+
+        <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 12 }}>
+          Loads group buildings by territory (one route per truck day), size (the deck bar runs against <strong>that driver's</strong> deck), and build dates.
+          The <strong>Leg</strong> column is drop-to-drop miles. A load can't go out or be delivered while a building isn't built — owners/admins can override with a reason, and the override stays on the load for good.
+          Wide buildings (over 8'6") are flagged automatically from the design's real dimensions.
+        </p>
+      </>)}
+
+      {/* ── TABLE VIEW ── */}
+      {data && view === "table" && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>{["Serial", "Customer", "Size", "Destination", "Territory", "Built", "Load", "Date", "Driver"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <tbody>
+              {stops.slice().sort((a, b) => {
+                const la = loads.find((x) => x.id === a.load_id) || {}; const lb = loads.find((x) => x.id === b.load_id) || {};
+                return String(la.load_date || "9999").localeCompare(String(lb.load_date || "9999")) || a.stop_order - b.stop_order;
+              }).map((s) => {
+                const l = loads.find((x) => x.id === s.load_id) || {};
+                return (
+                  <tr key={s.id}>
+                    <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.serial ? "#" + s.serial : (s.repair_id ? "R" : "—")}</td>
+                    <td style={S.td}><strong>{s.customer_name || "—"}</strong>{s.building_label && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{s.building_label}</div>}</td>
+                    <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>{(s.width_ft && s.length_ft) ? `${Number(s.width_ft)}×${Number(s.length_ft)}` : "—"}{Number(s.width_ft) > 8.5 && <span style={{ ...schedChip("#FEF3C7", "#92400E"), marginLeft: 5 }}>W</span>}</td>
+                    <td style={S.td}>{[s.dest_street, s.dest_city].filter(Boolean).join(", ") || "—"}</td>
+                    <td style={S.td}>{terrName[s.territory_id] || "—"}</td>
+                    <td style={S.td}>{builtCell(s, l)}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{l.load_no ? "Load " + l.load_no + " · stop " + s.stop_order : "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{l.load_date ? schedDayLabel(l.load_date) : "—"}</td>
+                    <td style={S.td}>{nameOf[l.driver_user_id] || "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {stops.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Nothing scheduled yet.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Load header editor (expand-in-place; only while the load is planned).
+function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
+  const [f, setF] = useState({
+    driverUserId: l.driver_user_id || "", loadDate: l.load_date || "", routeLabel: l.route_label || "",
+    milesOut: l.miles_out == null ? "" : String(l.miles_out), milesBack: l.miles_back == null ? "" : String(l.miles_back),
+    permitStatus: l.permit_status || "not_needed", notes: l.notes || "",
+  });
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
+  const lbl = { ...S.lbl, marginBottom: 3 };
+  return (
+    <div style={{ margin: "10px 14px", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 13px", background: "#FBFCFE" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "8px 10px" }}>
+        <div>
+          <span style={lbl}>Driver</span>
+          <select style={inp} value={f.driverUserId} onChange={set("driverUserId")}>
+            <option value="">— No driver —</option>
+            {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.user_id} value={p.user_id}>{(nameOf[p.user_id] || "Driver") + (p.truck_name ? " · " + p.truck_name : "")}</option>)}
+          </select>
+        </div>
+        <div><span style={lbl}>Date</span><input type="date" style={inp} value={f.loadDate} onChange={set("loadDate")} /></div>
+        <div style={{ gridColumn: "span 2" }}><span style={lbl}>Route</span><input style={inp} value={f.routeLabel} onChange={set("routeLabel")} /></div>
+        <div><span style={lbl}>Miles out</span><input style={inp} value={f.milesOut} onChange={set("milesOut")} /></div>
+        <div><span style={lbl}>Miles back</span><input style={inp} value={f.milesBack} onChange={set("milesBack")} /></div>
+        <div>
+          <span style={lbl}>Wide-load permit</span>
+          <select style={inp} value={f.permitStatus} onChange={set("permitStatus")}>
+            <option value="not_needed">Not needed</option><option value="needed">Needed</option><option value="on_file">On file ✓</option>
+          </select>
+        </div>
+        <div style={{ gridColumn: "span 2" }}><span style={lbl}>Notes</span><input style={inp} value={f.notes} onChange={set("notes")} /></div>
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 9 }}>
+        <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={onCancel}>Cancel</button>
+        <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
+          onClick={() => onSave({
+            driverUserId: f.driverUserId || null, loadDate: f.loadDate || null, routeLabel: f.routeLabel,
+            milesOut: f.milesOut === "" ? null : Number(f.milesOut), milesBack: f.milesBack === "" ? null : Number(f.milesBack),
+            permitStatus: f.permitStatus, notes: f.notes,
+          })}>Save load</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Drivers & delivery territories (Settings → Team; SCHEDULING_SCOPE.md decisions 9/9b) ───
+// Each driver carries their OWN truck specs — deck length drives the capacity bar on every
+// one of their loads, max width caps what they can haul (the one non-overridable rule) —
+// and covers one or more TERRITORIES: broad corridors described in words ("Hwy 50 west of
+// Linn to Kansas City, north to the Iowa line"), never city lists. driver_profiles is
+// service-role only, so everything goes through portal-schedule (admin-gated server-side).
+function DriversTerritoriesCard() {
+  const [data, setData] = useState(null);      // { team, drivers, territories }
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [drafts, setDrafts] = useState({});    // userId -> editable driver draft
+  const [tDraft, setTDraft] = useState(null);  // { id?, name, description } | null
+  const load = useCallback(async () => {
+    const { data: d, error } = await sb.functions.invoke("portal-schedule", { body: { action: "list_drivers" } });
+    if (error || !d || d.error) { setMsg({ err: (d && d.error) || "Could not load drivers." }); setData({ team: [], drivers: [], territories: [] }); return; }
+    setData(d);
+    const map = {};
+    (d.drivers || []).forEach((p) => {
+      map[p.user_id] = {
+        isDriver: !!p.is_driver, truckName: p.truck_name || "",
+        deck: p.deck_length_ft == null ? "" : String(p.deck_length_ft),
+        maxW: p.max_width_ft == null ? "" : String(p.max_width_ft),
+        wide: p.wide_load_capable !== false, territoryIds: p.territory_ids || [],
+      };
+    });
+    setDrafts(map);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const team = (data && data.team) || [];
+  const territories = (data && data.territories) || [];
+  const activeTerritories = territories.filter((t) => t.active !== false);
+  const call = async (body, okMsg) => {
+    const { data: d, error } = await sb.functions.invoke("portal-schedule", { body });
+    if (error || !d || d.error) { setMsg({ err: (d && d.error) || (error ? await fnError(error) : "That didn't save.") }); return null; }
+    if (okMsg) setMsg({ ok: okMsg });
+    return d;
+  };
+  const blank = { isDriver: false, truckName: "", deck: "", maxW: "", wide: true, territoryIds: [] };
+  const draftFor = (uid) => drafts[uid] || blank;
+  const setDraft = (uid, patch) => setDrafts({ ...drafts, [uid]: { ...draftFor(uid), ...patch } });
+  const saveDriver = async (m) => {
+    const f = draftFor(m.userId);
+    setBusy(true); setMsg(null);
+    const r = await call({
+      action: "save_driver", userId: m.userId, isDriver: f.isDriver,
+      truckName: f.truckName, deckLengthFt: f.deck === "" ? null : Number(f.deck),
+      maxWidthFt: f.maxW === "" ? null : Number(f.maxW),
+      wideLoadCapable: f.wide, territoryIds: f.territoryIds,
+    }, `${m.name || "Driver"} saved.`);
+    setBusy(false); if (r) load();
+  };
+  const saveTerritory = async () => {
+    if (!tDraft || !tDraft.name.trim()) { setMsg({ err: "Give the territory a name." }); return; }
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "save_territory", id: tDraft.id, name: tDraft.name, description: tDraft.description }, "Territory saved.");
+    setBusy(false); if (r) { setTDraft(null); load(); }
+  };
+  const archiveTerritory = async (t) => {
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "save_territory", id: t.id, name: t.name, description: t.description, sortOrder: t.sort_order, active: t.active === false }, t.active === false ? `${t.name} restored.` : `${t.name} archived.`);
+    setBusy(false); if (r) load();
+  };
+  const toggleTerr = (uid, tid) => {
+    const f = draftFor(uid);
+    const has = f.territoryIds.indexOf(tid) !== -1;
+    setDraft(uid, { territoryIds: has ? f.territoryIds.filter((x) => x !== tid) : [...f.territoryIds, tid] });
+  };
+  const lbl = { ...S.lbl, marginBottom: 3 };
+  const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Drivers & delivery territories" count={null}
+        right={<button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>} />
+      <p style={{ fontSize: 12, color: "#64748B", fontWeight: 600, lineHeight: 1.5, margin: "0 0 12px" }}>
+        Drivers power the <strong>Delivery Schedule</strong>: each driver's deck length sets how much fits on their loads,
+        max width caps which buildings they can haul, and their territory routes the right deliveries to the right driver.
+      </p>
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 8 }}>Loading…</p>}
+
+      {data && (<>
+        {/* ── Territories ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 8px" }}>
+          <span style={{ ...S.lbl, marginBottom: 0 }}>Delivery territories</span>
+          <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>— broad corridors, not city lists. Describe them the way you'd tell a new driver.</span>
+          <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "4px 10px", fontSize: 11.5, marginLeft: "auto" }}
+            onClick={() => setTDraft({ name: "", description: "" })}>+ Add territory</button>
+        </div>
+        {territories.length === 0 && !tDraft && (
+          <p style={{ fontSize: 12.5, color: "#64748B", padding: "4px 2px 10px" }}>
+            None yet. Example: <em>"West — Hwy 50 west of the shop to Kansas City, the I-70 corridor and everything in between, north to the Iowa line."</em>
+          </p>
+        )}
+        {territories.map((t) => (
+          tDraft && tDraft.id === t.id ? (
+            <div key={t.id} style={{ display: "flex", gap: 8, alignItems: "flex-end", border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", marginBottom: 7 }}>
+              <div style={{ width: 140 }}><span style={lbl}>Name</span><input style={inp} value={tDraft.name} onChange={(e) => setTDraft({ ...tDraft, name: e.target.value })} /></div>
+              <div style={{ flex: 1 }}><span style={lbl}>Covers</span><input style={inp} value={tDraft.description || ""} onChange={(e) => setTDraft({ ...tDraft, description: e.target.value })} /></div>
+              <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={saveTerritory}>Save</button>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setTDraft(null)}>Cancel</button>
+            </div>
+          ) : (
+            <div key={t.id} style={{ display: "flex", gap: 10, alignItems: "center", border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", marginBottom: 7, opacity: t.active === false ? 0.55 : 1 }}>
+              <span style={schedChip("#EEF2FF", "#3D3672")}>{t.name}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: "#334155", flex: 1 }}>{t.description || <em style={{ color: "#94A3B8" }}>no description</em>}</span>
+              <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "4px 9px", fontSize: 11 }} onClick={() => setTDraft({ id: t.id, name: t.name, description: t.description || "" })}>Edit</button>
+              <button type="button" style={{ ...S.btn(t.active === false ? "#F0FDF4" : "#F1F5F9", t.active === false ? "#15803D" : "#64748B"), padding: "4px 9px", fontSize: 11 }} onClick={() => archiveTerritory(t)}>{t.active === false ? "Restore" : "Archive"}</button>
+            </div>
+          )
+        ))}
+        {tDraft && !tDraft.id && (
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "8px 11px", marginBottom: 7 }}>
+            <div style={{ width: 140 }}><span style={lbl}>Name</span><input style={inp} value={tDraft.name} onChange={(e) => setTDraft({ ...tDraft, name: e.target.value })} placeholder="West" /></div>
+            <div style={{ flex: 1 }}><span style={lbl}>Covers</span><input style={inp} value={tDraft.description || ""} onChange={(e) => setTDraft({ ...tDraft, description: e.target.value })} placeholder="Hwy 50 west of the shop to Kansas City, north to the Iowa line" /></div>
+            <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={saveTerritory}>Save</button>
+            <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setTDraft(null)}>Cancel</button>
+          </div>
+        )}
+
+        {/* ── Drivers ── */}
+        <div style={{ ...S.lbl, margin: "16px 0 8px" }}>Drivers</div>
+        {team.length === 0 && <p style={{ fontSize: 12.5, color: "#64748B" }}>No team members yet — invite people in Team &amp; commissions below.</p>}
+        {team.map((m) => {
+          const f = draftFor(m.userId);
+          return (
+            <div key={m.userId} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "9px 12px", marginBottom: 8, background: f.isDriver ? "#FBFCFE" : "#FFF" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <strong style={{ fontSize: 13 }}>{m.name || m.userId.slice(0, 8)}</strong>
+                <span style={schedChip("#F1F5F9", "#475569")}>{m.role === "owner" ? "Owner" : m.role === "admin" ? "Admin" : "Team member"}</span>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "#334155", cursor: "pointer", marginLeft: "auto" }}>
+                  <input type="checkbox" checked={f.isDriver} onChange={(e) => setDraft(m.userId, { isDriver: e.target.checked })} />
+                  Driver
+                </label>
+              </div>
+              {f.isDriver && (<>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "8px 10px", marginTop: 9 }}>
+                  <div><span style={lbl}>Truck / trailer</span><input style={inp} value={f.truckName} onChange={(e) => setDraft(m.userId, { truckName: e.target.value })} placeholder="40' gooseneck" /></div>
+                  <div><span style={lbl}>Deck length (ft)</span><input style={inp} value={f.deck} onChange={(e) => setDraft(m.userId, { deck: e.target.value })} placeholder="40" /></div>
+                  <div><span style={lbl}>Max building width (ft)</span><input style={inp} value={f.maxW} onChange={(e) => setDraft(m.userId, { maxW: e.target.value })} placeholder="14" /></div>
+                  <div><span style={lbl}>Wide-load capable</span>
+                    <select style={inp} value={f.wide ? "yes" : "no"} onChange={(e) => setDraft(m.userId, { wide: e.target.value === "yes" })}>
+                      <option value="yes">Yes</option><option value="no">No</option>
+                    </select>
+                  </div>
+                </div>
+                {activeTerritories.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <span style={lbl}>Territories</span>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
+                      {activeTerritories.map((t) => {
+                        const on = f.territoryIds.indexOf(t.id) !== -1;
+                        return (
+                          <button key={t.id} type="button" onClick={() => toggleTerr(m.userId, t.id)} title={t.description || t.name}
+                            style={{ ...schedChip(on ? "#3D3672" : "#F1F5F9", on ? "#FFF" : "#475569"), border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+                            {t.name}{on ? " ✓" : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>)}
+              <div style={{ display: "flex", marginTop: f.isDriver ? 9 : 0 }}>
+                {(f.isDriver || (data.drivers || []).some((p) => p.user_id === m.userId && p.is_driver)) && (
+                  <button type="button" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12, marginLeft: "auto", marginTop: f.isDriver ? 0 : 8 }} onClick={() => saveDriver(m)}>Save driver</button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </>)}
+    </div>
+  );
+}
+
 // ─── Sales locations + building serial numbers (Settings → Team) ───
 // Locations are where inventory buildings sit on display; the serial block sets the ONE
 // shared per-builder sequence (inventory now, orders when Build Scheduling ships).
@@ -8639,7 +9425,7 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, isOperator = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -8701,7 +9487,9 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "connection" && <SettingsView section="connection" />}
       {sub === "quickbooks" && <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
-      {sub === "team" && (<><LocationsCard /><CommissionTeam /></>)}
+      {/* Drivers & territories feed the Delivery Schedule — operator-only until the
+          schedule_builds billing flip (Phase 5), same gate as the schedule tabs. */}
+      {sub === "team" && (<><LocationsCard />{isOperator && <DriversTerritoriesCard />}<CommissionTeam /></>)}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );
@@ -9112,7 +9900,7 @@ function Dashboard({ session }) {
           {soonItem("reports", "Reports", "4th Qtr")}
           {/* Operators get the live board (In Dev badge, like Orders); tenants keep the teaser. */}
           {isOperator ? soonItem("build-schedule", "Build Schedule", "In Dev") : soonItem("build-schedule", "Build Schedule", "3rd Qtr")}
-          {soonItem("delivery-schedule", "Delivery Schedule", "3rd Qtr")}
+          {isOperator ? soonItem("delivery-schedule", "Delivery Schedule", "In Dev") : soonItem("delivery-schedule", "Delivery Schedule", "3rd Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
         </nav>
 
@@ -9338,6 +10126,7 @@ function Dashboard({ session }) {
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 isOwner={!viewing && tenant.role === "owner"}
                 isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
+                isOperator={isOperator}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {!gateLocked && activeTab === "on-demand-pricing" && (
@@ -9373,7 +10162,12 @@ function Dashboard({ session }) {
               />
               )
             )}
+            {/* Real Load Planner for OPERATORS; tenants keep the teaser until the
+                schedule_builds billing flip (Phase 5) — same gate as Build Schedule. */}
             {!gateLocked && activeTab === "delivery-schedule" && (
+              isOperator ? (
+                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin} />
+              ) : (
               <ComingSoon
                 title="Delivery Schedule"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>}
@@ -9384,6 +10178,7 @@ function Dashboard({ session }) {
                   "Automatic customer notifications when a delivery is set",
                 ]}
               />
+              )
             )}
             {!gateLocked && activeTab === "inventory" && (
               <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={canAdmin}
