@@ -1,9 +1,23 @@
 # Build Schedule + Delivery Schedule + Repairs — Scoping Document
 
-**Status: MOCKUP APPROVED (Carolyn, 2026-08-04) — Phase 1 SHIPPED 2026-08-04.**
-Drafted 2026-08-03 with Carolyn; iterated through four mockup rounds (kanban → load
-planner → drivers/trucks → corridor territories). Phase 1 (migrations 087–091 + the
-portal-schedule edge function) is applied to live and deployed; Phases 2–5 are UI.
+**Status: ALL FIVE PHASES SHIPPED TO BETA 2026-08-04** (mockup approved by Carolyn same
+day, after four rounds: kanban → load planner → drivers/trucks → corridor territories).
+Phase 1 = migrations 087–091 + portal-schedule (applied live + deployed). Phase 2 = Build
+Schedule tab. Phase 3 = Repairs tab. Phase 4 = Load Planner + Drivers/Territories on
+Settings → Team + the sync-design-status delivered fence (deployed). Phase 5 = week
+calendar + the entitlement gate (`schedUnlocked` = operator OR
+`entitlement.features.schedule_builds`) + available-now teaser CTAs.
+
+⚠️ **TWO LAUNCH SWITCHES REMAIN, deliberately human-thrown** (the billing_plans update was
+blocked by tooling permissions — correctly; it's a money switch):
+1. `update public.billing_plans set availability='available', updated_at=now()
+   where feature='schedule_builds';` — until this runs, no tenant can subscribe, so only
+   operators and **billing-exempt tenants** see the live tabs (portal-billing grants exempt
+   tenants every feature — grandfathered accounts get scheduling free the moment this
+   code promotes; that is the platform's existing exempt semantic, flagged to Carolyn).
+2. The What's New entry (hand-authored INSERT into release_notes; drafted in the launch
+   notes, NO pricing per CLAUDE.md) — publish together with switch 1.
+`price_visible` stays false on both plans (055 decision; presentation-only).
 This is the planning doc for the "Schedule Builds and Delivery" feature (billing key
 `schedule_builds`, already defined in migration 052 at $250/mo, `availability='coming_soon'`)
 plus the full Repairs tab. Both `build-schedule` and `delivery-schedule` exist today as

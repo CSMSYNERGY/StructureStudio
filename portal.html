@@ -282,10 +282,10 @@ const TAB_META = {
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
   "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
-  "build-schedule": ["Build Schedule", "Track buildings from order to done — coming soon"],
-  "delivery-schedule": ["Delivery Schedule", "Plan and manage deliveries — coming soon"],
+  "build-schedule": ["Build Schedule", "Track buildings from order to done"],
+  "delivery-schedule": ["Delivery Schedule", "Plan truck loads and manage deliveries"],
   "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
-  "repairs": ["Repairs", "Manage repair jobs from request to done — coming soon"],
+  "repairs": ["Repairs", "Manage repair jobs from request to done"],
   "view-3d": ["3D Design", "Let customers see their building in 3D — coming soon"],
   "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
@@ -4304,7 +4304,10 @@ function ReleasesView({ submissionsKey }) {
 // ─── Coming-soon teaser panel ───
 // Placeholder for features that aren't built yet, shown to every logged-in user so
 // they can see what's on the way. Pure presentation — no data, no side effects.
-function ComingSoon({ icon, title, blurb, bullets }) {
+// `cta` (optional, { label, onClick }) turns the teaser into an AVAILABLE-NOW card: the
+// badge flips from "Coming soon" to "Available now" and the footer becomes the button —
+// used by billable features that have launched but this tenant hasn't switched on yet.
+function ComingSoon({ icon, title, blurb, bullets, cta }) {
   return (
     <div style={{ ...S.card, padding: 0, overflow: "hidden", maxWidth: 720 }}>
       <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "34px 28px", color: "#FFF", display: "flex", alignItems: "center", gap: 20 }}>
@@ -4312,7 +4315,7 @@ function ComingSoon({ icon, title, blurb, bullets }) {
           {icon}
         </div>
         <div style={{ minWidth: 0 }}>
-          <span style={{ display: "inline-block", background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px", marginBottom: 9 }}>Coming soon</span>
+          <span style={{ display: "inline-block", background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px", marginBottom: 9 }}>{cta ? "Available now" : "Coming soon"}</span>
           <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>{title}</div>
         </div>
       </div>
@@ -4328,9 +4331,15 @@ function ComingSoon({ icon, title, blurb, bullets }) {
             ))}
           </ul>
         )}
-        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #F1F5F9", fontSize: 12.5, color: "#94A3B8", fontWeight: 600 }}>
-          We're actively building this — it'll appear right here when it's ready, with nothing for you to set up.
-        </div>
+        {cta ? (
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #F1F5F9" }}>
+            <button type="button" onClick={cta.onClick} style={S.btn(ACCENT, "#FFF")}>{cta.label}</button>
+          </div>
+        ) : (
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #F1F5F9", fontSize: 12.5, color: "#94A3B8", fontWeight: 600 }}>
+            We're actively building this — it'll appear right here when it's ready, with nothing for you to set up.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -6027,7 +6036,8 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const [data, setData] = useState(null);      // loads payload
   const [pool, setPool] = useState(null);      // pool payload
   const [error, setError] = useState(null);
-  const [view, setView] = useState("loads");   // loads | table
+  const [view, setView] = useState("loads");   // loads | table | calendar
+  const [weekOffset, setWeekOffset] = useState(0);
   const [driverFilter, setDriverFilter] = useState("all");
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -6239,14 +6249,12 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
       <CardHead title="Delivery Schedule" count={loads.length}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
-            {[["loads", "Loads"], ["table", "Table"]].map(([v, label]) => (
+            {[["loads", "Loads"], ["table", "Table"], ["calendar", "Calendar"]].map(([v, label]) => (
               <button key={v} type="button" onClick={() => setView(v)}
                 style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
                 {label}
               </button>
             ))}
-            <button type="button" disabled title="Week-at-a-glance calendar — coming in Phase 5"
-              style={{ border: "none", background: "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: "#B9C4D6", fontFamily: "inherit" }}>Calendar · soon</button>
           </div>
           <button type="button" disabled title="Coming later: fits buildings to each driver's deck, groups stops by territory, routes by map"
             style={{ ...S.btn("#FFF", "#B9C4D6"), border: "1px solid #E2E8F0", cursor: "default" }}>⚡ Auto-plan · soon</button>
@@ -6518,6 +6526,72 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
           {stops.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Nothing scheduled yet.</p>}
         </div>
       )}
+
+      {/* ── CALENDAR VIEW — week at a glance ── */}
+      {data && view === "calendar" && (() => {
+        // Monday-start week, shifted by weekOffset.
+        const base = new Date(); base.setHours(0, 0, 0, 0);
+        base.setDate(base.getDate() - ((base.getDay() + 6) % 7) + weekOffset * 7);
+        const days = [];
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(base.getTime() + i * 86400000);
+          days.push({ iso: d.toISOString().slice(0, 10), d });
+        }
+        const rangeLabel = days[0].d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " +
+          days[6].d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        const undated = visibleLoads.filter((l) => !l.load_date && l.status === "planned").length;
+        return (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 11 }}>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset - 1)}>‹ Prev</button>
+              <span style={{ fontSize: 13.5, fontWeight: 800 }}>{rangeLabel}</span>
+              {weekOffset !== 0 && <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={() => setWeekOffset(0)}>This week</button>}
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset + 1)}>Next ›</button>
+              {undated > 0 && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, marginLeft: "auto" }}>{undated} planned load{undated === 1 ? "" : "s"} with no date yet — see the Loads view</span>}
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(128px, 1fr))", gap: 8, minWidth: 920 }}>
+                {days.map(({ iso, d }) => {
+                  const isToday = iso === todayIso;
+                  const dayLoads = visibleLoads.filter((l) => l.load_date === iso);
+                  return (
+                    <div key={iso} style={{ background: isToday ? "#F4F7FF" : "#F8FAFC", border: "1px solid " + (isToday ? "#C3D9F7" : "#E2E8F0"), borderRadius: 10, padding: 8, minHeight: 130 }}>
+                      <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B", marginBottom: 7 }}>
+                        {d.toLocaleDateString("en-US", { weekday: "short" })} {d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {dayLoads.map((l) => {
+                          const lStops = stopsByLoad[l.id] || [];
+                          const st = SCHED_LOAD_STATUS[l.status] || SCHED_LOAD_STATUS.planned;
+                          const conflict = loadConflicts[l.id];
+                          return (
+                            <button key={l.id} type="button" onClick={() => { setDriverFilter("all"); setView("loads"); }}
+                              title={`Load ${l.load_no} — open the Loads view`}
+                              style={{ textAlign: "left", background: "#FFF", border: "1px solid " + (conflict ? "#FCA5A5" : "#E2E8F0"), borderRadius: 8, padding: "7px 9px", cursor: "pointer", fontFamily: "inherit", boxShadow: "0 1px 2px rgba(15,23,42,.05)" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+                                <span style={{ fontSize: 12, fontWeight: 800 }}>Load {l.load_no}</span>
+                                <span style={{ ...schedChip(st.bg, st.fg), marginLeft: "auto", padding: "2px 7px", fontSize: 9.5 }}>{st.label}</span>
+                              </div>
+                              <div style={{ fontSize: 10.5, fontWeight: 600, color: "#64748B" }}>
+                                {nameOf[l.driver_user_id] || "No driver"} · {lStops.length} stop{lStops.length === 1 ? "" : "s"}
+                              </div>
+                              <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+                                {l.is_wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), padding: "1px 6px", fontSize: 9 }}>WIDE</span>}
+                                {conflict && <span style={{ ...schedChip("#FEF2F2", "#DC2626"), padding: "1px 6px", fontSize: 9 }}>⚠ not built</span>}
+                              </div>
+                            </button>
+                          );
+                        })}
+                        {dayLoads.length === 0 && <span style={{ fontSize: 10.5, color: "#CBD5E1", fontWeight: 600 }}>—</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -9425,7 +9499,7 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, isOperator = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -9487,9 +9561,9 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "connection" && <SettingsView section="connection" />}
       {sub === "quickbooks" && <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
-      {/* Drivers & territories feed the Delivery Schedule — operator-only until the
-          schedule_builds billing flip (Phase 5), same gate as the schedule tabs. */}
-      {sub === "team" && (<><LocationsCard />{isOperator && <DriversTerritoriesCard />}<CommissionTeam /></>)}
+      {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
+          schedule tabs (operator, or the tenant's schedule_builds subscription). */}
+      {sub === "team" && (<><LocationsCard />{schedUnlocked && <DriversTerritoriesCard />}<CommissionTeam /></>)}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );
@@ -9821,6 +9895,12 @@ function Dashboard({ session }) {
   // on. Never gate an operator viewing someone else's account: the entitlement loaded
   // here is the operator's own, not the tenant's.
   const gateLocked = !viewing && !!entitlement && entitlement.locked;
+  // Scheduling suite (Build Schedule + Delivery Schedule + Repairs — ONE feature,
+  // decision 12): live for operators (own tenant or view-as) and for tenants whose
+  // entitlement carries schedule_builds (active/grace subscription, exempt, or
+  // transition — portal-billing computes it server-side). Everyone else sees the
+  // teaser with a Billing call-to-action.
+  const schedUnlocked = isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features.schedule_builds));
   const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt
     ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
@@ -9894,13 +9974,13 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
-          {isOperator ? soonItem("repairs", "Repairs", "In Dev") : soonItem("repairs", "Repairs", "3rd Qtr")}
+          {schedUnlocked ? navItem("repairs", "Repairs") : soonItem("repairs", "Repairs", "New")}
           {soonItem("view-3d", "3D Design", "3rd Qtr")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
-          {/* Operators get the live board (In Dev badge, like Orders); tenants keep the teaser. */}
-          {isOperator ? soonItem("build-schedule", "Build Schedule", "In Dev") : soonItem("build-schedule", "Build Schedule", "3rd Qtr")}
-          {isOperator ? soonItem("delivery-schedule", "Delivery Schedule", "In Dev") : soonItem("delivery-schedule", "Delivery Schedule", "3rd Qtr")}
+          {/* Live for operators + subscribed tenants; a "New" badge invites everyone else. */}
+          {schedUnlocked ? navItem("build-schedule", "Build Schedule") : soonItem("build-schedule", "Build Schedule", "New")}
+          {schedUnlocked ? navItem("delivery-schedule", "Delivery Schedule") : soonItem("delivery-schedule", "Delivery Schedule", "New")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
         </nav>
 
@@ -10126,7 +10206,7 @@ function Dashboard({ session }) {
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 isOwner={!viewing && tenant.role === "owner"}
                 isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
-                isOperator={isOperator}
+                schedUnlocked={schedUnlocked}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {!gateLocked && activeTab === "on-demand-pricing" && (
@@ -10141,12 +10221,11 @@ function Dashboard({ session }) {
                 ]}
               />
             )}
-            {/* Real Build Schedule for OPERATORS (own tenant or view-as — reads/writes go
-                through portal-schedule, so view-as works and writes need can_write).
-                Tenants keep the teaser until the schedule_builds billing flip (Phase 5):
-                the launch change is swapping `isOperator` for the entitlement check. */}
+            {/* Scheduling suite: live when schedUnlocked (operator, or the tenant's
+                entitlement carries schedule_builds); otherwise the available-now card
+                pointing admins at Billing. */}
             {!gateLocked && activeTab === "build-schedule" && (
-              isOperator ? (
+              schedUnlocked ? (
                 <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
                   onOpenDesign={(code) => openInDesigner(code)} />
               ) : (
@@ -10159,24 +10238,24 @@ function Dashboard({ session }) {
                   "Queue, in-progress, and completed views",
                   "Keep the shop floor and the office on the same page",
                 ]}
+                cta={canAdmin ? { label: "Turn on scheduling — see Billing", onClick: () => navigate("settings", "billing") } : null}
               />
               )
             )}
-            {/* Real Load Planner for OPERATORS; tenants keep the teaser until the
-                schedule_builds billing flip (Phase 5) — same gate as Build Schedule. */}
             {!gateLocked && activeTab === "delivery-schedule" && (
-              isOperator ? (
+              schedUnlocked ? (
                 <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>}
-                blurb="Plan and manage every delivery in one place. Schedule drop-offs, see the week ahead at a glance, and keep customers in the loop on exactly when their building will arrive."
+                blurb="Plan every delivery as a truck load — grouped by area, sized to your driver's trailer, with build dates in view. See the week ahead at a glance and never send a building that isn't ready."
                 bullets={[
-                  "Schedule and reschedule deliveries with ease",
+                  "Plan loads by truck day: driver, route, deck space, wide-load flags",
                   "A week-at-a-glance calendar of upcoming drop-offs",
-                  "Automatic customer notifications when a delivery is set",
+                  "The schedule won't let a building go out before it's built",
                 ]}
+                cta={canAdmin ? { label: "Turn on scheduling — see Billing", onClick: () => navigate("settings", "billing") } : null}
               />
               )
             )}
@@ -10187,10 +10266,8 @@ function Dashboard({ session }) {
                 onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial })}
                 onNew={() => openInDesigner(null, null, { blank: true })} />
             )}
-            {/* Real Repairs tab for OPERATORS; tenants keep the teaser until the
-                schedule_builds billing flip (Phase 5) — same gate as Build Schedule. */}
             {!gateLocked && activeTab === "repairs" && (
-              isOperator ? (
+              schedUnlocked ? (
                 <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={canAdmin} />
               ) : (
               <ComingSoon
@@ -10202,6 +10279,7 @@ function Dashboard({ session }) {
                   "Track each job from request to completed",
                   "Service history tied to each building and customer",
                 ]}
+                cta={canAdmin ? { label: "Turn on scheduling — see Billing", onClick: () => navigate("settings", "billing") } : null}
               />
               )
             )}

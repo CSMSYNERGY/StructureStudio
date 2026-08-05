@@ -81,6 +81,37 @@ Two rules that are easy to break and expensive to get wrong:
 
 The widget is **portal-only** (`portal.html`: `FeedbackForm`, `FeedbackWidget`, `MySubmissions`; surfaced under What's New → My Submissions). It was removed from the public designer on 2026-07-26 — submissions must be attributable to a signed-in user and tenant, and the designer's visitors are anonymous shed-shoppers who should never see a "Report a bug" button on a tenant's customer-facing page. `FeedbackWidget.jsx` is now an empty signpost file; nothing imports it. The widget is also hidden while an operator is viewing another tenant's account, since the submission would be attributed to the operator's own tenant.
 
+## Scheduling suite (Build Schedule · Delivery Schedule · Repairs)
+
+Shipped 2026-08-04 (all five phases; spec + decisions in `SCHEDULING_SCOPE.md` — read it
+before touching anything here). Tables: `schedule_stages`, `build_jobs`, `schedule_activity`,
+`delivery_territories`, `driver_profiles` (service-role only, like `commission_members`),
+`delivery_loads`, `delivery_stops`, `repairs` (+ private `repair-photos` bucket), and
+`designs.delivered_at` (migrations 087–091). One edge function owns every read/write:
+**`portal-schedule`** (resolveTenant; READ = any role, STAFF = move_job/add_note/
+mark_stop_delivered, everything else owner/admin). UI is portal-only: `BuildScheduleTab`,
+`RepairsTab`, `DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+
+Rules that are easy to break and expensive to get wrong:
+1. **Automation keys on stage `kind` (`queue|active|done`), NEVER the stage name** — names
+   are tenant-editable (the Monday label-rename lesson, again).
+2. **The delivered fence:** `sync-design-status` skips rows with `delivered_at` set. Remove
+   that skip and the GHL recompute (which never reports delivered) downgrades every
+   locally-delivered design on the next portal load.
+3. **Serials:** order build jobs mint from `take_next_serial()` LAST, after all validation —
+   a rejected payload must not burn a number. Testing "add order to board" on a real tenant
+   consumes a real serial.
+4. **Built-before-delivered:** loads can't go out/delivered with an unbuilt stop; the 409
+   carries `{blocked, unbuilt}` and the admin override (required reason) is audit-logged and
+   stamped on the load. The width rule (building wider than the driver's `max_width_ft`) has
+   NO override anywhere — keep it that way.
+5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` = operator OR
+   `entitlement.features.schedule_builds`. The `schedule_builds` plans' `availability` flip
+   (coming_soon → available) is a HUMAN-run data change — see SCHEDULING_SCOPE.md's launch
+   switches. Exempt tenants get every feature the moment code promotes (portal-billing's
+   exempt semantic).
+6. The "to be loaded" pool is a QUERY, not a table — don't invent an "unassigned stops" row.
+
 ## What's New changelog — what must NEVER be published
 
 `release_notes` (migration `045`) is the tenant-facing changelog behind the What's New tab. It is hand-authored: nothing in the codebase writes to it, and no code change should ever auto-generate an entry.
