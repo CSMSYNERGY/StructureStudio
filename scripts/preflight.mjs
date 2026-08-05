@@ -20,21 +20,25 @@
 //      silently changes behaviour for the shared module).
 //   3. Cache-buster lockstep: index.html and portal.html must reference the same
 //      structure-studio.component.js?v=… value.
-//   4. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
+//   4. The CDN boot guard is present on all three pages and byte-identical across them. It is
+//      what turns a failed/blocked CDN request into a message the visitor can act on instead of
+//      a permanently blank page; the three mount blocks are not twinned, so only this notices
+//      one page drifting.
+//   5. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
 //      an edge function (qboFetch) — the client secret lives only there, and "we never call
 //      Intuit from the browser" is an answer we give Intuit in writing. Help links to
 //      quickbooks.intuit.com are deliberately still allowed.
-//   5. `deno check` over every supabase/functions/*/index.ts. The browser artifacts above
+//   6. `deno check` over every supabase/functions/*/index.ts. The browser artifacts above
 //      have no compiler, but the edge functions DO — and nothing was running it, so type
 //      errors accumulated silently: two sat in portal-settings' list_inventory long enough
 //      that a later commit added two more on the very same line. This step is SKIPPED with
 //      a warning when Deno isn't installed (it is not an npm devDependency).
-//   6. `deno test` over the edge-function unit tests — the parts of supabase/functions that
+//   7. `deno test` over the edge-function unit tests — the parts of supabase/functions that
 //      cannot be exercised any other way. Two groups with different invocations: the
 //      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
 //      validation, which guards where the client secret gets sent), and the pre-existing
 //      `_shared/_test_stubs/*_test.ts`, which needs its own import map. Same skip-with-a-warning
-//      policy as step 5.
+//      policy as step 6.
 //
 // Steps are numbered in the order they RUN.
 //
@@ -139,6 +143,32 @@ function run(files) {
   for (const f of ["portal.html", "admin.html"]) {
     if (cdnUrls(files[f]) !== lock) {
       errors.push(`${f}: CDN script URLs differ from index.html — the version lock (CLAUDE.md) is broken`);
+    }
+  }
+
+  // Boot-guard lock — the plain <script data-ss-app="…"> block at the end of each page's body
+  // must exist on all three, and its body must be byte-identical everywhere. It is the only
+  // thing standing between a failed CDN request and a permanently blank page (a blank page is
+  // what shipped until 2026-08-05, once to Googlebot), and unlike the designer the three mount
+  // blocks are NOT hand-mirrored twins — so nothing else in the repo would notice one page
+  // losing the guard or drifting from the others. Same argument as the CDN version lock above.
+  // The per-page label lives on the tag attribute, deliberately outside the compared body.
+  const guardBody = (html) => {
+    const m = html.match(/<script data-ss-app="[^"]*">([\s\S]*?)<\/script>/);
+    return m ? m[1] : null;
+  };
+  const guards = Object.fromEntries(
+    ["index.html", "portal.html", "admin.html"].map((f) => [f, guardBody(files[f])]));
+  for (const [f, body] of Object.entries(guards)) {
+    if (body === null) {
+      errors.push(`${f}: the CDN boot guard (<script data-ss-app="…">) is missing — a failed `
+        + "CDN request would leave the visitor a blank page again");
+    }
+  }
+  for (const f of ["portal.html", "admin.html"]) {
+    if (guards[f] !== null && guards["index.html"] !== null && guards[f] !== guards["index.html"]) {
+      errors.push(`${f}: the CDN boot guard body differs from index.html — the three copies must `
+        + "stay byte-identical (only the data-ss-app label may differ)");
     }
   }
 
@@ -359,6 +389,29 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: Intuit API hosts are refused in browser files, help links are not");
+
+  // ── The boot-guard lock ────────────────────────────────────────────────────
+  // Two regexes that never match are indistinguishable from three healthy pages, and this rule
+  // exists precisely because nothing else notices a page losing its guard. Prove both failure
+  // modes fire: a page with the guard deleted, and a page whose copy has drifted by one byte.
+  const guardGone = load();
+  guardGone["admin.html"] = guardGone["admin.html"].replace(/<script data-ss-app="[^"]*">[\s\S]*?<\/script>/, "");
+  if (!run(guardGone).some((e) => e.includes("boot guard") && e.includes("missing"))) {
+    console.error("self-test FAILED: a missing CDN boot guard in admin.html was not caught");
+    process.exit(1);
+  }
+  const guardDrift = load();
+  const driftFrom = 'missing.push("react-dom");';
+  if (!guardDrift["portal.html"].includes(driftFrom)) {
+    console.error("self-test: boot-guard fixture line not found in portal.html — update the self-test");
+    process.exit(1);
+  }
+  guardDrift["portal.html"] = guardDrift["portal.html"].replace(driftFrom, 'missing.push("reactdom");');
+  if (!run(guardDrift).some((e) => e.includes("boot guard body differs"))) {
+    console.error("self-test FAILED: a drifted CDN boot guard in portal.html was not caught");
+    process.exit(1);
+  }
+  console.log("self-test passed: the CDN boot guard must be present on all three pages and identical");
 
   // ── The deno step ──────────────────────────────────────────────────────────
   // Asserts the MECHANISM, not a historical bug. A subprocess check whose clean result and
