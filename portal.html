@@ -2149,6 +2149,41 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         </div>
       )}
 
+      {/* At-a-glance subscription summary — total spend, status, and next renewal, above the
+          per-feature detail. Derived from the same live subscriptions; no extra backend call. */}
+      {data && liveSubs.length > 0 && (() => {
+        const moSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval !== "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
+        const yrSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval === "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
+        const nextRenew = liveSubs.map((s) => s.current_period_end).filter(Boolean).sort()[0] || null;
+        const headStatus = liveSubs.some((s) => s.status === "past_due") ? "past_due" : liveSubs.some((s) => s.status === "paused") ? "paused" : "active";
+        const hb = SUB_BADGE[headStatus] || SUB_BADGE.active;
+        const spend = [moSum ? `${fmt$(moSum)}/mo` : null, yrSum ? `${fmt$(yrSum)}/yr` : null].filter(Boolean).join(" + ") || "—";
+        const stat = (label, value) => (
+          <div style={{ minWidth: 120 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#1E293B", marginTop: 3 }}>{value}</div>
+          </div>
+        );
+        return (
+          <div style={S.card}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+              <div style={{ ...S.h2, marginBottom: 0 }}>Your subscription</div>
+              <span style={{ background: hb.bg, color: hb.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{hb.label}</span>
+            </div>
+            <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+              {stat("What you pay", spend)}
+              {stat("Active features", String(liveSubs.length))}
+              {stat("Next renewal", nextRenew ? fmtDate(nextRenew) : "—")}
+            </div>
+            {acctDiscount > 0 && (
+              <div style={{ fontSize: 12, color: "#15803D", fontWeight: 600, marginTop: 12 }}>
+                Your account discount of {acctDiscount}% is already applied to the prices above.
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {data && liveSubs.length > 0 && (
         <div style={S.card}>
           <div style={S.h2}>Your features</div>
