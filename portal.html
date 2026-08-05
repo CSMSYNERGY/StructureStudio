@@ -286,7 +286,7 @@ const TAB_META = {
   "delivery-schedule": ["Delivery Schedule", "Plan and manage deliveries — coming soon"],
   "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
   "repairs": ["Repairs", "Manage repair jobs from request to done — coming soon"],
-  "view-3d": ["3D Design", "Let customers see their building in 3D — coming soon"],
+  "view-3d": ["3D Design", "Give each building style its own 3D look"],
   "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
   "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
@@ -3358,9 +3358,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       {straighten && (
         <SSStraightenPhoto
           file={straighten}
-          // The width/height the builder typed for pricing is also the real-world shape of
-          // the thing in the photo, so it is the right aspect to square the crop to.
+          // For a door or window the width/height typed for pricing IS the real-world shape
+          // of the thing in the photo, so it is the right aspect to square the crop to. For
+          // a RAMP those two numbers are a plan footprint (width x run) and describe nothing
+          // visible in a photo of it, so the crop is left square and the builder frames it.
           aspect={(() => {
+            if (category === "ramp") return 1;
             const w = Number(ftInToInches(edit && edit.draft ? edit.draft.width_in : "")), h = Number(ftInToInches(edit && edit.draft ? edit.draft.height_in : ""));
             return (w > 0 && h > 0) ? (w / h) : 1;
           })()}
@@ -5289,22 +5292,55 @@ function ssWarpQuad(img, quad, aspect, maxPx) {
   src.width = img.naturalWidth || img.width; src.height = img.naturalHeight || img.height;
   src.getContext("2d").drawImage(img, 0, 0);
   const sd = src.getContext("2d").getImageData(0, 0, src.width, src.height);
+  // Reject a quad that is not a sane convex shape before doing any work. The matrix solve
+  // alone does not catch these: a bow-tie (self-crossing) or near-zero-area quad solves
+  // fine and warps the photo into garbage, and a hair-thin one samples almost nothing.
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  let area = 0;
+  for (let i = 0; i < 4; i++) { const p = quad[i], q = quad[(i + 1) % 4]; area += p[0] * q[1] - q[0] * p[1]; }
+  area = Math.abs(area) / 2;
+  const signs = [0, 1, 2, 3].map((i) => Math.sign(cross(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4])));
+  const convex = signs.every((s) => s > 0) || signs.every((s) => s < 0);
+  const minSide = Math.min(...[0, 1, 2, 3].map((i) => Math.hypot(quad[(i + 1) % 4][0] - quad[i][0], quad[(i + 1) % 4][1] - quad[i][1])));
+  if (!convex || minSide < 8 || area < (src.width * src.height) * 0.005) return null;
   const H = ssSolveHomography([[0, 0], [w, 0], [w, h], [0, h]], quad);
   if (!H) return null;
   const out = document.createElement("canvas"); out.width = w; out.height = h;
-  const od = out.getContext("2d").createImageData(w, h);
+  const octx = out.getContext("2d");
+  // Paint the door colour first: the result is encoded as JPEG, which has no alpha, so any
+  // pixel left transparent would flatten to BLACK. Sampling outside the photo now lands on
+  // a plausible door tone instead of a black wedge.
+  octx.fillStyle = "#77664C";
+  octx.fillRect(0, 0, w, h);
+  const od = octx.getImageData(0, 0, w, h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const d = H[6] * x + H[7] * y + H[8];
-      const u = Math.round((H[0] * x + H[1] * y + H[2]) / d);
-      const v = Math.round((H[3] * x + H[4] * y + H[5]) / d);
+      const fu = (H[0] * x + H[1] * y + H[2]) / d;
+      const fv = (H[3] * x + H[4] * y + H[5]) / d;
       const o = (y * w + x) * 4;
-      if (u < 0 || v < 0 || u >= src.width || v >= src.height) { od.data[o + 3] = 0; continue; }
-      const s = (v * src.width + u) * 4;
-      od.data[o] = sd.data[s]; od.data[o + 1] = sd.data[s + 1]; od.data[o + 2] = sd.data[s + 2]; od.data[o + 3] = sd.data[s + 3];
+      // Bilinear, not nearest-neighbour: a 4000px phone photo lands on a <=1024px output,
+      // and point-sampling that ratio aliases every straight edge into a staircase.
+      const u0 = Math.floor(fu), v0 = Math.floor(fv);
+      if (u0 < 0 || v0 < 0 || u0 + 1 >= src.width || v0 + 1 >= src.height) continue;   // keep the fill
+      const au = fu - u0, av = fv - v0;
+      for (let c = 0; c < 4; c++) {
+        const p00 = sd.data[(v0 * src.width + u0) * 4 + c], p10 = sd.data[(v0 * src.width + u0 + 1) * 4 + c];
+        const p01 = sd.data[((v0 + 1) * src.width + u0) * 4 + c], p11 = sd.data[((v0 + 1) * src.width + u0 + 1) * 4 + c];
+        od.data[o + c] = (p00 * (1 - au) + p10 * au) * (1 - av) + (p01 * (1 - au) + p11 * au) * av;
+      }
+      // The source may itself be a cut-out PNG; anything see-through composites onto the
+      // door colour rather than carrying alpha into a format that cannot hold it.
+      const a = od.data[o + 3] / 255;
+      if (a < 1) {
+        od.data[o] = od.data[o] * a + 0x77 * (1 - a);
+        od.data[o + 1] = od.data[o + 1] * a + 0x66 * (1 - a);
+        od.data[o + 2] = od.data[o + 2] * a + 0x4C * (1 - a);
+      }
+      od.data[o + 3] = 255;
     }
   }
-  out.getContext("2d").putImageData(od, 0, 0);
+  octx.putImageData(od, 0, 0);
   return out;
 }
 
@@ -5316,6 +5352,7 @@ function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
   const [quad, setQuad] = useState(null);        // [[x,y]×4] in natural image pixels
   const [drag, setDrag] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
   const boxRef = useRef(null);
   const VIEW = 460;
 
@@ -5328,27 +5365,54 @@ function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
       const ix = w * 0.08, iy = h * 0.08;        // start slightly inside, so the handles are grabbable
       setQuad([[ix, iy], [w - ix, iy], [w - ix, h - iy], [ix, h - iy]]);
     };
-    im.onerror = () => onCancel();
+    im.onerror = () => { setErr("That image could not be opened — try a JPG or PNG straight from the camera."); };
     im.src = url;
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  const scale = img ? VIEW / Math.max(img.naturalWidth, img.naturalHeight) : 1;
+  // The box is sized to the viewport, not to a fixed 460px: this is a step a builder does
+  // on the phone they took the photo with, and a hard-coded width pushed two of the four
+  // corner handles off a phone screen entirely.
+  const view = Math.max(220, Math.min(VIEW, (typeof window !== "undefined" ? window.innerWidth : VIEW) - 96));
+  const scale = img ? view / Math.max(img.naturalWidth, img.naturalHeight) : 1;
   const dispW = img ? img.naturalWidth * scale : 0, dispH = img ? img.naturalHeight * scale : 0;
 
+  // Pointer events, not mouse events: the handles were undraggable on every phone and
+  // tablet — the exact devices this feature is for.
   const moveTo = (e) => {
     if (drag == null || !boxRef.current || !img) return;
+    const t = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    if (t.clientX == null) return;
+    if (e.cancelable) e.preventDefault();          // stop the page scrolling under the drag
     const r = boxRef.current.getBoundingClientRect();
-    const px = Math.max(0, Math.min(img.naturalWidth, (e.clientX - r.left) / scale));
-    const py = Math.max(0, Math.min(img.naturalHeight, (e.clientY - r.top) / scale));
+    const px = Math.max(0, Math.min(img.naturalWidth, (t.clientX - r.left) / scale));
+    const py = Math.max(0, Math.min(img.naturalHeight, (t.clientY - r.top) / scale));
     setQuad((q) => q.map((pt, i) => (i === drag ? [px, py] : pt)));
   };
+  // A release outside the modal (or outside the window) must still end the drag, or a
+  // handle stays glued to the cursor.
+  useEffect(() => {
+    if (drag == null) return;
+    const end = () => setDrag(null);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("touchend", end);
+    window.addEventListener("blur", end);
+    return () => {
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("touchend", end);
+      window.removeEventListener("blur", end);
+    };
+  }, [drag]);
 
   const finish = async (straighten) => {
     setBusy(true);
     try {
       if (!straighten) { onDone(file); return; }
       const out = ssWarpQuad(img, quad, aspect, 1024);
+      // A quad the solver refuses (collinear/duplicate corners) or a warp that produced
+      // nothing usable falls back to the original photo rather than uploading a ruined one.
       if (!out) { onDone(file); return; }
       const blob = await new Promise((res) => out.toBlob(res, "image/jpeg", 0.9));
       // JPEG, not WEBP: Safari's canvas WEBP encoder support is patchy and a silent
@@ -5359,14 +5423,15 @@ function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.75)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
-      onMouseMove={moveTo} onMouseUp={() => setDrag(null)}>
+      onPointerMove={moveTo} onPointerUp={() => setDrag(null)} onTouchMove={moveTo} onTouchEnd={() => setDrag(null)}>
       <div style={{ background: "#FFF", borderRadius: 14, padding: 18, maxWidth: 560, width: "100%", maxHeight: "92vh", overflowY: "auto" }}>
         <div style={{ fontWeight: 800, fontSize: 16, color: "#0F172A", marginBottom: 4 }}>Straighten this photo</div>
         <p style={{ margin: "0 0 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
           Drag the four dots onto the corners of the door itself. We'll square it up so it sits flat on the building in 3D.
           If the photo is already straight on, just use it as-is.
         </p>
-        {!img && <div style={{ fontSize: 13, color: "#64748B" }}>Loading photo…</div>}
+        {err && <div style={{ fontSize: 13, color: "#DC2626", fontWeight: 600 }}>{err}</div>}
+        {!img && !err && <div style={{ fontSize: 13, color: "#64748B" }}>Loading photo…</div>}
         {img && (
           <div ref={boxRef} style={{ position: "relative", width: dispW, height: dispH, margin: "0 auto", userSelect: "none", touchAction: "none" }}>
             <img src={img.src} alt="" style={{ width: dispW, height: dispH, display: "block", borderRadius: 6 }} draggable={false} />
@@ -5374,7 +5439,7 @@ function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
               <polygon points={quad.map(([x, y]) => `${x * scale},${y * scale}`).join(" ")} fill="rgba(124,58,237,0.16)" stroke="#7C3AED" strokeWidth="2" />
             </svg>
             {quad.map(([x, y], i) => (
-              <div key={i} onMouseDown={() => setDrag(i)}
+              <div key={i} onPointerDown={(e) => { if (e.currentTarget.setPointerCapture && e.pointerId != null) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_e) {} } setDrag(i); }} onTouchStart={() => setDrag(i)}
                 style={{ position: "absolute", left: x * scale - 9, top: y * scale - 9, width: 18, height: 18, borderRadius: "50%", background: "#7C3AED", border: "2px solid #FFF", boxShadow: "0 1px 4px rgba(0,0,0,0.4)", cursor: "grab" }} />
             ))}
           </div>
