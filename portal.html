@@ -10013,6 +10013,11 @@ function Dashboard({ session }) {
           {navItem("leads", "Contacts")}
           {navItem("inventory", "Inventory")}
           {soonItem("orders", "Orders", "In Dev")}
+          {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order, all
+              badged In Dev (they navigate; content is entitlement-gated inside). */}
+          {soonItem("build-schedule", "Build Schedule", "In Dev")}
+          {soonItem("delivery-schedule", "Delivery Schedule", "In Dev")}
+          {soonItem("repairs", "Repairs", "In Dev")}
           {soonItem("commissions", "Commissions", "In Dev")}
           {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
               NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
@@ -10022,13 +10027,9 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
-          {schedUnlocked ? navItem("repairs", "Repairs") : soonItem("repairs", "Repairs", "New")}
           {soonItem("view-3d", "3D Design", "3rd Qtr")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
-          {/* Live for operators + subscribed tenants; a "New" badge invites everyone else. */}
-          {schedUnlocked ? navItem("build-schedule", "Build Schedule") : soonItem("build-schedule", "Build Schedule", "New")}
-          {schedUnlocked ? navItem("delivery-schedule", "Delivery Schedule") : soonItem("delivery-schedule", "Delivery Schedule", "New")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
         </nav>
 
