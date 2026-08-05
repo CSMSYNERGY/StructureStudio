@@ -11146,4 +11146,95 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(function () { /* non-fatal: app works without it */ });
   });
 }
-</script></body></html>
+</script><script data-ss-app="portal">
+/* ── CDN boot guard ───────────────────────────────────────────────────────────────────────
+   The four <script> tags at the top of this page are its ONLY dependencies, and there is no
+   build step. A single failed or blocked request used to produce a PERMANENTLY BLANK PAGE:
+   babel-standalone still compiled the mount block, the block threw on the first missing
+   global, and the visitor got nothing at all — no message, nothing to act on. Seen live on
+   2026-08-04 and 2026-08-05 ("Uncaught ReferenceError: ReactDOM is not defined"), the second
+   time to GOOGLEBOT, i.e. a tenant's public shopfront was crawled blank.
+
+   WHY THIS IS PLAIN JS AT THE END OF THE BODY, and not a check inside the mount block:
+     * If babel-standalone is the script that failed, EVERY type="text/babel" block on the
+       page never executes — blank and completely unlogged, because the error reporter itself
+       lives inside one of those blocks. Only plain JS can see and report that case.
+     * A plain inline script runs during parsing, while babel-standalone transforms on
+       DOMContentLoaded. So this runs BEFORE the blocks above and can still stop them —
+       verified: document.readyState is "loading" here and the blocks have not run yet.
+     * Sitting after them in the document means they are already in the DOM to neutralise.
+     * The four CDN tags block parsing, so all four have resolved (loaded or failed) by now.
+
+   KEEP THIS BLOCK BYTE-IDENTICAL ACROSS index.html / portal.html / admin.html — preflight
+   enforces it, exactly as it enforces the CDN version lock. The mount blocks themselves are
+   NOT twinned, so nothing else would notice one page drifting. The only per-page difference
+   is the data-ss-app label on the tag above, which names the app in the message.
+*/
+(function () {
+  try {
+    var app = (document.currentScript && document.currentScript.getAttribute("data-ss-app")) || "page";
+    var missing = [];
+    if (typeof React === "undefined" || !React) missing.push("react");
+    if (typeof ReactDOM === "undefined" || !ReactDOM) missing.push("react-dom");
+    if (!window.supabase || typeof window.supabase.createClient !== "function") missing.push("supabase-js");
+    if (typeof Babel === "undefined" || !Babel) missing.push("babel-standalone");
+    if (!missing.length) return;
+
+    // Stop Babel compiling the blocks above. Without this they still run and still throw on
+    // the missing global — an app_errors row that reads like a product bug, on top of a
+    // message the visitor has already been given.
+    var tags = document.querySelectorAll('script[type="text/babel"]');
+    for (var i = 0; i < tags.length; i++) tags[i].type = "text/ss-boot-blocked";
+
+    // A broken render must never be indexed. Googlebot executes this; the healthy path
+    // returns above, so a working page never gets the tag.
+    var meta = document.createElement("meta");
+    meta.setAttribute("name", "robots");
+    meta.setAttribute("content", "noindex");
+    document.head.appendChild(meta);
+
+    // Plain HTML and no framework — the framework is what failed. The font is inherited from
+    // the page's own body rule, which is in the document, not on a CDN.
+    var host = document.getElementById("root") || document.body;
+    host.innerHTML =
+      '<div style="max-width:560px;margin:12vh auto;padding:0 24px;color:#1E293B">'
+      + '<h1 style="font-size:20px;line-height:1.35;margin:0 0 10px">Couldn\'t load the ' + app + '</h1>'
+      + '<p style="margin:0 0 16px;font-size:16px;line-height:1.5;color:#475569">Check your connection and reload the page.</p>'
+      + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">A library this page needs did not load ('
+      + missing.join(", ")
+      + '). That is usually a dropped connection, a VPN or company network, or a browser'
+      + ' extension blocking cdnjs.cloudflare.com or cdn.jsdelivr.net.</p>'
+      + '<button type="button" id="ss-boot-reload" style="font:inherit;font-size:15px;padding:9px 18px;'
+      + 'border:0;border-radius:8px;background:#2563EB;color:#FFF;cursor:pointer">Reload</button>'
+      + '</div>';
+    var btn = document.getElementById("ss-boot-reload");
+    if (btn) btn.addEventListener("click", function () { location.reload(); });
+
+    // Report it. A distinct source AND code so these are trivially separable from real
+    // product bugs: source "boot", code "boot_deps_missing". The page's own ssLogError cannot
+    // be used — it lives in the babel block just neutralised, and even hoisted its
+    // SUPABASE_* consts never initialised. Duplicating the URL and anon key here is the same
+    // deliberate trade index.html already documents for its own logger: babel blocks share no
+    // top-level consts, and the anon key is browser-safe by design. log_error stamps the user
+    // agent server-side from the request headers, which is what tells a crawler apart from a
+    // real visitor — the ambiguity that made the first of the two rows above hard to read.
+    var KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+    fetch("https://jzeamjbhdrsbygdnphbm.supabase.co/rest/v1/rpc/log_error", {
+      method: "POST",
+      keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": KEY, "Authorization": "Bearer " + KEY },
+      body: JSON.stringify({
+        p_source: "boot",
+        p_message: "boot aborted: CDN dependencies did not load (" + missing.join(", ") + ")",
+        p_code: "boot_deps_missing",
+        p_client_id: new URLSearchParams(location.search).get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: { app: app, missing: missing }
+      })
+    }).catch(function () {});
+  } catch (_e) {
+    /* A guard that throws is worse than no guard. */
+  }
+})();
+</script>
+</body></html>
