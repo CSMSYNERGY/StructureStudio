@@ -2228,7 +2228,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: soon ? "default" : "pointer", overflow: "hidden" }}>
                   {soon && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2, pointerEvents: "none" }}>
-                      <span style={{ transform: "rotate(-12deg)", background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>Coming soon</span>
+                      <span style={{ transform: "rotate(-12deg)", background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon"}</span>
                     </div>
                   )}
                   <div style={{ opacity: soon ? 0.45 : 1 }}>
