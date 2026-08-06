@@ -323,8 +323,47 @@ function ssPagePath(page, sub) {
 
 // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
 // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is
-// admin-only.
+// admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
+// 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
 const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+
+// Which permission area each page needs to be VISIBLE (migration 100). The server ships the
+// caller's resolved map on the status call and enforces it on every action regardless —
+// this only decides what is worth showing, so that a driver sees a portal made of the four
+// things they do rather than a wall of tabs that 403.
+//
+// A page absent from this map is not access-controlled: "releases" is product news, and the
+// coming-soon teasers render no tenant data at all.
+const TAB_AREA = {
+  designer: "designer",
+  designs: "designs",
+  leads: "contacts",
+  inventory: "inventory",
+  orders: "orders",
+  "build-schedule": "build_schedule",
+  "delivery-schedule": "delivery_schedule",
+  repairs: "repairs",
+  commissions: "commissions",
+  reports: "reports",
+  quickbooks: "settings_quickbooks",
+};
+// Settings is a hub: show it if ANY of its cards is readable, then each card gates itself.
+const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
+  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing"];
+
+// 'own' (commissions) counts as read — see canRead in _shared/access.ts. Kept deliberately
+// tiny and mirrored rather than imported: portal.html has no module loader, and the SERVER
+// is the enforcement point, so a drift here costs a wrong tab and never wrong access.
+function ssCanRead(access, area) {
+  const v = access && access[area];
+  return v === "view" || v === "edit" || v === "own";
+}
+function ssCanSeeTab(tab, access) {
+  if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
+  if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
+  const area = TAB_AREA[tab];
+  return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
+}
 
 // "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
 // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
@@ -335,9 +374,12 @@ const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on
 // to sit ABOVE Dashboard's early returns (tenant loading / no tenant) — a hook below them
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
-function ssClampTab(tab, isOperator, canAdmin) {
+function ssClampTab(tab, isOperator, canAdmin, access) {
   if (tab === "accounts" || tab === "admin") return isOperator ? tab : "designs";
-  return (!canAdmin && !NONADMIN_TABS.includes(tab)) ? "designs" : tab;
+  // Owners, admins and operators are never clamped — an owner locked out of their own
+  // portal by a permission bug is the one failure this feature must not have.
+  if (canAdmin) return tab;
+  return ssCanSeeTab(tab, access) ? tab : "designs";
 }
 
 const ACCENT = "#3D3672";  // brand purple
@@ -10521,7 +10563,8 @@ function Dashboard({ session }) {
   // `wanted` holds the URL's request until the gates have actually resolved, so an operator
   // whose app_operators row is still in flight is not mistaken for a refusal.
   const canAdminForUrl = viewing ? isOperator : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
-  const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl);
+  const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
+    (tenant && tenant !== "none") ? tenant.access : null);
   useEffect(() => {
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
@@ -10599,7 +10642,19 @@ function Dashboard({ session }) {
       if (cfg && cfg.company_name) {
         businessName = cfg.company_name;
       }
-      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user" });
+      // Per-area access (migration 100) comes from the SERVER's resolved map, not from
+      // client_users.access — that column holds only the deviations from the title preset,
+      // and resolving it here would mean a second copy of PRESETS in the browser that
+      // drifts the day an area is added. `status` is the "open" bootstrap action precisely
+      // so every role can make this call. On failure `access` stays undefined and
+      // ssCanSeeTab falls back to the old role behaviour: a nav that is too generous, never
+      // one that is too strict, and the server refuses the action either way.
+      let access = null;
+      try {
+        const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+        if (st && st.access) access = st.access;
+      } catch (_e) { /* keep the fallback */ }
+      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access });
     })();
   }, [session]);
 
@@ -10653,6 +10708,10 @@ function Dashboard({ session }) {
   // absent entirely — so using it here would leave Settings dead in the viewed account,
   // which is exactly the "only two tabs" symptom Carolyn reported.
   const canAdmin = viewing ? isOperator : isAdmin;
+  // The caller's resolved per-area map, straight from the status call (migration 100).
+  // Operators viewing a tenant have none — their rights come from app_operators — and
+  // canAdmin short-circuits every check below for them.
+  const myAccess = (tenant && tenant !== "none") ? tenant.access : null;
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions.
   const effClientId = viewing ? viewing.clientId : tenant.clientId;
@@ -10675,7 +10734,7 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = ssClampTab(tab, isOperator, canAdmin);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess);
 
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -10760,7 +10819,12 @@ function Dashboard({ session }) {
 
   // Real <button>s (not href-less anchors) so the nav stays keyboard- and
   // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
-  const navItem = (id, label, badge) => (
+  // Hidden, not padlocked: a padlock means "yours when you upgrade" (the billing gate).
+  // A page your access does not include is not something you can buy your way into, so
+  // showing it would just be a dead end. accounts/admin are operator-gated separately.
+  const navHidden = (id) =>
+    id !== "accounts" && id !== "admin" && !canAdmin && !ssCanSeeTab(id, myAccess);
+  const navItem = (id, label, badge) => navHidden(id) ? null : (
     <button type="button" className={activeTab === id ? "active" : ""}
       title={gateLocked ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
       onClick={() => navigate(id)}>
@@ -10774,7 +10838,7 @@ function Dashboard({ session }) {
   );
   // Same as navItem but with a status pill — "Soon" by default, or a custom badge
   // (e.g. "In Development") for tabs that are further along than the teaser ones.
-  const soonItem = (id, label, badge) => (
+  const soonItem = (id, label, badge) => navHidden(id) ? null : (
     <button type="button" className={activeTab === id ? "active" : ""} title={label + " — " + (badge ? badge.toLowerCase() : "coming soon")} onClick={() => navigate(id)}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
@@ -10828,8 +10892,11 @@ function Dashboard({ session }) {
 
         <div className="ss-spacer"></div>
 
-        {/* Settings pinned at the bottom, just above the footer divider */}
-        {canAdmin && (
+        {/* Settings pinned at the bottom, just above the footer divider. Was canAdmin-only;
+            now anyone holding at least one settings area sees it (migration 100) and each
+            card inside gates itself — a person given only Structures gets Settings with
+            Structures in it, which is the point of per-area access. */}
+        {(canAdmin || ssCanSeeTab("settings", myAccess)) && (
           <nav className="ss-nav" style={{ marginBottom: 10 }}>
             {navItem("settings", "Settings")}
           </nav>

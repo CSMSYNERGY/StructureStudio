@@ -192,6 +192,45 @@ function run(files) {
     }
   }
 
+  // Every action in a gated edge function must have a line in that function's GATES table.
+  //
+  // WHY THIS IS A PUSH-BLOCKING RULE. Per-person access (migration 100) is enforced by one
+  // table per function, checked in resolveTenant before dispatch. That design is only sound
+  // while the table is COMPLETE: these functions are long `if (action === "x")` chains, so a
+  // branch is reachable the moment it is written. resolveTenant refuses actions missing from
+  // the table, which turns the mistake into a 403 instead of an open endpoint — but a 403 on
+  // a brand-new feature reads like a bug in the feature, and the tempting fix is to widen the
+  // gate rather than to write the right one. Catching it here says exactly what is wrong.
+  // The reverse (a table entry with no branch) is caught too: a stale line is a claim that
+  // something is protected when nothing by that name exists.
+  for (const fn of ["portal-settings", "portal-schedule", "portal-billing", "sync-design-status"]) {
+    const src = readFileSync(join(root, "supabase", "functions", fn, "index.ts"), "utf8");
+    const start = src.indexOf("const GATES: GateTable = {");
+    if (start < 0) {
+      errors.push(`supabase/functions/${fn}/index.ts: no GATES table — every JWT-authenticated `
+        + "function must declare one (see _shared/access.ts)");
+      continue;
+    }
+    const rest = src.slice(start);
+    const end = rest.search(/\n\};/);
+    const table = rest.slice(0, end);
+    const body = rest.slice(end);
+    const gated = new Set([...table.matchAll(/^\s*([a-z_]+)\s*:/gm)].map((m) => m[1]));
+    const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
+    for (const a of used) {
+      if (!gated.has(a)) {
+        errors.push(`supabase/functions/${fn}/index.ts: action "${a}" has no entry in GATES — `
+          + "add the area and level it requires, or it is refused at runtime");
+      }
+    }
+    for (const a of gated) {
+      if (!used.has(a)) {
+        errors.push(`supabase/functions/${fn}/index.ts: GATES lists "${a}" but no branch handles `
+          + "it — remove the stale entry so the table describes what actually exists");
+      }
+    }
+  }
+
   // Cache-buster lockstep between the two hosts of the shared module.
   const buster = (html) => (html.match(/structure-studio\.component\.js\?v=([a-z0-9]+)/) || [])[1];
   const vi = buster(files["index.html"]);

@@ -1,10 +1,21 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 
 // This function exposes a single implicit action; everything it does is a read.
-const SYNC_READS = new Set(["sync"]);
+// WHAT THIS FUNCTION REQUIRES (migration 100) — see _shared/access.ts.
+//
+// designs:'view', not 'edit'. This endpoint writes designs rows, but it is a REFRESH the
+// portal fires on load, not a user editing anything: it recomputes status from GHL. Gating
+// it on edit would break the Designs tab for exactly the read-only roles (crew leader,
+// driver) whose presets are designs:'view'.
+//
+// It also closes a hole the old shape had: `payload.action` was never validated, so any
+// value other than "sync" fell out of SYNC_READS and was treated as a write. Unknown
+// actions are now refused by the table.
+const GATES: GateTable = { sync: { area: "designs", level: "view" } };
 
 // sync-design-status — refresh each design's fulfillment status FROM GoHighLevel.
 //
@@ -132,7 +143,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   // reclassify it as a write just because it caches `designs.status`. Doing so would
   // silently break every non-admin login.
   const admin = createClient(supabaseUrl, serviceKey);
-  const r = await resolveTenant(req, admin, { readActions: SYNC_READS, defaultAction: "sync" });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "sync" });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload } = r.ctx;
 

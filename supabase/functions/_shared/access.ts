@@ -160,3 +160,90 @@ export function mayGrant(
 export function accessMetadata() {
   return { areas: AREAS, titles: TITLES, presets: PRESETS };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Action gates — the table IS the permission check
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// WHY A TABLE AND NOT A CHECK PER BRANCH. Every one of these functions is a long
+// `if (action === "x") { ...; return }` chain — portal-settings alone is 51 of them. In
+// that shape a branch with a forgotten check does not fail, it RUNS: only an *unmatched*
+// action reaches the closing 400. So "add requireAccess() to each branch" would make the
+// security of this feature equal to how reliably a person remembers, forever, across four
+// files. It would hold today and rot on the first busy afternoon.
+//
+// Instead each function declares one table and resolveTenant checks it BEFORE dispatch.
+// An action that is not in the table is REFUSED (see resolveTenant's "Unrecognised
+// action"), so the failure mode of forgetting flips from "silently public" to "my new
+// endpoint 403s the moment I test it". That is the only direction this can safely fail,
+// and scripts/preflight.mjs pins it: every `action === "…"` literal in a gated function
+// must appear in that function's table, or the push is blocked.
+//
+// This table also REPLACES the old readActions/selfActions/staffActions role sets. Keeping
+// both would mean two permission models disagreeing: a crew leader granted
+// build_schedule:'edit' would pass canEdit() and then still be 403'd by the role gate,
+// which is exactly the per-person control Carolyn asked for failing to work. The read/write
+// split those sets also encoded (used for read-only OPERATORS) is derived from the gate's
+// own level instead — one fact, one place.
+
+/** One requirement: `level` is the MINIMUM. 'view' is satisfied by view/edit/own. */
+export type GateNeed = { area: string; level: "view" | "edit" };
+
+export type Gate =
+  /** Any signed-in member of the tenant. ONLY for bootstrap calls the portal shell cannot
+   *  render without — gating those locks everyone out of the app, not out of an area. */
+  | "open"
+  /** A write, but only ever to the caller's OWN row. The handler must key off ctx.userId
+   *  and never a body-supplied id — this gate cannot enforce that for you. */
+  | "self"
+  | GateNeed
+  /** Satisfied by ANY one of these — for payloads two areas legitimately share. */
+  | { any: GateNeed[] }
+  /** Requires EVERY one — for actions whose side effects cross areas (deleting an
+   *  inventory unit also deletes its design), so holding one area is not enough. */
+  | { all: GateNeed[] };
+
+export type GateTable = Record<string, Gate>;
+
+function needs(g: Gate): GateNeed[] {
+  if (g === "open" || g === "self") return [];
+  if ("any" in g || "all" in g) return (g as { any?: GateNeed[]; all?: GateNeed[] }).any ?? (g as { all: GateNeed[] }).all;
+  return [g as GateNeed];
+}
+
+/**
+ * Is this action a READ? Derived from the gate rather than a second hand-kept list.
+ * Used for the read-only-operator capability check, so a gate that requires 'edit'
+ * anywhere is a write.
+ */
+export function gateIsRead(g: Gate | undefined): boolean {
+  if (!g) return false;
+  if (g === "open") return true;
+  if (g === "self") return false;          // a self-service write is still a write
+  return needs(g).every((n) => n.level === "view");
+}
+
+/**
+ * Does this caller satisfy the gate? Returns null when allowed, or a message when not.
+ *
+ * The message deliberately names the AREA and not the action: "you do not have access to
+ * Billing" is something an owner can act on, whereas "cancel denied" is not.
+ */
+export function checkGate(
+  g: Gate | undefined,
+  access: Record<string, Level>,
+): string | null {
+  if (!g) return "Unrecognised action.";
+  if (g === "open" || g === "self") return null;
+  const list = needs(g);
+  const ok = (n: GateNeed) => (n.level === "edit" ? canEdit(access, n.area) : canRead(access, n.area));
+  const label = (n: GateNeed) => AREA_BY_KEY.get(n.area)?.label ?? n.area;
+  if (typeof g === "object" && "any" in g) {
+    if (list.some(ok)) return null;
+    return `Your access does not include ${list.map(label).join(" or ")}. Ask an owner or admin.`;
+  }
+  const missing = list.filter((n) => !ok(n));
+  if (!missing.length) return null;
+  const verb = missing.some((n) => n.level === "edit") ? "change" : "view";
+  return `Your access does not let you ${verb} ${missing.map(label).join(" and ")}. Ask an owner or admin.`;
+}

@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import type { GateTable } from "../_shared/access.ts";
 
 // Build Schedule + Delivery Schedule (Load Planner) + Repairs backend.
 // Spec: SCHEDULING_SCOPE.md (mockup approved by Carolyn 2026-08-04).
@@ -26,8 +27,67 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 //   * Marking an order's stop delivered sets designs.status='delivered' + delivered_at
 //     (the fence in sync-design-status ships with the Delivery tab UI — Phase 4).
 
-const READ_ACTIONS = new Set(["build_board", "loads", "pool", "list_repairs", "list_drivers", "repair_photos"]);
-const STAFF_ACTIONS = new Set(["move_job", "add_note", "mark_stop_delivered"]);
+// WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts. resolveTenant checks
+// this before dispatch and refuses any action missing from it, so the three schedule areas
+// are enforced by a table rather than by 32 remembered checks.
+//
+// This replaces READ_ACTIONS/STAFF_ACTIONS. Those said "any linked role may move a job or
+// mark a stop delivered", which was the only thing available before per-person access
+// existed; now a crew leader gets build_schedule:'edit' from their preset and a sales rep
+// does not, which is what Carolyn actually asked for.
+const GATES: GateTable = {
+  // ── Build schedule ───────────────────────────────────────────────────────
+  build_board:  { area: "build_schedule", level: "view" },
+  move_job:     { area: "build_schedule", level: "edit" },
+  add_note:     { area: "build_schedule", level: "edit" },
+  save_stages:  { area: "build_schedule", level: "edit" },
+  // create_job burns a number from the shared take_next_serial() sequence, so this level
+  // also spends an Inventory-visible resource. Deliberately still build_schedule alone:
+  // it is the board's own "add to schedule" button, and requiring inventory:edit would stop
+  // a crew leader scheduling a build.
+  create_job:   { area: "build_schedule", level: "edit" },
+  update_job:   { area: "build_schedule", level: "edit" },
+  complete_job: { area: "build_schedule", level: "edit" },
+  delete_job:   { area: "build_schedule", level: "edit" },
+
+  // ── Delivery schedule ────────────────────────────────────────────────────
+  loads:        { area: "delivery_schedule", level: "view" },
+  // The "to be loaded" pool is a cross-area QUERY (build jobs + sold units + open repairs),
+  // but it exists to fill the delivery board and is gated as that board's read.
+  pool:         { area: "delivery_schedule", level: "view" },
+  // Returns the driver roster (names + ids) — team-shaped data, but a dispatcher cannot
+  // assign a load without it, and it is this tenant's own staff list.
+  list_drivers: { area: "delivery_schedule", level: "view" },
+  create_load:  { area: "delivery_schedule", level: "edit" },
+  update_load:  { area: "delivery_schedule", level: "edit" },
+  delete_load:  { area: "delivery_schedule", level: "edit" },
+  add_stop:     { area: "delivery_schedule", level: "edit" },
+  update_stop:  { area: "delivery_schedule", level: "edit" },
+  remove_stop:  { area: "delivery_schedule", level: "edit" },
+  reorder_stops: { area: "delivery_schedule", level: "edit" },
+  // These three write designs.status/delivered_at, and the sync-design-status fence makes
+  // 'delivered' effectively permanent — a delivery right is a designs right in practice.
+  mark_load_out:       { area: "delivery_schedule", level: "edit" },
+  mark_load_delivered: { area: "delivery_schedule", level: "edit" },
+  mark_stop_delivered: { area: "delivery_schedule", level: "edit" },
+
+  // ── Repairs ──────────────────────────────────────────────────────────────
+  list_repairs:  { area: "repairs", level: "view" },
+  repair_photos: { area: "repairs", level: "view" },
+  create_repair: { area: "repairs", level: "edit" },
+  update_repair: { area: "repairs", level: "edit" },
+  // Cascades into build_jobs and delivery_stops via FK, so this deletes rows owned by two
+  // other areas. Left on repairs:edit because the repair IS the parent record and the
+  // cascade is the point; noted here so the blast radius is not a surprise later.
+  delete_repair: { area: "repairs", level: "edit" },
+  upload_repair_photo: { area: "repairs", level: "edit" },
+  delete_repair_photo: { area: "repairs", level: "edit" },
+
+  // ── Team (Settings → Team cards) ─────────────────────────────────────────
+  save_territory: { area: "settings_team", level: "edit" },
+  save_crew:      { area: "settings_team", level: "edit" },
+  save_driver:    { area: "settings_team", level: "edit" },
+};
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -108,8 +168,8 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
   const admin = createClient(supabaseUrl, serviceKey);
 
   const r = await resolveTenant(req, admin, {
-    readActions: READ_ACTIONS,
-    staffActions: STAFF_ACTIONS,
+    gates: GATES,
+    readActions: new Set(),
     defaultAction: "build_board",
   });
   if (!r.ok) return json(r.body, r.status);

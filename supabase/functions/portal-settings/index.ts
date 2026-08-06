@@ -6,23 +6,109 @@ import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboN
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
-// Any linked account may read these; everything else requires owner/admin (or an
-// operator with can_write). Hoisted above the handler so the resolver can consult it.
-const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile", "qbo_status",
-  // Inventory (075): any linked account may VIEW inventory and locations — same posture
-  // as the Designs tab. All inventory writes stay owner/admin (or operator can_write).
-  "list_locations", "list_inventory"]);
-// Self-service: a WRITE any role may make, because it only ever touches the caller's own
-// client_users row (scoped to ctx.userId below, never to anything from the body). Kept out of
-// READ_ACTIONS on purpose — mislabelling a write as a read would make the permission gate
-// misdescribe what it allows. Without this a "user"-role account could not set its own name.
-const SELF_ACTIONS = new Set(["save_profile"]);
-// Writes any linked role may make as part of ordinary selling (see resolveTenant's
-// staffActions). link_design_to_unit only tags a design this same tenant just created
-// with the inventory unit it was quoted from — a role-"user" salesperson can send that
-// estimate, so they must be able to complete it. Owner/admin-only here meant the link
-// silently 403'd and the building never showed the estimate or flipped to Sold.
-const STAFF_ACTIONS = new Set(["link_design_to_unit"]);
+import type { GateTable } from "../_shared/access.ts";
+
+// WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
+// refuses anything absent, so adding a branch without adding a line here 403s on the first
+// call rather than shipping open to every signed-in employee. See _shared/access.ts for why
+// this is a table and not a check inside each of the 51 branches below.
+//
+// This replaces the old READ_ACTIONS / SELF_ACTIONS / STAFF_ACTIONS sets entirely.
+const GATES: GateTable = {
+  // ── Bootstrap ────────────────────────────────────────────────────────────
+  // `status` is the portal's FIRST call and the default action: it carries clientId, role,
+  // operatorMode and the business identity the shell renders around every tab. Gating it on
+  // settings_crm would lock a driver out of the whole application rather than out of the CRM
+  // card, so it stays open and the CRM/QuickBooks fields inside it are filtered per-area at
+  // the branch instead (search: STATUS FIELD FILTER).
+  status: "open",
+
+  // ── Your own account ─────────────────────────────────────────────────────
+  get_profile: "self",
+  save_profile: "self",
+
+  // ── Structures ───────────────────────────────────────────────────────────
+  // `catalog` is one payload serving both Settings groups (styles+sizes+prices AND
+  // colors/layout/fixtures), and portal.html loads it from five different cards. `any` so a
+  // person holding only one of the two still gets their own screen; splitting the payload
+  // is the cleaner fix and belongs with the Team screen, not here.
+  catalog: { any: [{ area: "settings_structures", level: "view" }, { area: "settings_options", level: "view" }] },
+  import_pricing_csv:        { area: "settings_structures", level: "edit" },
+  create_style:              { area: "settings_structures", level: "edit" },
+  update_style:              { area: "settings_structures", level: "edit" },
+  delete_style:              { area: "settings_structures", level: "edit" },
+  reorder_styles:            { area: "settings_structures", level: "edit" },
+  set_style_active:          { area: "settings_structures", level: "edit" },
+  set_style_estimate_image:  { area: "settings_structures", level: "edit" },
+
+  // ── Options & colours ────────────────────────────────────────────────────
+  save_colors:                    { area: "settings_options", level: "edit" },
+  save_layout_pricing:            { area: "settings_options", level: "edit" },
+  upload_layout_image:            { area: "settings_options", level: "edit" },
+  upload_fixture_image:           { area: "settings_options", level: "edit" },
+  save_fixture:                   { area: "settings_options", level: "edit" },
+  delete_fixture:                 { area: "settings_options", level: "edit" },
+  reorder_fixtures:               { area: "settings_options", level: "edit" },
+  import_fixtures:                { area: "settings_options", level: "edit" },
+  set_layout_item_archived:       { area: "settings_options", level: "edit" },
+  set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
+  save_ramp_settings:             { area: "settings_options", level: "edit" },
+  // Legacy full-replace writers. The portal no longer calls these, but they are live
+  // endpoints and a live endpoint needs a gate whether or not anything drives it.
+  save_doors:   { area: "settings_options", level: "edit" },
+  save_ramps:   { area: "settings_options", level: "edit" },
+  save_windows: { area: "settings_options", level: "edit" },
+
+  // ── Branding, business details, lots ─────────────────────────────────────
+  // `save` writes CRM credentials AND business identity/quote terms in one call, so it
+  // requires both. Conservative on purpose: today every title holding one holds the other,
+  // and the alternative (pick one area, write both) would let half the form through a gate
+  // that names the other half.
+  save: { all: [{ area: "settings_crm", level: "edit" }, { area: "settings_branding", level: "edit" }] },
+  save_branding: { area: "settings_branding", level: "edit" },
+  upload_logo:   { area: "settings_branding", level: "edit" },
+  save_location:   { area: "settings_branding", level: "edit" },
+  delete_location: { area: "settings_branding", level: "edit" },
+  // The lot list is a Settings card AND the Inventory tab's location picker — two
+  // populations, neither of which covers the other.
+  list_locations: { any: [{ area: "settings_branding", level: "view" }, { area: "inventory", level: "view" }] },
+  // The serial counter is shared by Inventory and Orders but is configured from a Settings
+  // card; branding is where that card lives, and it is an owner/admin-shaped decision.
+  save_serial_start: { area: "settings_branding", level: "edit" },
+
+  // ── CRM ──────────────────────────────────────────────────────────────────
+  verify_save_ghl:     { area: "settings_crm", level: "edit" },
+  list_ghl_pipelines:  { area: "settings_crm", level: "view" },
+
+  // ── QuickBooks ───────────────────────────────────────────────────────────
+  qbo_status:      { area: "settings_quickbooks", level: "view" },
+  qbo_pending:     { area: "settings_quickbooks", level: "view" },
+  list_item_map:   { area: "settings_quickbooks", level: "view" },
+  list_qbo_items:  { area: "settings_quickbooks", level: "view" },
+  save_item_map:   { area: "settings_quickbooks", level: "edit" },
+  // `qbo_test` reads like a read — it is a "Test connection" button — but it writes
+  // qbo_company_name and can drive a token refresh. Gated as the write it is.
+  qbo_test:        { area: "settings_quickbooks", level: "edit" },
+  disconnect_qbo:  { area: "settings_quickbooks", level: "edit" },
+  retry_qbo_push:  { area: "settings_quickbooks", level: "edit" },
+
+  // ── Workspace ────────────────────────────────────────────────────────────
+  contact_activity: { area: "contacts", level: "view" },
+  delete_design:    { area: "designs", level: "edit" },
+  // NOT inventory:edit. A sales rep's preset is inventory:'view', and this only tags a
+  // design they just created with the unit it was quoted from — gating it on inventory:edit
+  // recreates the 2026-08-02 bug exactly (estimate sent, link 403s, the building never
+  // shows the estimate and never flips to Sold).
+  link_design_to_unit: { area: "designs", level: "edit" },
+  list_inventory:   { area: "inventory", level: "view" },
+  save_inventory:   { area: "inventory", level: "edit" },
+  update_inventory: { area: "inventory", level: "edit" },
+  // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
+  // is a Designs deletion happening under an Inventory verb, so it needs both.
+  delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
+  // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
+  send_invoice:     { area: "orders", level: "edit" },
+};
 
 // Owner-facing settings endpoint for the portal (portal.html).
 //
@@ -222,9 +308,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // mode actually read and write the viewed account instead of the operator's own.
   // Everything below this block is unchanged and simply uses `clientId`.
   const admin = createClient(supabaseUrl, serviceKey);
-  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, selfActions: SELF_ACTIONS, staffActions: STAFF_ACTIONS, defaultAction: "status" });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail } = r.ctx;
+  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
@@ -271,6 +357,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("company_name, tagline, logo_url, accent_color, header_bg")
       .eq("client_id", clientId)
       .maybeSingle();
+    // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
+    // bootstrap: every role needs clientId/role/branding/business identity to render the
+    // portal at all, so denying it would black out the app rather than close one card. The
+    // CRM wiring inside it is a different matter — pipeline and stage ids are settings_crm
+    // material with no business reaching a driver's browser — so it is filtered here
+    // instead. `access` rides along so portal.html renders tabs from the SAME resolved map
+    // the server just enforced, rather than from a second copy of the rules that can drift.
+    const crm = canRead("settings_crm")
+      ? {
+        configured: Boolean(data?.ghl_location_id && data?.ghl_api_key),
+        ghlLocationIdMasked: maskId(data?.ghl_location_id ?? null),
+        hasApiKey: Boolean(data?.ghl_api_key),
+        ghlPipelineId: data?.ghl_pipeline_id ?? null,
+        ghlStageSendQuoteId: data?.ghl_stage_send_quote_id ?? null,
+        ghlStageAcceptedId: data?.ghl_stage_accepted_id ?? null,
+        ghlStageInvoicedId: data?.ghl_stage_invoiced_id ?? null,
+        ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
+        betaMode: Boolean(data?.beta_mode),
+        betaEmail: data?.beta_email ?? null,
+      }
+      : {};
     return json({
       ok: true,
       // clientId is the RESOLVED tenant (the viewed one in operator mode). portal.html's
@@ -280,22 +387,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       clientId,
       role,
       operatorMode: Boolean(operator),
-      configured: Boolean(data?.ghl_location_id && data?.ghl_api_key),
-      ghlLocationIdMasked: maskId(data?.ghl_location_id ?? null),
-      hasApiKey: Boolean(data?.ghl_api_key),
-      ghlPipelineId: data?.ghl_pipeline_id ?? null,
-      ghlStageSendQuoteId: data?.ghl_stage_send_quote_id ?? null,
-      ghlStageAcceptedId: data?.ghl_stage_accepted_id ?? null,
-      ghlStageInvoicedId: data?.ghl_stage_invoiced_id ?? null,
-      ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
+      access,
+      ...crm,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
       businessWebsite: data?.business_website ?? null,
       businessAddress: data?.business_address ?? null,
       businessLogoUrl: data?.business_logo_url ?? null,
       quoteTerms: data?.quote_terms ?? null,
-      betaMode: Boolean(data?.beta_mode),
-      betaEmail: data?.beta_email ?? null,
       showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)

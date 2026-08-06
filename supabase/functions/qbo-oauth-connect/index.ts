@@ -12,6 +12,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import type { GateTable } from "../_shared/access.ts";
 import { qboOauthReady } from "../_shared/qboToken.ts";
 import { qboEndpoints, withParams } from "../_shared/qboDiscovery.ts";
 
@@ -55,9 +56,13 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  // Empty readActions ⇒ every action counts as a write ⇒ owner/admin or a writing
-  // operator. No extra permission code needed here.
-  const resolved = await resolveTenant(req, admin, { readActions: new Set<string>() });
+  // Starting an Intuit OAuth connect is a QuickBooks settings change (migration 100).
+  // This function takes no `action`, so the default lands on "status" and that one entry is
+  // the whole table — anything else is refused rather than inheriting a write by default.
+  const resolved = await resolveTenant(req, admin, {
+    gates: { status: { area: "settings_quickbooks", level: "edit" } } as GateTable,
+    readActions: new Set<string>(),
+  });
   if (!resolved.ok) return json(resolved.body, resolved.status);
   const { ctx } = resolved;
 

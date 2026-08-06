@@ -1,10 +1,28 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
-const BILLING_READS = new Set(["status"]);
+// WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts.
+//
+// `status` is "open" and must stay that way. settings_billing is the one ownerOnly area, so
+// gating this action on it would 403 the entitlement call for every non-owner — and
+// entitlement is what the whole portal shell reads to decide whether the product is
+// unlocked. A driver would not get a locked Billing tab, they would get a dead portal. The
+// money-shaped half of the payload is filtered inside the branch instead (search: BILLING
+// FIELD FILTER); what stays open is entitlement, which every role's UI genuinely needs.
+//
+// subscribe/cancel are settings_billing:'edit' = OWNERS ONLY. This is a deliberate change
+// from "owner or admin": Carolyn's design makes Billing owner-only, and PRESETS.admin sets
+// it to 'none'. Checked before shipping — this tenant base has 11 owners and no admins at
+// all, so no existing person loses an ability they use today.
+const GATES: GateTable = {
+  status:    "open",
+  subscribe: { area: "settings_billing", level: "edit" },
+  cancel:    { area: "settings_billing", level: "edit" },
+};
 
 // Platform billing endpoint for the portal's Billing tab — CSM Synergy charging
 // tenants for StructureStudio features via the Deposyt/NMI gateway.
@@ -98,12 +116,13 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // every non-read action on this function moves real money against the tenant's card.
   const admin = createClient(supabaseUrl, serviceKey);
   const r = await resolveTenant(req, admin, {
-    readActions: BILLING_READS,
+    gates: GATES,
+    readActions: new Set(),
     defaultAction: "status",
     requireBilling: true,
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, operator, payload, action, userEmail, audit, auditStrict } = r.ctx;
+  const { clientId, operator, payload, action, userEmail, audit, auditStrict, canRead } = r.ctx;
   if (operator) audit(`operator_billing_${action}`).catch(() => {});
   const configured = Boolean(SECURITY_KEY && TOKENIZATION_KEY);
 
@@ -383,16 +402,25 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       charge_cents: chargeCentsFor(p),
       discount_percent: discountForFeature(p.feature),
     }));
+    // BILLING FIELD FILTER. Everyone gets `entitlement` — it is what unlocks the rest of
+    // the portal, and withholding it would lock the product instead of the tab. Nobody but
+    // an owner gets the commercial detail: what this business pays, what discount it has,
+    // whether a card is on file, or the checkout keys to put a new one there.
+    const mine = canRead("settings_billing");
     return json({
       configured,
-      hasCard: Boolean(vaultId),
       entitlement,
-      discount: { percent: discountPct, features: discountFeatures },
-      plans: publicPlans,
-      subscriptions: subs,
-      checkout: configured
-        ? { tokenizationKey: TOKENIZATION_KEY, collectJsUrl: `${GATEWAY}/token/Collect.js` }
-        : null,
+      ...(mine
+        ? {
+          hasCard: Boolean(vaultId),
+          discount: { percent: discountPct, features: discountFeatures },
+          plans: publicPlans,
+          subscriptions: subs,
+          checkout: configured
+            ? { tokenizationKey: TOKENIZATION_KEY, collectJsUrl: `${GATEWAY}/token/Collect.js` }
+            : null,
+        }
+        : { plans: [], subscriptions: [], checkout: null }),
     });
   }
 

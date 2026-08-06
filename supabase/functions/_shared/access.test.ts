@@ -23,7 +23,10 @@ import {
   AREA_KEYS,
   canEdit,
   canRead,
+  checkGate,
   effectiveAccess,
+  type Gate,
+  gateIsRead,
   type Level,
   mayGrant,
   PRESETS,
@@ -116,4 +119,70 @@ Deno.test("an unknown title falls back to the least-privileged preset, not to ev
   const junk = effectiveAccess("user", "wizard", null);
   assertEquals(junk.designs, PRESETS.sales_rep.designs);
   assertEquals(junk.settings_billing, "none");
+});
+
+// ── Action gates ────────────────────────────────────────────────────────────
+// The gate table is only a security control if a MISSING entry denies. Every test below
+// exists because the opposite behaviour is silent: it returns 200 with someone else's data.
+
+Deno.test("an action with no gate is refused, not allowed", () => {
+  // The whole design rests on this. If an ungated action fell through to "allowed", adding
+  // a branch and forgetting the table entry would publish it to every employee.
+  const owner = effectiveAccess("owner", "owner", null);
+  assertEquals(checkGate(undefined, owner), "Unrecognised action.");
+});
+
+Deno.test("gates enforce the minimum level, and 'view' is satisfied by edit", () => {
+  const rep = effectiveAccess("user", "sales_rep", null);
+  assertEquals(checkGate({ area: "designs", level: "view" }, rep), null);
+  assertEquals(checkGate({ area: "designs", level: "edit" }, rep), null, "edit satisfies edit");
+  assertEquals(checkGate({ area: "inventory", level: "view" }, rep), null);
+  assert(checkGate({ area: "inventory", level: "edit" }, rep), "view must not satisfy edit");
+  assert(checkGate({ area: "build_schedule", level: "view" }, rep), "an area they lack");
+});
+
+Deno.test("'any' needs one, 'all' needs every one", () => {
+  const rep = effectiveAccess("user", "sales_rep", null);
+  // catalog: a rep holds neither settings area, so the real table entry denies them.
+  const catalog: Gate = {
+    any: [{ area: "settings_structures", level: "view" }, { area: "settings_options", level: "view" }],
+  };
+  assert(checkGate(catalog, rep));
+  const partial = effectiveAccess("user", "sales_rep", { settings_options: "view" });
+  assertEquals(checkGate(catalog, partial), null, "one of the two is enough for 'any'");
+
+  // delete_inventory: deleting a unit also deletes its design, so both are required.
+  const del: Gate = { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] };
+  const invOnly = effectiveAccess("user", "sales_rep", { inventory: "edit", designs: "none" });
+  assert(checkGate(del, invOnly), "holding one half must not pass an 'all' gate");
+  assertEquals(checkGate(del, effectiveAccess("owner", "owner", null)), null);
+});
+
+Deno.test("owners pass every gate, including the owner-only ones", () => {
+  const owner = effectiveAccess("owner", "owner", null);
+  assertEquals(checkGate({ area: "settings_billing", level: "edit" }, owner), null);
+  const admin = effectiveAccess("admin", "admin", null);
+  assert(checkGate({ area: "settings_billing", level: "edit" }, admin), "admins are not owners here");
+});
+
+Deno.test("read/write classification comes from the gate, not a second list", () => {
+  // This drives the read-only OPERATOR check: misclassifying a write as a read would let a
+  // read-only operator change a tenant's data.
+  assert(gateIsRead("open"));
+  assertFalse(gateIsRead("self"), "a self-service write is still a write");
+  assert(gateIsRead({ area: "designs", level: "view" }));
+  assertFalse(gateIsRead({ area: "designs", level: "edit" }));
+  assert(gateIsRead({ any: [{ area: "a", level: "view" }, { area: "b", level: "view" }] }));
+  assertFalse(
+    gateIsRead({ all: [{ area: "a", level: "view" }, { area: "b", level: "edit" }] }),
+    "one edit anywhere makes the whole action a write",
+  );
+  assertFalse(gateIsRead(undefined));
+});
+
+Deno.test("a denial names the area a human can ask for, not the action", () => {
+  const rep = effectiveAccess("user", "sales_rep", null);
+  const msg = checkGate({ area: "settings_billing", level: "view" }, rep) ?? "";
+  assert(msg.includes("Billing"), `expected the area label, got: ${msg}`);
+  assertFalse(msg.includes("settings_billing"), "no database keys in a message a person reads");
 });
