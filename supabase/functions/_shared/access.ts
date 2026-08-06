@@ -156,6 +156,63 @@ export function mayGrant(
   return RANK[level] <= RANK[granterAccess[area] ?? "none"];
 }
 
+/**
+ * The coarse `role` a title implies. Migration 100 kept `role` (owner|admin|user) as the
+ * column RLS policies and older gates read, so the two must never disagree: a person whose
+ * title says Admin but whose role still says user would pass this module's checks and then
+ * be refused by an RLS policy, which reads as "the app is broken" and is impossible to
+ * diagnose from the screen. Every write of `title` writes `role` alongside it.
+ *
+ * The three staff titles all map to 'user' — their real powers come from the access map,
+ * not from role. That keeps the coarse column meaning exactly what it always meant.
+ */
+export function roleForTitle(title: unknown): "owner" | "admin" | "user" {
+  const t = normTitle(title);
+  return t === "owner" ? "owner" : t === "admin" ? "admin" : "user";
+}
+
+/**
+ * Keep only what is safe to store in client_users.access: known areas, valid levels for
+ * THAT area, and never an owner-only area. Mirrors what effectiveAccess would ignore
+ * anyway — but dropping it at the door means the stored row never contains a claim the
+ * resolver silently disregards, so what an owner sees on the Team screen is what is saved.
+ */
+export function sanitizeAccess(raw: unknown): Record<string, Level> {
+  const out: Record<string, Level> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const area = AREA_BY_KEY.get(k);
+    if (!area || area.ownerOnly) continue;
+    if (area.levels.includes(v as Level)) out[k] = v as Level;
+  }
+  return out;
+}
+
+/**
+ * May `granter` produce this ENTIRE resulting access map for someone else? Returns the
+ * label of the first area they may not grant, or null when the whole map is allowed.
+ *
+ * Checking the RESULT rather than the submitted overrides is the load-bearing part. Access
+ * is stored as deviations from a title's preset, so an admin could hand out everything the
+ * OWNER preset contains while submitting an empty overrides object — simply by setting the
+ * title to Owner. Validating only the overrides would wave that through. Resolve first,
+ * then check every area, and both doors are covered by one rule.
+ */
+export function mayGrantMap(
+  granterRole: string | null | undefined,
+  granterAccess: Record<string, Level>,
+  resulting: Record<string, Level>,
+): string | null {
+  for (const key of AREA_KEYS) {
+    const level = resulting[key] ?? "none";
+    if (level === "none") continue;              // taking access away is always allowed
+    if (!mayGrant(granterRole, granterAccess, key, level)) {
+      return AREA_BY_KEY.get(key)?.label ?? key;
+    }
+  }
+  return null;
+}
+
 /** Metadata the Team screen renders from, so the browser never hard-codes an area list. */
 export function accessMetadata() {
   return { areas: AREAS, titles: TITLES, presets: PRESETS };

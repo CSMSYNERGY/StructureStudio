@@ -347,6 +347,19 @@ const TAB_AREA = {
   reports: "reports",
   quickbooks: "settings_quickbooks",
 };
+// Which area each Settings sub-tab needs. Same registry idea as TAB_AREA above: a sub-tab
+// missing from this map is not access-controlled.
+const SETTINGS_TAB_AREA = {
+  structures: "settings_structures",
+  options: "settings_options",
+  colors: "settings_options",
+  branding: "settings_branding",
+  connection: "settings_crm",
+  quickbooks: "settings_quickbooks",
+  commissions: "commissions",
+  team: "settings_team",
+  billing: "settings_billing",
+};
 // Settings is a hub: show it if ANY of its cards is readable, then each card gates itself.
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
   "settings_crm", "settings_quickbooks", "settings_team", "settings_billing"];
@@ -9848,12 +9861,159 @@ function CommissionStructure({ clientId }) {
 // commission_members table. Admins can add/remove people but see rates as ••• and cannot
 // touch grants; only the owner sees rates and flips the two grants. clientId is resolved
 // server-side from the caller's JWT — the prop is display-only here.
-function CommissionTeam() {
+// ─── Per-person access grid (Settings → Team) ───
+// Carolyn, 2026-08-06: "I want the access to each to be as dynamic as possible per
+// individual. Admins and Owners should assign each user the access they want to give them
+// (tab by tab) and they may choose to give the Read or edit access."
+//
+// Everything this renders — the areas, their labels, the level vocabulary for each row, the
+// per-title presets — arrives from the server in `meta` (accessMetadata()). Nothing about
+// permissions is hard-coded here. That is deliberate: a second copy of the area list in the
+// browser drifts the day someone adds an area, and a permission screen that disagrees with
+// the server is worse than no screen at all, because people trust what it shows them.
+//
+// What is SAVED is only the deviations from the title's preset, which is how the column is
+// defined (migration 100). So changing a preset later improves everyone who never customised
+// their people, and "is this person customised?" stays a real question with a real answer.
+const LEVEL_LABEL = { none: "No access", view: "View", edit: "Edit", own: "Own only" };
+const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
+
+function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave }) {
+  const areas = (meta && meta.areas) || [];
+  const titles = (meta && meta.titles) || [];
+  const presets = (meta && meta.presets) || {};
+  const [title, setTitle] = useState(member.title || "sales_rep");
+  // The map being edited is the EFFECTIVE one — what this person will actually be able to
+  // do. Editing raw deviations would mean showing an owner a blank grid for someone who has
+  // plenty of access, which is exactly the arithmetic this screen exists to remove.
+  const [map, setMap] = useState(() => ({ ...(member.effective || {}) }));
+
+  // Switching the job title reseeds every row from that title's preset. Anything the owner
+  // had already customised in this unsaved session is deliberately discarded — a title IS a
+  // starting point, and silently keeping stale overrides on top of a new one is how someone
+  // ends up a "Driver" holding Structures because it survived from when they were an Admin.
+  const pickTitle = (t) => { setTitle(t); setMap({ ...(presets[t] || {}) }); };
+
+  // What may THIS granter hand out? Never above their own level, and never an owner-only
+  // area. The server enforces the same rule (mayGrantMap) — this only keeps the UI honest,
+  // so nobody clicks something that will 403.
+  const canGrant = (area, level) => {
+    if (level === "none") return true;                       // taking away is always allowed
+    if (area.ownerOnly) return isOwner;
+    if (isOwner) return true;
+    return LEVEL_RANK[level] <= LEVEL_RANK[(myAccess || {})[area.key] || "none"];
+  };
+
+  const preset = presets[title] || {};
+  const deviations = areas.filter((a) => (map[a.key] || "none") !== (preset[a.key] || "none"));
+  const group = (g) => areas.filter((a) => a.group === g);
+
+  const row = (a) => {
+    const cur = map[a.key] || "none";
+    const off = (preset[a.key] || "none") !== cur;
+    return (
+      <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: "1px solid #F1F5F9" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+            {a.label}
+            {off && <span style={{ marginLeft: 7, fontSize: 10, fontWeight: 700, color: ACCENT, background: "#EDE9FE", borderRadius: 20, padding: "2px 7px" }}>changed</span>}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 1 }}>{a.hint}</div>
+        </div>
+        <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
+          {a.levels.map((lv) => {
+            const on = cur === lv;
+            const allowed = canGrant(a, lv);
+            return (
+              <button key={lv} type="button" disabled={busy || !allowed}
+                title={allowed ? undefined : `You don't have ${a.label} yourself, so you can't give it to anyone.`}
+                onClick={() => setMap((prev) => ({ ...prev, [a.key]: lv }))}
+                style={{
+                  border: "none", borderLeft: a.levels[0] === lv ? "none" : "1px solid #E2E8F0",
+                  background: on ? ACCENT : "#FFF", color: on ? "#FFF" : (allowed ? "#475569" : "#CBD5E1"),
+                  fontSize: 11.5, fontWeight: 700, padding: "6px 11px", fontFamily: "inherit",
+                  cursor: busy || !allowed ? "not-allowed" : "pointer",
+                }}>
+                {LEVEL_LABEL[lv] || lv}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 14 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          <span style={S.lbl}>Job title</span>
+          <select value={title} onChange={(e) => pickTitle(e.target.value)} disabled={busy} style={{ ...S.input, width: 170 }}>
+            {titles.filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
+              <option key={t.key} value={t.key}>{t.label}</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ fontSize: 11.5, color: "#64748B", flex: 1, minWidth: 180, paddingBottom: 8 }}>
+          {(titles.find((t) => t.key === title) || {}).blurb}
+          <div style={{ marginTop: 3, color: "#94A3B8" }}>
+            {deviations.length === 0
+              ? "Using the standard access for this title."
+              : `${deviations.length} change${deviations.length === 1 ? "" : "s"} from the standard.`}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.6, margin: "4px 0 2px" }}>Workspace</div>
+      {group("workspace").map(row)}
+      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.6, margin: "16px 0 2px" }}>Settings</div>
+      {group("settings").map(row)}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <button type="button" disabled={busy}
+          onClick={() => {
+            // Send deviations only — the server stores the same shape, so what is saved is
+            // exactly what this screen computed rather than a snapshot that goes stale when
+            // a preset improves.
+            const access = {};
+            for (const a of deviations) access[a.key] = map[a.key] || "none";
+            onSave({ title, access });
+          }}
+          style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save access</button>
+        <button type="button" onClick={onCancel} disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #E2E8F0" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function CommissionTeam({ viewingLabel = null }) {
+  // portal-commissions resolves the tenant from the CALLER's own client_users row and takes
+  // no targetClientId — it predates the shared resolveTenant. So in operator view-as every
+  // action here silently acts on the OPERATOR's own account while the banner names someone
+  // else: "Add & send invite" would put the person on CSM Synergy's team, not the builder's.
+  // Nothing crosses tenants (the scoping is what makes it wrong, not unsafe), but a screen
+  // that quietly does something other than what it says is worse than one that is absent.
+  // Moving these actions onto portal-settings' resolveTenant is the real fix.
+  if (viewingLabel) {
+    return (
+      <div style={{ ...S.card, maxWidth: 860, color: "#64748B", fontSize: 13, lineHeight: 1.6 }}>
+        <div style={{ ...S.h2, marginBottom: 6 }}>Team &amp; access</div>
+        People and access for <b>{viewingLabel}</b> aren't editable from view-as — this screen
+        would act on your own account instead. Manage their team from the Admin console, or ask
+        an owner there to do it.
+      </div>
+    );
+  }
+  return <CommissionTeamInner />;
+}
+
+function CommissionTeamInner() {
   const [data, setData] = useState(null);       // { members, canSeeRates, isOwner, role } | { members: [] }
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);         // { ok } | { err }
-  const [add, setAdd] = useState({ fullName: "", email: "", role: "user" });
+  const [add, setAdd] = useState({ fullName: "", email: "", title: "sales_rep" });
+  const [editingAccess, setEditingAccess] = useState(null);  // userId whose access grid is open
   const [edits, setEdits] = useState({});       // userId -> in-progress rate string
   const [removing, setRemoving] = useState(null); // member awaiting unlink/deactivate choice
   const [invite, setInvite] = useState(null);   // { email, link, emailSent } after an add
@@ -9875,10 +10035,10 @@ function CommissionTeam() {
     if (!add.email.trim()) { setMsg({ err: "Enter an email address." }); return; }
     setBusy(true); setMsg(null); setInvite(null);
     try {
-      const r = await call({ action: "add_user", email: add.email.trim(), fullName: add.fullName.trim(), role: add.role });
+      const r = await call({ action: "add_user", email: add.email.trim(), fullName: add.fullName.trim(), title: add.title });
       if (r.alreadyOnTeam) setMsg({ ok: `${add.email.trim()} is already on your team.` });
       else { setMsg({ ok: `Invited ${add.email.trim()}.` }); if (r.setupLink) setInvite({ email: add.email.trim(), link: r.setupLink, emailSent: r.emailSent }); }
-      setAdd({ fullName: "", email: "", role: "user" });
+      setAdd({ fullName: "", email: "", title: "sales_rep" });
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
@@ -9910,13 +10070,33 @@ function CommissionTeam() {
 
   const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
   const td = { fontSize: 13, padding: "10px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
-  const roleChip = (r) => { const c = { owner: ["#EDE9FE", "#5B21B6"], admin: ["#DBEAFE", "#1E40AF"], user: ["#F1F5F9", "#475569"] }[r] || ["#F1F5F9", "#475569"]; return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, textTransform: "capitalize" }}>{r}</span>; };
+  const saveAccess = async (m, next) => {
+    setBusy(true); setMsg(null);
+    try {
+      await call({ action: "set_access", userId: m.userId, title: next.title, access: next.access });
+      setMsg({ ok: `Updated ${m.fullName || m.email}'s access.` });
+      setEditingAccess(null);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  // Titles, not the three legacy roles. Falls back to the role when a row predates
+  // migration 100 and has no title yet, so an older account never renders a blank cell.
+  const titleChip = (m, titles) => {
+    const t = (titles || []).find((x) => x.key === m.title);
+    const c = { owner: ["#EDE9FE", "#5B21B6"], admin: ["#DBEAFE", "#1E40AF"] }[m.title] || ["#F1F5F9", "#475569"];
+    return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{t ? t.label : (m.role || "user")}</span>;
+  };
   const sw = (on) => <span style={{ display: "inline-block", width: 34, height: 20, borderRadius: 20, background: on ? ACCENT : "#CBD5E1", position: "relative", verticalAlign: "middle", transition: "background .12s" }}><span style={{ position: "absolute", top: 2, [on ? "right" : "left"]: 2, width: 16, height: 16, borderRadius: "50%", background: "#FFF" }} /></span>;
 
   if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading team…</div>;
   const isOwner = !!data.isOwner;
   const canSeeRates = !!data.canSeeRates;
   const members = data.members || [];
+  // Areas, titles and presets all come from the server (accessMetadata) — see AccessGrid.
+  const meta = data.meta || { areas: [], titles: [], presets: {} };
+  const canManageTeam = !!data.canManageTeam;
 
   return (
     <div style={{ ...S.card, maxWidth: 860 }}>
@@ -9942,11 +10122,11 @@ function CommissionTeam() {
           <input value={add.email} onChange={(e) => setAdd((p) => ({ ...p, email: e.target.value }))} placeholder="jordan@company.com" style={{ ...S.input, width: 200 }} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <span style={S.lbl}>Role</span>
-          <select value={add.role} onChange={(e) => setAdd((p) => ({ ...p, role: e.target.value }))} style={{ ...S.input, width: 120 }}>
-            <option value="user">User</option>
-            {isOwner && <option value="admin">Admin</option>}
-            {isOwner && <option value="owner">Owner</option>}
+          <span style={S.lbl}>Job title</span>
+          <select value={add.title} onChange={(e) => setAdd((p) => ({ ...p, title: e.target.value }))} style={{ ...S.input, width: 140 }}>
+            {(meta.titles || []).filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
+              <option key={t.key} value={t.key}>{t.label}</option>
+            ))}
           </select>
         </div>
         <button onClick={addUser} disabled={busy} style={{ ...S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF") }}>Add &amp; send invite</button>
@@ -9962,7 +10142,7 @@ function CommissionTeam() {
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr>
-            <th style={th}>Name</th><th style={th}>Email</th><th style={th}>Role</th><th style={th}>Commission&nbsp;%</th>
+            <th style={th}>Name</th><th style={th}>Email</th><th style={th}>Title</th><th style={th}>Access</th><th style={th}>Commission&nbsp;%</th>
             {isOwner && <th style={th}>Sees all payouts</th>}
             {isOwner && <th style={th}>Full access</th>}
             <th style={th}></th>
@@ -9972,7 +10152,25 @@ function CommissionTeam() {
               <tr key={m.userId}>
                 <td style={{ ...td, fontWeight: 700 }}>{m.fullName || <span style={{ color: "#94A3B8" }}>—</span>}{m.isSelf && <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}> (you)</span>}</td>
                 <td style={td}>{m.email}</td>
-                <td style={td}>{roleChip(m.role)}</td>
+                <td style={td}>{titleChip(m, meta.titles)}</td>
+                <td style={td}>
+                  {m.role === "owner"
+                    ? <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Everything</span>
+                    : (() => {
+                        const n = Object.keys(m.access || {}).length;
+                        const label = n === 0 ? "Standard" : `${n} change${n === 1 ? "" : "s"}`;
+                        // Your own access is shown but never editable by you — the server
+                        // refuses it too. Access is something you receive, not something you
+                        // write for yourself.
+                        if (!canManageTeam || m.isSelf) return <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{label}</span>;
+                        return (
+                          <button type="button" onClick={() => setEditingAccess(editingAccess === m.userId ? null : m.userId)}
+                            style={{ background: "none", border: "1px solid #E2E8F0", borderRadius: 7, color: ACCENT, cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit", padding: "4px 9px" }}>
+                            {label} <span style={{ color: "#94A3B8" }}>{editingAccess === m.userId ? "▲" : "▾"}</span>
+                          </button>
+                        );
+                      })()}
+                </td>
                 <td style={td}>
                   {m.rateHidden
                     ? <span style={{ color: "#94A3B8", fontWeight: 800, letterSpacing: 2 }}>🔒 •••</span>
@@ -10003,8 +10201,20 @@ function CommissionTeam() {
                   )}
                 </td>
               </tr>
-            ))}
-            {members.length === 0 && <tr><td colSpan={isOwner ? 7 : 5} style={{ ...td, color: "#64748B" }}>No teammates yet — add someone above.</td></tr>}
+            )).flatMap((el, i) => {
+              const m = members[i];
+              if (editingAccess !== m.userId) return [el];
+              return [el, (
+                <tr key={m.userId + ":access"}>
+                  <td colSpan={isOwner ? 8 : 6} style={{ padding: "0 10px 14px", borderBottom: "1px solid #F1F5F9" }}>
+                    <AccessGrid member={m} meta={meta} myAccess={data.myAccess} isOwner={isOwner} busy={busy}
+                      onCancel={() => setEditingAccess(null)}
+                      onSave={(next) => saveAccess(m, next)} />
+                  </td>
+                </tr>
+              )];
+            })}
+            {members.length === 0 && <tr><td colSpan={isOwner ? 8 : 6} style={{ ...td, color: "#64748B" }}>No teammates yet — add someone above.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -10373,7 +10583,7 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, access = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -10384,9 +10594,20 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
-    ...(isAdmin ? [["team", "Team", "People, roles, and commission rates"]] : []),
+    ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates"]] : []),
     ["billing", "Billing", "Your StructureStudio subscription"],
-  ];
+  ]
+  // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
+  // an owner shut out of their own Settings by a permission bug is the failure this feature
+  // must not have. For everyone else each card appears only if they can read its area, which
+  // is what makes granting one person Structures actually produce a usable Settings page
+  // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
+  // the server refuses is still refused — this only decides what is worth showing.
+  .filter(([id]) => {
+    if (isAdmin || !access) return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
@@ -10437,7 +10658,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
           schedule tabs (operator, or the tenant's schedule_builds subscription). */}
-      {sub === "team" && (<><LocationsCard />{schedUnlocked && <DriversTerritoriesCard />}<CommissionTeam /></>)}
+      {sub === "team" && (<><LocationsCard />{schedUnlocked && <DriversTerritoriesCard />}<CommissionTeam viewingLabel={viewingLabel} /></>)}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
     </div>
   );
@@ -11107,6 +11328,7 @@ function Dashboard({ session }) {
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 isOwner={!viewing && tenant.role === "owner"}
                 isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
+                access={viewing ? null : myAccess}
                 schedUnlocked={schedUnlocked}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}

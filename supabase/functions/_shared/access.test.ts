@@ -29,7 +29,10 @@ import {
   gateIsRead,
   type Level,
   mayGrant,
+  mayGrantMap,
   PRESETS,
+  roleForTitle,
+  sanitizeAccess,
   seesAllPayouts,
 } from "./access.ts";
 
@@ -185,4 +188,71 @@ Deno.test("a denial names the area a human can ask for, not the action", () => {
   const msg = checkGate({ area: "settings_billing", level: "view" }, rep) ?? "";
   assert(msg.includes("Billing"), `expected the area label, got: ${msg}`);
   assertFalse(msg.includes("settings_billing"), "no database keys in a message a person reads");
+});
+
+// ── The Team screen's write path ────────────────────────────────────────────
+// These pin the rules that stand between "an admin manages the team" and "an admin can
+// promote themselves to owner". Each one is a real request someone can make with curl.
+
+Deno.test("title and role can never disagree", () => {
+  // A person whose title says Admin but whose role still says user passes this module's
+  // checks and is then refused by an RLS policy — which reads on screen as "the app is
+  // broken" and is close to undiagnosable. Every title write carries the role with it.
+  assertEquals(roleForTitle("owner"), "owner");
+  assertEquals(roleForTitle("admin"), "admin");
+  for (const t of ["sales_rep", "crew_leader", "driver"]) {
+    assertEquals(roleForTitle(t), "user", `${t} must stay a plain user`);
+  }
+  assertEquals(roleForTitle("wizard"), "user", "an unknown title must not mint an admin");
+  assertEquals(roleForTitle(null), "user");
+});
+
+Deno.test("only real deviations are stored", () => {
+  const clean = sanitizeAccess({
+    designs: "view",
+    settings_billing: "edit",   // owner-only: must never be storable, by anyone
+    made_up: "edit",            // unknown area
+    contacts: "sideways",       // invalid level
+    commissions: "own",         // area-specific vocabulary is allowed
+  });
+  assertEquals(clean, { designs: "view", commissions: "own" });
+  assertEquals(sanitizeAccess(null), {});
+  assertEquals(sanitizeAccess("nope"), {});
+});
+
+Deno.test("an admin cannot promote someone past themselves — via the ACCESS blob", () => {
+  const admin = effectiveAccess("admin", "admin", { settings_quickbooks: "none" });
+  const resulting = effectiveAccess("user", "sales_rep", { settings_quickbooks: "edit" });
+  assertEquals(mayGrantMap("admin", admin, resulting), "QuickBooks");
+});
+
+Deno.test("an admin cannot promote someone past themselves — via the TITLE", () => {
+  // The escalation the overrides check alone would miss: submit an EMPTY access object and
+  // set the title to Owner. Because access is stored as deviations, nothing in the payload
+  // looks suspicious — the privilege comes from the preset. mayGrantMap resolves first, so
+  // it sees the owner preset and refuses.
+  const admin = effectiveAccess("admin", "admin", null);
+  const asOwner = effectiveAccess("owner", "owner", {});
+  assert(mayGrantMap("admin", admin, asOwner), "an admin must not be able to mint an owner");
+  // The same admin CAN create an ordinary rep, which is the everyday case.
+  assertEquals(mayGrantMap("admin", admin, effectiveAccess("user", "sales_rep", null)), null);
+  // ...and an owner can do both.
+  assertEquals(mayGrantMap("owner", effectiveAccess("owner", "owner", null), asOwner), null);
+});
+
+Deno.test("taking access away is always allowed", () => {
+  // An admin with no QuickBooks must still be able to REMOVE QuickBooks from someone who
+  // has it — otherwise a departing employee cannot be locked out by the person on shift.
+  const admin = effectiveAccess("admin", "admin", { settings_quickbooks: "none" });
+  const stripped = effectiveAccess("user", "driver", { delivery_schedule: "none", inventory: "none", orders: "none" });
+  assertEquals(mayGrantMap("admin", admin, stripped), null);
+});
+
+Deno.test("billing cannot be granted to anyone by anyone but an owner", () => {
+  const admin = effectiveAccess("admin", "admin", null);
+  // sanitizeAccess drops it at the door...
+  assertFalse("settings_billing" in sanitizeAccess({ settings_billing: "view" }));
+  // ...and even if it reached the resolver, effectiveAccess ignores it for a non-owner.
+  assertEquals(effectiveAccess("user", "admin", { settings_billing: "edit" }).settings_billing, "none");
+  assertFalse(mayGrant("admin", admin, "settings_billing", "view"));
 });
