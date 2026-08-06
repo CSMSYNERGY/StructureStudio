@@ -58,10 +58,45 @@ function parseSize(label: unknown): { widthFt: number | null; lengthFt: number |
   return { widthFt: Number(m[1]), lengthFt: Number(m[2]) };
 }
 const titleCase = (s: unknown) => String(s || "").replace(/\b\w/g, (c) => c.toUpperCase());
+// Live designs store selections as { style, size, roofType, roofColor, ... } — verified
+// against production data 2026-08-04. (buildingStyle/buildingSize appear only in the
+// submit-estimate webhook payload, never in the stored row — reading those keys here is
+// why early build cards had no building label or dimensions.) Keep them as fallbacks.
+// deno-lint-ignore no-explicit-any
+const selStyle = (sel: any) => sel?.style ?? sel?.buildingStyle ?? "";
+// deno-lint-ignore no-explicit-any
+const selSize = (sel: any) => sel?.size ?? sel?.buildingSize ?? "";
 function buildingLabelFrom(selections: Record<string, unknown> | null | undefined): string {
-  const style = titleCase((selections as Record<string, unknown>)?.buildingStyle ?? "");
-  const size = String((selections as Record<string, unknown>)?.buildingSize ?? "");
+  const style = titleCase(selStyle(selections));
+  const size = String(selSize(selections));
   return [style, size].filter(Boolean).join(" ").trim();
+}
+// Roof + colors snapshot for the building-first card, hexes resolved from the tenant's
+// colors catalog (label match, case-insensitive) so the card renders true swatches.
+// deno-lint-ignore no-explicit-any
+async function appearanceFrom(admin: any, clientId: string, selections: any, paintColors: any) {
+  const sel = selections ?? {};
+  const paint = paintColors ?? {};
+  const out: Record<string, string | null> = {
+    roof_type: sel.roofType ? String(sel.roofType) : null,
+    roof_color: sel.roofColor ? String(sel.roofColor) : null,
+    body_color: paint.body ? String(paint.body) : null,
+    trim_color: paint.trim ? String(paint.trim) : null,
+    roof_color_hex: null,
+    body_color_hex: null,
+    trim_color_hex: null,
+  };
+  const wanted = [out.roof_color, out.body_color, out.trim_color].filter(Boolean) as string[];
+  if (wanted.length) {
+    const { data: colors } = await admin.from("colors").select("label, hex").eq("client_id", clientId).limit(500);
+    const hexOf: Record<string, string> = {};
+    for (const c of colors ?? []) if (c.label && c.hex) hexOf[String(c.label).trim().toLowerCase()] = c.hex;
+    const lookup = (name: string | null) => name ? (hexOf[name.trim().toLowerCase()] ?? null) : null;
+    out.roof_color_hex = lookup(out.roof_color);
+    out.body_color_hex = lookup(out.body_color);
+    out.trim_color_hex = lookup(out.trim_color);
+  }
+  return out;
 }
 
 Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
@@ -501,29 +536,31 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const code = str(payload?.designShortCode);
         if (!code) return json({ error: "designShortCode is required for an order job." }, 400);
         const { data: design, error } = await admin
-          .from("designs").select("short_code, contact, selections, status")
+          .from("designs").select("short_code, contact, selections, paint_colors, status")
           .eq("client_id", clientId).eq("short_code", code).maybeSingle();
         if (error) throw error;
         if (!design) return json({ error: "That design isn't in your account." }, 404);
         row.design_short_code = design.short_code;
         row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
         row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
-        const dims = parseSize((design.selections as Record<string, unknown>)?.buildingSize);
+        const dims = parseSize(selSize(design.selections));
         row.width_ft = row.width_ft ?? dims.widthFt;
         row.length_ft = row.length_ft ?? dims.lengthFt;
+        Object.assign(row, await appearanceFrom(admin, clientId, design.selections, design.paint_colors));
         mintSerial = true;
       } else if (source === "inventory") {
         const unit = await requireRow("inventory_units", payload?.inventoryUnitId, "Inventory unit");
         row.inventory_unit_id = unit.id;
         row.serial = unit.serial;
         row.design_short_code = null; // the unit's master design is reachable via the unit
-        if (!row.building_label && unit.design_short_code) {
-          const { data: master } = await admin.from("designs").select("selections")
+        if (unit.design_short_code) {
+          const { data: master } = await admin.from("designs").select("selections, paint_colors")
             .eq("client_id", clientId).eq("short_code", unit.design_short_code).maybeSingle();
-          row.building_label = str(buildingLabelFrom(master?.selections as Record<string, unknown>));
-          const dims = parseSize((master?.selections as Record<string, unknown>)?.buildingSize);
+          row.building_label = row.building_label ?? str(buildingLabelFrom(master?.selections as Record<string, unknown>));
+          const dims = parseSize(selSize(master?.selections));
           row.width_ft = row.width_ft ?? dims.widthFt;
           row.length_ft = row.length_ft ?? dims.lengthFt;
+          Object.assign(row, await appearanceFrom(admin, clientId, master?.selections, master?.paint_colors));
         }
       } else if (source === "repair") {
         const repair = await requireRow("repairs", payload?.repairId, "Repair");
@@ -778,7 +815,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
         row.customer_phone = row.customer_phone ?? str((design.contact as Record<string, unknown>)?.phone);
         row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
-        const dims = parseSize((design.selections as Record<string, unknown>)?.buildingSize);
+        const dims = parseSize(selSize(design.selections));
         row.width_ft = row.width_ft ?? dims.widthFt;
         row.length_ft = row.length_ft ?? dims.lengthFt;
       } else if (source === "inventory") {
@@ -802,7 +839,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           const { data: master } = await admin.from("designs").select("selections")
             .eq("client_id", clientId).eq("short_code", unit.design_short_code).maybeSingle();
           row.building_label = str(buildingLabelFrom(master?.selections as Record<string, unknown>));
-          const dims = parseSize((master?.selections as Record<string, unknown>)?.buildingSize);
+          const dims = parseSize(selSize(master?.selections));
           row.width_ft = row.width_ft ?? dims.widthFt;
           row.length_ft = row.length_ft ?? dims.lengthFt;
         }

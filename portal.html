@@ -5570,6 +5570,20 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
     const stg = stages.find((s) => s.id === job.stage_id);
     const open = expandedId === job.id;
     const bd = schedBuildDate(job);
+    // Building-first reading order (Carolyn 2026-08-04, mockup approved): style+size is
+    // the headline, then roof, then colors (real catalog swatches), then the customer.
+    const isRepair = job.source === "repair";
+    let headline = isRepair ? (job.title || "Repair") : (job.building_label || job.title || "—");
+    if (!isRepair && headline !== "—" && !/[x×]/.test(headline) && schedDims(job) !== "—") headline += " " + schedDims(job);
+    const roofLine = isRepair
+      ? [job.serial ? "Building #" + job.serial : null, job.building_label].filter(Boolean).join(" · ")
+      : (job.roof_type ? String(job.roof_type) + (/roof/i.test(String(job.roof_type)) ? "" : " roof") : null);
+    const colorBits = [
+      job.body_color ? { hex: job.body_color_hex, name: job.body_color, sfx: "" } : null,
+      job.trim_color ? { hex: job.trim_color_hex, name: job.trim_color, sfx: " trim" } : null,
+      job.roof_color ? { hex: job.roof_color_hex, name: job.roof_color, sfx: " roof" } : null,
+    ].filter(Boolean);
+    const custLine = job.customer_name || (job.source === "inventory" ? "Spec build for the lot" : null);
     return (
       <div key={job.id} draggable={!open && (opts.dragAdmin ? canAdmin : true)} tabIndex={0} role="button" aria-expanded={open}
         onDragStart={(e) => { setDragId(job.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
@@ -5582,17 +5596,29 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
           <span style={{ fontSize: 11, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{job.serial ? "#" + job.serial : (job.source === "repair" ? "Repair" : "—")}</span>
           <span style={{ ...schedChip(src.bg, src.fg), marginLeft: "auto" }}>{src.label}</span>
         </div>
-        <div style={{ fontSize: 13, fontWeight: 800, lineHeight: 1.25 }}>{job.customer_name || job.title || "—"}</div>
-        {(job.building_label || job.title) && job.customer_name && (
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#64748B", marginTop: 1 }}>{job.building_label || job.title}</div>
+        {/* 1 · The building — the headline the shop floor reads first. */}
+        <div style={{ fontSize: 14.5, fontWeight: 800, lineHeight: 1.2, letterSpacing: 0.1 }}>{headline}</div>
+        {/* 2 · Roof type (for repairs: which building this belongs to). */}
+        {roofLine && <div style={{ fontSize: 11, fontWeight: 700, color: "#475569", marginTop: 3 }}>{roofLine}</div>}
+        {/* 3 · Colors, with true swatches from the tenant's catalog. */}
+        {colorBits.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+            {colorBits.map((c, i) => (
+              <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "#64748B" }}>
+                {c.hex && <span style={{ width: 10, height: 10, borderRadius: 3, border: "1px solid rgba(15,23,42,.18)", background: c.hex, display: "inline-block", flexShrink: 0 }}></span>}
+                {c.name}{c.sfx}
+              </span>
+            ))}
+          </div>
         )}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 7, flexWrap: "wrap" }}>
+        {/* 4 · The customer, under the fold line. */}
+        {custLine && (
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", marginTop: 6, paddingTop: 6, borderTop: "1px solid #F1F5F9" }}>{custLine}</div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
           {/* Stage chip on calendar cards (there the column is a DATE, so the stage needs a home). */}
           {opts.showStage && stg && (
             <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>
-          )}
-          {schedDims(job) !== "—" && (
-            <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{schedDims(job)}</span>
           )}
           {/* One build date per job; hidden on the calendar where the column says it. */}
           {!opts.hideDate && bd && (
@@ -5602,8 +5628,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
           )}
           {loadChip(job)}
         </div>
-        {/* Every detail at face value (Carolyn 2026-08-04): the crew shows as a named row,
-            not an initials-only dot you have to hover. */}
+        {/* Crew as a named row — every detail at face value. */}
         {job.assignee_user_id && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
             <span style={{ width: 18, height: 18, borderRadius: "50%", background: "#DBEAFF", border: "1px solid #C3D9F7", color: ACCENT, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 8, fontWeight: 800, flexShrink: 0 }}>
