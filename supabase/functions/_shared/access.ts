@@ -1,0 +1,162 @@
+// Per-person access: the ONE definition of what areas exist, what each job title grants,
+// and how an effective permission is resolved. Migration 100 stores the two inputs
+// (client_users.title + client_users.access); everything else lives here.
+//
+// WHY ONE MODULE: this answers "may this person do this" for every edge function AND
+// supplies the switch grid the Team screen renders. A second copy of the preset table in
+// portal.html would drift the day someone adds an area — and a permission table that
+// drifts is a permission table that lies. The server therefore SHIPS the metadata below
+// to the browser (see portal-settings' team actions); the UI renders what it is told and
+// never hard-codes an area.
+//
+// THE RULE THAT MATTERS: the UI hiding a tab is a courtesy, not a control. Every action
+// in every function must call requireAccess() before it reads or writes, because anyone
+// can call these endpoints directly with a valid session.
+
+export type Level = "none" | "view" | "edit" | "own";
+export type Title = "owner" | "admin" | "sales_rep" | "crew_leader" | "driver";
+
+/** One switch on the Team screen. `levels` is the vocabulary for THAT row — commissions
+ *  is deliberately different from the rest, so the grid is data-driven rather than
+ *  assuming a universal none/view/edit triplet. */
+export interface Area {
+  key: string;
+  label: string;
+  group: "workspace" | "settings";
+  hint: string;
+  levels: Level[];
+  /** Only an owner may hold or grant this, whatever an admin's own access says. */
+  ownerOnly?: boolean;
+}
+
+const RVE: Level[] = ["none", "view", "edit"];
+
+export const AREAS: Area[] = [
+  // ── Workspace ────────────────────────────────────────────────────────────
+  { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and quotes",            levels: RVE },
+  { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
+  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired",           levels: RVE },
+  { key: "inventory",         label: "Inventory",          group: "workspace", hint: "Buildings on your lots",              levels: RVE },
+  { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted quotes through delivery",    levels: RVE },
+  { key: "build_schedule",    label: "Build Schedule",     group: "workspace", hint: "Crews, build dates, the board",       levels: RVE },
+  { key: "delivery_schedule", label: "Delivery Schedule",  group: "workspace", hint: "Loads, routes, drivers",              levels: RVE },
+  { key: "repairs",           label: "Repairs",            group: "workspace", hint: "Service jobs and history",            levels: RVE },
+  // 'own' = see your own payout and nothing else. This is the setting most reps should
+  // have, and it is the shape the commissions confidentiality rule already assumes.
+  { key: "commissions",       label: "Commissions",        group: "workspace", hint: "Payouts — 'Own only' hides everyone else's",
+    levels: ["none", "own", "edit"] },
+  { key: "reports",           label: "Reports",            group: "workspace", hint: "Sales, leads, revenue",               levels: RVE },
+
+  // ── Settings ─────────────────────────────────────────────────────────────
+  { key: "settings_structures", label: "Structures",           group: "settings", hint: "Styles, sizes, base prices",          levels: RVE },
+  { key: "settings_options",    label: "Options & Colors",     group: "settings", hint: "Doors, windows, ramps, palettes",     levels: RVE },
+  { key: "settings_branding",   label: "Branding & Estimates", group: "settings", hint: "Your look, business details, lots",   levels: RVE },
+  { key: "settings_crm",        label: "CRM Connection",       group: "settings", hint: "Synergy/GHL keys and pipelines",      levels: RVE },
+  { key: "settings_quickbooks", label: "QuickBooks",           group: "settings", hint: "Accounting connection + mappings",    levels: RVE },
+  { key: "settings_team",       label: "Team",                 group: "settings", hint: "Add people and set their access",     levels: RVE },
+  // Owner-only, always: this is the card that pays for the product.
+  { key: "settings_billing",    label: "Billing",              group: "settings", hint: "Your StructureStudio subscription",   levels: RVE, ownerOnly: true },
+];
+
+export const AREA_KEYS: string[] = AREAS.map((a) => a.key);
+const AREA_BY_KEY = new Map(AREAS.map((a) => [a.key, a]));
+
+export const TITLES: { key: Title; label: string; blurb: string }[] = [
+  { key: "owner",       label: "Owner",       blurb: "Everything, always — cannot be reduced" },
+  { key: "admin",       label: "Admin",       blurb: "Runs the business day to day; Billing stays with owners" },
+  { key: "sales_rep",   label: "Sales Rep",   blurb: "Sells: designs, quotes, contacts, own commission" },
+  { key: "crew_leader", label: "Crew Leader", blurb: "Runs builds and repairs" },
+  { key: "driver",      label: "Driver",      blurb: "Runs deliveries" },
+];
+
+/** A title's default switches. Anything a preset omits is "none" — new areas are therefore
+ *  DENIED by default to every non-owner, which is the only safe direction for a list that
+ *  people will keep extending. */
+export const PRESETS: Record<Title, Record<string, Level>> = {
+  owner: Object.fromEntries(AREA_KEYS.map((k) => [k, k === "commissions" ? "edit" : "edit"])),
+  admin: {
+    designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
+    build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
+    settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
+    settings_crm: "edit", settings_quickbooks: "edit", settings_team: "edit",
+    settings_billing: "none",
+  },
+  sales_rep: {
+    designer: "edit", designs: "edit", contacts: "edit",
+    inventory: "view", orders: "view", commissions: "own",
+  },
+  crew_leader: {
+    build_schedule: "edit", repairs: "edit",
+    designs: "view", inventory: "view", orders: "view",
+  },
+  driver: {
+    delivery_schedule: "edit",
+    inventory: "view", orders: "view",
+  },
+};
+
+const RANK: Record<Level, number> = { none: 0, own: 1, view: 1, edit: 2 };
+
+function normTitle(t: unknown): Title {
+  return (TITLES.some((x) => x.key === t) ? t : "sales_rep") as Title;
+}
+
+/** The full, resolved map for one person: preset(title) with their stored overrides on top.
+ *  Owners short-circuit to full access — an owner's stored map is never consulted, so an
+ *  owner can never lock themselves (or be locked) out of their own account. */
+export function effectiveAccess(
+  role: string | null | undefined,
+  title: unknown,
+  overrides: Record<string, unknown> | null | undefined,
+): Record<string, Level> {
+  if (role === "owner") return Object.fromEntries(AREA_KEYS.map((k) => [k, "edit" as Level]));
+  const base = { ...PRESETS[normTitle(title)] };
+  const out: Record<string, Level> = {};
+  for (const k of AREA_KEYS) out[k] = (base[k] as Level) ?? "none";
+  for (const [k, v] of Object.entries(overrides ?? {})) {
+    const area = AREA_BY_KEY.get(k);
+    if (!area) continue;                       // unknown area: ignore, never trust the blob
+    if (area.ownerOnly) continue;              // owner-only can never be granted by data
+    if (area.levels.includes(v as Level)) out[k] = v as Level;
+  }
+  return out;
+}
+
+export function canRead(access: Record<string, Level>, area: string): boolean {
+  return RANK[access[area] ?? "none"] >= 1;
+}
+export function canEdit(access: Record<string, Level>, area: string): boolean {
+  return (access[area] ?? "none") === "edit";
+}
+/** Commissions only: may they see OTHER people's payouts, or just their own? */
+export function seesAllPayouts(access: Record<string, Level>): boolean {
+  return access.commissions === "edit";
+}
+
+/**
+ * May `granter` hand `level` on `area` to someone else?
+ *
+ * Two rules, both load-bearing:
+ *   1. owner-only areas are owner-only, full stop.
+ *   2. NOBODY GRANTS ABOVE THEMSELVES — an admin without QuickBooks cannot give QuickBooks
+ *      to anyone, including themselves. Without this the whole model is decorative: any
+ *      admin could self-promote to everything in two clicks and nothing would record it.
+ */
+export function mayGrant(
+  granterRole: string | null | undefined,
+  granterAccess: Record<string, Level>,
+  area: string,
+  level: Level,
+): boolean {
+  const a = AREA_BY_KEY.get(area);
+  if (!a) return false;
+  if (!a.levels.includes(level)) return false;
+  if (granterRole === "owner") return true;
+  if (a.ownerOnly) return false;
+  return RANK[level] <= RANK[granterAccess[area] ?? "none"];
+}
+
+/** Metadata the Team screen renders from, so the browser never hard-codes an area list. */
+export function accessMetadata() {
+  return { areas: AREAS, titles: TITLES, presets: PRESETS };
+}
