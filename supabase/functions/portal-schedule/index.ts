@@ -186,6 +186,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     return data ?? [];
   };
 
+  // Build crews (094) — the scheduling unit on the build calendar.
+  const getCrews = async () => {
+    const { data, error } = await admin
+      .from("build_crews").select("*").eq("client_id", clientId).order("sort_order");
+    if (error) throw error;
+    return data ?? [];
+  };
+
   // Stops whose linked build job is not in a kind='done' stage (the built check).
   // deno-lint-ignore no-explicit-any
   const unbuiltStops = async (loadId: string): Promise<any[]> => {
@@ -303,7 +311,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           description: rp.description, serial: rp.serial, status: rp.status,
         })),
       };
-      return json({ stages, jobs: jobs ?? [], stopByJob, tray, team: await getTeam() });
+      return json({ stages, jobs: jobs ?? [], stopByJob, tray, team: await getTeam(), crews: await getCrews() });
     }
 
     if (action === "loads") {
@@ -398,7 +406,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     }
 
     if (action === "list_drivers") {
-      return json({ team: await getTeam(), drivers: await getDrivers(), territories: await getTerritories() });
+      return json({ team: await getTeam(), drivers: await getDrivers(), territories: await getTerritories(), crews: await getCrews() });
     }
 
     if (action === "list_repairs") {
@@ -538,6 +546,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         notes: str(payload?.notes),
         created_by: userId,
       };
+      if (payload?.crewId) {
+        const crew = await requireRow("build_crews", payload.crewId, "Crew");
+        row.crew_id = crew.id;
+      }
 
       let mintSerial = false;
       if (source === "order") {
@@ -609,6 +621,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       if ("scheduledStart" in payload) patch.scheduled_start = dateStr(payload.scheduledStart);
       if ("dueDate" in payload) patch.due_date = dateStr(payload.dueDate);
       if ("assigneeUserId" in payload) patch.assignee_user_id = isUuid(payload.assigneeUserId) ? payload.assigneeUserId : null;
+      if ("crewId" in payload) {
+        if (payload.crewId === null || payload.crewId === "") patch.crew_id = null;
+        else {
+          const crew = await requireRow("build_crews", payload.crewId, "Crew");
+          patch.crew_id = crew.id;
+        }
+      }
       if ("notes" in payload) patch.notes = str(payload.notes);
       const { error } = await admin.from("build_jobs").update(patch).eq("id", job.id).eq("client_id", clientId);
       if (error) throw error;
@@ -664,6 +683,34 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         throw error;
       }
       return json({ territory: data });
+    }
+
+    if (action === "save_crew") {
+      const name = str(payload?.name);
+      if (!name) return json({ error: "Give the crew a name." }, 400);
+      const memberIds = Array.isArray(payload?.memberUserIds) ? payload.memberUserIds.filter(isUuid) : [];
+      const row = {
+        name,
+        color: str(payload?.color) ?? "#3D3672",
+        member_user_ids: memberIds,
+        sort_order: num(payload?.sortOrder) ?? 0,
+        active: payload?.active !== false,
+        updated_at: new Date().toISOString(),
+      };
+      if (payload?.id) {
+        const c = await requireRow("build_crews", payload.id, "Crew");
+        const { data, error } = await admin.from("build_crews").update(row)
+          .eq("id", c.id).eq("client_id", clientId).select("*").single();
+        if (error) throw error;
+        return json({ crew: data });
+      }
+      const { data, error } = await admin.from("build_crews")
+        .insert({ ...row, client_id: clientId }).select("*").single();
+      if (error) {
+        if ((error as { code?: string }).code === "23505") return json({ error: "A crew with that name already exists." }, 409);
+        throw error;
+      }
+      return json({ crew: data });
     }
 
     if (action === "save_driver") {
