@@ -10410,16 +10410,16 @@ function Dashboard({ session }) {
           {navItem("designs", "Designs")}
           {navItem("leads", "Contacts")}
           {navItem("inventory", "Inventory")}
-          {soonItem("orders", "Orders", "In Dev")}
-          {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order, all
-              badged In Dev (they navigate; content is entitlement-gated inside). */}
-          {soonItem("build-schedule", "Build Schedule", "In Dev")}
-          {soonItem("delivery-schedule", "Delivery Schedule", "In Dev")}
-          {soonItem("repairs", "Repairs", "In Dev")}
-          {soonItem("commissions", "Commissions", "In Dev")}
+          {navItem("orders", "Orders")}
+          {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
+              badges came off 2026-08-05 (Carolyn); content stays entitlement-gated inside. */}
+          {navItem("build-schedule", "Build Schedule")}
+          {navItem("delivery-schedule", "Delivery Schedule")}
+          {navItem("repairs", "Repairs")}
+          {navItem("commissions", "Commissions")}
           {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
               NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
-          {canAdmin && navItem("quickbooks", "QuickBooks", "In Dev")}
+          {canAdmin && navItem("quickbooks", "QuickBooks")}
         </nav>
 
         <div className="ss-navlabel">Coming Soon</div>
