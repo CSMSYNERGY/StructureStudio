@@ -202,8 +202,8 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       lineTaxCodesOk = false;
     }
 
-    // Yoder-style model: the mapped item is a broad category (Doors, Windows, a building
-    // style…), so the line Description must carry the specifics. Compose it from the line
+    // Simplified category-item model: the mapped item is a broad category (Doors, Windows,
+    // a building style…), so the line Description must carry the specifics. Compose it from the line
     // name plus the snapshot's `desc` (the GHL line description — paint colors, roof
     // type/color, ramp sizing). Deduped so pre-desc snapshots and desc-echoes-name lines
     // render exactly as before.
