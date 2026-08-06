@@ -6570,8 +6570,12 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const [error, setError] = useState(null);
   const [view, setView] = useState("loads");   // loads | table | calendar
   const [weekOffset, setWeekOffset] = useState(0);
+  const [monthCursor, setMonthCursor] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d.getTime(); });
+  const [calView, setCalView] = useState("week");            // calendar zoom: week | month
   const [showWeekends, setShowWeekends] = useState(false);   // calendar: Sat/Sun columns off by default (matches Build Schedule)
   const [driverFilter, setDriverFilter] = useState("all");
+  const [dragItem, setDragItem] = useState(null);            // a to-be-loaded item being dragged onto the calendar
+  const [dropKey, setDropKey] = useState(null);              // "day:<iso>" | "load:<id>" for the drop glow
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [newLoad, setNewLoad] = useState(null);          // { driverUserId, loadDate, routeLabel } | null
@@ -6676,6 +6680,20 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
     setBusy(true); setMsg(null);
     const r = await call({ action: "add_stop", loadId: target, ...body }, `${label} added to the load.`);
     setBusy(false); if (r) load();
+  };
+  // Calendar drag-and-drop: drop a to-be-loaded building on a DAY to start a new load there, or
+  // on an existing load's card to add it as a stop. Both reuse createLoad/addToLoad.
+  const dropOnDay = async (iso, item) => {
+    if (!item || busy) return;
+    setBusy(true); setMsg(null);
+    const r = await call({ action: "create_load", loadDate: iso });
+    setBusy(false);
+    if (r && r.load) await addToLoad(r.load.id, item.body, item.label);
+    else load();
+  };
+  const dropOnLoad = async (loadId, item) => {
+    if (!item || busy) return;
+    await addToLoad(loadId, item.body, item.label);
   };
   const saveLoadHeader = async (l, fields) => {
     setBusy(true); setMsg(null);
@@ -7075,24 +7093,112 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
       {/* ── CALENDAR VIEW — week at a glance ── */}
       {data && view === "calendar" && (() => {
         const DAY = 86400000;
-        const base = new Date(); base.setHours(0, 0, 0, 0);
-        base.setDate(base.getDate() - base.getDay() + weekOffset * 7);   // Sunday-first, matching Build Schedule
-        let days = [];
-        for (let i = 0; i < 7; i++) { const d = new Date(base.getTime() + i * DAY); days.push({ iso: d.toISOString().slice(0, 10), d }); }
-        const weekEnd = days[6].d;
-        if (!showWeekends) days = days.filter(({ d }) => d.getDay() !== 0 && d.getDay() !== 6);
-        const rangeLabel = base.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " +
-          weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", " + weekEnd.getFullYear();
-        const undated = visibleLoads.filter((l) => !l.load_date && l.status === "planned").length;
-        const cols = showWeekends ? 7 : 5;
+        const isoOf = (d) => d.toISOString().slice(0, 10);
+        const trayItems = [
+          ...poolJobs.map((j) => ({ key: "j" + j.buildJobId, building: j.buildingLabel || j.title || "Building", customer: j.customerName || (j.source === "inventory" ? "Spec build" : ""), serial: j.serial ? "#" + j.serial : "", ready: j.buildKind === "done", body: { source: j.source, buildJobId: j.buildJobId }, label: j.customerName || (j.serial ? "#" + j.serial : "Building") })),
+          ...poolInv.map((u) => ({ key: "u" + u.inventoryUnitId, building: "Sold lot building", customer: u.location ? u.location.name : "Sales lot", serial: "#" + u.serial, ready: true, body: { source: "inventory", inventoryUnitId: u.inventoryUnitId }, label: "#" + u.serial })),
+          ...poolRepairs.map((rp) => ({ key: "r" + rp.id, building: (rp.description || "Repair").slice(0, 40), customer: rp.customer_name || "", serial: "R-" + rp.repair_no, ready: true, body: { source: "repair", repairId: rp.id }, label: "R-" + rp.repair_no })),
+        ];
         const driverChips = [["all", "All drivers"]].concat(drivers.map((p) => [p.user_id, nameOf[p.user_id] || "Driver"]));
+        const undated = visibleLoads.filter((l) => !l.load_date && l.status === "planned").length;
+
+        const step = (dir) => { if (calView === "month") { const d = new Date(monthCursor); d.setMonth(d.getMonth() + dir); d.setDate(1); setMonthCursor(d.getTime()); } else setWeekOffset(weekOffset + dir); };
+        const goToday = () => { setWeekOffset(0); const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); setMonthCursor(d.getTime()); };
+
+        const dayDrop = (iso) => canAdmin ? {
+          onDragOver: (e) => { if (dragItem) { e.preventDefault(); setDropKey("day:" + iso); } },
+          onDragLeave: () => setDropKey((k) => k === "day:" + iso ? null : k),
+          onDrop: (e) => { e.preventDefault(); const it = dragItem; setDropKey(null); setDragItem(null); if (it) dropOnDay(iso, it); },
+        } : {};
+        const dayGlow = (iso) => dropKey === "day:" + iso ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -2 } : {};
+        const loadDrop = (id) => canAdmin ? {
+          onDragOver: (e) => { if (dragItem) { e.preventDefault(); e.stopPropagation(); setDropKey("load:" + id); } },
+          onDragLeave: () => setDropKey((k) => k === "load:" + id ? null : k),
+          onDrop: (e) => { e.preventDefault(); e.stopPropagation(); const it = dragItem; setDropKey(null); setDragItem(null); if (it) dropOnLoad(id, it); },
+        } : {};
+
+        const loadCard = (l) => {
+          const lStops = stopsByLoad[l.id] || [];
+          const st = SCHED_LOAD_STATUS[l.status] || SCHED_LOAD_STATUS.planned;
+          const conflict = loadConflicts[l.id];
+          const usedFt = lStops.reduce((a, s) => a + (Number(s.length_ft) || 0), 0);
+          const glow = dropKey === "load:" + l.id ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -2 } : {};
+          return (
+            <div key={l.id} {...loadDrop(l.id)} onClick={() => setView("loads")} title={`Load ${l.load_no} — open the Loads view to manage`}
+              style={{ background: "#FFF", border: "0.5px solid " + (conflict ? "#FCA5A5" : "#DDD6FE"), borderRadius: 12, overflow: "hidden", cursor: "pointer", ...glow }}>
+              <div style={{ background: ACCENT, padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: "#FFF" }}>Load {l.load_no}</span>
+                <span style={{ ...schedChip(st.bg, st.fg), padding: "2px 8px", fontSize: 9.5 }}>{st.label}</span>
+                {l.is_wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), padding: "2px 8px", fontSize: 9.5 }}>WIDE</span>}
+              </div>
+              <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 8, borderBottom: "0.5px solid #F1F5F9" }}>
+                <span style={{ fontSize: 11, color: "#475569", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf[l.driver_user_id] || "No driver"}{l.route_label ? " · " + l.route_label : ""}</span>
+                {l.deck_length_ft ? <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" }}>{Math.round(usedFt)}′ / {l.deck_length_ft}′</span> : null}
+              </div>
+              <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {conflict && <div style={{ ...schedChip("#FEF2F2", "#DC2626"), padding: "2px 8px", fontSize: 9.5 }}>⚠ a building isn't built yet</div>}
+                {lStops.map((s) => (
+                  <div key={s.id} style={{ border: "0.5px solid #E2E8F0", borderRadius: 9, padding: "6px 8px", display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ flex: "0 0 18px", height: 18, borderRadius: "50%", background: "#EEF2FF", color: ACCENT, fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{s.stop_order}</span>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.building_label || "Building"}</div>
+                      <div style={{ fontSize: 11, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.customer_name || "—"}{s.dest_city ? " · " + s.dest_city + (s.dest_state ? ", " + s.dest_state : "") : ""}</div>
+                    </div>
+                    {s.delivered_at ? <span style={{ color: "#16A34A", fontSize: 11 }} title="Delivered">✓</span> : (s.serial ? <span style={{ color: "#94A3B8", fontSize: 10 }}>#{s.serial}</span> : null)}
+                  </div>
+                ))}
+                {lStops.length === 0 && <div style={{ fontSize: 10.5, color: "#94A3B8", fontStyle: "italic", padding: "2px" }}>No stops yet</div>}
+              </div>
+            </div>
+          );
+        };
+        const loadChip = (l) => {
+          const lStops = stopsByLoad[l.id] || [];
+          const st = SCHED_LOAD_STATUS[l.status] || SCHED_LOAD_STATUS.planned;
+          const conflict = loadConflicts[l.id];
+          const glow = dropKey === "load:" + l.id ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -1 } : {};
+          return (
+            <div key={l.id} {...loadDrop(l.id)} onClick={() => setView("loads")} title={`Load ${l.load_no} · ${lStops.length} stop${lStops.length === 1 ? "" : "s"}`}
+              style={{ background: "#FFF", border: "0.5px solid " + (conflict ? "#FCA5A5" : "#DDD6FE"), borderRadius: 8, padding: "4px 6px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, ...glow }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: st.fg, flexShrink: 0 }}></span>
+              <span style={{ fontSize: 11, fontWeight: 800, color: "#1E293B", whiteSpace: "nowrap" }}>Load {l.load_no}</span>
+              <span style={{ fontSize: 10, color: "#64748B", marginLeft: "auto", whiteSpace: "nowrap" }}>{lStops.length} stop{lStops.length === 1 ? "" : "s"}</span>
+              {l.is_wide && <span style={{ fontSize: 9, fontWeight: 800, color: "#92400E" }}>W</span>}
+            </div>
+          );
+        };
+
+        let label, cells, cols, headRow = null;
+        if (calView === "month") {
+          const m0 = new Date(monthCursor); m0.setDate(1); m0.setHours(0, 0, 0, 0);
+          label = m0.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+          const gStart = new Date(m0); gStart.setDate(gStart.getDate() - gStart.getDay());
+          let mc = []; for (let i = 0; i < 42; i++) mc.push(new Date(gStart.getTime() + i * DAY));
+          if (!showWeekends) mc = mc.filter((d) => d.getDay() !== 0 && d.getDay() !== 6);
+          cells = mc.map((d) => ({ iso: isoOf(d), d, inMonth: d.getMonth() === m0.getMonth() }));
+          cols = showWeekends ? 7 : 5;
+          headRow = showWeekends ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["Mon", "Tue", "Wed", "Thu", "Fri"];
+        } else {
+          const b = new Date(); b.setHours(0, 0, 0, 0); b.setDate(b.getDate() - b.getDay() + weekOffset * 7);
+          let wd = []; for (let i = 0; i < 7; i++) { const d = new Date(b.getTime() + i * DAY); wd.push({ iso: isoOf(d), d, inMonth: true }); }
+          const wknd = wd[6].d;
+          label = b.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " + wknd.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", " + wknd.getFullYear();
+          if (!showWeekends) wd = wd.filter(({ d }) => d.getDay() !== 0 && d.getDay() !== 6);
+          cells = wd; cols = showWeekends ? 7 : 5;
+        }
+
         return (
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, flexWrap: "wrap" }}>
-              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset - 1)}>‹</button>
-              <span style={{ fontSize: 14, fontWeight: 800 }}>{rangeLabel}</span>
-              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset + 1)}>›</button>
-              <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={() => setWeekOffset(0)}>Today</button>
+              <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
+                {[["week", "Week"], ["month", "Month"]].map(([v, l2]) => (
+                  <button key={v} type="button" onClick={() => setCalView(v)} style={{ border: "none", background: calView === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: calView === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: calView === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>{l2}</button>
+                ))}
+              </div>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => step(-1)}>‹</button>
+              <span style={{ fontSize: 14, fontWeight: 800 }}>{label}</span>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => step(1)}>›</button>
+              <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={goToday}>Today</button>
               <button type="button" onClick={() => setShowWeekends(!showWeekends)}
                 title={showWeekends ? "Hide Saturday & Sunday" : "Show Saturday & Sunday"}
                 style={{ ...S.btn(showWeekends ? "#EEF2FF" : "#FFF", showWeekends ? ACCENT : "#64748B"), border: "1px solid " + (showWeekends ? "#C3D9F7" : "#CBD5E1"), padding: "6px 11px", fontSize: 12 }}>
@@ -7100,6 +7206,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
               </button>
               {undated > 0 && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, marginLeft: "auto" }}>{undated} planned load{undated === 1 ? "" : "s"} with no date — see the Loads view</span>}
             </div>
+
             {driverChips.length > 1 && (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 11 }}>
                 {driverChips.map(([k, lbl]) => {
@@ -7111,60 +7218,64 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                 })}
               </div>
             )}
-            <div style={{ overflowX: "auto", paddingBottom: 6 }}>
-              <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(210px, 1fr))`, gap: 8, minWidth: cols * 218 }}>
-                {days.map(({ iso, d }) => {
-                  const isToday = iso === todayIso;
-                  const dayLoads = visibleLoads.filter((l) => l.load_date === iso);
-                  return (
-                    <div key={iso} style={{ background: isToday ? "#E9F0FF" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 150, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2 }}>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "1px 3px 8px" }}>
-                        <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B" }}>{d.toLocaleDateString("en-US", { weekday: "short" })}</span>
-                        <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
-                        <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px" }}>{dayLoads.length ? dayLoads.length + " load" + (dayLoads.length === 1 ? "" : "s") : "0"}</span>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                        {dayLoads.map((l) => {
-                          const lStops = stopsByLoad[l.id] || [];
-                          const st = SCHED_LOAD_STATUS[l.status] || SCHED_LOAD_STATUS.planned;
-                          const conflict = loadConflicts[l.id];
-                          const usedFt = lStops.reduce((a, s) => a + (Number(s.length_ft) || 0), 0);
-                          return (
-                            <div key={l.id} onClick={() => setView("loads")} title={`Load ${l.load_no} — open the Loads view to manage`}
-                              style={{ background: "#FFF", border: "0.5px solid " + (conflict ? "#FCA5A5" : "#DDD6FE"), borderRadius: 12, overflow: "hidden", cursor: "pointer" }}>
-                              <div style={{ background: ACCENT, padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                <span style={{ fontSize: 12, fontWeight: 800, color: "#FFF" }}>Load {l.load_no}</span>
-                                <span style={{ ...schedChip(st.bg, st.fg), padding: "2px 8px", fontSize: 9.5 }}>{st.label}</span>
-                                {l.is_wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), padding: "2px 8px", fontSize: 9.5 }}>WIDE</span>}
-                              </div>
-                              <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 8, borderBottom: "0.5px solid #F1F5F9" }}>
-                                <span style={{ fontSize: 11, color: "#475569", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf[l.driver_user_id] || "No driver"}{l.route_label ? " · " + l.route_label : ""}</span>
-                                {l.deck_length_ft ? <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" }}>{Math.round(usedFt)}′ / {l.deck_length_ft}′</span> : null}
-                              </div>
-                              <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                                {conflict && <div style={{ ...schedChip("#FEF2F2", "#DC2626"), padding: "2px 8px", fontSize: 9.5 }}>⚠ a building isn't built yet</div>}
-                                {lStops.map((s) => (
-                                  <div key={s.id} style={{ border: "0.5px solid #E2E8F0", borderRadius: 9, padding: "6px 8px", display: "flex", gap: 8, alignItems: "flex-start" }}>
-                                    <span style={{ flex: "0 0 18px", height: 18, borderRadius: "50%", background: "#EEF2FF", color: ACCENT, fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{s.stop_order}</span>
-                                    <div style={{ minWidth: 0, flex: 1 }}>
-                                      <div style={{ fontSize: 12, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.building_label || "Building"}</div>
-                                      <div style={{ fontSize: 11, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.customer_name || "—"}{s.dest_city ? " · " + s.dest_city + (s.dest_state ? ", " + s.dest_state : "") : ""}</div>
-                                    </div>
-                                    {s.delivered_at ? <span style={{ color: "#16A34A", fontSize: 11 }} title="Delivered">✓</span> : (s.serial ? <span style={{ color: "#94A3B8", fontSize: 10 }}>#{s.serial}</span> : null)}
-                                  </div>
-                                ))}
-                                {lStops.length === 0 && <div style={{ fontSize: 10.5, color: "#94A3B8", fontStyle: "italic", padding: "2px" }}>No stops yet</div>}
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {dayLoads.length === 0 && <div style={{ border: "1px dashed #CBD5E1", borderRadius: 12, padding: "16px 8px", textAlign: "center", color: "#94A3B8", fontSize: 11 }}>No loads</div>}
-                      </div>
+
+            {canAdmin && trayItems.length > 0 && (
+              <div style={{ background: "#FFF7ED", border: "0.5px dashed #FDBA74", borderRadius: 10, padding: "8px 11px", marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#9A3412", marginBottom: 6 }}>To be loaded · {trayItems.length}<span style={{ fontWeight: 600, color: "#B45309" }}> — drag onto a day to start a load, or onto an existing load</span></div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {trayItems.map((it) => (
+                    <div key={it.key} draggable onDragStart={() => setDragItem(it)} onDragEnd={() => { setDragItem(null); setDropKey(null); }}
+                      style={{ background: "#FFF", border: "0.5px solid #FED7AA", borderRadius: 8, padding: "5px 9px", cursor: "grab", fontSize: 11, maxWidth: 230 }}>
+                      <span style={{ fontWeight: 700, color: "#7C2D12" }}>{it.building}</span>
+                      <span style={{ color: "#9A3412" }}>{it.customer ? " · " + it.customer : ""}{it.serial ? " · " + it.serial : ""}</span>
+                      {it.ready && <span style={{ marginLeft: 5, color: "#15803D" }} title="Built">✓</span>}
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
+
+            {calView === "week" ? (
+              <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(210px, 1fr))`, gap: 8, minWidth: cols * 218 }}>
+                  {cells.map(({ iso, d }) => {
+                    const isToday = iso === todayIso;
+                    const dayLoads = visibleLoads.filter((l) => l.load_date === iso);
+                    return (
+                      <div key={iso} {...dayDrop(iso)} style={{ background: isToday ? "#E9F0FF" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 150, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2, ...dayGlow(iso) }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "1px 3px 8px" }}>
+                          <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B" }}>{d.toLocaleDateString("en-US", { weekday: "short" })}</span>
+                          <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
+                          <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px" }}>{dayLoads.length ? dayLoads.length + " load" + (dayLoads.length === 1 ? "" : "s") : "0"}</span>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                          {dayLoads.map(loadCard)}
+                          {dayLoads.length === 0 && <div style={{ border: "1px dashed #CBD5E1", borderRadius: 12, padding: "16px 8px", textAlign: "center", color: "#94A3B8", fontSize: 11 }}>{canAdmin && dragItem ? "Drop to start a load" : "No loads"}</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(120px, 1fr))`, gap: 6, minWidth: cols === 7 ? 880 : 640 }}>
+                  {headRow.map((h) => <div key={h} style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8", padding: "0 4px 2px" }}>{h}</div>)}
+                  {cells.map(({ iso, d, inMonth }) => {
+                    const isToday = iso === todayIso;
+                    const dayLoads = visibleLoads.filter((l) => l.load_date === iso);
+                    return (
+                      <div key={iso} {...dayDrop(iso)} style={{ background: isToday ? "#E9F0FF" : inMonth ? "#F6F8FB" : "#F1F3F6", borderRadius: 10, padding: 6, minHeight: 92, opacity: inMonth ? 1 : 0.55, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2, ...dayGlow(iso) }}>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: isToday ? ACCENT : "#475569", marginBottom: 5, textAlign: "right" }}>{d.getDate()}</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {dayLoads.map(loadChip)}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         );
       })()}
