@@ -686,6 +686,16 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const name = str(payload?.name);
       if (!name) return json({ error: "Give the crew a name." }, 400);
       const memberIds = Array.isArray(payload?.memberUserIds) ? payload.memberUserIds.filter(isUuid) : [];
+      // Crew members are TEAM MEMBERS — people with a login (Carolyn, 2026-08-06). isUuid
+      // alone only proved the string was shaped like an id, so any uuid at all could be
+      // stored here, including one belonging to another tenant's user.
+      if (memberIds.length) {
+        const { data: mem } = await admin.from("client_users").select("user_id")
+          .eq("client_id", clientId).in("user_id", memberIds);
+        if ((mem ?? []).length !== memberIds.length) {
+          return json({ error: "Everyone on a crew has to be on your team. Add them under Settings → Team first." }, 400);
+        }
+      }
       const row = {
         name,
         color: str(payload?.color) ?? "#3D3672",
@@ -711,9 +721,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     }
 
     if (action === "save_driver") {
-      // Drivers are NAME-FIRST (095): display_name is the identity, a linked login is
-      // optional. Accepts driverId (existing profile), userId (link/create by login),
-      // or neither (name-only driver — displayName required).
+      // EVERY DRIVER HAS A LOGIN (Carolyn, 2026-08-06 — correcting 095's optional-login
+      // model). A driver is a person on the team with the Driver title, not a free-floating
+      // name: they need to sign in to see their loads and mark a delivery done, and per-person
+      // access (migration 100) can only attach to something you can sign in as. display_name
+      // stays as an optional label (a nickname, or "Dad's truck") layered on their real name.
+      //
+      // Safe to tighten: at the time of this change every driver_profiles row already had a
+      // login (0 without), so nothing needed converting.
       const driverId = isUuid(payload?.driverId) ? payload.driverId : null;
       const targetUserId = isUuid(payload?.userId) ? payload.userId : null;
       const displayName = str(payload?.displayName);
@@ -721,6 +736,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const { data: member } = await admin.from("client_users").select("user_id")
           .eq("client_id", clientId).eq("user_id", targetUserId).maybeSingle();
         if (!member) return json({ error: "That person isn't on your team." }, 404);
+      }
+      // Creating a driver requires naming the person. Editing one (driverId) does not have to
+      // resend it, but must never be used to strip the link off an existing profile.
+      if (!driverId && !targetUserId) {
+        return json({ error: "Pick the person this driver is. Add them under Settings → Team first if they aren't there yet." }, 400);
+      }
+      if (driverId && "userId" in (payload ?? {}) && !targetUserId) {
+        return json({ error: "A driver must stay linked to a team member." }, 400);
       }
       const territoryIds = Array.isArray(payload?.territoryIds) ? payload.territoryIds.filter(isUuid) : [];
       if (territoryIds.length) {
@@ -764,11 +787,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         if (error) throw error;
         return json({ driver: data });
       }
-      if (!displayName) return json({ error: "Give the driver a name." }, 400);
-      const { data, error } = await admin.from("driver_profiles")
-        .insert({ ...row, client_id: clientId, user_id: null }).select("*").single();
-      if (error) throw error;
-      return json({ driver: data });
+      // No login-less fallback: the guard at the top of this action is the only entry, and a
+      // second insert path here would quietly outlive it the first time someone edits that guard.
+      return json({ error: "Pick the person this driver is." }, 400);
     }
 
     // ═══════════════ ADMIN WRITES — loads & stops ═══════════════
