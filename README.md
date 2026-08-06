@@ -20,7 +20,7 @@ Each customer (a shed business) is a **tenant** identified by a `client_id` slug
 - A **public designer link** — `https://<site>/?client=<client_id>` — branded with their config. Shoppers design a building and submit for a quote; no login required.
 - A **business portal** — `https://<site>/portal.html` (also where the bare site root redirects) — where the owner logs in to see their submitted designs/leads, copy their customer link, run the build/delivery schedules, and manage their GoHighLevel + business settings. Row Level Security guarantees each business only ever sees its own data.
 
-Per-tenant subdomains (`https://<client_id>.structurestudio.app`) also select the tenant. ⚠️ That resolution is hardcoded to the `structurestudio.app` apex, so **subdomain tenancy does not yet work on `structurestudiosuite.com`** — use `?client=<client_id>` on the new domain until it is generalized.
+Per-tenant subdomains (`https://<client_id>.structurestudio.app`) also select the tenant, and work on **either apex** — `structurestudio.app` and `structurestudiosuite.com` are both listed for the duration of the migration, so a branded link resolves the same on the old domain and the new one.
 
 ## Layout
 

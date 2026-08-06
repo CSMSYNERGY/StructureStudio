@@ -5369,9 +5369,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 //   1. `config` prop (e.g. supplied by index.html's postMessage re-render handler)
 //      wins and is used as-is, no fetch.
 //   2. `?client=<id>` URL param — explicit override, wins over hostname.
-//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns". Skipped for
-//      the apex, IPs, localhost, *.pages.dev / *.netlify.app deploy hosts, and the
-//      reserved env labels (www/beta/dev/staging/app).
+//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns", on either
+//      apex we serve (structurestudio.app and structurestudiosuite.com — both live
+//      during the migration). Skipped for the apexes themselves, IPs, localhost,
+//      *.pages.dev / *.netlify.app / *.workers.dev deploy hosts, and the reserved
+//      env labels (www/beta/dev/staging/app).
 //   4. `?id=<short_code>` share-link — the design row records its owning tenant;
 //      resolved via the load_design RPC (NOT a direct table read — that dies at
 //      cutover) so a rep clicking someone else's link gets that tenant's branding.
@@ -5434,16 +5436,24 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
     // decides the tenant for an embedded mount.
     let clientId = clientIdProp || params.get("client");
     const designShortCode = params.get("id");
-    // Tenant subdomains: only derive a client_id from <sub>.structurestudio.app.
-    // Anything else (apex, *.pages.dev / *.netlify.app deploy hosts, localhost,
-    // IPs, env labels) falls through — a deploy hostname is never a tenant.
+    // Tenant subdomains: derive a client_id from <sub>.<apex> on EITHER apex we serve.
+    // Both are live during the Netlify → Cloudflare migration (structurestudio.app is
+    // production today; structurestudiosuite.com is where we are moving, beta already
+    // on it), so a branded link must resolve identically on both — supporting only the
+    // old apex breaks every tenant's subdomain the day production cuts over, and only
+    // the new one breaks them all today. Retire an entry here when its apex is retired.
+    // Anything else (either apex itself, *.pages.dev / *.netlify.app / *.workers.dev
+    // deploy hosts, localhost, IPs, env labels) falls through — a deploy hostname is
+    // never a tenant.
     if (!clientId) {
-      const host = window.location.hostname;
-      const BASE = "structurestudio.app";
+      const host = window.location.hostname.toLowerCase();
+      const TENANT_APEXES = ["structurestudio.app", "structurestudiosuite.com"];
       const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
-      if (host.endsWith("." + BASE)) {
-        const sub = host.slice(0, host.length - BASE.length - 1).toLowerCase();
+      for (const base of TENANT_APEXES) {
+        if (!host.endsWith("." + base)) continue;
+        const sub = host.slice(0, host.length - base.length - 1);
         if (sub && !sub.includes(".") && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
+        break;
       }
     }
     // Bare product root: no tenant link (?client= / subdomain) and no design code.
