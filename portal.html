@@ -2425,6 +2425,33 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           </p>
         </div>
       )}
+
+      {/* Synergy CRM — a separate offering with tiered per-user pricing. Sign-up is EXTERNAL (its
+          own enrollment page), not the in-app Deposyt checkout, so this is an informational card
+          with an outbound link rather than a purchasable billing_plans feature. */}
+      <div style={S.card}>
+        <div style={S.h2}>Synergy CRM</div>
+        <p style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          The CRM that runs your sales — leads, pipelines, and follow-up. Priced by number of users; enroll on the sign-up page.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 16 }}>
+          {[
+            { tier: "1 User", mo: "$200/mo", yr: "$2,000/yr" },
+            { tier: "2-3 Users", mo: "$300/mo", yr: "$3,000/yr" },
+            { tier: "Unlimited Users", mo: "$500/mo", yr: "$5,000/yr" },
+          ].map((t) => (
+            <div key={t.tier} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>{t.tier}</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#3D3672" }}>{t.mo}</div>
+              <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2 }}>{t.yr}</div>
+            </div>
+          ))}
+        </div>
+        <a href="https://streamlinedconstructionsystem.com/saas-enrollment" target="_blank" rel="noopener noreferrer"
+          style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none" }}>
+          Sign up for Synergy CRM →
+        </a>
+      </div>
     </div>
   );
 }
