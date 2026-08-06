@@ -6578,7 +6578,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const [dropKey, setDropKey] = useState(null);              // "day:<iso>" | "load:<id>" for the drop glow
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [newLoad, setNewLoad] = useState(null);          // { driverUserId, loadDate, routeLabel } | null
+  const [newLoad, setNewLoad] = useState(null);          // { driverId, loadDate, routeLabel } | null
   const [editLoadId, setEditLoadId] = useState(null);    // header edit
   const [editStopId, setEditStopId] = useState(null);
   const [override, setOverride] = useState(null);        // { loadId, action, unbuilt, reason, complete }
@@ -6624,7 +6624,12 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const territories = (data && data.territories) || [];
   const team = (data && data.team) || [];
   const nameOf = {}; team.forEach((m) => { nameOf[m.userId] = m.name; });
-  const driverOf = {}; drivers.forEach((p) => { driverOf[p.user_id] = p; });
+  // Drivers are name-first profiles (095): resolve a load's driver by profile id, falling
+  // back to the legacy user link on old rows.
+  const profById = {}; const profByUser = {};
+  drivers.forEach((p) => { profById[p.id] = p; if (p.user_id) profByUser[p.user_id] = p; });
+  const loadProf = (l) => profById[l.driver_id] || profByUser[l.driver_user_id] || null;
+  const profName = (p) => p ? (p.display_name || nameOf[p.user_id] || "Driver") : "No driver";
   const terrName = {}; territories.forEach((t) => { terrName[t.id] = t.name; });
   const stopsByLoad = {}; stops.forEach((s) => { (stopsByLoad[s.load_id] = stopsByLoad[s.load_id] || []).push(s); });
   Object.keys(stopsByLoad).forEach((k) => stopsByLoad[k].sort((a, b) => a.stop_order - b.stop_order));
@@ -6653,7 +6658,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const thisWeek = loads.filter((l) => l.status !== "delivered" && l.load_date && l.load_date >= todayIso && l.load_date <= weekAhead).length;
 
-  const visibleLoads = loads.filter((l) => driverFilter === "all" || l.driver_user_id === driverFilter);
+  const visibleLoads = loads.filter((l) => driverFilter === "all" || ((loadProf(l) || {}).id === driverFilter));
   // Group by day (date-less loads last, under "No date yet").
   const dayKeys = []; const byDay = {};
   visibleLoads.slice().sort((a, b) => String(a.load_date || "9999").localeCompare(String(b.load_date || "9999"))).forEach((l) => {
@@ -6665,7 +6670,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   // ── Actions ──
   const createLoad = async (fields) => {
     setBusy(true); setMsg(null);
-    const r = await call({ action: "create_load", driverUserId: fields.driverUserId || null, loadDate: fields.loadDate || null, routeLabel: fields.routeLabel || null });
+    const r = await call({ action: "create_load", driverId: fields.driverId || null, loadDate: fields.loadDate || null, routeLabel: fields.routeLabel || null });
     setBusy(false);
     if (r && r.load) { setNewLoad(null); await load(); return r.load; }
     return null;
@@ -6758,11 +6763,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
 
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
-  const driverLabel = (uid) => {
-    const p = driverOf[uid];
-    if (!uid) return "No driver";
-    return (nameOf[uid] || "Driver") + (p && p.truck_name ? " · " + p.truck_name : "");
-  };
+  const driverLabel = (p) => !p ? "No driver" : profName(p) + (p.truck_name ? " · " + p.truck_name : "");
   const builtCell = (s, l) => {
     if (s.delivered_at) return <span style={schedChip("#F0FDF4", "#15803D")}>Delivered ✓</span>;
     if (s.build_job_id) {
@@ -6792,7 +6793,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
           <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addToLoad(e.target.value, addBody, label); }}
             style={{ ...inp, width: "auto", fontWeight: 700 }}>
             <option value="">Add to load…</option>
-            {plannedLoads.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}{l.driver_user_id ? " · " + (nameOf[l.driver_user_id] || "") : ""}</option>)}
+            {plannedLoads.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}{loadProf(l) ? " · " + profName(loadProf(l)) : ""}</option>)}
             <option value="new">➕ New load</option>
           </select>
         )}
@@ -6815,7 +6816,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
           <button type="button" disabled title="Coming later: fits buildings to each driver's deck, groups stops by territory, routes by map"
             style={{ ...S.btn("#FFF", "#B9C4D6"), border: "1px solid #E2E8F0", cursor: "default" }}>⚡ Auto-plan · soon</button>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
-          {canAdmin && <button type="button" onClick={() => setNewLoad(newLoad ? null : { driverUserId: "", loadDate: "", routeLabel: "" })} style={S.btn(ACCENT, "#FFF")}>+ New load</button>}
+          {canAdmin && <button type="button" onClick={() => setNewLoad(newLoad ? null : { driverId: "", loadDate: "", routeLabel: "" })} style={S.btn(ACCENT, "#FFF")}>+ New load</button>}
         </>} />
 
       {data && (
@@ -6839,9 +6840,9 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
           <div style={{ minWidth: 180 }}>
             <span style={lbl}>Driver</span>
-            <select style={inp} value={newLoad.driverUserId} onChange={(e) => setNewLoad({ ...newLoad, driverUserId: e.target.value })}>
+            <select style={inp} value={newLoad.driverId} onChange={(e) => setNewLoad({ ...newLoad, driverId: e.target.value })}>
               <option value="">— Pick later —</option>
-              {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.user_id} value={p.user_id}>{driverLabel(p.user_id)}</option>)}
+              {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.id} value={p.id}>{driverLabel(p)}</option>)}
             </select>
             {drivers.filter((p) => p.is_driver).length === 0 && <div style={{ fontSize: 10.5, color: "#B45309", fontWeight: 700, marginTop: 3 }}>No drivers set up yet — add trucks in Settings → Team.</div>}
           </div>
@@ -6891,7 +6892,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
         {/* Driver filter chips */}
         {drivers.filter((p) => p.is_driver).length > 0 && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
-            {[["all", `All drivers (${loads.length})`]].concat(drivers.filter((p) => p.is_driver).map((p) => [p.user_id, driverLabel(p.user_id) + ` (${loads.filter((l) => l.driver_user_id === p.user_id).length})`])).map(([k, label]) => {
+            {[["all", `All drivers (${loads.length})`]].concat(drivers.filter((p) => p.is_driver).map((p) => [p.id, driverLabel(p) + ` (${loads.filter((l) => (loadProf(l) || {}).id === p.id).length})`])).map(([k, label]) => {
               const on = driverFilter === k;
               return (
                 <button key={k} type="button" onClick={() => setDriverFilter(on && k !== "all" ? "all" : k)}
@@ -6930,7 +6931,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                     <span style={{ fontSize: 13.5, fontWeight: 800 }}>Load {l.load_no}</span>
                     <span style={schedChip(st.bg, st.fg)}>{st.label}</span>
                     <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>
-                      {driverLabel(l.driver_user_id)}
+                      {driverLabel(loadProf(l))}
                       {deck ? ` · ${deck}' deck` : ""}{l.max_width_ft ? ` · max ${Number(l.max_width_ft)}' wide` : ""}
                     </span>
                     {l.route_label && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>📍 {l.route_label}</span>}
@@ -7080,7 +7081,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                     <td style={S.td}>{builtCell(s, l)}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{l.load_no ? "Load " + l.load_no + " · stop " + s.stop_order : "—"}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{l.load_date ? schedDayLabel(l.load_date) : "—"}</td>
-                    <td style={S.td}>{nameOf[l.driver_user_id] || "—"}</td>
+                    <td style={S.td}>{loadProf(l) ? profName(loadProf(l)) : "—"}</td>
                   </tr>
                 );
               })}
@@ -7132,7 +7133,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                 {l.is_wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), padding: "2px 8px", fontSize: 9.5 }}>WIDE</span>}
               </div>
               <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 8, borderBottom: "0.5px solid #F1F5F9" }}>
-                <span style={{ fontSize: 11, color: "#475569", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf[l.driver_user_id] || "No driver"}{l.route_label ? " · " + l.route_label : ""}</span>
+                <span style={{ fontSize: 11, color: "#475569", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profName(loadProf(l))}{l.route_label ? " · " + l.route_label : ""}</span>
                 {l.deck_length_ft ? <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" }}>{Math.round(usedFt)}′ / {l.deck_length_ft}′</span> : null}
               </div>
               <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -7286,7 +7287,8 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
 // Load header editor (expand-in-place; only while the load is planned).
 function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
   const [f, setF] = useState({
-    driverUserId: l.driver_user_id || "", loadDate: l.load_date || "", routeLabel: l.route_label || "",
+    driverId: l.driver_id || ((drivers.find((p) => p.user_id && p.user_id === l.driver_user_id) || {}).id || ""),
+    loadDate: l.load_date || "", routeLabel: l.route_label || "",
     milesOut: l.miles_out == null ? "" : String(l.miles_out), milesBack: l.miles_back == null ? "" : String(l.miles_back),
     permitStatus: l.permit_status || "not_needed", notes: l.notes || "",
   });
@@ -7298,7 +7300,7 @@ function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "8px 10px" }}>
         <div>
           <span style={lbl}>Driver</span>
-          <select style={inp} value={f.driverUserId} onChange={set("driverUserId")}>
+          <select style={inp} value={f.driverId} onChange={set("driverId")}>
             <option value="">— No driver —</option>
             {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.user_id} value={p.user_id}>{(nameOf[p.user_id] || "Driver") + (p.truck_name ? " · " + p.truck_name : "")}</option>)}
           </select>
@@ -7319,7 +7321,7 @@ function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
         <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={onCancel}>Cancel</button>
         <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
           onClick={() => onSave({
-            driverUserId: f.driverUserId || null, loadDate: f.loadDate || null, routeLabel: f.routeLabel,
+            driverId: f.driverId || null, loadDate: f.loadDate || null, routeLabel: f.routeLabel,
             milesOut: f.milesOut === "" ? null : Number(f.milesOut), milesBack: f.milesBack === "" ? null : Number(f.milesBack),
             permitStatus: f.permitStatus, notes: f.notes,
           })}>Save load</button>
@@ -7347,9 +7349,11 @@ function DriversTerritoriesCard() {
     const { data: d, error } = await sb.functions.invoke("portal-schedule", { body: { action: "list_drivers" } });
     if (error || !d || d.error) { setMsg({ err: (d && d.error) || "Could not load drivers." }); setData({ team: [], drivers: [], territories: [], crews: [] }); return; }
     setData(d);
+    // Drafts are keyed by PROFILE id (095: drivers are name-first, logins optional).
     const map = {};
     (d.drivers || []).forEach((p) => {
-      map[p.user_id] = {
+      map[p.id] = {
+        userId: p.user_id || null, displayName: p.display_name || "",
         isDriver: !!p.is_driver, truckName: p.truck_name || "",
         deck: p.deck_length_ft == null ? "" : String(p.deck_length_ft),
         maxW: p.max_width_ft == null ? "" : String(p.max_width_ft),
@@ -7374,19 +7378,25 @@ function DriversTerritoriesCard() {
     if (okMsg) setMsg({ ok: okMsg });
     return d;
   };
-  const blank = { isDriver: false, truckName: "", deck: "", maxW: "", wide: true, territoryIds: [] };
-  const draftFor = (uid) => drafts[uid] || blank;
-  const setDraft = (uid, patch) => setDrafts({ ...drafts, [uid]: { ...draftFor(uid), ...patch } });
-  const saveDriver = async (uid, overrides) => {
-    const f = { ...draftFor(uid), ...(overrides || {}) };
+  const blank = { userId: null, displayName: "", isDriver: true, truckName: "", deck: "", maxW: "", wide: true, territoryIds: [] };
+  const draftFor = (k) => drafts[k] || blank;
+  const setDraft = (k, patch) => setDrafts({ ...drafts, [k]: { ...draftFor(k), ...patch } });
+  const driverName = (f) => f.displayName || nameOfU[f.userId] || "Driver";
+  const saveDriver = async (key, overrides) => {
+    const f = { ...draftFor(key), ...(overrides || {}) };
+    if (!f.displayName.trim() && !f.userId) { setMsg({ err: "Give the driver a name." }); return; }
     setBusy(true); setMsg(null);
-    const r = await call({
-      action: "save_driver", userId: uid, isDriver: f.isDriver,
+    const body = {
+      action: "save_driver", isDriver: f.isDriver, displayName: f.displayName,
       truckName: f.truckName, deckLengthFt: f.deck === "" ? null : Number(f.deck),
       maxWidthFt: f.maxW === "" ? null : Number(f.maxW),
       wideLoadCapable: f.wide, territoryIds: f.territoryIds,
-    }, f.isDriver ? `${nameOfU[uid] || "Driver"} saved.` : `${nameOfU[uid] || "Driver"} is no longer a driver.`);
-    setBusy(false); if (r) load();
+    };
+    if (key === "new") { if (f.userId) body.userId = f.userId; }
+    else body.driverId = key;
+    const r = await call(body, f.isDriver ? `${driverName(f)} saved.` : `${driverName(f)} is no longer a driver.`);
+    setBusy(false);
+    if (r) { if (key === "new") setDrafts((d) => { const n = { ...d }; delete n.new; return n; }); load(); }
   };
   const saveCrew = async () => {
     if (!cDraft || !cDraft.name.trim()) { setMsg({ err: "Give the crew a name." }); return; }
@@ -7521,43 +7531,49 @@ function DriversTerritoriesCard() {
           </div>
         )}
 
-        {/* ── Drivers — one line each (like Sales Locations); Edit expands in place ── */}
+        {/* ── Drivers — one line each (like Sales Locations); Edit expands in place.
+               Name-first (095): type any name; linking a portal login is optional. ── */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "16px 0 8px" }}>
           <span style={{ ...S.lbl, marginBottom: 0 }}>Drivers</span>
           <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>— truck specs drive the load planner's deck math</span>
-          {team.filter((m) => !draftFor(m.userId).isDriver).length > 0 && (
-            <select value={addDriverPick}
-              onChange={(e) => { const uid = e.target.value; setAddDriverPick(""); if (uid) { setDraft(uid, { ...blank, isDriver: true }); setEditingDriver(uid); } }}
-              style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 11.5, fontWeight: 700, marginLeft: "auto" }}>
-              <option value="">+ Add driver…</option>
-              {team.filter((m) => !draftFor(m.userId).isDriver).map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)}</option>)}
-            </select>
-          )}
+          <select value={addDriverPick}
+            onChange={(e) => {
+              const v = e.target.value; setAddDriverPick("");
+              if (v === "__name") { setDraft("new", { ...blank }); setEditingDriver("new"); }
+              else if (v) { setDraft("new", { ...blank, userId: v, displayName: nameOfU[v] || "" }); setEditingDriver("new"); }
+            }}
+            style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 11.5, fontWeight: 700, marginLeft: "auto" }}>
+            <option value="">+ Add driver…</option>
+            <option value="__name">➕ New driver (name only, no login)</option>
+            {team.filter((m) => !(data.drivers || []).some((p) => p.user_id === m.userId)).map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)} (team login)</option>)}
+          </select>
         </div>
-        {team.filter((m) => draftFor(m.userId).isDriver).length === 0 && (
-          <p style={{ fontSize: 12.5, color: "#64748B", padding: "4px 2px 8px" }}>No drivers yet — pick a team member from "+ Add driver…" to give them a truck.</p>
+        {(data.drivers || []).filter((p) => p.is_driver).length === 0 && editingDriver !== "new" && (
+          <p style={{ fontSize: 12.5, color: "#64748B", padding: "4px 2px 8px" }}>No drivers yet — use "+ Add driver…" and just type their name; a portal login is optional.</p>
         )}
-        {team.filter((m) => draftFor(m.userId).isDriver).map((m) => {
-          const f = draftFor(m.userId);
-          const editing = editingDriver === m.userId;
+        {(data.drivers || []).filter((p) => p.is_driver).map((p) => p.id).concat(editingDriver === "new" ? ["new"] : []).map((key) => {
+          const f = draftFor(key);
+          const editing = editingDriver === key;
           return (
-            <div key={m.userId} style={{ border: "1px solid #E2E8F0", borderRadius: 10, marginBottom: 7, background: "#FBFCFE" }}>
+            <div key={key} style={{ border: "1px " + (key === "new" ? "dashed #B9C4D6" : "solid #E2E8F0"), borderRadius: 10, marginBottom: 7, background: "#FBFCFE" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", flexWrap: "wrap" }}>
-                <strong style={{ fontSize: 13 }}>{m.name || m.userId.slice(0, 8)}</strong>
+                <strong style={{ fontSize: 13 }}>{key === "new" ? (f.displayName || "New driver") : driverName(f)}</strong>
+                {f.userId && <span style={schedChip("#EEF2FF", "#3D3672")}>login ✓</span>}
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: "#64748B", flex: 1, minWidth: 160 }}>
                   {[f.truckName || "no truck yet", f.deck ? f.deck + "' deck" : null, f.maxW ? "max " + f.maxW + "' wide" : null, f.wide ? "wide-load ✓" : "no wide loads"].filter(Boolean).join(" · ")}
                   {f.territoryIds.length > 0 ? " · " + f.territoryIds.map((tid) => terrName[tid]).filter(Boolean).join(", ") : ""}
                 </span>
-                <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "4px 9px", fontSize: 11 }} onClick={() => setEditingDriver(editing ? null : m.userId)}>{editing ? "Close" : "Edit"}</button>
+                {key !== "new" && <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "4px 9px", fontSize: 11 }} onClick={() => setEditingDriver(editing ? null : key)}>{editing ? "Close" : "Edit"}</button>}
               </div>
               {editing && (
                 <div style={{ borderTop: "1px solid #F1F5F9", padding: "9px 11px" }}>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "8px 10px" }}>
-                    <div><span style={lbl}>Truck / trailer</span><input style={inp} value={f.truckName} onChange={(e) => setDraft(m.userId, { truckName: e.target.value })} placeholder="40' gooseneck" /></div>
-                    <div><span style={lbl}>Deck length (ft)</span><input style={inp} value={f.deck} onChange={(e) => setDraft(m.userId, { deck: e.target.value })} placeholder="40" /></div>
-                    <div><span style={lbl}>Max building width (ft)</span><input style={inp} value={f.maxW} onChange={(e) => setDraft(m.userId, { maxW: e.target.value })} placeholder="14" /></div>
+                    <div><span style={lbl}>Driver name</span><input style={inp} value={f.displayName} onChange={(e) => setDraft(key, { displayName: e.target.value })} placeholder="Ray Detweiler" /></div>
+                    <div><span style={lbl}>Truck / trailer</span><input style={inp} value={f.truckName} onChange={(e) => setDraft(key, { truckName: e.target.value })} placeholder="40' gooseneck" /></div>
+                    <div><span style={lbl}>Deck length (ft)</span><input style={inp} value={f.deck} onChange={(e) => setDraft(key, { deck: e.target.value })} placeholder="40" /></div>
+                    <div><span style={lbl}>Max building width (ft)</span><input style={inp} value={f.maxW} onChange={(e) => setDraft(key, { maxW: e.target.value })} placeholder="14" /></div>
                     <div><span style={lbl}>Wide-load capable</span>
-                      <select style={inp} value={f.wide ? "yes" : "no"} onChange={(e) => setDraft(m.userId, { wide: e.target.value === "yes" })}>
+                      <select style={inp} value={f.wide ? "yes" : "no"} onChange={(e) => setDraft(key, { wide: e.target.value === "yes" })}>
                         <option value="yes">Yes</option><option value="no">No</option>
                       </select>
                     </div>
@@ -7569,7 +7585,7 @@ function DriversTerritoriesCard() {
                         {activeTerritories.map((t) => {
                           const on = f.territoryIds.indexOf(t.id) !== -1;
                           return (
-                            <button key={t.id} type="button" onClick={() => toggleTerr(m.userId, t.id)} title={t.description || t.name}
+                            <button key={t.id} type="button" onClick={() => toggleTerr(key, t.id)} title={t.description || t.name}
                               style={{ ...schedChip(on ? "#3D3672" : "#F1F5F9", on ? "#FFF" : "#475569"), border: "none", cursor: "pointer", fontFamily: "inherit" }}>
                               {t.name}{on ? " ✓" : ""}
                             </button>
@@ -7579,9 +7595,9 @@ function DriversTerritoriesCard() {
                     </div>
                   )}
                   <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
-                    <button type="button" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12 }} onClick={() => saveDriver(m.userId)}>Save driver</button>
-                    <button type="button" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 13px", fontSize: 12 }} onClick={() => setEditingDriver(null)}>Cancel</button>
-                    <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "6px 13px", fontSize: 12, marginLeft: "auto" }} onClick={() => saveDriver(m.userId, { isDriver: false })}>Remove driver</button>
+                    <button type="button" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12 }} onClick={() => saveDriver(key)}>Save driver</button>
+                    <button type="button" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 13px", fontSize: 12 }} onClick={() => { setEditingDriver(null); if (key === "new") setDrafts((d) => { const n = { ...d }; delete n.new; return n; }); }}>Cancel</button>
+                    {key !== "new" && <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "6px 13px", fontSize: 12, marginLeft: "auto" }} onClick={() => saveDriver(key, { isDriver: false })}>Remove driver</button>}
                   </div>
                 </div>
               )}

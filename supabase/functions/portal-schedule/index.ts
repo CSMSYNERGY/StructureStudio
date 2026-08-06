@@ -158,18 +158,15 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     return (seeded ?? []).sort((a, b) => a.sort_order - b.sort_order);
   };
 
-  // Team names for rendering (assignees, drivers, activity) — one query each.
+  // Team names for rendering (assignees, drivers, activity). Names live on
+  // client_users.full_name — there is NO user_profiles table (migration 060 put the
+  // columns on client_users); the old lookup here silently returned nothing, which is
+  // why drivers and team pickers showed blank names.
   const getTeam = async () => {
     const { data: members, error } = await admin
-      .from("client_users").select("user_id, role").eq("client_id", clientId);
+      .from("client_users").select("user_id, role, full_name").eq("client_id", clientId);
     if (error) throw error;
-    const ids = (members ?? []).map((m) => m.user_id);
-    let names: Record<string, string> = {};
-    if (ids.length) {
-      const { data: profs } = await admin.from("user_profiles").select("user_id, full_name").in("user_id", ids);
-      names = Object.fromEntries((profs ?? []).map((p) => [p.user_id, p.full_name || ""]));
-    }
-    return (members ?? []).map((m) => ({ userId: m.user_id, role: m.role || "user", name: names[m.user_id] || "" }));
+    return (members ?? []).map((m) => ({ userId: m.user_id, role: m.role || "user", name: m.full_name || "" }));
   };
 
   const getDrivers = async () => {
@@ -714,20 +711,25 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     }
 
     if (action === "save_driver") {
-      const targetUserId = payload?.userId;
-      if (!isUuid(targetUserId)) return json({ error: "Invalid user id." }, 400);
-      const { data: member } = await admin.from("client_users").select("user_id")
-        .eq("client_id", clientId).eq("user_id", targetUserId).maybeSingle();
-      if (!member) return json({ error: "That person isn't on your team." }, 404);
+      // Drivers are NAME-FIRST (095): display_name is the identity, a linked login is
+      // optional. Accepts driverId (existing profile), userId (link/create by login),
+      // or neither (name-only driver — displayName required).
+      const driverId = isUuid(payload?.driverId) ? payload.driverId : null;
+      const targetUserId = isUuid(payload?.userId) ? payload.userId : null;
+      const displayName = str(payload?.displayName);
+      if (targetUserId) {
+        const { data: member } = await admin.from("client_users").select("user_id")
+          .eq("client_id", clientId).eq("user_id", targetUserId).maybeSingle();
+        if (!member) return json({ error: "That person isn't on your team." }, 404);
+      }
       const territoryIds = Array.isArray(payload?.territoryIds) ? payload.territoryIds.filter(isUuid) : [];
       if (territoryIds.length) {
         const { data: owned } = await admin.from("delivery_territories").select("id")
           .eq("client_id", clientId).in("id", territoryIds);
         if ((owned ?? []).length !== territoryIds.length) return json({ error: "Unknown territory." }, 400);
       }
-      const row = {
-        client_id: clientId,
-        user_id: targetUserId,
+      const row: Record<string, unknown> = {
+        display_name: displayName,
         is_driver: payload?.isDriver !== false,
         truck_name: str(payload?.truckName),
         deck_length_ft: num(payload?.deckLengthFt),
@@ -738,8 +740,33 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         updated_at: new Date().toISOString(),
         updated_by: userId,
       };
+      if ("userId" in (payload ?? {})) row.user_id = targetUserId; // explicit link/unlink
+      if (driverId) {
+        const existing = await requireRow("driver_profiles", driverId, "Driver");
+        const { data, error } = await admin.from("driver_profiles").update(row)
+          .eq("id", existing.id).eq("client_id", clientId).select("*").single();
+        if (error) throw error;
+        return json({ driver: data });
+      }
+      if (targetUserId) {
+        // One profile per login: update it if it exists, create it otherwise (the partial
+        // unique index can't drive an upsert, so do it by hand).
+        const { data: byUser } = await admin.from("driver_profiles").select("id")
+          .eq("client_id", clientId).eq("user_id", targetUserId).maybeSingle();
+        if (byUser) {
+          const { data, error } = await admin.from("driver_profiles").update(row)
+            .eq("id", byUser.id).eq("client_id", clientId).select("*").single();
+          if (error) throw error;
+          return json({ driver: data });
+        }
+        const { data, error } = await admin.from("driver_profiles")
+          .insert({ ...row, client_id: clientId, user_id: targetUserId }).select("*").single();
+        if (error) throw error;
+        return json({ driver: data });
+      }
+      if (!displayName) return json({ error: "Give the driver a name." }, 400);
       const { data, error } = await admin.from("driver_profiles")
-        .upsert(row, { onConflict: "client_id,user_id" }).select("*").single();
+        .insert({ ...row, client_id: clientId, user_id: null }).select("*").single();
       if (error) throw error;
       return json({ driver: data });
     }
@@ -757,11 +784,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         notes: str(payload?.notes),
         created_by: userId,
       };
-      if (payload?.driverUserId) {
-        if (!isUuid(payload.driverUserId)) return json({ error: "Invalid driver id." }, 400);
-        const { data: prof } = await admin.from("driver_profiles").select("*")
-          .eq("client_id", clientId).eq("user_id", payload.driverUserId).maybeSingle();
+      if (payload?.driverId || payload?.driverUserId) {
+        // driverId = the profile (095, name-first); driverUserId kept for older pages.
+        const prof = payload?.driverId
+          ? await requireRow("driver_profiles", payload.driverId, "Driver")
+          : (await admin.from("driver_profiles").select("*")
+              .eq("client_id", clientId).eq("user_id", payload.driverUserId).maybeSingle()).data;
         if (!prof?.is_driver || !prof.active) return json({ error: "That person isn't set up as a driver — add their truck in Settings → Team." }, 400);
+        row.driver_id = prof.id;
         row.driver_user_id = prof.user_id;
         // Snapshot the truck: past loads keep their math when a driver upgrades trucks.
         row.deck_length_ft = prof.deck_length_ft;
@@ -789,13 +819,15 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       if ("milesBack" in payload) patch.miles_back = num(payload.milesBack);
       if ("permitStatus" in payload && ["not_needed", "needed", "on_file"].includes(payload.permitStatus)) patch.permit_status = payload.permitStatus;
       if ("notes" in payload) patch.notes = str(payload.notes);
-      if ("driverUserId" in payload) {
-        if (payload.driverUserId === null) {
-          patch.driver_user_id = null; patch.deck_length_ft = null; patch.max_width_ft = null;
+      if ("driverId" in payload || "driverUserId" in payload) {
+        const cleared = ("driverId" in payload ? payload.driverId : payload.driverUserId) === null;
+        if (cleared) {
+          patch.driver_id = null; patch.driver_user_id = null; patch.deck_length_ft = null; patch.max_width_ft = null;
         } else {
-          if (!isUuid(payload.driverUserId)) return json({ error: "Invalid driver id." }, 400);
-          const { data: prof } = await admin.from("driver_profiles").select("*")
-            .eq("client_id", clientId).eq("user_id", payload.driverUserId).maybeSingle();
+          const prof = payload?.driverId
+            ? await requireRow("driver_profiles", payload.driverId, "Driver")
+            : (await admin.from("driver_profiles").select("*")
+                .eq("client_id", clientId).eq("user_id", payload.driverUserId).maybeSingle()).data;
           if (!prof?.is_driver || !prof.active) return json({ error: "That person isn't set up as a driver." }, 400);
           // No override for physics: every existing stop must fit the new truck.
           if (prof.max_width_ft != null) {
@@ -804,6 +836,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
             const tooWide = (stops ?? []).find((s) => Number(s.width_ft) > Number(prof.max_width_ft));
             if (tooWide) return json({ error: `Building #${tooWide.serial ?? "?"} is ${tooWide.width_ft}' wide — too wide for that truck (max ${prof.max_width_ft}').` }, 400);
           }
+          patch.driver_id = prof.id;
           patch.driver_user_id = prof.user_id;
           patch.deck_length_ft = prof.deck_length_ft;
           patch.max_width_ft = prof.max_width_ft;
