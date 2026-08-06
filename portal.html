@@ -2505,7 +2505,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
 }
 
 // ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
-function PricingCsv({ viewingLabel = null }) {
+function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
   const [dlBusy, setDlBusy] = useState(false);
@@ -2886,6 +2886,20 @@ function PricingCsv({ viewingLabel = null }) {
 
       <div style={S.card}>
         <div style={S.h2}>Pricing &amp; included options (Excel)</div>
+        {/* Sequencing banner (Carolyn 2026-08-06): the template's option columns ARE the
+            tenant's Options catalog, so pricing a size before the catalog exists means
+            re-downloading the sheet later to say what's included. Say so before they start. */}
+        <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", marginBottom: 12, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <span aria-hidden="true" style={{ fontSize: 15, lineHeight: 1.4 }}>💡</span>
+          <div style={{ flex: 1, minWidth: 220, fontSize: 13, color: "#92400E", lineHeight: 1.55 }}>
+            <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a
+            column in this sheet — that's how you say what comes <b>included</b> with each style and size.
+            Build that list under <b>Options</b>, then download the template so nothing is missing from it.
+          </div>
+          {onGoToOptions && (
+            <button onClick={onGoToOptions} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", padding: "6px 12px", whiteSpace: "nowrap" }}>Go to Options →</button>
+          )}
+        </div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Download the template (one row per building style), then add a row for every size you offer: type the
           <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
@@ -10372,7 +10386,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         ))}
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
-      {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} />}
+      {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />}
       {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
