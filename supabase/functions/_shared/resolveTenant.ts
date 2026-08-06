@@ -20,6 +20,16 @@
 // Same specifier every function in this project uses — mixing jsr: and esm.sh would
 // bundle two copies of supabase-js into each function.
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import {
+  canEdit,
+  canRead,
+  checkGate,
+  effectiveAccess,
+  type Gate,
+  gateIsRead,
+  type GateTable,
+  type Level,
+} from "./access.ts";
 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
@@ -41,6 +51,18 @@ export type TenantCtx = {
   userEmail: string;
   /** Non-null only when acting on ANOTHER tenant via the operator override. */
   operator: OperatorCtx | null;
+  /**
+   * This caller's RESOLVED per-area access (migration 100): the title's preset with their
+   * stored overrides applied. Owners resolve to full edit and operators in view-as are
+   * treated the same — an operator's rights come from app_operators, not from a
+   * client_users row they do not have.
+   *
+   * `access` is the raw map; prefer the two helpers, and prefer failing closed:
+   * an action with NO access check is an action anyone signed in can call.
+   */
+  access: Record<string, Level>;
+  canRead: (area: string) => boolean;
+  canEdit: (area: string) => boolean;
   /** Parsed request body — the resolver owns the single parse. */
   // deno-lint-ignore no-explicit-any
   payload: any;
@@ -105,6 +127,19 @@ export async function resolveTenant(
   req: Request,
   admin: Admin,
   opts: {
+    /**
+     * The function's action → required-access table (migration 100). When supplied it is
+     * THE gate: it decides read-vs-write for the operator capability check, it enforces
+     * per-area access, and an action missing from it is refused outright.
+     *
+     * It also SUPERSEDES readActions/selfActions/staffActions — passing both is a
+     * contradiction, and the legacy role gate is skipped when gates are present. Two
+     * models would mean a crew leader granted build_schedule:'edit' passing canEdit() and
+     * then being 403'd anyway by role !== 'owner'|'admin', which is the whole per-person
+     * feature quietly not working.
+     */
+    gates?: GateTable;
+    /** Legacy coarse gate. Only consulted when `gates` is absent. */
     readActions: Set<string>;
     defaultAction?: string;
     requireBilling?: boolean;
@@ -152,7 +187,17 @@ export async function resolveTenant(
   try { payload = await req.json(); }
   catch { return { ok: false, status: 400, body: { error: "Invalid JSON" } }; }
   const action = String(payload?.action || opts.defaultAction || "status");
-  const isRead = opts.readActions.has(action);
+  // The gate table, when present, is the authority on everything below — including whether
+  // this is a read, which a read-only operator's capability check depends on.
+  const gated = !!opts.gates;
+  const gate: Gate | undefined = opts.gates?.[action];
+  if (gated && !gate) {
+    // FAIL CLOSED. Reached only by a typo'd action or by a new branch whose author did not
+    // add a gate — and the second one is the case worth protecting: without this, a new
+    // action is callable by every signed-in person in the company by default.
+    return { ok: false, status: 403, body: { error: `Unrecognised action "${action}".` } };
+  }
+  const isRead = gated ? gateIsRead(gate) : opts.readActions.has(action);
   // A self-service write is allowed for any role, but ONLY on the caller's own row —
   // enforced by the handler, which must key off ctx.userId and never a body-supplied id.
   const isSelf = Boolean(opts.selfActions?.has(action));
@@ -165,7 +210,7 @@ export async function resolveTenant(
   //    the same way (its "audit #F6" comment); these functions did not.
   const { data: mapRows, error: mapErr } = await admin
     .from("client_users")
-    .select("client_id, role")
+    .select("client_id, role, title, access")
     .eq("user_id", user.id)
     .limit(1);
   if (mapErr) return { ok: false, status: 500, body: { error: mapErr.message } };
@@ -181,7 +226,15 @@ export async function resolveTenant(
   // ── Normal path: unchanged behaviour ─────────────────────────────────────────
   if (!wantsOverride) {
     if (!mapping) return { ok: false, status: 403, body: { error: "No business is linked to this account." } };
-    if (!isRead && !isSelf && !isStaff && mapping.role !== "owner" && mapping.role !== "admin") {
+    // Resolved once per request from the row we already fetched — no extra round trip.
+    const acc = effectiveAccess(mapping.role, mapping.title, mapping.access);
+
+    if (gated) {
+      // Per-area gate. Owners short-circuit to full access inside effectiveAccess, so an
+      // owner can never be locked out of their own account by a bad table entry here.
+      const denied = checkGate(gate, acc);
+      if (denied) return { ok: false, status: 403, body: { error: denied } };
+    } else if (!isRead && !isSelf && !isStaff && mapping.role !== "owner" && mapping.role !== "admin") {
       return {
         ok: false,
         status: 403,
@@ -197,6 +250,9 @@ export async function resolveTenant(
         userId: user.id,
         userEmail: user.email ?? "",
         operator: null,
+        access: acc,
+        canRead: (area: string) => canRead(acc, area),
+        canEdit: (area: string) => canEdit(acc, area),
         payload,
         action,
         audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),
@@ -241,6 +297,11 @@ export async function resolveTenant(
 
   const actor = { userId: user.id, email: op.email || user.email || "" };
   const a = makeAudit(admin, actor, clientId);
+  // An operator in view-as has NO client_users row on the viewed tenant, so there is no
+  // title or override map to resolve. Their rights come from app_operators and were already
+  // enforced above (can_write / can_bill); per-area access is therefore full, and the
+  // read-only operator is still blocked by the can_write gate rather than by this map.
+  const opAcc = effectiveAccess("owner", "owner", null);
   return {
     ok: true,
     ctx: {
@@ -249,6 +310,9 @@ export async function resolveTenant(
       userId: user.id,
       userEmail: user.email ?? "",
       operator: { userId: actor.userId, email: actor.email, canWrite: !!op.can_write, canBill: !!op.can_bill },
+      access: opAcc,
+      canRead: () => true,
+      canEdit: () => !!op.can_write,
       payload,
       action,
       audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),

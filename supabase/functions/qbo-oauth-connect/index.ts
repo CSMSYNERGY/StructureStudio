@@ -12,9 +12,10 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import type { GateTable } from "../_shared/access.ts";
 import { qboOauthReady } from "../_shared/qboToken.ts";
+import { qboEndpoints, withParams } from "../_shared/qboDiscovery.ts";
 
-const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const SCOPE = "com.intuit.quickbooks.accounting";
 const STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -24,7 +25,13 @@ const STATE_TTL_MS = 10 * 60 * 1000;
  * the callback appends. Re-checked on the callback side too — never trust that the value
  * that comes back is the value we issued.
  */
-const ALLOWED_HOSTS = new Set(["structurestudio.app", "beta.structurestudio.app"]);
+// Rebrand 2026-08-05: keep the old-domain entries until its sunset redirect ships.
+const ALLOWED_HOSTS = new Set([
+  "app.structurestudiosuite.com",
+  "beta.structurestudiosuite.com",
+  "structurestudio.app",
+  "beta.structurestudio.app",
+]);
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -49,9 +56,13 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  // Empty readActions ⇒ every action counts as a write ⇒ owner/admin or a writing
-  // operator. No extra permission code needed here.
-  const resolved = await resolveTenant(req, admin, { readActions: new Set<string>() });
+  // Starting an Intuit OAuth connect is a QuickBooks settings change (migration 100).
+  // This function takes no `action`, so the default lands on "status" and that one entry is
+  // the whole table — anything else is refused rather than inheriting a write by default.
+  const resolved = await resolveTenant(req, admin, {
+    gates: { status: { area: "settings_quickbooks", level: "edit" } } as GateTable,
+    readActions: new Set<string>(),
+  });
   if (!resolved.ok) return json(resolved.body, resolved.status);
   const { ctx } = resolved;
 
@@ -72,7 +83,7 @@ Deno.serve(async (req) => {
   // Where to land the browser afterwards. Validated against the allowlist; anything else
   // silently falls back to production rather than erroring — a bad returnTo is not worth
   // blocking a connect over.
-  let returnHost = "structurestudio.app";
+  let returnHost = "app.structurestudiosuite.com";
   const rawReturn = typeof ctx.payload?.returnTo === "string" ? ctx.payload.returnTo : "";
   if (rawReturn) {
     try {
@@ -106,13 +117,21 @@ Deno.serve(async (req) => {
   await ctx.audit("qbo_oauth_start", 1, null);
 
   const state = b64url(JSON.stringify({ cid: ctx.clientId, n: nonce, rt: returnHost }));
-  const authorizeUrl = `${AUTHORIZE_URL}?${new URLSearchParams({
+  // Read AFTER the nonce is saved and the audit row is written: those are the steps that must not
+  // be skipped, and qboEndpoints() falls back rather than failing, so ordering it here costs
+  // nothing and keeps a slow metadata host from delaying a write we care about.
+  const { authorize } = await qboEndpoints();
+  // withParams, NOT `${authorize}?${new URLSearchParams(params)}`. The left-hand side is no longer
+  // a constant we control — it comes from Intuit's discovery document — and a query component is
+  // legal there (RFC 6749 §3.1), so concatenating a second "?" would corrupt the request. The
+  // reasoning and the unit tests live with the helper in _shared/qboDiscovery.ts.
+  const authorizeUrl = withParams(authorize, {
     client_id: Deno.env.get("QBO_CLIENT_ID")!,
     response_type: "code",
     scope: SCOPE,
     redirect_uri: redirectUri,
     state,
-  })}`;
+  });
 
   // clientId is echoed as the operator view-as tripwire the portal already checks.
   return json({ oauthReady: true, authorizeUrl, clientId: ctx.clientId });

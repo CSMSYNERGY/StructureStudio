@@ -2,6 +2,17 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import {
+  accessMetadata,
+  canEdit as accCanEdit,
+  canRead as accCanRead,
+  effectiveAccess,
+  type Level,
+  mayGrantMap,
+  roleForTitle,
+  sanitizeAccess,
+  TITLES,
+} from "../_shared/access.ts";
 
 // Commission team + rates backend (portal.html Settings → "Team & commissions").
 //
@@ -45,6 +56,10 @@ const cors = {
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
+// One answer for every reason an address is refused, so the response can never be used to
+// discover who else uses StructureStudio. See add_user.
+const OPAQUE_ADD_FAILURE = "That email can't be added here. If they already use StructureStudio at another company, contact support.";
+
 const isUuid = (v: unknown) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 const enc = encodeURIComponent;
@@ -125,13 +140,20 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   // 2. Map the caller to their tenant + role (service role; client_id is never trusted from the body).
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: me, error: meErr } = await admin
-    .from("client_users").select("client_id, role").eq("user_id", user.id).maybeSingle();
+    .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).maybeSingle();
   if (meErr) return json({ error: meErr.message }, 500);
   if (!me?.client_id) return json({ error: "Your login isn't attached to an account." }, 403);
   const clientId: string = me.client_id;
   const role: string = me.role || "user";
   const isOwner = role === "owner";
   const isAdmin = role === "owner" || role === "admin";
+  // The caller's resolved per-area access (migration 100). The TEAM actions below gate on
+  // settings_team rather than on role, so that "as dynamic as possible per individual"
+  // actually reaches the screen where people are managed — an office manager can be given
+  // Team without being made an admin. Owners resolve to full access inside effectiveAccess.
+  const myAccess = effectiveAccess(role, me.title, me.access as Record<string, unknown> | null);
+  const canManageTeam = accCanEdit(myAccess, "settings_team");
+  const canViewTeam = accCanRead(myAccess, "settings_team");
 
   // The caller's own grants. Owner always sees rates + all payouts regardless.
   const { data: myCm } = await admin
@@ -150,28 +172,47 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   // Confirm a userId is a member of THIS tenant before any write touches them.
   const requireMember = async (uid: unknown) => {
     if (!isUuid(uid)) throw new Error("Invalid user id.");
-    const { data, error } = await admin.from("client_users").select("user_id, role").eq("client_id", clientId).eq("user_id", uid).maybeSingle();
+    const { data, error } = await admin.from("client_users").select("user_id, role, title, access").eq("client_id", clientId).eq("user_id", uid).maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("That person isn't on your team.");
-    return data as { user_id: string; role: string };
+    return data as { user_id: string; role: string; title: string | null; access: Record<string, unknown> | null };
   };
 
   try {
     switch (action) {
       // ── list the team (rates only if the caller may see them; grants only for the owner) ──
       case "list": {
-        if (!isAdmin) return json({ error: "Only an owner or admin can manage the team." }, 403);
+        if (!canViewTeam) return json({ error: "You don't have access to the team list." }, 403);
         const { data: rows, error } = await admin
-          .from("client_users").select("user_id, role, full_name, created_at").eq("client_id", clientId).order("created_at");
+          .from("client_users").select("user_id, role, title, access, full_name, created_at").eq("client_id", clientId).order("created_at");
         if (error) throw error;
         const { data: cms } = await admin
           .from("commission_members").select("user_id, commission_percent, sees_all_payouts, full_access").eq("client_id", clientId);
         const cmById = new Map((cms || []).map((c: any) => [c.user_id, c]));
+        // Truck summary for the Driver callout in the access editor. Read-only here: the
+        // record itself is written in exactly one place (portal-schedule's save_driver), so
+        // the editor shows what is on file and points at that card rather than becoming a
+        // second writer of the same row.
+        const { data: dps } = await admin.from("driver_profiles")
+          .select("user_id, truck_name, deck_length_ft, max_width_ft, is_driver, active")
+          .eq("client_id", clientId).eq("is_driver", true).eq("active", true);
+        const dpById = new Map((dps || []).map((d: any) => [d.user_id, d]));
         const members = [];
         for (const r of rows || []) {
           const uid = (r as any).user_id;
           let email = "";
-          try { const { data: au } = await admin.auth.admin.getUserById(uid); email = au?.user?.email || ""; } catch { /* one missing auth user must not break the list */ }
+          let lastActive: string | null = null;
+          let deactivated = false;
+          try {
+            const { data: au } = await admin.auth.admin.getUserById(uid);
+            email = au?.user?.email || "";
+            lastActive = au?.user?.last_sign_in_at || null;
+            // A ~100-year ban is how remove_user deactivates a login. Surfacing it on the
+            // roster is what stops "I re-added them and they still can't get in" being an
+            // invisible state — see the ban-clearing in add_user.
+            const b = au?.user?.banned_until;
+            deactivated = !!b && new Date(b).getTime() > Date.now();
+          } catch { /* one missing auth user must not break the list */ }
           const cm: any = cmById.get(uid) || {};
           members.push({
             userId: uid,
@@ -185,9 +226,33 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             // Grants are managed by the owner only.
             seesAllPayouts: isOwner ? !!cm.sees_all_payouts : undefined,
             fullAccess: isOwner ? !!cm.full_access : undefined,
+            // Per-person access (migration 100). `title` is the job label and the preset it
+            // seeds; `access` is only their deviations from it; `effective` is what the
+            // server will actually enforce. The screen shows `effective` so nobody has to
+            // do the preset-plus-overrides arithmetic in their head to answer "can Dana see
+            // pricing?" — the honest answer is the resolved one.
+            lastActive,
+            deactivated,
+            driver: (() => {
+              const d: any = dpById.get(uid);
+              if (!d) return null;
+              return [d.truck_name, d.deck_length_ft ? d.deck_length_ft + "' deck" : null,
+                d.max_width_ft ? "max " + d.max_width_ft + "' wide" : null].filter(Boolean).join(" · ") || null;
+            })(),
+            title: (r as any).title || null,
+            access: ((r as any).access as Record<string, Level> | null) || null,
+            effective: effectiveAccess((r as any).role, (r as any).title, (r as any).access),
           });
         }
-        return json({ ok: true, clientId, role, canSeeRates, isOwner, members });
+        return json({
+          ok: true, clientId, role, canSeeRates, isOwner, members,
+          // The grid is rendered from what the server sends, never from a hard-coded list in
+          // portal.html — a second copy of the areas would drift the day one is added, and a
+          // permission table that drifts is a permission table that lies.
+          meta: accessMetadata(),
+          canManageTeam,
+          myAccess,
+        });
       }
 
       // ── set a person's commission rate (owner or full_access) ──
@@ -223,12 +288,23 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
 
       // ── invite a teammate by email (reuses admin-catalog's link_owner flow, re-gated to owner/admin) ──
       case "add_user": {
-        if (!isAdmin) return json({ error: "Only an owner or admin can add people." }, 403);
+        if (!canManageTeam) return json({ error: "You don't have access to add people." }, 403);
         const email = String(p.email || "").trim().toLowerCase();
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: "Enter a valid email address." }, 400);
-        // An admin can only add plain users; only the owner can mint admins/owners.
-        let wantRole = ["owner", "admin", "user"].includes(String(p.role || "").toLowerCase()) ? String(p.role).toLowerCase() : "user";
-        if (!isOwner && wantRole !== "user") wantRole = "user";
+        // Titles (migration 100), not the three legacy roles. `role` is derived from the
+        // title and written alongside it so the coarse column RLS still reads can never
+        // disagree with the title on screen. Falls back to Sales Rep — the least-privileged
+        // preset — rather than to anything inherited.
+        const wantTitle = TITLES.some((t) => t.key === p.title) ? String(p.title) : "sales_rep";
+        const wantRole = roleForTitle(wantTitle);
+        // Only an owner mints owners and admins; everything else runs through mayGrantMap
+        // below, which also catches "make them an Owner" as the escalation it is.
+        if (!isOwner && (wantTitle === "owner" || wantTitle === "admin")) {
+          return json({ error: "Only an owner can add another owner or admin." }, 403);
+        }
+        const seedAccess = sanitizeAccess(p.access);
+        const tooHigh = mayGrantMap(role, myAccess, effectiveAccess(wantRole, wantTitle, seedAccess));
+        if (tooHigh) return json({ error: `You can't give someone access to ${tooHigh} that you don't have yourself.` }, 403);
         const fullName = typeof p.fullName === "string" ? p.fullName.trim().slice(0, 120) : null;
 
         // find existing auth user by email (paginated admin list)
@@ -253,12 +329,30 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             created = !cu.error;
           }
         }
-        // Never silently re-home a login already attached to a DIFFERENT tenant.
+        // A StructureStudio OPERATOR login must never be adoptable into a tenant. It has no
+        // client_users row at all (cross-tenant access lives in app_operators), so the
+        // "belongs to another account" guard below cannot see it — without this check a
+        // tenant admin could link a support login into their own team and be handed a
+        // password-setup link for it. Service-role read: app_operators has RLS on with zero
+        // policies (051), so a user-scoped client returns nothing for everyone.
+        const { data: opRow } = await admin.from("app_operators").select("user_id").eq("user_id", au.id).maybeSingle();
+        if (opRow) return json({ error: OPAQUE_ADD_FAILURE }, 409);
+
+        // Never silently re-home a login already attached to a DIFFERENT tenant. The message
+        // is deliberately the SAME one used for every other rejection: echoing "already
+        // belongs to another account" back at the caller turns this endpoint into a
+        // platform-wide existence oracle — loop it over a competitor's staff addresses and
+        // you learn which of them are StructureStudio users. One answer for every refusal.
         const existing = await admin.from("client_users").select("client_id, role").eq("user_id", au.id).maybeSingle();
         if (existing.error) throw existing.error;
         if (existing.data && existing.data.client_id && existing.data.client_id !== clientId) {
-          return json({ error: `"${email}" already belongs to another account and can't be added here.` }, 409);
+          return json({ error: OPAQUE_ADD_FAILURE }, 409);
         }
+        // Re-adding someone who was removed with "Deactivate login" has to actually let them
+        // back in. The ban lives on the auth record, not on the membership, so without this
+        // they rejoin the team, get a working-looking setup link, set a password, and then
+        // every sign-in fails with nothing anywhere explaining why.
+        if (!created) { try { await admin.auth.admin.updateUserById(au.id, { ban_duration: "none" }); } catch { /* best-effort */ } }
         if (existing.data && existing.data.client_id === clientId) {
           // Already on this team — update name only, never silently change their role here.
           if (fullName) await admin.from("client_users").update({ full_name: fullName }).eq("user_id", au.id);
@@ -266,20 +360,105 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           return json({ ok: true, userId: au.id, email, alreadyOnTeam: true });
         }
         const link = await admin.from("client_users").upsert(
-          { user_id: au.id, client_id: clientId, role: wantRole, ...(fullName ? { full_name: fullName } : {}) }, { onConflict: "user_id" });
+          { user_id: au.id, client_id: clientId, role: wantRole, title: wantTitle,
+            access: Object.keys(seedAccess).length ? seedAccess : null,
+            ...(fullName ? { full_name: fullName } : {}) }, { onConflict: "user_id" });
         if (link.error) throw link.error;
         // Seed a commission_members row so the person shows up on the team with a blank rate.
         await admin.from("commission_members").upsert({ client_id: clientId, user_id: au.id }, { onConflict: "client_id,user_id", ignoreDuplicates: true });
 
+        // The setup link is a BEARER CREDENTIAL: whoever opens it first gets a session as
+        // that person and sets their password. That is the right trade for a brand-new
+        // passwordless account, where it is the only way in. It is the wrong trade for an
+        // account that already has a password — there it is a silent password reset, mintable
+        // by anyone holding Team access and handed back in the response body. So it is only
+        // ever issued to a login that has NEVER signed in. Everyone else uses "Forgot
+        // password" from the sign-in page, which mails the link to them rather than to
+        // whoever asked for it.
         let setupLink: string | null = null;
-        try { const gl = await admin.auth.admin.generateLink({ type: "recovery", email, options: { redirectTo: AUTH_PORTAL_URL } }); if (!gl.error) setupLink = gl.data?.properties?.action_link || null; } catch { /* best-effort */ }
-        await audit(`add_user ${email} as ${wantRole}`);
-        return json({ ok: true, userId: au.id, email, role: wantRole, created, emailSent, setupLink });
+        if (!au.last_sign_in_at) {
+          try { const gl = await admin.auth.admin.generateLink({ type: "recovery", email, options: { redirectTo: AUTH_PORTAL_URL } }); if (!gl.error) setupLink = gl.data?.properties?.action_link || null; } catch { /* best-effort */ }
+        }
+        await audit(`add_user ${email} as ${wantTitle}`);
+        return json({ ok: true, userId: au.id, email, role: wantRole, title: wantTitle, created, emailSent, setupLink });
+      }
+
+      // ── set one person's job title and per-area access (migration 100) ──────────
+      //
+      // Carolyn: "I want the access to each to be as dynamic as possible per individual.
+      //  Admins and Owners should assign each user the access they want to give them
+      //  (tab by tab) and they may choose Read or Edit."
+      //
+      // The order of the checks below is the security design; each one closes a specific
+      // way this endpoint could be turned into a privilege-escalation tool.
+      case "set_access": {
+        if (!canManageTeam) return json({ error: "You don't have access to change people's access." }, 403);
+        const target = await requireMember(p.userId);
+
+        // 1. NOT YOURSELF. Without this, anyone who can manage the team can hand themselves
+        //    every area in two clicks, and mayGrantMap below would happily allow it one
+        //    area at a time (grant yourself what you already have... then use it). Access is
+        //    something you receive, never something you write for yourself.
+        if (String(p.userId) === user.id) {
+          return json({ error: "You can't change your own access. Ask an owner." }, 403);
+        }
+
+        // 2. OWNERS ARE UNTOUCHABLE HERE, same as remove_user. Owners resolve to full access
+        //    unconditionally, so "editing" one would silently do nothing — and demoting the
+        //    last owner would strand the account with nobody able to reach Billing. Changing
+        //    an owner belongs to the operator console, where it is audited as such.
+        if (target.role === "owner") {
+          return json({ error: "Owners always have full access and can't be changed here." }, 403);
+        }
+
+        // 2b. ADMINS ARE PEERS, AND PEERS DON'T EDIT EACH OTHER. mayGrantMap in step 6 lets
+        //     "none" through unconditionally — taking access away has to stay possible, or a
+        //     departing employee could not be locked out by whoever is on shift. But that
+        //     also means one admin could strip a peer admin down to a Driver, Team access
+        //     included, and end up the only person who can manage people. Subtraction is the
+        //     escalation nobody thinks to look for. Only an owner settles it between admins.
+        if (!isOwner && target.role === "admin") {
+          return json({ error: "Only an owner can change another admin's access." }, 403);
+        }
+
+        // 3. A VALID TITLE, or keep the one they have. Never fall through to "everything".
+        const nextTitle = TITLES.some((t) => t.key === p.title) ? String(p.title) : (target.title || "sales_rep");
+        if (p.title !== undefined && !TITLES.some((t) => t.key === p.title)) {
+          return json({ error: "Unknown job title." }, 400);
+        }
+        // 4. Only an owner mints owners and admins.
+        if (!isOwner && (nextTitle === "owner" || nextTitle === "admin")) {
+          return json({ error: "Only an owner can make someone an owner or admin." }, 403);
+        }
+
+        // 5. Store only real deviations, so the row never contains a claim the resolver
+        //    ignores — what the owner sees on the grid is what is saved.
+        const nextAccess = p.access === undefined ? ((target.access as Record<string, Level> | null) || {}) : sanitizeAccess(p.access);
+        const nextRole = roleForTitle(nextTitle);
+
+        // 6. NOBODY GRANTS ABOVE THEMSELVES — checked against the RESOLVED result, not the
+        //    submitted overrides. Access is stored as deviations from a preset, so an admin
+        //    could otherwise hand out the entire Owner preset while submitting an empty
+        //    overrides object, just by setting the title. Resolving first catches both doors.
+        const resulting = effectiveAccess(nextRole, nextTitle, nextAccess);
+        const tooHigh = mayGrantMap(role, myAccess, resulting);
+        if (tooHigh) {
+          return json({ error: `You can't give someone access to ${tooHigh} that you don't have yourself.` }, 403);
+        }
+
+        // 7. role travels with title — see roleForTitle. Scoped to (client_id, user_id) so a
+        //    forged userId from another tenant cannot be written even if step 0 were removed.
+        const upd = await admin.from("client_users")
+          .update({ title: nextTitle, role: nextRole, access: Object.keys(nextAccess).length ? nextAccess : null })
+          .eq("client_id", clientId).eq("user_id", p.userId);
+        if (upd.error) throw upd.error;
+        await audit(`set_access ${p.userId} title=${nextTitle} areas=${Object.keys(nextAccess).length}`);
+        return json({ ok: true, userId: p.userId, title: nextTitle, role: nextRole, access: nextAccess, effective: resulting });
       }
 
       // ── remove a teammate: unlink from this tenant, or fully deactivate the login ──
       case "remove_user": {
-        if (!isAdmin) return json({ error: "Only an owner or admin can remove people." }, 403);
+        if (!canManageTeam) return json({ error: "You don't have access to remove people." }, 403);
         const target = await requireMember(p.userId);
         const mode = p.mode === "deactivate" ? "deactivate" : "unlink";
         if (p.userId === user.id) return json({ error: "You can't remove yourself." }, 400);
@@ -288,6 +467,32 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         // An admin can only remove plain users, not other admins.
         if (!isOwner && target.role !== "user") return json({ error: "Only the owner can remove an admin." }, 403);
 
+        // Two references to this person live OUTSIDE client_users, neither protected by a
+        // foreign key, and both became load-bearing in the last few days:
+        //
+        //  * driver_profiles.user_id is NOT NULL as of migration 101, and save_driver now
+        //    refuses to create or unlink a login-less driver. Delete the client_users row
+        //    alone and the profile survives with is_driver=true: the delivery board keeps
+        //    offering a driver who cannot sign in, and the tenant cannot even fix the ghost,
+        //    because save_driver requires a userId that is on the team. ARCHIVE rather than
+        //    delete — delivery_loads.driver_id is ON DELETE SET NULL, so removing the row
+        //    would silently blank who drove every past and scheduled load for that person.
+        //
+        //  * build_crews.member_user_ids is a bare uuid[], and save_crew now validates every
+        //    id against client_users. A stale id makes that crew permanently UNSAVABLE — the
+        //    tenant cannot rename, recolor or re-staff it without a hand-edit to the array.
+        //
+        // Both are consequences of tightening those two paths, so both are cleaned up here.
+        await admin.from("driver_profiles")
+          .update({ is_driver: false, active: false })
+          .eq("client_id", clientId).eq("user_id", p.userId);
+        const { data: crewRows } = await admin.from("build_crews")
+          .select("id, member_user_ids").eq("client_id", clientId).contains("member_user_ids", [p.userId]);
+        for (const c of crewRows || []) {
+          const kept = (((c as any).member_user_ids) || []).filter((x: string) => x !== p.userId);
+          await admin.from("build_crews").update({ member_user_ids: kept })
+            .eq("id", (c as any).id).eq("client_id", clientId);
+        }
         await admin.from("commission_members").delete().eq("client_id", clientId).eq("user_id", p.userId);
         await admin.from("client_users").delete().eq("client_id", clientId).eq("user_id", p.userId);
         if (mode === "deactivate") {
@@ -441,6 +646,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             amountCents: e.amount_cents, earnedOn: e.earned_on,
             periodKey: e.period_key, periodLabel: e.period_key ? periodLabel(e.period_key, freq, customDays) : "Unscheduled",
             status: e.status, kind: e.kind, isOverride: e.is_override,
+            splitShare: e.split_share == null ? null : Number(e.split_share),
           };
         });
         // The assignable team (names) — only for someone who may edit commissions.
@@ -506,6 +712,115 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         if (error) throw error;
         await audit(`split_entry ${entryId} → ${rows.length} parts`);
         return json({ ok: true, parts: rows.length });
+      }
+      // NOTE: split_entry above is LEGACY (kept for older cached portals). The UI now uses
+      // split_order below — splitting a LINE quartered an already-halved base when a split
+      // was split again (Carolyn hit this on order #1003, 2026-08-05); an ORDER-level
+      // allocation can be re-edited forever without compounding.
+
+      // ── completely remove ONE line (owner|full_access). Distinct from Exclude: an excluded
+      // line stays visible on the rep's report at $0; delete makes it as if it never existed.
+      // Paid lines and clawbacks are immutable, and a line a clawback points at can't go
+      // (the clawback would orphan) — exclude those instead.
+      case "delete_entry": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const entryId = Number(p.entryId);
+        const { data: entry } = await admin.from("commission_entries").select("id, status, kind").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.status === "paid" || entry.kind === "clawback") return json({ error: "Paid lines and clawbacks can't be deleted." }, 409);
+        const { data: cb } = await admin.from("commission_entries").select("id").eq("client_id", clientId).eq("clawback_of", entryId).limit(1);
+        if (cb && cb.length) return json({ error: "A clawback references this line — exclude it instead." }, 409);
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("id", entryId);
+        await audit(`delete_entry ${entryId}`);
+        return json({ ok: true });
+      }
+
+      // ── ORDER-level split: the modal shows everyone on the order; saving REPLACES the
+      // order's unpaid commission lines with one line per person, each a share of the ORDER'S
+      // FULL base — so re-editing an allocation never compounds. One person at 100% is legal
+      // (that's "give the whole order to X"). Paid lines block the edit; clawbacks untouched.
+      case "split_order": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const orderId = String(p.orderId || "");
+        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
+        if (!ord) return json({ error: "Order not found." }, 404);
+        const clean: { userId: string; share: number }[] = [];
+        let sum = 0;
+        for (const s of (Array.isArray(p.splits) ? p.splits : [])) {
+          const share = Number(s?.sharePercent);
+          if (isUuid(s?.userId) && Number.isFinite(share) && share > 0 && share <= 100) { clean.push({ userId: String(s.userId), share }); sum += share; }
+        }
+        if (clean.length < 1) return json({ error: "Pick at least one person." }, 400);
+        if (Math.abs(sum - 100) > 0.01) return json({ error: "Shares must add up to 100%." }, 400);
+        if (new Set(clean.map((c) => c.userId)).size !== clean.length) return json({ error: "The same person is listed twice." }, 400);
+        const teamIds = new Set(((await admin.from("client_users").select("user_id").eq("client_id", clientId)).data || []).map((r: any) => r.user_id));
+        for (const cs of clean) if (!teamIds.has(cs.userId)) return json({ error: "A selected person isn't on your team." }, 400);
+        const { data: exRows } = await admin.from("commission_entries").select("id, status, kind, base_cents, split_share, earned_on, period_key").eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission");
+        if ((exRows || []).some((r: any) => r.status === "paid")) return json({ error: "This order has a paid line — its allocation can't be edited." }, 409);
+        // Full-order base: the stored pre-tax subtotal; else reconstruct from an existing line
+        // (a line's base = full × share, so full = base ÷ share); else the order total.
+        let fullBase: number | null = ord.pretax_subtotal_cents ?? null;
+        if (fullBase == null) {
+          const withBase = (exRows || []).filter((r: any) => r.base_cents != null).sort((a: any, b: any) => b.base_cents - a.base_cents);
+          if (withBase.length) { const r0 = withBase[0]; fullBase = r0.split_share ? Math.round(r0.base_cents * 100 / Number(r0.split_share)) : r0.base_cents; }
+          else fullBase = ord.total_cents ?? null;
+        }
+        const keep = (exRows || []).find((r: any) => r.period_key) || (exRows || [])[0] || null;
+        const rateBy = new Map(((await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId)).data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
+        const now = new Date().toISOString();
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        const rows = clean.map((cs) => {
+          const baseShare = fullBase != null ? Math.round(fullBase * cs.share / 100) : null;
+          const rate = (rateBy.get(cs.userId) ?? null) as number | null;
+          return { client_id: clientId, order_id: ord.id, earner_user_id: cs.userId, base_cents: baseShare, rate_percent: rate, split_share: cs.share, amount_cents: (baseShare != null && rate != null) ? Math.round(baseShare * rate / 100) : null, earned_on: keep?.earned_on ?? (ord.ordered_at ? String(ord.ordered_at).slice(0, 10) : null), period_key: keep?.period_key ?? null, kind: "commission", status: "pending", is_override: true, updated_at: now };
+        });
+        const { error: insErr } = await admin.from("commission_entries").insert(rows);
+        if (insErr) throw insErr;
+        await audit(`split_order ${ord.id} → ${rows.length} people`);
+        return json({ ok: true, parts: rows.length });
+      }
+
+      // ── rebuild an order's commission to the default single line (owner|full_access):
+      // wipes the unpaid lines (splits, overrides, excluded — all of them) and re-materializes
+      // what compute would create — earner = invoice sender, their standard rate, full base.
+      // The rebuilt row is NOT an override, so the next compute keeps maintaining it. Paid
+      // lines block (the money is out the door); clawbacks are left untouched.
+      case "reset_order": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const orderId = String(p.orderId || "");
+        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
+        if (!ord) return json({ error: "Order not found." }, 404);
+        const { data: exRows } = await admin.from("commission_entries").select("id, status, kind").eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission");
+        if ((exRows || []).some((r: any) => r.status === "paid")) return json({ error: "This order has a paid line — it can't be reset." }, 409);
+        const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();
+        if (!settings || !settings.enabled) return json({ error: "Commission tracking isn't enabled." }, 409);
+        const { data: iv } = await admin.from("invoice_sends").select("sender_user_id, sent_by_operator").eq("client_id", clientId).eq("short_code", ord.short_code).maybeSingle();
+        let earner: string | null = (iv && !iv.sent_by_operator && iv.sender_user_id) ? String(iv.sender_user_id) : null;
+        if (earner) {
+          const { data: t } = await admin.from("client_users").select("user_id").eq("client_id", clientId).eq("user_id", earner).maybeSingle();
+          if (!t) earner = null;
+        }
+        let rate: number | null = null;
+        if (earner) {
+          const { data: m } = await admin.from("commission_members").select("commission_percent").eq("client_id", clientId).eq("user_id", earner).maybeSingle();
+          rate = m?.commission_percent == null ? null : Number(m.commission_percent);
+        }
+        const baseCents: number | null = ord.pretax_subtotal_cents ?? ord.total_cents ?? null;
+        let earnedDate: string | null = ord.ordered_at ? String(ord.ordered_at).slice(0, 10) : null;
+        if (settings.earned_on === "collected") {
+          const { data: pays } = await admin.from("payments").select("amount_cents, received_at, voided_at").eq("client_id", clientId).eq("order_id", ord.id);
+          earnedDate = collectedDate((pays || []).filter((x: any) => !x.voided_at), ord.total_cents);
+        }
+        const period = earnedDate ? periodKey(earnedDate, settings.payout_frequency, settings.period_anchor, settings.custom_days) : null;
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        const { error: insErr } = await admin.from("commission_entries").insert({
+          client_id: clientId, order_id: ord.id, earner_user_id: earner,
+          base_cents: baseCents, rate_percent: rate, amount_cents: (baseCents != null && rate != null) ? Math.round(baseCents * rate / 100) : null,
+          earned_on: earnedDate, period_key: period?.key ?? null, kind: "commission", status: "pending", is_override: false, updated_at: new Date().toISOString(),
+        });
+        if (insErr) throw insErr;
+        await audit(`reset_order ${ord.id}`);
+        return json({ ok: true });
       }
 
       // ── override the amount on one entry, e.g. a rep's mistake (owner|full_access) ──

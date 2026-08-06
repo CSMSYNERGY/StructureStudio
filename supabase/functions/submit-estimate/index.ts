@@ -1259,6 +1259,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           kind: p?.kind ?? "fallback",
           itemKey: p?.itemKey ?? "",
           name: String(li.name ?? ""),
+          // The GHL line's description is where the specifics live (paint colors, roof
+          // type/color, ramp sizing, RO dimensions) — under the simplified category-item
+          // model the QuickBooks item is a broad category, so this text is what makes the
+          // books line readable. Capped: it feeds a 4000-char QBO Description, not storage.
+          desc: String(li.description ?? "").trim().slice(0, 1000),
           qty: Number(li.qty) || 0,
           amount: Number(li.amount) || 0,
           nonTaxable: !!p?.nonTaxable,

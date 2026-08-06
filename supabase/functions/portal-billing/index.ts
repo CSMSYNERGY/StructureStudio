@@ -1,10 +1,28 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
-const BILLING_READS = new Set(["status"]);
+// WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts.
+//
+// `status` is "open" and must stay that way. settings_billing is the one ownerOnly area, so
+// gating this action on it would 403 the entitlement call for every non-owner — and
+// entitlement is what the whole portal shell reads to decide whether the product is
+// unlocked. A driver would not get a locked Billing tab, they would get a dead portal. The
+// money-shaped half of the payload is filtered inside the branch instead (search: BILLING
+// FIELD FILTER); what stays open is entitlement, which every role's UI genuinely needs.
+//
+// subscribe/cancel are settings_billing:'edit' = OWNERS ONLY. This is a deliberate change
+// from "owner or admin": Carolyn's design makes Billing owner-only, and PRESETS.admin sets
+// it to 'none'. Checked before shipping — this tenant base has 11 owners and no admins at
+// all, so no existing person loses an ability they use today.
+const GATES: GateTable = {
+  status:    "open",
+  subscribe: { area: "settings_billing", level: "edit" },
+  cancel:    { area: "settings_billing", level: "edit" },
+};
 
 // Platform billing endpoint for the portal's Billing tab — CSM Synergy charging
 // tenants for StructureStudio features via the Deposyt/NMI gateway.
@@ -98,12 +116,13 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // every non-read action on this function moves real money against the tenant's card.
   const admin = createClient(supabaseUrl, serviceKey);
   const r = await resolveTenant(req, admin, {
-    readActions: BILLING_READS,
+    gates: GATES,
+    readActions: new Set(),
     defaultAction: "status",
     requireBilling: true,
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, operator, payload, action, userEmail, audit, auditStrict } = r.ctx;
+  const { clientId, operator, payload, action, userEmail, audit, auditStrict, canRead } = r.ctx;
   if (operator) audit(`operator_billing_${action}`).catch(() => {});
   const configured = Boolean(SECURITY_KEY && TOKENIZATION_KEY);
 
@@ -126,6 +145,17 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const plans = allPlans.filter((p) => p.active);   // purchasable / gate-driving
   const planById = new Map(allPlans.map((p) => [p.id, p]));   // interpretive, includes retired
 
+  // BUNDLES: one subscription that grants several features. The Structure Studio Suite
+  // ("full_suite") unlocks everything except Self Serve Displays. expandFeature() turns a
+  // subscription/cart feature into the concrete features it confers — a bundle expands to itself
+  // PLUS its members, a plain feature to just itself. Used for entitlement, live-set, and the
+  // purchase guards so a bundle satisfies the base and can't be stacked on the pieces it covers.
+  const BUNDLE_FEATURES: Record<string, string[]> = {
+    full_suite: ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"],
+  };
+  const expandFeature = (f: string | null | undefined): string[] =>
+    !f ? [] : (BUNDLE_FEATURES[f] ? [f, ...BUNDLE_FEATURES[f]] : [f]);
+
   // All subscription rows for this tenant, newest first (cancelled kept for history).
   const { data: subRows, error: subsErr } = await admin
     .from("billing_subscriptions")
@@ -134,11 +164,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     .order("created_at", { ascending: false });
   if (subsErr) return json({ error: subsErr.message }, 500);
   const subs = subRows ?? [];
-  const liveFeatures = new Set(
-    subs.filter((s) => s.status !== "cancelled")
-      .map((s) => planById.get(s.plan_id)?.feature)
-      .filter(Boolean),
-  );
+  const liveFeatures = new Set<string>();
+  for (const s of subs) {
+    if (s.status === "cancelled") continue;
+    for (const t of expandFeature(planById.get(s.plan_id)?.feature)) liveFeatures.add(t);
+  }
 
   // Card on file? (NMI Customer Vault id — never sent to the browser.)
   const { data: vaultRow } = await admin
@@ -268,14 +298,28 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         st = { usable: true, state: "cancelled_paid", graceEnds: null };
       }
     }
-    const prior = featureState.get(feature);
     const rank = (x: { state: string }) => (x.state === "active" ? 3 : x.state === "grace" || x.state === "cancelled_paid" ? 2 : x.state === "past_due" ? 1 : 0);
-    if (!prior || rank(st) > rank(prior)) featureState.set(feature, st);
+    // A bundle subscription confers its state on every feature it includes.
+    for (const feat of expandFeature(feature)) {
+      const prior = featureState.get(feat);
+      if (!prior || rank(st) > rank(prior)) featureState.set(feat, st);
+    }
   }
 
   const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
+  // PAID-ONLY features: the exempt/transition blankets deliberately do NOT cover these.
+  // Carolyn 2026-08-04: "No one gets grandfathered into this" — the scheduling suite
+  // (Build Schedule + Delivery Schedule + Repairs + drivers/territories) is available
+  // ONLY with a real subscription, for every tenant: grandfathered, internal, and
+  // free-period accounts included. Operators still see the tabs via the portal's own
+  // isOperator branch, which never consults this map.
+  const PAID_ONLY_FEATURES = new Set(["schedule_builds"]);
   const features: Record<string, boolean> = {};
-  for (const p of plans) features[p.feature] = exempt || inTransition || Boolean(featureState.get(p.feature)?.usable);
+  for (const p of plans) {
+    features[p.feature] = PAID_ONLY_FEATURES.has(p.feature)
+      ? Boolean(featureState.get(p.feature)?.usable)
+      : (exempt || inTransition || Boolean(featureState.get(p.feature)?.usable));
+  }
 
   let entState = "active";
   let reason = "active";
@@ -358,16 +402,25 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       charge_cents: chargeCentsFor(p),
       discount_percent: discountForFeature(p.feature),
     }));
+    // BILLING FIELD FILTER. Everyone gets `entitlement` — it is what unlocks the rest of
+    // the portal, and withholding it would lock the product instead of the tab. Nobody but
+    // an owner gets the commercial detail: what this business pays, what discount it has,
+    // whether a card is on file, or the checkout keys to put a new one there.
+    const mine = canRead("settings_billing");
     return json({
       configured,
-      hasCard: Boolean(vaultId),
       entitlement,
-      discount: { percent: discountPct, features: discountFeatures },
-      plans: publicPlans,
-      subscriptions: subs,
-      checkout: configured
-        ? { tokenizationKey: TOKENIZATION_KEY, collectJsUrl: `${GATEWAY}/token/Collect.js` }
-        : null,
+      ...(mine
+        ? {
+          hasCard: Boolean(vaultId),
+          discount: { percent: discountPct, features: discountFeatures },
+          plans: publicPlans,
+          subscriptions: subs,
+          checkout: configured
+            ? { tokenizationKey: TOKENIZATION_KEY, collectJsUrl: `${GATEWAY}/token/Collect.js` }
+            : null,
+        }
+        : { plans: [], subscriptions: [], checkout: null }),
     });
   }
 
@@ -413,9 +466,21 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     for (const f of features) {
       if (liveFeatures.has(f)) return json({ error: `You already have an active subscription for ${f}.` }, 409);
     }
-    // Simple Layout is the required base — in the cart or already live.
-    if (!features.includes("simple_layout") && !liveFeatures.has("simple_layout")) {
-      return json({ error: "Simple Layout is the required base plan — add it to your selection." }, 400);
+    // A bundle covers its members — don't let it stack on the pieces it already includes, whether
+    // those are in this same cart or already subscribed. (Switching an existing plan to the Suite
+    // is handled separately, later — for now the Suite is a clean choice for new signups.)
+    for (const p of chosen) {
+      const members = BUNDLE_FEATURES[p!.feature];
+      if (!members) continue;
+      if (features.some((f) => f !== p!.feature && members.includes(f)))
+        return json({ error: `The ${p!.name} already includes those features — remove them from your selection.` }, 400);
+      if (members.some((m) => liveFeatures.has(m)))
+        return json({ error: `You already subscribe to features the ${p!.name} includes. Switching to the Suite isn't automated yet — contact CSM Synergy.` }, 409);
+    }
+    // Required base (Simple Layout) must be covered — directly, via a bundle in the cart, or already live.
+    const cartCovers = new Set(chosen.flatMap((p) => expandFeature(p!.feature)));
+    if (!cartCovers.has("simple_layout") && !liveFeatures.has("simple_layout")) {
+      return json({ error: "Simple Layout is the required base plan — add it (or the Suite) to your selection." }, 400);
     }
 
     // Card: reuse the vault, or create it from a fresh Collect.js token.

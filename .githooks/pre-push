@@ -1,13 +1,116 @@
 #!/bin/sh
-# Pre-push correctness gate. Wire it up once per clone:
+# Pre-push gate. Wire it up once per clone:
 #   git config core.hooksPath .githooks
 #   npm install
-# Runs scripts/preflight.mjs (JSX no-undef and friends across all five source files, the
-# CDN version lock, cache-buster lockstep). Zero output means go. On failure the push is
-# refused with file:line reasons. Emergency bypass: git push --no-verify — say so in the
-# commit message if you use it.
+#
+# Two checks, in order:
+#   1. FRESHNESS — refuse to push a branch that is behind its remote. The rule
+#      (Carolyn, 2026-08-02): always `git pull --rebase origin beta` before pushing.
+#   2. CORRECTNESS — scripts/preflight.mjs (JSX no-undef and friends across all five
+#      source files, the CDN version lock, cache-buster lockstep, deno check).
+# Zero output means go. Emergency bypass: git push --no-verify — say so in the commit.
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
+# $1 is the remote's name as given on the command line ("origin"), $2 its URL. Pushing to
+# a bare URL leaves $1 as that URL, which still reads correctly in the messages below.
+remote_name=${1:-origin}
+
+# ── 1. Freshness ─────────────────────────────────────────────────────────────
+# WHY THIS IS A GATE AND NOT ADVICE: several Claude sessions and Ahsan share this
+# clone and this branch. On 2026-08-02 eight commits landed on beta while one session
+# was mid-feature; the push bounced, and the recovery (stash, rebase, re-verify every
+# marker) is exactly the kind of manual scramble where work gets clobbered. Rebasing
+# FIRST also means the preflight below lints the code as it will actually exist on the
+# remote, not as it existed in isolation.
+#
+# The hook deliberately does NOT run the pull itself: a rebase rewrites the working
+# tree, and a hook that does that mid-push is a nasty surprise the moment it hits a
+# conflict. It names the one command to run instead.
+#
+# ── HOW IT KNOWS (rewritten 2026-08-04, and why the old way was inert) ──
+# Git feeds this hook one line per ref being pushed:
+#     <local-ref> <local-oid> <remote-ref> <remote-oid>
+# <remote-oid> is that ref's CURRENT value ON THE REMOTE, learned during ref discovery,
+# which git completes BEFORE running this hook. The freshness answer is therefore already
+# in our hands: no fetch of our own, no guessing at names, nothing that can time out.
+#
+# The previous version instead ran `git fetch origin "$(git rev-parse --abbrev-ref HEAD)"`
+# and that was wrong twice over:
+#   * It probed the LOCAL branch name. `git push origin HEAD:beta` — how every worktree
+#     session and the beta→main promotion pushes — made it look for a branch named after
+#     the local topic branch, which does not exist on origin at all. Pushing any branch
+#     under a different remote name had the same problem.
+#   * A missing remote ref makes fetch exit 128, and the hook reported that as
+#     "could not reach origin — skipping the freshness check" and then PASSED. So for the
+#     push style this repo uses most, the gate was silently inert: it announced a network
+#     fault that did not exist and waved the push through. Caught 2026-08-04 when a push
+#     printed that line on a perfectly healthy network.
+# Note there is no fail-open case left to handle, because a genuinely unreachable origin
+# cannot reach this code: the push dies at ref discovery, before any hook runs. That
+# branch was only ever reporting a false alarm.
+#
+# A deliberate rewind (force-push) also lands in "you are behind", since git tells the
+# hook nothing about --force. That is the intended reading on a shared branch; use
+# --no-verify when you really mean to rewrite what is on the remote.
+
+# All-zeros oid = "this side does not exist". Written as a glob rather than a compare
+# against 40 zeros so it holds for sha256 repositories too.
+all_zero() {
+  case "$1" in
+    "" | *[!0]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+stale=0
+# `|| [ -n "$local_ref" ]` so a final line with no trailing newline is still processed.
+# No pipeline here on purpose: a `while` fed by a pipe runs in a subshell in POSIX sh and
+# $stale would not survive the loop.
+while read -r local_ref local_oid remote_ref remote_oid || [ -n "$local_ref" ]; do
+  # Branches only. A tag or a note has no meaningful "behind" to block on.
+  case "$remote_ref" in
+    refs/heads/*) ;;
+    *) continue ;;
+  esac
+  all_zero "$local_oid"  && continue   # deleting the remote ref
+  all_zero "$remote_oid" && continue   # brand-new branch: nothing to be behind
+
+  short=${remote_ref#refs/heads/}
+  behind=""
+
+  if git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+    # The remote tip is already contained in what we are pushing → fast-forward → current.
+    git merge-base --is-ancestor "$remote_oid" "$local_oid" 2>/dev/null && continue
+    behind=$(git rev-list --count "$local_oid..$remote_oid" 2>/dev/null)
+  else
+    # We do not even have the remote's tip object, so we are certainly missing its work —
+    # the verdict is already decided. This fetch runs ONLY to put a number in the message,
+    # and the low-speed bounds keep a sick network from hanging an already-failing push.
+    # Kept on ONE line deliberately: a trailing-backslash continuation breaks outright if
+    # this file is ever checked out with CRLF, because the backslash escapes the CR instead
+    # of the newline (git then gets a literal "r" argument and the next line runs on its
+    # own). .gitattributes pins this file to LF, and this keeps it safe even if that slips.
+    if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 fetch --quiet "$remote_name" "$short" 2>/dev/null; then
+      behind=$(git rev-list --count "$local_oid..$remote_oid" 2>/dev/null)
+    fi
+  fi
+
+  if [ -n "$behind" ] && [ "$behind" != "0" ]; then
+    echo "pre-push: refused — $remote_name/$short has $behind commit(s) you do not have." >&2
+  else
+    echo "pre-push: refused — $remote_name/$short has commits you do not have." >&2
+  fi
+  echo "" >&2
+  echo "  git pull --rebase $remote_name $short" >&2
+  echo "" >&2
+  echo "Then push again. (Rebase first so the preflight checks your code against" >&2
+  echo "what is really on the remote. Emergency bypass: git push --no-verify.)" >&2
+  stale=1
+done
+
+[ "$stale" -eq 0 ] || exit 1
+
+# ── 2. Correctness ───────────────────────────────────────────────────────────
 if [ ! -d node_modules/eslint ]; then
   echo "pre-push: preflight gate needs its dev tools — run: npm install" >&2
   exit 1

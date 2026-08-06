@@ -512,7 +512,7 @@ function ssAllowedOrigin(origin) {
     if (!origin || origin === "null") return false;
     if (origin === window.location.origin) return true;
     const h = new URL(origin).hostname;
-    return h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
+    return h === "structurestudiosuite.com" || h.endsWith(".structurestudiosuite.com") || h === "structurestudio.app" || h.endsWith(".structurestudio.app") || h === "localhost" || h === "127.0.0.1";
   } catch { return false; }
 }
 
@@ -1539,7 +1539,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the next submit saves a NEW version that is no longer tied to the unit.
   const [newBuildMode, setNewBuildMode] = useState(false);
   const [inventoryMaster, setInventoryMaster] = useState(null); // { code, unitId, priceCents, locationId } | null
-  const [invDialog, setInvDialog] = useState(null); // { busy, err, locations, locationId, price, done } | null
+  const [invDialog, setInvDialog] = useState(null); // { busy, err, price, done } | null — price/confirm only (location is inline now)
+  // The inventory Save bar (inline location dropdown + button) appears ONLY for a NEW inventory
+  // build ("+ New inventory building" → openDesign.blank) or an OPENED inventory master — never on
+  // an ordinary customer design. Location is chosen inline, beside the Save button.
+  const [inventoryNew, setInventoryNew] = useState(false);
+  const [invLocations, setInvLocations] = useState([]);   // [{id, name, city}]
+  const [invLocationId, setInvLocationId] = useState(""); // where this building sits
+  const invLocLoadedRef = useRef(false);
   // PLAN LOCK (Carolyn, 2026-08-02): "Building is BUILT". An estimate for an inventory
   // building describes a structure that already physically exists, so its floor plan,
   // size, style, roof and colours are not negotiable — only the money lines are (custom
@@ -1578,31 +1585,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         + customTotal);
     } catch (_e) { return 0; }
   };
-  const openInventoryDialog = async () => {
+  // Load the tenant's locations once we enter an inventory context (new build or opened master),
+  // so the inline location dropdown by the Save button is ready. targetClientId names the tenant
+  // explicitly — the component's supabase client lacks portal.html's operator view-as injection.
+  useEffect(() => {
+    if (!embedded || !supabase || invLocLoadedRef.current) return;
+    if (!(inventoryNew || inventoryMaster)) return;
+    invLocLoadedRef.current = true;
+    (async () => {
+      try {
+        const { data } = await supabase.functions.invoke("portal-settings",
+          { body: { action: "list_locations", targetClientId: C.clientId } });
+        if (data && Array.isArray(data.locations)) setInvLocations(data.locations);
+      } catch (_e) { /* locations are optional */ }
+    })();
+  }, [embedded, supabase, inventoryNew, inventoryMaster, C.clientId]);
+
+  const openInventoryDialog = () => {
     if (!sel.style || !sel.size) { setSubmitError("Pick a Building Style and Size before saving to inventory."); return; }
     setSubmitError(null);
     const isUpdate = Boolean(inventoryMaster && inventoryMaster.unitId);
     const prefill = isUpdate && inventoryMaster.priceCents != null
       ? inventoryMaster.priceCents / 100
       : inventoryQuotePrefill();
-    setInvDialog({
-      busy: true, err: null, locations: [],
-      locationId: (isUpdate && inventoryMaster.locationId) || "",
-      price: prefill > 0 ? String(Math.round(prefill * 100) / 100) : "",
-      done: null,
-    });
-    try {
-      // targetClientId: the component's own supabase client shares the signed-in portal
-      // session but NOT portal.html's view-as injection, so the tenant is named
-      // explicitly. For an owner it's a harmless no-op; for an operator in view-as it
-      // routes the call to the viewed tenant with the server-side can_write gate.
-      const { data, error } = await supabase.functions.invoke("portal-settings",
-        { body: { action: "list_locations", targetClientId: C.clientId } });
-      if (error || !data || data.error) throw new Error((data && data.error) || "Could not load your locations.");
-      setInvDialog((d) => d && { ...d, busy: false, locations: data.locations || [] });
-    } catch (e) {
-      setInvDialog((d) => d && { ...d, busy: false, err: e.message || String(e) });
-    }
+    // Location is chosen on the inline dropdown beside the Save button; this dialog only confirms price.
+    setInvDialog({ busy: false, err: null, price: prefill > 0 ? String(Math.round(prefill * 100) / 100) : "", done: null });
   };
   const saveInventory = async () => {
     if (!invDialog || invDialog.busy) return;
@@ -1641,7 +1648,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const { data, error } = await supabase.functions.invoke("portal-settings", { body: {
         action: "save_inventory", targetClientId: C.clientId,
         ...(isUpdate ? { unitId: inventoryMaster.unitId } : { shortCode: code }),
-        imageUrl, askingPriceCents, locationId: invDialog.locationId || null,
+        imageUrl, askingPriceCents, locationId: invLocationId || null,
         selections: sel, paintColors, items, customOptions, roDimensions, bldgW, bldgH,
       } });
       if (error) {
@@ -1655,9 +1662,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // The design on screen IS now this unit's master — further saves are updates.
         currentDesignIdRef.current = code;
         setDesignCode(code);
-        setInventoryMaster({ code, unitId: data.unitId, priceCents: askingPriceCents, locationId: invDialog.locationId || null });
+        setInventoryMaster({ code, unitId: data.unitId, priceCents: askingPriceCents, locationId: invLocationId || null });
       } else {
-        setInventoryMaster((m) => m && { ...m, priceCents: askingPriceCents, locationId: invDialog.locationId || null });
+        setInventoryMaster((m) => m && { ...m, priceCents: askingPriceCents, locationId: invLocationId || null });
       }
       if (onSaved) onSaved();
     } catch (e) {
@@ -1851,6 +1858,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setInventoryMaster(data.status === "inventory"
       ? { code: data.short_code, unitId: null, priceCents: null, locationId: null }
       : null);
+    // Opening an existing design is never a NEW inventory build; a master's location is seeded
+    // by the openDesign enrichment below.
+    setInventoryNew(false);
+    setInvLocationId("");
     // An estimate quoted FROM an inventory building carries the link on the row, so
     // reopening it later (portal or public share link) locks the plan again. The serial
     // is a nicety for the banner: readable to a signed-in tenant under inventory_units'
@@ -1965,6 +1976,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setInventoryMaster(null);
       setDesignUnit(null);
       setNewBuildMode(false);
+      setInventoryNew(true);   // "+ New inventory building" → show the inventory Save bar + location dropdown
+      setInvLocationId("");
       setHasExistingEstimate(false);
       setDesignCode(null);
       setEstimateVersions([]);
@@ -2025,6 +2038,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             priceCents: openDesign.unit.askingPriceCents ?? null,
             locationId: openDesign.unit.locationId ?? null,
           });
+          setInvLocationId(openDesign.unit.locationId || ""); // seed the inline location dropdown
         }
       }
     })();
@@ -3596,10 +3610,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Call the submit-estimate Edge Function. It looks up the GHL credentials for
       // this clientId in Supabase (admin-configured), then either creates a new GHL
       // estimate or updates the existing one for this design and emails it.
-      // betaMode (detected from the deploy host, e.g. beta.structurestudio.app or a
-      // beta--* branch preview) makes the Edge Function redirect the estimate email
-      // to the internal QA inbox instead of the customer. The per-client beta_mode
-      // switch in client_settings does the same thing server-side.
+      // ⚠️ betaMode does NOT redirect the estimate email, and neither does the per-client
+      // beta_mode switch in client_settings. It is detected from the deploy host (beta.*
+      // on either apex, or a beta--* branch preview) and passed as TELEMETRY only — the
+      // edge function mails the submitted contact in every environment, beta included
+      // (`recipients = [contact?.email]`, and its own header says so). So a verification
+      // submit carrying a real lead's details emails that customer a live branded quote:
+      // submit with an address you control, or use a test tenant. A QA-inbox redirect did
+      // exist once; it pointed at a non-deliverable address so beta estimates silently
+      // failed to send, which is why it was removed rather than fixed.
       const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
         body: { ...payload, betaMode },
@@ -5054,16 +5073,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {invDialog.err && (
                   <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
                 )}
-                <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Location</label>
-                <select value={invDialog.locationId}
-                  onChange={(e) => setInvDialog((d) => d && { ...d, locationId: e.target.value })}
-                  disabled={invDialog.busy}
-                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 10px", fontSize: 13.5, marginBottom: 12, background: "#FFF", color: "#1E293B" }}>
-                  <option value="">{invDialog.busy ? "Loading locations…" : "No location yet"}</option>
-                  {invDialog.locations.map((l) => (
-                    <option key={l.id} value={l.id}>{l.name}{l.city ? ` — ${l.city}` : ""}</option>
-                  ))}
-                </select>
+                {(() => { const loc = invLocations.find((l) => String(l.id) === String(invLocationId)); const name = loc ? (loc.city && loc.city !== loc.name ? `${loc.name} — ${loc.city}` : loc.name) : "none yet"; return (
+                  <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 12 }}>Location: <b>{name}</b></div>
+                ); })()}
                 <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 4 }}>Asking price</label>
                 <input value={invDialog.price} inputMode="decimal" placeholder="0.00"
                   onChange={(e) => setInvDialog((d) => d && { ...d, price: e.target.value })}
@@ -5099,38 +5111,64 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           )}
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
-              {hasExistingEstimate
+              {(inventoryNew || inventoryMaster)
+                ? <>Design the building and pick its location, then click <strong>{inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}</strong>.</>
+                : hasExistingEstimate
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
             </p>
             {/* Business users can send this design to the lot instead of a customer.
                 Embedded-only: inventory is a portal feature; customers never see it. */}
-            {embedded && (
+            {embedded && (inventoryNew || inventoryMaster) && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
+                {/* Where this building sits — inline so it's set right beside the Save button. */}
+                <select
+                  value={invLocationId}
+                  onChange={(e) => setInvLocationId(e.target.value)}
+                  title="Location — where this building sits on your lot"
+                  style={{
+                    border: "1.5px solid #CBD5E1", borderRadius: 10, padding: "12px 12px",
+                    fontSize: 14, fontWeight: 700, color: "#334155", background: "#FFF",
+                    cursor: "pointer", maxWidth: 210,
+                  }}
+                >
+                  <option value="">{invLocations.length ? "No location yet" : "Loading locations…"}</option>
+                  {invLocations.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}{l.city ? ` — ${l.city}` : ""}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={openInventoryDialog}
+                  disabled={submitting || Boolean(invDialog && invDialog.busy)}
+                  style={{
+                    background: (submitting || (invDialog && invDialog.busy)) ? "#9CA3AF" : accent, color: "#FFF",
+                    border: "none", borderRadius: 10, padding: "12px 22px", fontSize: 14, fontWeight: 800,
+                    cursor: (submitting || (invDialog && invDialog.busy)) ? "wait" : "pointer",
+                    letterSpacing: "-0.01em", whiteSpace: "nowrap",
+                    boxShadow: (submitting || (invDialog && invDialog.busy)) ? "none" : `0 4px 14px ${accent}50`,
+                  }}
+                >
+                  {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}
+                </button>
+              </div>
+            )}
+            {/* Get Quote is a customer action — hidden while building/editing an inventory unit
+                (a lot building is quoted later via "Send estimate" on the Inventory tab). */}
+            {!(inventoryNew || inventoryMaster) && (
               <button
-                type="button"
-                onClick={openInventoryDialog}
-                disabled={submitting || Boolean(invDialog && invDialog.busy)}
+                onClick={submitQuote}
+                disabled={submitting}
                 style={{
-                  background: "#FFF", color: "#334155", border: "1.5px solid #CBD5E1", borderRadius: 10,
-                  padding: "12px 20px", fontSize: 14, fontWeight: 800, cursor: "pointer",
-                  letterSpacing: "-0.01em", whiteSpace: "nowrap",
+                  background: submitting ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 10,
+                  padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
+                  letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
+                  transition: "all 0.2s", minWidth: 160,
                 }}
               >
-                {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}
+                {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
               </button>
             )}
-            <button
-              onClick={submitQuote}
-              disabled={submitting}
-              style={{
-                background: submitting ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 10,
-                padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
-                letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
-                transition: "all 0.2s", minWidth: 160,
-              }}
-            >
-              {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
-            </button>
           </div>
           {estimateVersions.length > 0 && (() => {
             const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
@@ -5326,9 +5364,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 //   1. `config` prop (e.g. supplied by index.html's postMessage re-render handler)
 //      wins and is used as-is, no fetch.
 //   2. `?client=<id>` URL param — explicit override, wins over hostname.
-//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns". Skipped for
-//      the apex, IPs, localhost, *.pages.dev / *.netlify.app deploy hosts, and the
-//      reserved env labels (www/beta/dev/staging/app).
+//   3. Subdomain — `juniorbarns.structurestudio.app` → "juniorbarns", on either
+//      apex we serve (structurestudio.app and structurestudiosuite.com — both live
+//      during the migration). Skipped for the apexes themselves, IPs, localhost,
+//      *.pages.dev / *.netlify.app / *.workers.dev deploy hosts, and the reserved
+//      env labels (www/beta/dev/staging/app).
 //   4. `?id=<short_code>` share-link — the design row records its owning tenant;
 //      resolved via the load_design RPC (NOT a direct table read — that dies at
 //      cutover) so a rep clicking someone else's link gets that tenant's branding.
@@ -5391,16 +5431,24 @@ export default function StructureStudio({ config: configProp = null, clientId: c
     // decides the tenant for an embedded mount.
     let clientId = clientIdProp || params.get("client");
     const designShortCode = params.get("id");
-    // Tenant subdomains: only derive a client_id from <sub>.structurestudio.app.
-    // Anything else (apex, *.pages.dev / *.netlify.app deploy hosts, localhost,
-    // IPs, env labels) falls through — a deploy hostname is never a tenant.
+    // Tenant subdomains: derive a client_id from <sub>.<apex> on EITHER apex we serve.
+    // Both are live during the Netlify → Cloudflare migration (structurestudio.app is
+    // production today; structurestudiosuite.com is where we are moving, beta already
+    // on it), so a branded link must resolve identically on both — supporting only the
+    // old apex breaks every tenant's subdomain the day production cuts over, and only
+    // the new one breaks them all today. Retire an entry here when its apex is retired.
+    // Anything else (either apex itself, *.pages.dev / *.netlify.app / *.workers.dev
+    // deploy hosts, localhost, IPs, env labels) falls through — a deploy hostname is
+    // never a tenant.
     if (!clientId) {
-      const host = window.location.hostname;
-      const BASE = "structurestudio.app";
+      const host = window.location.hostname.toLowerCase();
+      const TENANT_APEXES = ["structurestudio.app", "structurestudiosuite.com"];
       const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
-      if (host.endsWith("." + BASE)) {
-        const sub = host.slice(0, host.length - BASE.length - 1).toLowerCase();
+      for (const base of TENANT_APEXES) {
+        if (!host.endsWith("." + base)) continue;
+        const sub = host.slice(0, host.length - base.length - 1);
         if (sub && !sub.includes(".") && !RESERVED_SUBDOMAINS.includes(sub)) clientId = sub;
+        break;
       }
     }
     // Bare product root: no tenant link (?client= / subdomain) and no design code.

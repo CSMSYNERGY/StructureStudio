@@ -8,7 +8,10 @@ StructureStudio is a multi-tenant SaaS floor-plan designer + quote builder for c
 
 - `StructureStudio.jsx` — ES-module React source (`import { useState, ... } from "react"`; default export `StructureStudio`, the config-loader wrapper around the internal `StructureStudioInner`). Consumed by hosts that have their own build.
 - `structure-studio.component.js` — **the ONE shared browser module** (babel/global-destructure dialect): the full component body, self-contained (own React/supabase destructures + Supabase constants), ending with `window.StructureStudio = StructureStudio`. Loaded by BOTH `index.html` and `portal.html` via `<script src="structure-studio.component.js?v=…" type="text/babel">`.
-- `index.html` — a **thin mount page**: CDN tags + the shared-module `<script src>` + a small mount block (single named `root`, the `structureConfig` postMessage remount, and the designer-sourced `ssLogError` wiring). It is NOT self-contained anymore — it hard-requires its sibling `structure-studio.component.js` on the same origin. **`file://` double-click no longer works** (Babel must *fetch* the src sibling; that XHR is CORS-blocked from disk). Cloudflare Pages serves both files together at the site root.
+- `index.html` — a **thin mount page**: CDN tags + the shared-module `<script src>` + a small mount block (single named `root`, the `structureConfig` postMessage remount, and the designer-sourced `ssLogError` wiring). It is NOT self-contained anymore — it hard-requires its sibling `structure-studio.component.js` on the same origin. **`file://` double-click no longer works** (Babel must *fetch* the src sibling; that XHR is CORS-blocked from disk). **Hosting is MID-MIGRATION Netlify → Cloudflare Workers (state as verified 2026-08-05):**
+- **BETA is on Cloudflare Workers** at **beta.structurestudiosuite.com** (new domain; `Server: cloudflare`): worker `structurestudio-beta`, account CSM Synergy `7e50b16e…`, config `wrangler.beta.jsonc` (static assets from repo root, `html_handling: "none"` is load-bearing — read `wrangler.jsonc`'s comments before changing; `_redirects` provides the pretty paths, e.g. `/portal/designs`). ⚠️ **Deploys are MANUAL — a git push no longer ships anything to beta.** There is no git integration and no deploy workflow; ship with `npx wrangler deploy --config wrangler.beta.jsonc` (deployment history: `npx wrangler deployments list --name structurestudio-beta`). Wrangler on Carolyn's machine is authenticated to this account.
+- **PRODUCTION is still on Netlify** at structurestudio.app (site `structurestudio-app`, team `carmil2`, deploys `main` on push) until its cutover; the new apex structurestudiosuite.com did not respond as of 2026-08-05. The old Netlify beta (beta.structurestudio.app) also still serves — a STALE parallel copy; don't verify against it.
+- Netlify residue that still applies to production: when the carmil2 team's **credits are exhausted**, git deploys are marked "Skipped due to account credit usage exceeded" and direct `netlify deploy` returns 403 — pushes LOOK fine while silently not shipping. Check `npx netlify-cli api listSiteDeploys` when a main push doesn't appear.
 - `portal.html` — standalone owner login + dashboard (designs/contacts lists, settings, billing) with an in-portal **Designer** tab that mounts the shared module (`<StructureStudio clientId=… embedded/>`). **HTML-only — it has no .jsx sibling and is exempt from the mirror rule.**
 
 **The hand-mirrored pair is `StructureStudio.jsx` ↔ `structure-studio.component.js`.** The only structural differences:
@@ -22,7 +25,13 @@ Any non-trivial edit must be mirrored in both files or the browser deliverable w
 
 There is no build/run/test command. To sanity-check a change, serve the folder (`python -m http.server 8123`) and open `index.html` / `portal.html` over http — never from `file://` — `.claude/launch.json` has a `static` server config for the preview tools.
 
-**Pre-push gate (added 2026-07-30).** Because nothing compiles ahead of time, a broken reference ships silently and throws in the customer's tab — a missed rename during the status-chips refactor (`RANK` → `STATUS_RANK`, one leftover usage) put the Contacts tab on "Loading…" for every tenant. `scripts/preflight.mjs` now lints every inline `text/babel` block plus the two component twins (JSX-aware `no-undef` and nine other correctness-only rules — never style), and enforces the CDN version lock and the `?v=` cache-buster lockstep between index.html and portal.html. It runs automatically on `git push` via `.githooks/pre-push`. **One-time setup per clone:** `git config core.hooksPath .githooks` and `npm install` (the only devDependencies in the repo — the product itself still has no build). Run it by hand with `npm run preflight`; `node scripts/preflight.mjs --self-test` proves the gate still catches the original RANK incident. Emergency bypass is `git push --no-verify` — if you use it, say so in the commit message. ⚠️ **Side effect on edge functions:** the gate's `npm install` creates a root `node_modules`, which Deno then discovers and fails on — `deno check` in `supabase/functions/` dies with *"Could not find a matching package for 'npm:@supabase/realtime-js'"*. The functions are fine; the resolver isn't. Type-check them with **`deno check --node-modules-dir=none`**.
+**ALWAYS rebase before you push (rule, Carolyn 2026-08-02).** Run `git pull --rebase origin beta` immediately before every `git push`. This clone is shared — several Claude sessions plus Ahsan commit to `beta` all day, and on 2026-08-02 eight commits landed while one session was mid-feature. Rebasing first is not just about avoiding a rejected push: it means the pre-push gate lints your code against what is *really* on the remote, and it keeps the recovery (stash → rebase → re-verify every marker) out of the moment when you are trying to ship. The `.githooks/pre-push` hook enforces it — it fetches your branch and **refuses the push while you are behind**, naming the command to run. It deliberately does not rebase for you: a hook that rewrites your working tree mid-push is a nasty surprise the first time it hits a conflict. If the fetch fails (offline), the check is skipped rather than blocking work. After any rebase, re-run the preflight and spot-check that your own changes survived — a sibling session's commit can touch the same lines.
+
+**Pre-push gate (added 2026-07-30).** Because nothing compiles ahead of time, a broken reference ships silently and throws in the customer's tab — a missed rename during the status-chips refactor (`RANK` → `STATUS_RANK`, one leftover usage) put the Contacts tab on "Loading…" for every tenant. `scripts/preflight.mjs` now lints every inline `text/babel` block plus the two component twins (JSX-aware `no-undef` and nine other correctness-only rules — never style), and enforces the CDN version lock and the `?v=` cache-buster lockstep between index.html and portal.html. It runs automatically on `git push` via `.githooks/pre-push`. **One-time setup per clone:** `git config core.hooksPath .githooks` and `npm install` (the only devDependencies in the repo — the product itself still has no build). **It also runs `deno check` over every `supabase/functions/*/index.ts` (added 2026-08-04).** Nothing was type-checking the edge functions, so errors accumulated unseen: two sat in `portal-settings`' `list_inventory` (an untyped `new Map()` over `as any` data became `Map<unknown, unknown>`, and the truthiness checks narrowed `unknown` to `{}`, so every field read off it was a TS2339) long enough that a later commit added a third read off the same broken line. One `deno check` invocation covers every entrypoint (15 as of 2026-08-05) in ~3s (shared module graph; `_shared/*.ts` is checked transitively). Deno is **not** an npm devDependency, so when it is missing the step **skips with a loud warning and does not block the push** — a gate that makes the repo unpushable is worse than the bugs it catches. If you see that warning, `supabase/functions/` was not covered by that run.
+
+**Two more checks were added 2026-08-04.** (1) **No Intuit API/OAuth host may appear in a browser-served file** (`index.html`, `portal.html`, `admin.html`, either component twin). Every QuickBooks call goes through `qboFetch` in an edge function; the client secret exists only server-side, and that is what we state in Intuit's App Assessment questionnaire — so it is enforced rather than left true by habit. Scoped to the API/OAuth hosts, so a help link to `quickbooks.intuit.com` still passes. (2) **`deno test` over the edge-function unit tests**, in two groups because they need different invocations: the self-contained `_shared/*.test.ts` (no `jsr:`/`npm:` imports — a gate that needs a registry fetch fails closed on an offline machine), and the pre-existing `_shared/_test_stubs/*_test.ts`, which **requires `--import-map=_shared/_test_stubs/import_map.json`** or 12 of its 14 cases fail on module resolution. That second suite existed for a while with nothing running it; if you add a test, either naming shape is picked up automatically.
+
+Run the gate by hand with `npm run preflight`; `node scripts/preflight.mjs --self-test` proves it still catches the original RANK incident, that ≥1 edge-function entrypoint is discovered, that `deno check` really does fail a file with a type error, that the Intuit-host rule fires on an API call **and stays quiet on a help link**, and that both test groups are discovered and `deno test` really does fail a failing test (a subprocess step whose clean result and whose tool-missing result both print nothing needs that assertion — this script has already shipped once while silently running zero rules, and the test step shipped once already missing a whole suite). Emergency bypass is `git push --no-verify` — if you use it, say so in the commit message. ⚠️ **Side effect on edge functions:** the gate's `npm install` creates a root `node_modules`, which Deno then discovers and fails on — `deno check` in `supabase/functions/` dies with *"Could not find a matching package for 'npm:@supabase/realtime-js'"*. The functions are fine; the resolver isn't. Type-check them with **`deno check --node-modules-dir=none`** — the preflight gate passes that flag for you, so this only bites when you run `deno check` by hand.
 
 ## Multi-tenancy model
 
@@ -75,6 +84,93 @@ Two rules that are easy to break and expensive to get wrong:
 
 The widget is **portal-only** (`portal.html`: `FeedbackForm`, `FeedbackWidget`, `MySubmissions`; surfaced under What's New → My Submissions). It was removed from the public designer on 2026-07-26 — submissions must be attributable to a signed-in user and tenant, and the designer's visitors are anonymous shed-shoppers who should never see a "Report a bug" button on a tenant's customer-facing page. `FeedbackWidget.jsx` is now an empty signpost file; nothing imports it. The widget is also hidden while an operator is viewing another tenant's account, since the submission would be attributed to the operator's own tenant.
 
+## Scheduling suite (Build Schedule · Delivery Schedule · Repairs)
+
+Shipped 2026-08-04 (all five phases; spec + decisions in `SCHEDULING_SCOPE.md` — read it
+before touching anything here), then refined daily through Carolyn's beta testing —
+**migrations 087–095**, so anything below that reads like a Phase-1 description is the
+older shape. Tables: `schedule_stages`, `build_jobs`, `schedule_activity`,
+`delivery_territories`, `driver_profiles` (service-role only, like `commission_members`),
+`delivery_loads`, `delivery_stops`, `repairs` (+ private `repair-photos` bucket),
+`build_crews`, and `designs.delivered_at`. One edge function owns every read/write:
+**`portal-schedule`** (resolveTenant; READ = any role, STAFF = move_job/add_note/
+mark_stop_delivered, everything else owner/admin). UI is portal-only: `BuildScheduleTab`,
+`RepairsTab`, `DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+
+Post-launch shape changes (092–095), each from real use:
+- **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
+  build, then lot → buyer once sold), so the per-unit unique index is gone; the guard is
+  now "at most one OPEN (undelivered) stop per unit", enforced in `add_stop`. The SALE stop
+  is the one carrying the buyer's `sold_design_short_code` — that is how the pool knows a
+  sale is scheduled and how the delivered write-back reaches the buyer's estimate.
+- **093** — `build_jobs` snapshots appearance (`roof_type`, `roof_color`, `body_color`,
+  `trim_color` + three `_hex` columns, resolved from the tenant's `colors` catalog at
+  creation). The card reads **building-first**: style+size headline → roof → color
+  swatches → customer. Carolyn's ordering, not negotiable without asking her.
+- **094** — `build_crews` (name, color, optional `member_user_ids`) + `build_jobs.crew_id`.
+  Crews are the build scheduling unit: the calendar flips between per-crew calendars and a
+  drop on one assigns that crew. Crews do NOT require logins — most shop crews never sign in.
+- **095** — drivers are **name-first**: `driver_profiles` gained its own `id` (new PK) and
+  `display_name`; `user_id` is nullable (one profile per login, partial unique index).
+  `delivery_loads.driver_id` → the profile, with `driver_user_id` kept for legacy rows and
+  for a driver's own field access. Resolve a load's driver by profile id first, then the
+  legacy user link.
+- **The Build Schedule calendar is the DEFAULT view** (Calendar | Board | Table). Real
+  dates, Sunday-first, week + month, a weekends on/off toggle (localStorage), and **ONE
+  build date per job** — `due_date` is canonical, `scheduled_start` kept equal for
+  compatibility; every cross-check (past due, delivery conflicts, pool) keys on `due_date`.
+  Dragging a card to a day IS the reschedule. There is exactly ONE Unscheduled tray, above
+  the calendar, holding both undated board jobs and not-yet-created intake items; dropping
+  an intake item on a day creates the job already scheduled.
+
+Two data-shape traps that cost real debugging time — do not re-learn them:
+- **Stored designs key on `style` / `size`** (plus `roofType` / `roofColor`, and
+  `paint_colors.{body,trim}`). `buildingStyle` / `buildingSize` exist ONLY in the
+  submit-estimate webhook payload, never in the `designs` row. Reading the webhook names
+  against a stored row returns undefined silently — that is why early build cards had no
+  building label and no dimensions, and it needed a backfill to repair.
+- **There is no `user_profiles` table.** Migration `060_user_profiles.sql` put the columns
+  on **`client_users`** (`full_name`, `phone`). A `from("user_profiles")` read fails soft
+  and returns nothing, so names render blank / as id fragments with no error anywhere —
+  exactly how drivers and team pickers shipped nameless.
+
+Rules that are easy to break and expensive to get wrong:
+1. **Automation keys on stage `kind` (`queue|active|done`), NEVER the stage name** — names
+   are tenant-editable (the Monday label-rename lesson, again).
+2. **The delivered fence:** `sync-design-status` skips rows with `delivered_at` set. Remove
+   that skip and the GHL recompute (which never reports delivered) downgrades every
+   locally-delivered design on the next portal load.
+3. **Serials:** order build jobs mint from `take_next_serial()` LAST, after all validation —
+   a rejected payload must not burn a number. Testing "add order to board" on a real tenant
+   consumes a real serial.
+4. **Built-before-delivered:** loads can't go out/delivered with an unbuilt stop; the 409
+   carries `{blocked, unbuilt}` and the admin override (required reason) is audit-logged and
+   stamped on the load. The width rule (building wider than the driver's `max_width_ft`) has
+   NO override anywhere — keep it that way.
+5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` = operator OR
+   `entitlement.features.schedule_builds`. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
+   grandfathered into this."** portal-billing's `PAID_ONLY_FEATURES` set excludes
+   `schedule_builds` from the exempt/transition blankets — a real subscription is the only
+   tenant path in; do not "fix" that back to the blanket. The plans' `availability` flip
+   (coming_soon → available) is a HUMAN-run data change — see SCHEDULING_SCOPE.md's launch
+   switches.
+6. The "to be loaded" pool is a QUERY, not a table — don't invent an "unassigned stops" row.
+   It covers **every non-repair build job without a stop** (Carolyn 2026-08-04: "every
+   building that is in the build schedule should also show in the delivery schedule" — an
+   inventory spec build gets hauled to the lot, which is a delivery), plus sold units
+   needing their sale delivery, plus open repairs. Repairs appear once, via the repairs
+   section, so nothing is listed twice.
+7. **`deno check` is the ONLY type-check over `portal-schedule`.** ✅ Verified 2026-08-05:
+   Deno **2.9.4 is installed** (scoop, `C:\Users\carol\scoop\shims\deno.exe`, on both the
+   PowerShell and Git Bash PATH), the gate covers **15 entrypoints + 3 test files**, and
+   every function — `portal-schedule` included — type-checks clean. Prove the steps are
+   really running rather than silently skipping with `node scripts/preflight.mjs
+   --self-test`; a clean run and a tool-missing run both print nothing, which is exactly
+   why that assertion exists. Deno is **Supabase's edge runtime** (every function opens
+   with `import "jsr:@supabase/functions-js/edge-runtime.d.ts"` and calls `Deno.env.get`),
+   NOT a Netlify artifact — the Netlify → Cloudflare hosting move did not retire it, so
+   don't delete the step on that theory.
+
 ## What's New changelog — what must NEVER be published
 
 `release_notes` (migration `045`) is the tenant-facing changelog behind the What's New tab. It is hand-authored: nothing in the codebase writes to it, and no code change should ever auto-generate an entry.
@@ -87,7 +183,7 @@ SQL migrations live in `supabase/migrations/`. `000`–`027` are **all applied t
 
 ### ✅ Cutover state — COMPLETE (2026-06-14)
 
-The cutover is **done**. The multi-tenant frontend (config via `get_config`, designs via `load_design`/`save_design`, PDFs under `{client_id}/`) is deployed to **production** (`structurestudio.app`), and `005_cutover.sql` + `015_config_rls_scope.sql` are applied. **Deploy source (corrected 2026-07-29):** **`beta` is the working line** — all development happens there and `beta.structurestudio.app` ships from it. **`main` is production** (`structurestudio.app`) and is updated by **promoting beta into it via merge**. Evidence: `origin/main`'s tip is `9b40cf0` *"Merge beta into main: Beta->Main promotion (2026-07-28)"*, whose message notes production was still serving the 2026-07-26 build beforehand. **The promotion is AUTOMATED, not manual** (refined 2026-07-29): `.github/workflows/merge-beta-to-main.yml` merges beta into main on **`cron: "0 13 * * 1"` — 13:00 UTC every Monday** — and is also runnable on demand from the Actions tab (`workflow_dispatch`); it reports each run to the "StructureStudio" item on the monday.com *Projects (Repos)* board. So the answer to "when do clients see this?" is **the next Monday**, not "when someone remembers". Two consequences: (1) do not hand-merge to `main` — let the workflow do it, or dispatch it deliberately if something must ship sooner; (2) that workflow file lives **only on `main`** (`a332e3b`/`6f95523`), so it is invisible from a `beta` checkout — look on `origin/main` for it. Check the pending gap any time with `git log --oneline origin/main..origin/beta`. ⚠️ This paragraph previously said `main` was a frozen legacy single-tenant build that must **never** be a merge target — that was true until the 2026-07-28 promotion and is now wrong; believing it means shipping to beta and assuming clients see it, when they do not until a promotion. **Still true: never develop on `main`** — branch from `beta`, and reach `main` only by promotion. Verified live: **every public table has RLS on and zero anon-readable policies** — anon reaches data only through the capability RPCs (`get_config`/`get_catalog`/`load_design`); `designs_anon_all` and `floor_plans_public_all` are dropped; `client_configs` is owner-scoped. Storage writes require the `{client_id}/SS-….pdf` shape (no anon delete, no bucket listing). Pre-cutover floor-plan files remain at the bucket root (still publicly readable); re-pathing them under `{client_id}/` via COPY is optional cleanup (see `CUTOVER_HANDOFF.md` Task 3).
+The cutover is **done**. The multi-tenant frontend (config via `get_config`, designs via `load_design`/`save_design`, PDFs under `{client_id}/`) is deployed to **production** (`structurestudio.app`), and `005_cutover.sql` + `015_config_rls_scope.sql` are applied. **Deploy source (corrected 2026-07-29):** **`beta` is the working line** — all development happens there and `beta.structurestudio.app` ships from it. **`main` is production** (`structurestudio.app`) and is updated by **promoting beta into it via merge**. Evidence: `origin/main`'s tip is `9b40cf0` *"Merge beta into main: Beta->Main promotion (2026-07-28)"*, whose message notes production was still serving the 2026-07-26 build beforehand. **The promotion is AUTOMATED, not manual** (refined 2026-07-29): `.github/workflows/merge-beta-to-main.yml` merges beta into main on **`cron: "0 10 * * 1"` — 10:00 UTC every Monday** (moved from 13:00 UTC on 2026-08-03, `ffac49f`) — and is also runnable on demand from the Actions tab (`workflow_dispatch`); it reports each run to the "StructureStudio" item on the monday.com *Projects (Repos)* board. So the answer to "when do clients see this?" is **the next Monday**, not "when someone remembers". Two consequences: (1) do not hand-merge to `main` — let the workflow do it, or dispatch it deliberately if something must ship sooner; (2) that workflow file lives **only on `main`** (`a332e3b`/`6f95523`), so it is invisible from a `beta` checkout — look on `origin/main` for it. Check the pending gap any time with `git log --oneline origin/main..origin/beta`. ⚠️ This paragraph previously said `main` was a frozen legacy single-tenant build that must **never** be a merge target — that was true until the 2026-07-28 promotion and is now wrong; believing it means shipping to beta and assuming clients see it, when they do not until a promotion. **Still true: never develop on `main`** — branch from `beta`, and reach `main` only by promotion. Verified live: **every public table has RLS on and zero anon-readable policies** — anon reaches data only through the capability RPCs (`get_config`/`get_catalog`/`load_design`); `designs_anon_all` and `floor_plans_public_all` are dropped; `client_configs` is owner-scoped. Storage writes require the `{client_id}/SS-….pdf` shape (no anon delete, no bucket listing). Pre-cutover floor-plan files remain at the bucket root (still publicly readable); re-pathing them under `{client_id}/` via COPY is optional cleanup (see `CUTOVER_HANDOFF.md` Task 3).
 
 ## Runtime configuration model
 
@@ -95,7 +191,7 @@ The component is white-labeled per client. There is **no in-source copy** of any
 
 1. React prop: `<StructureStudio config={clientConfig} />` — wins, no fetch. Used by the `postMessage` re-render path in `index.html` and by hosts that supply their own config.
 2. `?client=<id>` URL param — explicit override, wins over hostname.
-3. **Subdomain** — `juniorbarns.structurestudio.app` → `client_id = "juniorbarns"`. Only fires for `<sub>.structurestudio.app`; the apex, IPs, localhost, `*.pages.dev`/`*.netlify.app` deploy hosts, and the reserved env labels (`www`/`beta`/`dev`/`staging`/`app`) all fall through — a deploy hostname is never a tenant.
+3. **Subdomain** — `juniorbarns.structurestudio.app` → `client_id = "juniorbarns"`. Fires for `<sub>.<apex>` on **either apex we serve** — `structurestudio.app` **and** `structurestudiosuite.com` (`TENANT_APEXES` in both twins, 2026-08-05). Both are listed deliberately for the duration of the migration: the old apex is production today, the new one already serves beta, and a tenant's branded link must resolve identically on both — listing only the old one breaks every subdomain the day production cuts over, listing only the new one breaks them all today. Drop an entry when its apex is actually retired, not before. The apexes themselves, IPs, localhost, `*.pages.dev`/`*.netlify.app`/`*.workers.dev` deploy hosts, and the reserved env labels (`www`/`beta`/`dev`/`staging`/`app`) all fall through — a deploy hostname is never a tenant. Note `ssAllowedOrigin` (the postMessage allowlist) already accepted both apexes; it was the tenant resolver that lagged.
 4. `?id=<short_code>` share-link — without a `?client=` or tenant subdomain, the owning `client_id` is looked up via the `load_design` RPC so a rep clicking someone else's link gets that tenant's branding/config.
 5. Bare product root (no tenant and no `?id=`) → **redirects to `/portal.html`** — the business portal is the landing page; owners copy their customer design link from the dashboard. `DEFAULT_CLIENT_ID` (currently `junior-barns`) remains only as the branding fallback when an `?id=` owner lookup fails. Note: the operator `?admin=1` panel therefore needs a tenant in the URL, e.g. `?client=junior-barns&admin=1`.
 6. On fetch failure (network error, unknown `client_id`, or an incomplete row missing one of `REQUIRED_CONFIG_KEYS`) the wrapper renders an error screen with a retry button — it does NOT silently fall back to another tenant's config.

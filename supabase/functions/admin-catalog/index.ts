@@ -547,17 +547,57 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           for (const z of szSrc.data ?? []) { const ns = styleIdMap.get(z.style_id); if (!ns) continue; const nid = newSizeIdByKey.get(`${ns}|${z.label}`); if (nid) sizeIdMap.set(z.id, nid); }
           counts.building_sizes = sizeIdMap.size;
 
-          // 3. building_size_inclusions → remap size_id (qty travels with the row —
+          // 3. fixture_items (the doors/windows/ramps catalog) → old id → new id.
+          // Must run BEFORE inclusions: a size can include a FIXTURE, and it references it
+          // by the fixture's uuid in item_key (migration 074 dropped that FK so the column
+          // can hold either a builtin key or a fixture id). Cloning without this step left
+          // the new client with no catalog doors at all AND inclusion rows pointing at the
+          // template's fixture ids — invisible rows referencing another tenant's data.
+          // Ids are generated up front rather than read back, because fixtures have no
+          // stable per-client natural key to re-match on the way the styles clone does.
+          // Archived fixtures are skipped: they exist only so a template's OLD designs still
+          // render, and a brand-new client has no old designs.
+          const fxSrc = await sb.from("fixture_items").select("*").eq("client_id", T).eq("archived", false);
+          if (fxSrc.error) throw new Error(`clone fixtures read: ${fxSrc.error.message}`);
+          const fixtureIdMap = new Map<string, string>();  // old fixture id → new fixture id
+          if ((fxSrc.data ?? []).length) {
+            const fxRows = (fxSrc.data ?? []).map((f0: any) => {
+              const { id, client_id, created_at, updated_at, ...rest } = f0;
+              const newId = crypto.randomUUID();
+              fixtureIdMap.set(String(id), newId);
+              return { id: newId, client_id: Cc, ...rest };
+            });
+            const r = await sb.from("fixture_items").insert(fxRows);
+            if (r.error) throw new Error(`clone fixtures: ${r.error.message}`);
+          }
+          counts.fixture_items = fixtureIdMap.size;
+
+          // 4. building_size_inclusions → remap size_id (qty travels with the row —
           // previously dropped here, resetting every clone's quantities to the default 1)
+          // and remap item_key when it names a fixture. A uuid-shaped key with no entry in
+          // the map belongs to a fixture we did NOT clone (archived, or deleted since the
+          // inclusion was written) — copying it would recreate the dangling reference, so
+          // the row is dropped and counted instead of silently carried over.
+          const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
           const incSrc = await sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", T);
           if (incSrc.error) throw new Error(`clone inclusions read: ${incSrc.error.message}`);
-          const incRows = (incSrc.data ?? []).filter((x: any) => sizeIdMap.has(x.size_id)).map((x: any) => ({
-            client_id: Cc, size_id: sizeIdMap.get(x.size_id), item_key: x.item_key, included: x.included, qty: x.qty ?? 1,
-          }));
+          let incDropped = 0;
+          const incRows = (incSrc.data ?? [])
+            .filter((x: any) => sizeIdMap.has(x.size_id))
+            .map((x: any) => {
+              const key = String(x.item_key ?? "");
+              let newKey: string | null = key;
+              if (fixtureIdMap.has(key)) newKey = fixtureIdMap.get(key) as string;
+              else if (isUuid(key)) newKey = null;
+              if (newKey === null) { incDropped++; return null; }
+              return { client_id: Cc, size_id: sizeIdMap.get(x.size_id), item_key: newKey, included: x.included, qty: x.qty ?? 1 };
+            })
+            .filter(Boolean) as any[];
           if (incRows.length) { const r = await sb.from("building_size_inclusions").insert(incRows); if (r.error) throw new Error(`clone inclusions: ${r.error.message}`); }
           counts.building_size_inclusions = incRows.length;
+          if (incDropped) counts.building_size_inclusions_dropped = incDropped;
 
-          // 4. client_layout_items (no style FK)
+          // 5. client_layout_items (no style FK)
           const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override").eq("client_id", T);
           if (liSrc.error) throw new Error(`clone items read: ${liSrc.error.message}`);
           if ((liSrc.data ?? []).length) {
@@ -566,7 +606,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           }
           counts.client_layout_items = (liSrc.data ?? []).length;
 
-          // 5. layout_item_pricing → remap style_id (NULL default stays NULL)
+          // 6. layout_item_pricing → remap style_id (NULL default stays NULL)
           const lpSrc = await sb.from("layout_item_pricing").select("item_key, style_id, pricing_method, rate, image_url").eq("client_id", T);
           if (lpSrc.error) throw new Error(`clone pricing read: ${lpSrc.error.message}`);
           const lpRows = (lpSrc.data ?? []).filter((q: any) => !q.style_id || styleIdMap.has(q.style_id)).map((q: any) => ({
@@ -576,7 +616,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           if (lpRows.length) { const r = await sb.from("layout_item_pricing").insert(lpRows); if (r.error) throw new Error(`clone pricing: ${r.error.message}`); }
           counts.layout_item_pricing = lpRows.length;
 
-          // 6. colors (no FK) — copy every column except identity/timestamps
+          // 7. colors (no FK) — copy every column except identity/timestamps
           const colSrc = await sb.from("colors").select("*").eq("client_id", T);
           if (colSrc.error) throw new Error(`clone colors read: ${colSrc.error.message}`);
           if ((colSrc.data ?? []).length) {

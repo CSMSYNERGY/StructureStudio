@@ -2,26 +2,113 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
-import { qboFetch, qboOauthReady, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
+import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
+import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 
-// Any linked account may read these; everything else requires owner/admin (or an
-// operator with can_write). Hoisted above the handler so the resolver can consult it.
-const READ_ACTIONS = new Set(["status", "catalog", "contact_activity", "get_profile", "qbo_status",
-  // Inventory (075): any linked account may VIEW inventory and locations — same posture
-  // as the Designs tab. All inventory writes stay owner/admin (or operator can_write).
-  "list_locations", "list_inventory"]);
-// Self-service: a WRITE any role may make, because it only ever touches the caller's own
-// client_users row (scoped to ctx.userId below, never to anything from the body). Kept out of
-// READ_ACTIONS on purpose — mislabelling a write as a read would make the permission gate
-// misdescribe what it allows. Without this a "user"-role account could not set its own name.
-const SELF_ACTIONS = new Set(["save_profile"]);
-// Writes any linked role may make as part of ordinary selling (see resolveTenant's
-// staffActions). link_design_to_unit only tags a design this same tenant just created
-// with the inventory unit it was quoted from — a role-"user" salesperson can send that
-// estimate, so they must be able to complete it. Owner/admin-only here meant the link
-// silently 403'd and the building never showed the estimate or flipped to Sold.
-const STAFF_ACTIONS = new Set(["link_design_to_unit"]);
+import type { GateTable } from "../_shared/access.ts";
+
+// WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
+// refuses anything absent, so adding a branch without adding a line here 403s on the first
+// call rather than shipping open to every signed-in employee. See _shared/access.ts for why
+// this is a table and not a check inside each of the 51 branches below.
+//
+// This replaces the old READ_ACTIONS / SELF_ACTIONS / STAFF_ACTIONS sets entirely.
+const GATES: GateTable = {
+  // ── Bootstrap ────────────────────────────────────────────────────────────
+  // `status` is the portal's FIRST call and the default action: it carries clientId, role,
+  // operatorMode and the business identity the shell renders around every tab. Gating it on
+  // settings_crm would lock a driver out of the whole application rather than out of the CRM
+  // card, so it stays open and the CRM/QuickBooks fields inside it are filtered per-area at
+  // the branch instead (search: STATUS FIELD FILTER).
+  status: "open",
+
+  // ── Your own account ─────────────────────────────────────────────────────
+  get_profile: "self",
+  save_profile: "self",
+
+  // ── Structures ───────────────────────────────────────────────────────────
+  // `catalog` is one payload serving both Settings groups (styles+sizes+prices AND
+  // colors/layout/fixtures), and portal.html loads it from five different cards. `any` so a
+  // person holding only one of the two still gets their own screen; splitting the payload
+  // is the cleaner fix and belongs with the Team screen, not here.
+  catalog: { any: [{ area: "settings_structures", level: "view" }, { area: "settings_options", level: "view" }] },
+  import_pricing_csv:        { area: "settings_structures", level: "edit" },
+  create_style:              { area: "settings_structures", level: "edit" },
+  update_style:              { area: "settings_structures", level: "edit" },
+  delete_style:              { area: "settings_structures", level: "edit" },
+  reorder_styles:            { area: "settings_structures", level: "edit" },
+  set_style_active:          { area: "settings_structures", level: "edit" },
+  set_style_estimate_image:  { area: "settings_structures", level: "edit" },
+
+  // ── Options & colours ────────────────────────────────────────────────────
+  save_colors:                    { area: "settings_options", level: "edit" },
+  save_layout_pricing:            { area: "settings_options", level: "edit" },
+  upload_layout_image:            { area: "settings_options", level: "edit" },
+  upload_fixture_image:           { area: "settings_options", level: "edit" },
+  save_fixture:                   { area: "settings_options", level: "edit" },
+  delete_fixture:                 { area: "settings_options", level: "edit" },
+  reorder_fixtures:               { area: "settings_options", level: "edit" },
+  import_fixtures:                { area: "settings_options", level: "edit" },
+  set_layout_item_archived:       { area: "settings_options", level: "edit" },
+  set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
+  save_ramp_settings:             { area: "settings_options", level: "edit" },
+  // Legacy full-replace writers. The portal no longer calls these, but they are live
+  // endpoints and a live endpoint needs a gate whether or not anything drives it.
+  save_doors:   { area: "settings_options", level: "edit" },
+  save_ramps:   { area: "settings_options", level: "edit" },
+  save_windows: { area: "settings_options", level: "edit" },
+
+  // ── Branding, business details, lots ─────────────────────────────────────
+  // `save` writes CRM credentials AND business identity/quote terms in one call, so it
+  // requires both. Conservative on purpose: today every title holding one holds the other,
+  // and the alternative (pick one area, write both) would let half the form through a gate
+  // that names the other half.
+  save: { all: [{ area: "settings_crm", level: "edit" }, { area: "settings_branding", level: "edit" }] },
+  save_branding: { area: "settings_branding", level: "edit" },
+  upload_logo:   { area: "settings_branding", level: "edit" },
+  save_location:   { area: "settings_branding", level: "edit" },
+  delete_location: { area: "settings_branding", level: "edit" },
+  // The lot list is a Settings card AND the Inventory tab's location picker — two
+  // populations, neither of which covers the other.
+  list_locations: { any: [{ area: "settings_branding", level: "view" }, { area: "inventory", level: "view" }] },
+  // The serial counter is shared by Inventory and Orders but is configured from a Settings
+  // card; branding is where that card lives, and it is an owner/admin-shaped decision.
+  save_serial_start: { area: "settings_branding", level: "edit" },
+
+  // ── CRM ──────────────────────────────────────────────────────────────────
+  verify_save_ghl:     { area: "settings_crm", level: "edit" },
+  list_ghl_pipelines:  { area: "settings_crm", level: "view" },
+
+  // ── QuickBooks ───────────────────────────────────────────────────────────
+  qbo_status:      { area: "settings_quickbooks", level: "view" },
+  qbo_pending:     { area: "settings_quickbooks", level: "view" },
+  list_item_map:   { area: "settings_quickbooks", level: "view" },
+  list_qbo_items:  { area: "settings_quickbooks", level: "view" },
+  save_item_map:   { area: "settings_quickbooks", level: "edit" },
+  // `qbo_test` reads like a read — it is a "Test connection" button — but it writes
+  // qbo_company_name and can drive a token refresh. Gated as the write it is.
+  qbo_test:        { area: "settings_quickbooks", level: "edit" },
+  disconnect_qbo:  { area: "settings_quickbooks", level: "edit" },
+  retry_qbo_push:  { area: "settings_quickbooks", level: "edit" },
+
+  // ── Workspace ────────────────────────────────────────────────────────────
+  contact_activity: { area: "contacts", level: "view" },
+  delete_design:    { area: "designs", level: "edit" },
+  // NOT inventory:edit. A sales rep's preset is inventory:'view', and this only tags a
+  // design they just created with the unit it was quoted from — gating it on inventory:edit
+  // recreates the 2026-08-02 bug exactly (estimate sent, link 403s, the building never
+  // shows the estimate and never flips to Sold).
+  link_design_to_unit: { area: "designs", level: "edit" },
+  list_inventory:   { area: "inventory", level: "view" },
+  save_inventory:   { area: "inventory", level: "edit" },
+  update_inventory: { area: "inventory", level: "edit" },
+  // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
+  // is a Designs deletion happening under an Inventory verb, so it needs both.
+  delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
+  // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
+  send_invoice:     { area: "orders", level: "edit" },
+};
 
 // Owner-facing settings endpoint for the portal (portal.html).
 //
@@ -221,9 +308,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // mode actually read and write the viewed account instead of the operator's own.
   // Everything below this block is unchanged and simply uses `clientId`.
   const admin = createClient(supabaseUrl, serviceKey);
-  const r = await resolveTenant(req, admin, { readActions: READ_ACTIONS, selfActions: SELF_ACTIONS, staffActions: STAFF_ACTIONS, defaultAction: "status" });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail } = r.ctx;
+  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
@@ -270,6 +357,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("company_name, tagline, logo_url, accent_color, header_bg")
       .eq("client_id", clientId)
       .maybeSingle();
+    // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
+    // bootstrap: every role needs clientId/role/branding/business identity to render the
+    // portal at all, so denying it would black out the app rather than close one card. The
+    // CRM wiring inside it is a different matter — pipeline and stage ids are settings_crm
+    // material with no business reaching a driver's browser — so it is filtered here
+    // instead. `access` rides along so portal.html renders tabs from the SAME resolved map
+    // the server just enforced, rather than from a second copy of the rules that can drift.
+    const crm = canRead("settings_crm")
+      ? {
+        configured: Boolean(data?.ghl_location_id && data?.ghl_api_key),
+        ghlLocationIdMasked: maskId(data?.ghl_location_id ?? null),
+        hasApiKey: Boolean(data?.ghl_api_key),
+        ghlPipelineId: data?.ghl_pipeline_id ?? null,
+        ghlStageSendQuoteId: data?.ghl_stage_send_quote_id ?? null,
+        ghlStageAcceptedId: data?.ghl_stage_accepted_id ?? null,
+        ghlStageInvoicedId: data?.ghl_stage_invoiced_id ?? null,
+        ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
+        betaMode: Boolean(data?.beta_mode),
+        betaEmail: data?.beta_email ?? null,
+      }
+      : {};
     return json({
       ok: true,
       // clientId is the RESOLVED tenant (the viewed one in operator mode). portal.html's
@@ -279,22 +387,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       clientId,
       role,
       operatorMode: Boolean(operator),
-      configured: Boolean(data?.ghl_location_id && data?.ghl_api_key),
-      ghlLocationIdMasked: maskId(data?.ghl_location_id ?? null),
-      hasApiKey: Boolean(data?.ghl_api_key),
-      ghlPipelineId: data?.ghl_pipeline_id ?? null,
-      ghlStageSendQuoteId: data?.ghl_stage_send_quote_id ?? null,
-      ghlStageAcceptedId: data?.ghl_stage_accepted_id ?? null,
-      ghlStageInvoicedId: data?.ghl_stage_invoiced_id ?? null,
-      ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
+      access,
+      ...crm,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
       businessWebsite: data?.business_website ?? null,
       businessAddress: data?.business_address ?? null,
       businessLogoUrl: data?.business_logo_url ?? null,
       quoteTerms: data?.quote_terms ?? null,
-      betaMode: Boolean(data?.beta_mode),
-      betaEmail: data?.beta_email ?? null,
       showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)
@@ -1049,6 +1149,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, saved, deleted, skipped });
   }
 
+  // LEGACY (2026-08-03): the portal's catalog editors moved to per-line saves (save_fixture /
+  // delete_fixture below) and spreadsheet upsert (import_fixtures) — nothing in the current
+  // portal calls save_doors/save_ramps/save_windows anymore. Kept only so an older cached
+  // portal.html can still save; do not extend these.
+  //
   // Full-replace this tenant's DOORS (Options tab → Doors section, fixture_items). Takes the
   // COMPLETE desired door list: rows with an id update, rows without insert, and any existing
   // door absent from the list is deleted. Scoped to category='door' so windows/ramps (same
@@ -1209,6 +1314,143 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // ═══ Per-line fixture editing (2026-08-03) ════════════════════════════════════
+  // The catalog editors save one line at a time now. One validation source shared by
+  // save_fixture and import_fixtures, mirroring the legacy full-replace rules above exactly.
+  // Ramps/windows force swing/op false/null; ramp height_in holds LENGTH (error wording).
+  // price NULL is legal (NULL-price contract: not-yet-priced = not offered) — never coerce
+  // blank to 0. Op exclusivity (Double / Slide up are standalone) is normalized HERE because
+  // spreadsheet imports bypass the UI's setOp logic.
+  const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp"]);
+  const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
+    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
+    const name = String(row?.name ?? "").trim();
+    if (!name) return { err: `row ${i + 1}: blank name` };
+    const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
+    if (w === null || Number.isNaN(w) || (w as number) <= 0) return { err: `${name}: invalid width` };
+    if (h === null || Number.isNaN(h) || (h as number) <= 0) return { err: `${name}: invalid ${category === "ramp" ? "length" : "height"}` };
+    const price = numOrNull(row?.price);
+    if (Number.isNaN(price)) return { err: `${name}: invalid price` };
+    const isDoor = category === "door";
+    const swingIn = isDoor && row?.swingIn === true, swingOut = isDoor && row?.swingOut === true;
+    let opRight = isDoor && row?.opRight === true, opLeft = isDoor && row?.opLeft === true;
+    const opDouble = isDoor && row?.opDouble === true;
+    let opSlideUp = isDoor && row?.opSlideUp === true;
+    if (opDouble && opSlideUp) opSlideUp = false;
+    if (opDouble || opSlideUp) { opRight = false; opLeft = false; }
+    const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
+    const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
+    const rec: Record<string, unknown> = {
+      client_id: clientId, category, name,
+      plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
+      show_image_on_estimate: row?.showImageOnEstimate !== false,
+      width_in: w, height_in: h, price,
+      swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
+      op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
+      active: row?.active !== false,
+      archived: row?.archived === true,
+      internal_only: row?.internalOnly === true,
+      updated_at: new Date().toISOString(),
+    };
+    if (Object.prototype.hasOwnProperty.call(row ?? {}, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+    return { rec };
+  };
+
+  // Save ONE catalog fixture. Update is IN PLACE by uuid — building_size_inclusions
+  // references fixture ids with no FK (074), so delete+reinsert would orphan an item's
+  // inclusions. Scoped by id+client_id+category: a foreign or cross-category id matches
+  // nothing → 404, never a silent success. New rows go to the END of the palette
+  // (max+1 per client+category — a default 0 would pin them to the top of the picker).
+  if (action === "save_fixture") {
+    const category = String(payload?.category ?? "").trim();
+    if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
+    const v = validateFixtureRow(payload, category, 0);
+    if (v.err) return json({ error: v.err }, 400);
+    const id = String(payload?.id ?? "").trim();
+    if (id) {
+      const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
+        .eq("id", id).eq("client_id", clientId).eq("category", category);
+      if (error) return json({ error: error.message }, 500);
+      if (!count) return json({ error: "Item not found." }, 404);
+      return json({ ok: true, id });
+    }
+    const { data: maxRow } = await admin.from("fixture_items").select("sort_order")
+      .eq("client_id", clientId).eq("category", category)
+      .order("sort_order", { ascending: false }).limit(1).maybeSingle();
+    v.rec!.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
+    const ins = await admin.from("fixture_items").insert(v.rec!).select("id").maybeSingle();
+    if (ins.error) return json({ error: ins.error.message }, 500);
+    return json({ ok: true, id: ins.data!.id });
+  }
+
+  // Delete ONE catalog fixture. Deliberately does NOT clean building_size_inclusions —
+  // 074 documents stale fixture-id inclusion rows as benign, and the legacy full-replace
+  // delete leaves them too. Placed instances on saved designs keep rendering from their
+  // own snapshot.
+  if (action === "delete_fixture") {
+    const id = String(payload?.id ?? "").trim();
+    if (!id) return json({ error: "id is required." }, 400);
+    const { error, count } = await admin.from("fixture_items").delete({ count: "exact" })
+      .eq("id", id).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Item not found." }, 404);
+    return json({ ok: true });
+  }
+
+  // Persist drag-reorder of a category's fixtures (mirrors reorder_styles). sort_order
+  // drives the designer's picker order via get_fixtures.
+  if (action === "reorder_fixtures") {
+    const category = String(payload?.category ?? "").trim();
+    if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
+    if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    let i = 0;
+    for (const fid of payload.orderedIds) {
+      const sid = String(fid ?? "").trim();
+      if (!sid) continue;
+      const { error } = await admin.from("fixture_items").update({ sort_order: i })
+        .eq("client_id", clientId).eq("category", category).eq("id", sid);
+      if (error) return json({ error: error.message }, 500);
+      i++;
+    }
+    return json({ ok: true });
+  }
+
+  // Spreadsheet import (Export → edit in Excel → re-upload). UPSERT-ONLY by design: rows
+  // with a known id update in place, rows without one insert at the end; rows absent from
+  // the file are NEVER deleted (a partial or filtered sheet must not wipe the catalog —
+  // deletes happen only in the UI). Image URLs never ride in the sheet, so the
+  // hasOwnProperty gate in validateFixtureRow leaves each row's photo untouched.
+  if (action === "import_fixtures") {
+    const category = String(payload?.category ?? "").trim();
+    if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);
+    const exRes = await admin.from("fixture_items").select("id, sort_order").eq("client_id", clientId).eq("category", category);
+    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    let nextSort = (exRes.data ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.sort_order) || 0), -1) + 1;
+    let saved = 0, added = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.rows) {
+      const v = validateFixtureRow(row, category, i);
+      if (v.err) { skipped.push(v.err); i++; continue; }
+      const rid = String(row?.id ?? "").trim();
+      if (rid && existingIds.has(rid)) {
+        const res = await admin.from("fixture_items").update(v.rec!)
+          .eq("id", rid).eq("client_id", clientId).eq("category", category);
+        if (res.error) { skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${res.error.message}`); i++; continue; }
+        saved++;
+      } else {
+        v.rec!.sort_order = nextSort++;
+        const res = await admin.from("fixture_items").insert(v.rec!);
+        if (res.error) { skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${res.error.message}`); i++; continue; }
+        added++;
+      }
+      i++;
+    }
+    return json({ ok: true, saved, added, skipped });
   }
 
   // Archive / un-archive a BUILT-IN layout option (singleDoor/doubleDoor/window/ramp/…). Archived =
@@ -1552,7 +1794,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const unitIds = units.map((u: any) => u.id);
     const [mastersRes, estRes] = await Promise.all([
       codes.length
-        ? admin.from("designs").select("short_code, selections, image_url").in("short_code", codes).eq("client_id", clientId)
+        ? admin.from("designs").select("short_code, selections, image_url, paint_colors").in("short_code", codes).eq("client_id", clientId)
         : Promise.resolve({ data: [], error: null } as any),
       unitIds.length
         ? admin.from("designs")
@@ -1561,7 +1803,28 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         : Promise.resolve({ data: [], error: null } as any),
     ]);
     if (mastersRes.error) return json({ error: mastersRes.error.message }, 500);
-    const masterByCode = new Map((mastersRes.data ?? []).map((d: any) => [d.short_code, d]));
+    // Spell out the master rows' shape. The empty-input branch above is `as any`, so
+    // `mastersRes.data` is `any` and a bare `new Map(rows.map(...))` has nothing to infer
+    // K/V from — it quietly becomes Map<unknown, unknown>, `.get()` returns `unknown`, and
+    // the truthiness / `?.` checks below narrow `unknown` to `{}`, so every field read off a
+    // master was a TS2339. Those errors kept `deno check` on this function permanently
+    // non-zero, which is exactly how a genuinely new type error would have gone unnoticed.
+    // A `Map<string, any>` also silences them, but it makes every read here unchecked
+    // forever — which defeats the point of having the gate — so name the fields instead.
+    // Both jsonb columns are optional-everything: they read back null on rows that predate
+    // them (roofType/roofColor and paint_colors each shipped later than the master itself),
+    // and save_inventory writes `{}` when unset.
+    interface MasterSelections { style?: string; size?: string; roofType?: string; roofColor?: string }
+    interface MasterPaint { body?: string; trim?: string }
+    interface MasterRow {
+      short_code: string;
+      image_url: string | null;
+      selections: MasterSelections | null;
+      paint_colors: MasterPaint | null;
+    }
+    const masterByCode = new Map<string, MasterRow>(
+      ((mastersRes.data ?? []) as MasterRow[]).map((d): [string, MasterRow] => [d.short_code, d]),
+    );
     const estsByUnit = new Map<string, any[]>();
     for (const d of estRes.data ?? []) {
       const list = estsByUnit.get(d.inventory_unit_id) ?? [];
@@ -1574,7 +1837,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
     const out = units.map((u: any) => {
       const m = masterByCode.get(u.design_short_code);
-      const sel = (m && m.selections) || {};
+      // Annotated, not inferred: without it the `|| {}` fallback puts a bare `{}` into the
+      // union and the reads below break again. The `||` (not `??`) is deliberate — an unset
+      // jsonb column reads back as null, and a legacy row can hold "".
+      const sel: MasterSelections = (m && m.selections) || {};
+      const paint: MasterPaint = (m && m.paint_colors) || {};
       const loc = u.location_id ? locById.get(u.location_id) : null;
       return {
         id: u.id, serial: u.serial, shortCode: u.design_short_code,
@@ -1582,6 +1849,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         askingPriceCents: u.asking_price_cents, status: u.status,
         soldDesignShortCode: u.sold_design_short_code,
         style: sel.style ?? null, size: sel.size ?? null, imageUrl: m?.image_url ?? null,
+        roofType: sel.roofType ?? null, roofColor: sel.roofColor ?? null,
+        bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
         createdAt: u.created_at, updatedAt: u.updated_at,
         estimates: estsByUnit.get(u.id) ?? [],
       };
@@ -1615,9 +1884,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { data: newest } = await admin.from("design_versions")
       .select("id").eq("client_id", clientId).eq("short_code", shortCode)
       .order("version", { ascending: false }).limit(1).maybeSingle();
+    let versionStamped = false;
     if (newest) {
-      await admin.from("design_versions").update({ inventory_unit_id: unitId }).eq("id", newest.id);
+      const { error: vErr } = await admin.from("design_versions")
+        .update({ inventory_unit_id: unitId }).eq("id", newest.id);
+      versionStamped = !vErr;
     }
+
+    // Audited because this was the ONE inventory write that left no trace, and the two
+    // columns it sets are the only link between a customer estimate and the building it
+    // was quoted from. An untie (unitId null) is invisible by nature — it removes the very
+    // evidence that a link existed — so without this row a designs/design_versions
+    // disagreement is unattributable after the fact. Not hypothetical: on 2026-08-03 a
+    // design was found with BOTH versions pointing at a unit while its
+    // designs.inventory_unit_id was null, so list_inventory reported that building with
+    // zero estimates and invEffStatus could never derive Sold from it — and nothing
+    // recorded what had done it. The version outcome is logged for the same reason: a
+    // stamped-versions / null-design split is exactly that shape, and it is silent
+    // otherwise. Best-effort like its save_inventory / update_inventory neighbours — the
+    // estimate is already submitted and linked here, so a logging blip must not fail it.
+    await audit("portal_link_design_to_unit", (count ?? 0) + (versionStamped ? 1 : 0),
+      `code=${shortCode} unit=${unitId ?? "none (untied)"} version=${versionStamped ? (newest?.id ?? "") : "not stamped"}`);
     return json({ ok: true, unitId });
   }
 
@@ -1745,7 +2032,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "qbo_status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at")
+      .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at, qbo_disconnect_reason")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);
@@ -1767,6 +2054,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       broken: connected && !!data?.qbo_refresh_error,
       brokenReason: data?.qbo_refresh_error ?? null,
       refreshTokenExpiresAt: data?.qbo_refresh_token_expires_at ?? null,
+      // Only meaningful while NOT connected: why it stopped, when the tenant did not stop it
+      // themselves (today: another account took the QuickBooks company over — migration 084).
+      // Without this the displaced tenant just finds a bare "Connect QuickBooks" card and no
+      // explanation for why their invoices quietly stopped syncing.
+      disconnectReason: data?.qbo_connected_at ? null : (data?.qbo_disconnect_reason ?? null),
       mappedCount: count ?? 0,
     });
   }
@@ -1797,7 +2089,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // infer (same documented reason as save_layout_pricing above).
     if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
 
-    const KINDS = new Set(["building", "paint", "roof", "door", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
+    const KINDS = new Set(["building", "paint", "roof", "door", "window", "ramp", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
 
     // Validate against the tenant's OWN catalog — an item key or style id from another
     // tenant must not be writable here.
@@ -1854,32 +2146,109 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "list_qbo_items") {
     // Server-side QBO query; the token never leaves this function (the
     // list_ghl_pipelines doctrine). Fed to the mapping grid's dropdowns.
-    const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+    //
+    // "Not connected" and "needs reconnect" answer 200 with NO `error` key, because they are
+    // STATES, not failures — the connection card above the grid already reports both, and this
+    // call is made automatically on render, by an effect the user never asked for. Returning
+    // 400/409 here was doubly wrong: portal.html's invoke wrapper files anything with a
+    // non-2xx or an `error` body into app_errors (so an ordinary disconnect raised an incident
+    // — this is the 2026-08-03 FunctionsHttpError), and supabase-js collapses a non-2xx into
+    // "Edge Function returned a non-2xx status code", throwing away the readable reason on the
+    // way. Only a genuine QuickBooks-side failure below is worth an error, and it keeps 502.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected) return json({ items: [], notConnected: true, clientId });
+    if (conn.broken) return json({ items: [], broken: true, clientId });
     try {
-      const q = encodeURIComponent("select Id, Name, Type, Active from Item where Active = true maxresults 1000");
-      const body = await qboFetch(admin, clientId, cs.qbo_realm_id, `/query?query=${q}&minorversion=75`);
-      const items = (body?.QueryResponse?.Item ?? []).map((i: any) => ({
-        id: String(i.Id), name: i.Name ?? String(i.Id), type: i.Type ?? "",
-      }));
-      return json({ items, clientId });
+      // PAGED. A single `maxresults 1000` silently truncated any company with more items
+      // than that, and there was no way to tell a complete list from a clipped one — the
+      // grid just wouldn't offer the item you were looking for. Real shed books run to
+      // hundreds of rows (base buildings plus an "OP …" line per option), so this is not
+      // hypothetical. The cap exists so a pathological book can't hold the request open
+      // forever; when it bites we SAY so rather than pretending the list is whole.
+      const PAGE = 1000, MAX_PAGES = 5;
+      // Explicit column list, not `select *`: * returns account/tax refs and purchase costs
+      // we never read — roughly ten times the payload for the same dropdown.
+      // FullyQualifiedName is the item's category path ("Options:Doors:OP Door 4");
+      // ParentRef is deliberately NOT fetched, because resolving those ids to names would
+      // mean keeping the very Category rows we drop below.
+      const COLS = "Id, Name, Type, Active, FullyQualifiedName";
+      const pageQuery = (cols: string, page: number, paged: boolean) => encodeURIComponent(
+        `select ${cols} from Item where Active = true`
+        + (paged ? ` startposition ${page * PAGE + 1} maxresults ${PAGE}` : ` maxresults ${PAGE}`),
+      );
+      const fetchPage = (cols: string, page: number, paged: boolean) =>
+        qboFetch(admin, clientId, conn.realmId as string, `/query?query=${pageQuery(cols, page, paged)}&minorversion=75`);
+
+      const raw: any[] = [];
+      let truncated = false;
+      let cols = COLS, paged = true;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        let body: any;
+        try {
+          body = await fetchPage(cols, page, paged);
+        } catch (qe) {
+          // A connection problem is not a query problem — let those through to the outer
+          // catch, which has the right answer for each.
+          if (qe instanceof QboBroken || qe instanceof QboNotConnected) throw qe;
+          // Otherwise: this shape was rejected. Fall back ONCE to the long-standing query
+          // (no qualified name, no startposition) so a dialect surprise degrades to the
+          // old behaviour — an unsorted list of up to 1000 items — instead of an empty
+          // dropdown that blocks all mapping work. Only worth trying on the first page;
+          // a failure deeper in means paging itself worked.
+          if (page > 0 || cols === "Id, Name, Type, Active") throw qe;
+          cols = "Id, Name, Type, Active"; paged = false;
+          body = await fetchPage(cols, 0, false);
+        }
+        const rows = body?.QueryResponse?.Item ?? [];
+        raw.push(...rows);
+        if (!paged) { truncated = rows.length >= PAGE; break; }
+        if (rows.length < PAGE) break;
+        if (page === MAX_PAGES - 1) truncated = true;
+      }
+      // Categories are Item rows in QuickBooks, so they arrive mixed in with real products
+      // — and they are NOT usable as an invoice ItemRef. Offering them meant a mapping that
+      // looked fine and then failed the whole push with an Intuit 400. Filtered here rather
+      // than in the query: QBO's SQL dialect has no `!=`, and enumerating the allowed types
+      // would silently drop whatever type Intuit adds next.
+      const items = raw
+        .filter((i: any) => i.Type !== "Category")
+        .map((i: any) => ({
+          id: String(i.Id),
+          name: i.Name ?? String(i.Id),
+          type: i.Type ?? "",
+          fullName: i.FullyQualifiedName ?? "",
+        }));
+      // `id`/`name`/`type` keep their old meaning on purpose: production portal.html groups
+      // by `type` until the next Monday promotion, and both hosts call THIS one function.
+      return json({ items, ...(truncated ? { truncated: true } : {}), clientId });
     } catch (e) {
-      if (e instanceof QboBroken) return json({ error: "QuickBooks needs to be reconnected.", broken: true }, 409);
-      if (e instanceof QboNotConnected) return json({ error: "QuickBooks is not connected." }, 400);
-      return json({ error: "Could not load items from QuickBooks. Try again shortly." }, 502);
+      // Still reachable: the connection can die between the check above and the call landing.
+      if (e instanceof QboBroken) return json({ items: [], broken: true, clientId });
+      if (e instanceof QboNotConnected) return json({ items: [], notConnected: true, clientId });
+      // The tid rides along as a support ref rather than a second app_errors row: withErrorLog
+      // already records this 502 and reads its message from the body, so appending the ref puts
+      // the trace id in app_errors through the path that exists — and gives whoever reports the
+      // problem something Intuit can look up. Opaque id, no customer data, safe to show.
+      const ref = e instanceof QboApiError && e.tid ? ` (ref ${e.tid})` : "";
+      return json({ error: `Could not load items from QuickBooks. Try again shortly.${ref}` }, 502);
     }
   }
 
   if (action === "qbo_test") {
     // On-demand probe via CompanyInfo THROUGH the token helper, so an expired access
     // token exercises the refresh path — which is exactly what a "Test" should prove.
-    const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+    //
+    // Unlike list_qbo_items this KEEPS its `error` key (and the app_errors row that follows):
+    // the Test button only renders on a card that believes it is connected, so a
+    // not-connected answer means the page is stale in a way worth a trace. What it must not
+    // do is lie about WHY — reading the disconnect tombstone as connected sent this down the
+    // catch below and reported "Could not reach QuickBooks", which starts someone hunting a
+    // network fault that does not exist.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected) return json({ ok: false, error: "QuickBooks is not connected.", clientId }, 200);
     try {
-      const body = await qboFetch(admin, clientId, cs.qbo_realm_id,
-        `/companyinfo/${cs.qbo_realm_id}?minorversion=75`);
+      const body = await qboFetch(admin, clientId, conn.realmId as string,
+        `/companyinfo/${conn.realmId}?minorversion=75`);
       const name = body?.CompanyInfo?.CompanyName ?? null;
       if (name) {
         // Keep the stored name current — it may have been edited in QuickBooks.
@@ -1889,19 +2258,30 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ ok: true, companyName: name, clientId });
     } catch (e) {
       if (e instanceof QboBroken) return json({ ok: false, broken: true, error: "QuickBooks refused the connection — reconnect to restore it.", clientId }, 200);
-      return json({ ok: false, error: "Could not reach QuickBooks. Try again shortly.", clientId }, 200);
+      // Same support ref as list_qbo_items. This one answers 200 deliberately (see above), so
+      // the app_errors row comes from portal.html's invoke wrapper filing any `error` body —
+      // which means the ref reaches triage by that route instead.
+      const ref = e instanceof QboApiError && e.tid ? ` (ref ${e.tid})` : "";
+      return json({ ok: false, error: `Could not reach QuickBooks. Try again shortly.${ref}`, clientId }, 200);
     }
   }
 
   if (action === "disconnect_qbo") {
+    // Idempotent: disconnecting an already-disconnected tenant is a no-op success, not an
+    // error. Guarding on the realm alone made this "succeed" against a tombstone — writing a
+    // second qbo_disconnect audit row asserting a disconnect that had already happened, and
+    // re-running the revoke below with a refresh token that is null by then anyway.
+    const conn = await getQboConnection(admin, clientId);
+    if (!conn.connected) return json({ ok: true, alreadyDisconnected: true, clientId });
+
     const { data: cs } = await admin.from("client_settings")
-      .select("qbo_realm_id, qbo_refresh_token").eq("client_id", clientId).maybeSingle();
-    if (!cs?.qbo_realm_id) return json({ error: "QuickBooks is not connected." }, 400);
+      .select("qbo_refresh_token").eq("client_id", clientId).maybeSingle();
 
     // Best-effort revoke at Intuit — a failure here must not block the disconnect.
     const id = Deno.env.get("QBO_CLIENT_ID"), secret = Deno.env.get("QBO_CLIENT_SECRET");
-    if (id && secret && cs.qbo_refresh_token) {
-      await fetch("https://developer.api.intuit.com/v2/oauth2/tokens/revoke", {
+    if (id && secret && cs?.qbo_refresh_token) {
+      const { revoke: revokeUrl } = await qboEndpoints();
+      await fetch(revokeUrl, {
         method: "POST",
         headers: {
           Authorization: `Basic ${btoa(`${id}:${secret}`)}`,
@@ -1927,6 +2307,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       qbo_refreshing_at: null,
       qbo_oauth_state: null,
       qbo_oauth_state_expires_at: null,
+      // This tenant chose to disconnect, so any "another account took your company" note from
+      // an earlier displacement is now stale and must not sit on the card explaining THIS one.
+      qbo_disconnect_reason: null,
     }).eq("client_id", clientId);
     if (error) return json({ error: error.message }, 500);
 
