@@ -16,3 +16,16 @@
 # no `sh` is on PATH. Node driver, no shell, no CRLF exposure. The rule stays so the next
 # .sh someone adds is born correct.
 *.sh text eol=lf
+
+# The three app pages MUST stay LF, because preflight compares the dependency boot guard
+# BYTE-FOR-BYTE across all three and autocrlf makes that comparison unreliable. Whichever of
+# them a tool last rewrote sits at LF while the others stay at git's CRLF checkout, so the
+# guard bodies differ by exactly one CR per line and the gate refuses every push with
+# "the dependency boot guard body differs from index.html" — a real 12,000-line red herring
+# that costs a long investigation and tempts someone into --no-verify or a whitespace-bomb
+# commit. Verified 2026-08-06: all three blobs are ALREADY LF, so this pins the checkout and
+# renormalises nothing. Narrow on purpose — this is the same reasoning as the rules above,
+# not the blanket `* text=auto` the header rules out.
+index.html text eol=lf
+portal.html text eol=lf
+admin.html text eol=lf
