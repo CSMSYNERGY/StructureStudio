@@ -83,7 +83,7 @@ Deno.serve(async (req) => {
   // Where to land the browser afterwards. Validated against the allowlist; anything else
   // silently falls back to production rather than erroring — a bad returnTo is not worth
   // blocking a connect over.
-  let returnHost = "structurestudio.app";
+  let returnHost = "app.structurestudiosuite.com";
   const rawReturn = typeof ctx.payload?.returnTo === "string" ? ctx.payload.returnTo : "";
   if (rawReturn) {
     try {

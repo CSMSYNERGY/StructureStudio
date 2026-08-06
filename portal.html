@@ -8059,7 +8059,7 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
                                       project serves both hosts, so a password set there works on beta
                                       too. Said out loud because a beta operator WILL notice. */}
                                   <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5 }}>
-                                    The link opens structurestudio.app/portal — a password set there works everywhere, including beta.
+                                    The link opens app.structurestudiosuite.com/portal — a password set there works everywhere, including beta.
                                   </div>
                                 </div>
                               )}
@@ -8705,7 +8705,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
               <input value={id} onChange={(e) => { setIdTouched(true); setId(e.target.value); }}
                 placeholder="junior-barns" style={{ ...S.input, borderColor: idErr ? "#DC2626" : "#CBD5E1" }} />
               <div style={{ fontSize: 11, color: idErr ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
-                {idErr || (idTouched ? "Becomes junior-barns.structurestudio.app." : "Auto-generated from the company name — edit to override.")}
+                {idErr || (idTouched ? "Used in the customer designer link: ?client=junior-barns." : "Auto-generated from the company name — edit to override.")}
               </div>
             </div>
             <div>

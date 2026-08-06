@@ -1,9 +1,12 @@
-// Cloudflare Worker config — PRODUCTION frontend, STAGED BUT NOT YET SERVING (2026-08-05).
-// structurestudio.app is still served by Netlify (which deploys `main` on push); this Worker
-// has been uploaded but no zone route points at it yet — see the routes note at the bottom.
-// It becomes production at cutover, and deploys are MANUAL (no git integration) exactly like
-// beta:  npx wrangler deploy   /   npx wrangler deployments list --name structurestudio-app
-// Beta twin: wrangler.beta.jsonc (structurestudio-beta, live now). Assets-only Worker:
+// Cloudflare Worker config — PRODUCTION frontend, LIVE at app.structurestudiosuite.com
+// (zone route `app.structurestudiosuite.com/*` → this worker, created 2026-08-05; routes are
+// dashboard/API-managed during the migration ON PURPOSE — see the note at the bottom).
+// DEPLOYS ARE GIT-DRIVEN: Workers Builds deploys this worker from `main` on push (verified
+// end-to-end 2026-08-05; its build FAILS until the Monday promotion carries these configs to
+// main — expected). Manual fallback: npx wrangler deploy. History: npx wrangler deployments
+// list --name structurestudio-app. LEGACY: structurestudio.app is still Netlify-served
+// (old customer links) pending its sunset redirect — see the migration work log.
+// Beta twin: wrangler.beta.jsonc (structurestudio-beta). Assets-only Worker:
 // no "main" script, no bindings, no vars — this repo is PUBLIC, so nothing secret may ever
 // be added here (worker name + account_id are non-secret identifiers).
 {

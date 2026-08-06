@@ -6,10 +6,11 @@ A config-driven, multi-tenant floor plan designer and quote builder for custom s
 
 | | URL | Host | Ships from |
 |---|---|---|---|
-| **Production** | https://structurestudio.app | Netlify | `main`, on push |
-| **Beta** | https://beta.structurestudiosuite.com | Cloudflare Workers | `beta`, **manual deploy** |
+| **Production** | https://app.structurestudiosuite.com | Cloudflare Workers | `main`, Workers Builds on push |
+| **Beta** | https://beta.structurestudiosuite.com | Cloudflare Workers | `beta`, Workers Builds on push |
+| **Legacy production** | https://structurestudio.app | Netlify | `main`, on push — sunsetting; serves already-sent customer links only |
 
-Hosting is **mid-migration** from Netlify to Cloudflare Workers — see [Deployment](#deployment), and read `CLAUDE.md` before you ship anything.
+The app was renamed **Structure Studio Suite** (trademark conflict), so hosting moved to the structurestudiosuite.com domain; structurestudio.app is being discontinued behind a redirect. Read `CLAUDE.md` before you ship anything.
 
 ⚠️ **`beta.structurestudio.app` still resolves (Netlify) but is a stale parallel copy — never verify against it.** The live beta is the `structurestudiosuite.com` one.
 
@@ -17,10 +18,10 @@ Hosting is **mid-migration** from Netlify to Cloudflare Workers — see [Deploym
 
 Each customer (a shed business) is a **tenant** identified by a `client_id` slug, with:
 
-- A **public designer link** — `https://<site>/?client=<client_id>` — branded with their config. Shoppers design a building and submit for a quote; no login required.
+- A **public designer link** — `https://app.structurestudiosuite.com/?client=<client_id>` — branded with their config. Shoppers design a building and submit for a quote; no login required.
 - A **business portal** — `https://<site>/portal.html` (also where the bare site root redirects) — where the owner logs in to see their submitted designs/leads, copy their customer link, run the build/delivery schedules, and manage their GoHighLevel + business settings. Row Level Security guarantees each business only ever sees its own data.
 
-Per-tenant subdomains (`https://<client_id>.structurestudio.app`) also select the tenant, and work on **either apex** — `structurestudio.app` and `structurestudiosuite.com` are both listed for the duration of the migration, so a branded link resolves the same on the old domain and the new one.
+The tenant parser also recognizes per-tenant subdomains on either apex, but **no wildcard DNS is provisioned** — subdomain links do not currently resolve; tenant links use `?client=<id>`.
 
 ## Layout
 
@@ -73,15 +74,9 @@ Resolution order: a `config` React prop → `?client=<id>` → tenant subdomain 
 
 ## Deployment
 
-**Beta (Cloudflare Workers) — deploys are MANUAL.** A git push ships nothing; there is no git integration and no deploy workflow:
+**Both workers deploy from git via Cloudflare Workers Builds** (account CSM Synergy): a push to `beta` builds and deploys the `structurestudio-beta` worker (live at beta.structurestudiosuite.com within ~2 minutes), and a push to `main` builds and deploys the `structurestudio-app` worker (live at app.structurestudiosuite.com). Verified end-to-end 2026-08-05 (push → deploy → live bytes identical to git). ⚠️ The `main` build **fails until the Monday promotion carries the wrangler configs to `main`** — expected; ignore it until then. Manual fallback if Builds is down: `npx wrangler deploy [--config wrangler.beta.jsonc]`; verify any deploy with `npx wrangler deployments list --name <worker>`.
 
-```bash
-npx wrangler deploy --config wrangler.beta.jsonc
-```
-
-Verify with `npx wrangler deployments list --name structurestudio-beta`.
-
-**Production (Netlify)** still deploys `main` on push, until its cutover to the `structurestudio-app` Worker. Note that when the Netlify team's credits are exhausted, git deploys are silently marked *"Skipped due to account credit usage exceeded"* — pushes look fine while shipping nothing. Check `npx netlify-cli api listSiteDeploys` when a `main` push doesn't appear.
+**Legacy (structurestudio.app) is still Netlify**, deploying `main` on push, until its sunset redirect ships. When the Netlify team's credits are exhausted, git deploys are silently marked *"Skipped due to account credit usage exceeded"* — pushes look fine while shipping nothing. Check `npx netlify-cli api listSiteDeploys` when a `main` push doesn't appear there.
 
 **Branching.** `beta` is the working line — all development happens there. `main` is production and is reached **only by promotion**: `.github/workflows/merge-beta-to-main.yml` merges beta into main at **10:00 UTC every Monday**, and can be dispatched on demand from the Actions tab. So the answer to *"when do clients see this?"* is the next Monday. Do not hand-merge to `main`, and never develop on it. Check the pending gap with:
 
@@ -99,7 +94,7 @@ New tenants land on a billing gate until they subscribe; tenants predating the g
 
 ## Supabase Auth settings
 
-Configured in the Dashboard (Authentication): public sign-ups disabled (the operator creates owner accounts), Site URL `https://structurestudio.app`, with `https://structurestudio.app/portal.html` on the redirect allow-list so password-recovery emails land there.
+Configured in the Dashboard (Authentication): public sign-ups disabled (the operator creates owner accounts), Site URL `https://app.structurestudiosuite.com`, with `https://app.structurestudiosuite.com/portal` on the redirect allow-list so password-recovery emails land there. Keep the legacy structurestudio.app entries while already-sent links are alive.
 
 ⛔ **Never run `supabase config push`.** It is declarative and `supabase/config.toml` deliberately has no `[auth]` section — pushing it would reset `site_url` to localhost, de-allow-list the real redirect, and clear custom SMTP. Make auth changes in the dashboard.
 
