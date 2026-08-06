@@ -6550,6 +6550,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
   const [error, setError] = useState(null);
   const [view, setView] = useState("loads");   // loads | table | calendar
   const [weekOffset, setWeekOffset] = useState(0);
+  const [showWeekends, setShowWeekends] = useState(false);   // calendar: Sat/Sun columns off by default (matches Build Schedule)
   const [driverFilter, setDriverFilter] = useState("all");
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -7053,60 +7054,91 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
 
       {/* ── CALENDAR VIEW — week at a glance ── */}
       {data && view === "calendar" && (() => {
-        // Monday-start week, shifted by weekOffset.
+        const DAY = 86400000;
         const base = new Date(); base.setHours(0, 0, 0, 0);
-        base.setDate(base.getDate() - ((base.getDay() + 6) % 7) + weekOffset * 7);
-        const days = [];
-        for (let i = 0; i < 7; i++) {
-          const d = new Date(base.getTime() + i * 86400000);
-          days.push({ iso: d.toISOString().slice(0, 10), d });
-        }
-        const rangeLabel = days[0].d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " +
-          days[6].d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        base.setDate(base.getDate() - base.getDay() + weekOffset * 7);   // Sunday-first, matching Build Schedule
+        let days = [];
+        for (let i = 0; i < 7; i++) { const d = new Date(base.getTime() + i * DAY); days.push({ iso: d.toISOString().slice(0, 10), d }); }
+        const weekEnd = days[6].d;
+        if (!showWeekends) days = days.filter(({ d }) => d.getDay() !== 0 && d.getDay() !== 6);
+        const rangeLabel = base.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " +
+          weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", " + weekEnd.getFullYear();
         const undated = visibleLoads.filter((l) => !l.load_date && l.status === "planned").length;
+        const cols = showWeekends ? 7 : 5;
+        const driverChips = [["all", "All drivers"]].concat(drivers.map((p) => [p.user_id, nameOf[p.user_id] || "Driver"]));
         return (
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 11 }}>
-              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset - 1)}>‹ Prev</button>
-              <span style={{ fontSize: 13.5, fontWeight: 800 }}>{rangeLabel}</span>
-              {weekOffset !== 0 && <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={() => setWeekOffset(0)}>This week</button>}
-              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset + 1)}>Next ›</button>
-              {undated > 0 && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, marginLeft: "auto" }}>{undated} planned load{undated === 1 ? "" : "s"} with no date yet — see the Loads view</span>}
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, flexWrap: "wrap" }}>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset - 1)}>‹</button>
+              <span style={{ fontSize: 14, fontWeight: 800 }}>{rangeLabel}</span>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => setWeekOffset(weekOffset + 1)}>›</button>
+              <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={() => setWeekOffset(0)}>Today</button>
+              <button type="button" onClick={() => setShowWeekends(!showWeekends)}
+                title={showWeekends ? "Hide Saturday & Sunday" : "Show Saturday & Sunday"}
+                style={{ ...S.btn(showWeekends ? "#EEF2FF" : "#FFF", showWeekends ? ACCENT : "#64748B"), border: "1px solid " + (showWeekends ? "#C3D9F7" : "#CBD5E1"), padding: "6px 11px", fontSize: 12 }}>
+                Weekends {showWeekends ? "on" : "off"}
+              </button>
+              {undated > 0 && <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, marginLeft: "auto" }}>{undated} planned load{undated === 1 ? "" : "s"} with no date — see the Loads view</span>}
             </div>
-            <div style={{ overflowX: "auto" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(128px, 1fr))", gap: 8, minWidth: 920 }}>
+            {driverChips.length > 1 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 11 }}>
+                {driverChips.map(([k, lbl]) => {
+                  const on = driverFilter === k;
+                  return (
+                    <button key={k} type="button" onClick={() => setDriverFilter(on && k !== "all" ? "all" : k)}
+                      style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 800, borderRadius: 999, padding: "4px 11px", background: on ? ACCENT : "#EEF2F8", color: on ? "#FFF" : "#475569" }}>{lbl}</button>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(210px, 1fr))`, gap: 8, minWidth: cols * 218 }}>
                 {days.map(({ iso, d }) => {
                   const isToday = iso === todayIso;
                   const dayLoads = visibleLoads.filter((l) => l.load_date === iso);
                   return (
-                    <div key={iso} style={{ background: isToday ? "#F4F7FF" : "#F8FAFC", border: "1px solid " + (isToday ? "#C3D9F7" : "#E2E8F0"), borderRadius: 10, padding: 8, minHeight: 130 }}>
-                      <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B", marginBottom: 7 }}>
-                        {d.toLocaleDateString("en-US", { weekday: "short" })} {d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                    <div key={iso} style={{ background: isToday ? "#E9F0FF" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 150, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2 }}>
+                      <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "1px 3px 8px" }}>
+                        <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B" }}>{d.toLocaleDateString("en-US", { weekday: "short" })}</span>
+                        <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
+                        <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px" }}>{dayLoads.length ? dayLoads.length + " load" + (dayLoads.length === 1 ? "" : "s") : "0"}</span>
                       </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                         {dayLoads.map((l) => {
                           const lStops = stopsByLoad[l.id] || [];
                           const st = SCHED_LOAD_STATUS[l.status] || SCHED_LOAD_STATUS.planned;
                           const conflict = loadConflicts[l.id];
+                          const usedFt = lStops.reduce((a, s) => a + (Number(s.length_ft) || 0), 0);
                           return (
-                            <button key={l.id} type="button" onClick={() => { setDriverFilter("all"); setView("loads"); }}
-                              title={`Load ${l.load_no} — open the Loads view`}
-                              style={{ textAlign: "left", background: "#FFF", border: "1px solid " + (conflict ? "#FCA5A5" : "#E2E8F0"), borderRadius: 8, padding: "7px 9px", cursor: "pointer", fontFamily: "inherit", boxShadow: "0 1px 2px rgba(15,23,42,.05)" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-                                <span style={{ fontSize: 12, fontWeight: 800 }}>Load {l.load_no}</span>
-                                <span style={{ ...schedChip(st.bg, st.fg), marginLeft: "auto", padding: "2px 7px", fontSize: 9.5 }}>{st.label}</span>
+                            <div key={l.id} onClick={() => setView("loads")} title={`Load ${l.load_no} — open the Loads view to manage`}
+                              style={{ background: "#FFF", border: "0.5px solid " + (conflict ? "#FCA5A5" : "#DDD6FE"), borderRadius: 12, overflow: "hidden", cursor: "pointer" }}>
+                              <div style={{ background: ACCENT, padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 12, fontWeight: 800, color: "#FFF" }}>Load {l.load_no}</span>
+                                <span style={{ ...schedChip(st.bg, st.fg), padding: "2px 8px", fontSize: 9.5 }}>{st.label}</span>
+                                {l.is_wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), padding: "2px 8px", fontSize: 9.5 }}>WIDE</span>}
                               </div>
-                              <div style={{ fontSize: 10.5, fontWeight: 600, color: "#64748B" }}>
-                                {nameOf[l.driver_user_id] || "No driver"} · {lStops.length} stop{lStops.length === 1 ? "" : "s"}
+                              <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 8, borderBottom: "0.5px solid #F1F5F9" }}>
+                                <span style={{ fontSize: 11, color: "#475569", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf[l.driver_user_id] || "No driver"}{l.route_label ? " · " + l.route_label : ""}</span>
+                                {l.deck_length_ft ? <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" }}>{Math.round(usedFt)}′ / {l.deck_length_ft}′</span> : null}
                               </div>
-                              <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
-                                {l.is_wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), padding: "1px 6px", fontSize: 9 }}>WIDE</span>}
-                                {conflict && <span style={{ ...schedChip("#FEF2F2", "#DC2626"), padding: "1px 6px", fontSize: 9 }}>⚠ not built</span>}
+                              <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                                {conflict && <div style={{ ...schedChip("#FEF2F2", "#DC2626"), padding: "2px 8px", fontSize: 9.5 }}>⚠ a building isn't built yet</div>}
+                                {lStops.map((s) => (
+                                  <div key={s.id} style={{ border: "0.5px solid #E2E8F0", borderRadius: 9, padding: "6px 8px", display: "flex", gap: 8, alignItems: "flex-start" }}>
+                                    <span style={{ flex: "0 0 18px", height: 18, borderRadius: "50%", background: "#EEF2FF", color: ACCENT, fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{s.stop_order}</span>
+                                    <div style={{ minWidth: 0, flex: 1 }}>
+                                      <div style={{ fontSize: 12, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.building_label || "Building"}</div>
+                                      <div style={{ fontSize: 11, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.customer_name || "—"}{s.dest_city ? " · " + s.dest_city + (s.dest_state ? ", " + s.dest_state : "") : ""}</div>
+                                    </div>
+                                    {s.delivered_at ? <span style={{ color: "#16A34A", fontSize: 11 }} title="Delivered">✓</span> : (s.serial ? <span style={{ color: "#94A3B8", fontSize: 10 }}>#{s.serial}</span> : null)}
+                                  </div>
+                                ))}
+                                {lStops.length === 0 && <div style={{ fontSize: 10.5, color: "#94A3B8", fontStyle: "italic", padding: "2px" }}>No stops yet</div>}
                               </div>
-                            </button>
+                            </div>
                           );
                         })}
-                        {dayLoads.length === 0 && <span style={{ fontSize: 10.5, color: "#CBD5E1", fontWeight: 600 }}>—</span>}
+                        {dayLoads.length === 0 && <div style={{ border: "1px dashed #CBD5E1", borderRadius: 12, padding: "16px 8px", textAlign: "center", color: "#94A3B8", fontSize: 11 }}>No loads</div>}
                       </div>
                     </div>
                   );
