@@ -202,10 +202,19 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       lineTaxCodesOk = false;
     }
 
+    // Yoder-style model: the mapped item is a broad category (Doors, Windows, a building
+    // style…), so the line Description must carry the specifics. Compose it from the line
+    // name plus the snapshot's `desc` (the GHL line description — paint colors, roof
+    // type/color, ramp sizing). Deduped so pre-desc snapshots and desc-echoes-name lines
+    // render exactly as before.
+    const lineDesc = (li: any) => {
+      const parts = [li.name, li.desc].map((s: any) => String(s ?? "").trim()).filter(Boolean);
+      return (parts[1] && parts[1] !== parts[0] ? parts.join(" — ") : parts[0] ?? "").slice(0, 4000);
+    };
     const lines: any[] = resolved.map(({ li, item }: any) => ({
       DetailType: "SalesItemLineDetail",
       Amount: round2((Number(li.qty) || 0) * (Number(li.amount) || 0)),
-      Description: String(li.name ?? "").slice(0, 4000),
+      Description: lineDesc(li),
       SalesItemLineDetail: {
         ItemRef: { value: item.id, ...(item.name ? { name: item.name } : {}) },
         Qty: Number(li.qty) || 1,
