@@ -9875,66 +9875,149 @@ function CommissionStructure({ clientId }) {
 // What is SAVED is only the deviations from the title's preset, which is how the column is
 // defined (migration 100). So changing a preset later improves everyone who never customised
 // their people, and "is this person customised?" stays a real question with a real answer.
-const LEVEL_LABEL = { none: "No access", view: "View", edit: "Edit", own: "Own only" };
+// ─── Team: per-person access (Settings → Team) ───
+// Carolyn, 2026-08-06: "I want the access to each to be as dynamic as possible per
+// individual. Admins and Owners should assign each user the access they want to give them
+// (tab by tab) and they may choose to give the Read or edit access."
+//
+// Everything rendered below — areas, labels, hints, the level vocabulary of each row, the
+// per-title presets — arrives from the server in `meta` (accessMetadata()). Nothing about
+// permissions is hard-coded here. A second copy of the area list in the browser drifts the
+// day someone adds an area, and a permission screen that disagrees with the server is worse
+// than no screen at all, because people believe what it shows them.
+
 const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
 
+// Commissions speaks a different language from the rest: its three settings are about WHOSE
+// payouts you see, not how much you can change. "Everyone's" is the honest word for the top
+// of that row — calling it "Edit" invites an owner to grant it thinking it means edit rights.
+function ssLevelLabel(areaKey, lv) {
+  if (areaKey === "commissions") return ({ none: "No access", own: "Own only", edit: "Everyone's" })[lv] || lv;
+  return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
+}
+
+// Two areas you hold by TITLE and can never hand out one switch at a time. Billing is the
+// card that pays for the product; Team is the one that hands out everything else. Making
+// them grantable would mean an owner could give a driver the keys with two clicks, and an
+// admin could mint peer admins. Being an Admin is how someone gets Team.
+const NON_GRANTABLE = { settings_team: "By title", settings_billing: "Owner only" };
+
+const TITLE_CHIP = {
+  owner:       ["#EDE9FE", "#5B21B6"],
+  admin:       ["#DBEAFE", "#1E40AF"],
+  sales_rep:   ["#DCFCE7", "#166534"],
+  crew_leader: ["#FEF3C7", "#92400E"],
+  driver:      ["#E0E7FF", "#3730A3"],
+};
+
+function ssInitials(name, email) {
+  const src = (name || "").trim() || (email || "").split("@")[0] || "?";
+  const bits = src.split(/[\s._-]+/).filter(Boolean);
+  return ((bits[0] || "")[0] + (bits.length > 1 ? (bits[bits.length - 1] || "")[0] : "")).toUpperCase() || "?";
+}
+
+function ssRelTime(iso) {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!isFinite(ms) || ms < 0) return null;
+  const m = Math.floor(ms / 60000);
+  if (m < 2) return "now";
+  if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h ago";
+  const d = Math.floor(h / 24);
+  if (d === 1) return "yesterday";
+  if (d < 30) return d + "d ago";
+  return new Date(iso).toLocaleDateString();
+}
+
+// The Access column in plain English, so the whole company can be audited at a glance
+// without opening anyone. Reads off the RESOLVED map, not the stored deviations — the
+// honest answer to "what can Dana actually do?" is the resolved one.
+function ssAccessSummary(m, meta) {
+  if (m.role === "owner") return "Everything";
+  const areas = (meta && meta.areas) || [];
+  const presets = (meta && meta.presets) || {};
+  const eff = m.effective || {};
+  const lvl = (k) => eff[k] || "none";
+  if (!areas.length) return "";
+  // An untouched Admin is every tab plus every settings card except Billing — worth saying
+  // in four words rather than listing seventeen areas.
+  const adminPreset = presets.admin || {};
+  if (m.title === "admin" && areas.every((a) => lvl(a.key) === (adminPreset[a.key] || "none"))) {
+    return "All tabs · Settings except Billing";
+  }
+  const names = (level) => areas.filter((a) => lvl(a.key) === level).map((a) => a.label);
+  const parts = [];
+  const e = names("edit"), v = names("view"), o = names("own");
+  if (e.length) parts.push(e.join(", ") + " Edit");
+  if (v.length) parts.push(v.join(", ") + " View");
+  if (o.length) parts.push(o.join(", ") + " own only");
+  const n = Object.keys(m.access || {}).length;
+  const base = parts.length ? parts.join(" · ") : "No access yet";
+  return n ? base + " (+" + n + " changed)" : base;
+}
+
+// One person's switches. Full width, because eighteen areas in a nested table cell is how
+// the first cut ended up with a horizontal scrollbar and a clipped Remove button.
 function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave }) {
   const areas = (meta && meta.areas) || [];
   const titles = (meta && meta.titles) || [];
   const presets = (meta && meta.presets) || {};
   const [title, setTitle] = useState(member.title || "sales_rep");
   // The map being edited is the EFFECTIVE one — what this person will actually be able to
-  // do. Editing raw deviations would mean showing an owner a blank grid for someone who has
-  // plenty of access, which is exactly the arithmetic this screen exists to remove.
+  // do. Editing raw deviations would show an owner a blank grid for someone who has plenty
+  // of access, which is exactly the arithmetic this screen exists to remove.
   const [map, setMap] = useState(() => ({ ...(member.effective || {}) }));
 
-  // Switching the job title reseeds every row from that title's preset. Anything the owner
-  // had already customised in this unsaved session is deliberately discarded — a title IS a
-  // starting point, and silently keeping stale overrides on top of a new one is how someone
-  // ends up a "Driver" holding Structures because it survived from when they were an Admin.
+  // Picking a title reseeds every switch from its preset. Anything customised in this
+  // unsaved session is deliberately discarded: a title is a starting point, and silently
+  // keeping stale overrides on top of a new one is how a "Driver" ends up holding
+  // Structures because it survived from when they were an Admin.
   const pickTitle = (t) => { setTitle(t); setMap({ ...(presets[t] || {}) }); };
 
-  // What may THIS granter hand out? Never above their own level, and never an owner-only
-  // area. The server enforces the same rule (mayGrantMap) — this only keeps the UI honest,
-  // so nobody clicks something that will 403.
+  // What may THIS granter hand out? Never above their own level. The server enforces the
+  // same rule (mayGrantMap); this only keeps the UI from offering a click that will 403.
   const canGrant = (area, level) => {
-    if (level === "none") return true;                       // taking away is always allowed
-    if (area.ownerOnly) return isOwner;
+    if (NON_GRANTABLE[area.key]) return false;
+    if (level === "none") return true;                      // taking away is always allowed
     if (isOwner) return true;
     return LEVEL_RANK[level] <= LEVEL_RANK[(myAccess || {})[area.key] || "none"];
   };
 
   const preset = presets[title] || {};
-  const deviations = areas.filter((a) => (map[a.key] || "none") !== (preset[a.key] || "none"));
-  const group = (g) => areas.filter((a) => a.group === g);
+  const deviations = areas.filter((a) => !NON_GRANTABLE[a.key] && (map[a.key] || "none") !== (preset[a.key] || "none"));
+  const sub = member.email + (member.lastActive ? " · last active " + ssRelTime(member.lastActive)
+    : member.invitePending ? " · invite pending" : "");
 
   const row = (a) => {
     const cur = map[a.key] || "none";
-    const off = (preset[a.key] || "none") !== cur;
+    const locked = !!NON_GRANTABLE[a.key];
+    const changed = !locked && (preset[a.key] || "none") !== cur;
     return (
-      <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: "1px solid #F1F5F9" }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
-            {a.label}
-            {off && <span style={{ marginLeft: 7, fontSize: 10, fontWeight: 700, color: ACCENT, background: "#EDE9FE", borderRadius: 20, padding: "2px 7px" }}>changed</span>}
-          </div>
-          <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 1 }}>{a.hint}</div>
-        </div>
+      <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 0", borderBottom: "1px solid #F1F5F9", opacity: locked ? 0.55 : 1 }}>
+        <div style={{ width: 190, flexShrink: 0, fontSize: 13.5, fontWeight: 700, color: locked ? "#94A3B8" : "#1E293B" }}>{a.label}</div>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "#94A3B8" }}>{a.hint}</div>
+        {changed && <div style={{ fontSize: 11, fontWeight: 700, color: ACCENT, whiteSpace: "nowrap" }}>changed from title</div>}
+        {locked && <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", whiteSpace: "nowrap" }}>🔒 {NON_GRANTABLE[a.key]}</div>}
         <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
           {a.levels.map((lv) => {
             const on = cur === lv;
             const allowed = canGrant(a, lv);
             return (
               <button key={lv} type="button" disabled={busy || !allowed}
-                title={allowed ? undefined : `You don't have ${a.label} yourself, so you can't give it to anyone.`}
+                title={allowed ? undefined : (locked
+                  ? a.label + " comes with the job title, and can't be handed out one switch at a time."
+                  : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
                 onClick={() => setMap((prev) => ({ ...prev, [a.key]: lv }))}
                 style={{
                   border: "none", borderLeft: a.levels[0] === lv ? "none" : "1px solid #E2E8F0",
-                  background: on ? ACCENT : "#FFF", color: on ? "#FFF" : (allowed ? "#475569" : "#CBD5E1"),
-                  fontSize: 11.5, fontWeight: 700, padding: "6px 11px", fontFamily: "inherit",
-                  cursor: busy || !allowed ? "not-allowed" : "pointer",
+                  background: on ? (locked ? "#CBD5E1" : ACCENT) : "#FFF",
+                  color: on ? "#FFF" : (allowed ? "#475569" : "#CBD5E1"),
+                  fontSize: 11.5, fontWeight: 700, padding: "6px 12px", fontFamily: "inherit",
+                  cursor: busy || !allowed ? "default" : "pointer", whiteSpace: "nowrap",
                 }}>
-                {LEVEL_LABEL[lv] || lv}
+                {ssLevelLabel(a.key, lv)}
               </button>
             );
           })}
@@ -9943,44 +10026,79 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
     );
   };
 
+  const groupHead = (t) => (
+    <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.7, margin: "18px 0 2px" }}>{t}</div>
+  );
+
   return (
-    <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
-      <div style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 14 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <span style={S.lbl}>Job title</span>
-          <select value={title} onChange={(e) => pickTitle(e.target.value)} disabled={busy} style={{ ...S.input, width: 170 }}>
-            {titles.filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
-              <option key={t.key} value={t.key}>{t.label}</option>
-            ))}
-          </select>
+    <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", paddingBottom: 16, borderBottom: "1px solid #F1F5F9" }}>
+        <div style={{ width: 38, height: 38, borderRadius: "50%", background: "#EDE9FE", color: "#5B21B6", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>
+          {ssInitials(member.fullName, member.email)}
         </div>
-        <div style={{ fontSize: 11.5, color: "#64748B", flex: 1, minWidth: 180, paddingBottom: 8 }}>
-          {(titles.find((t) => t.key === title) || {}).blurb}
-          <div style={{ marginTop: 3, color: "#94A3B8" }}>
-            {deviations.length === 0
-              ? "Using the standard access for this title."
-              : `${deviations.length} change${deviations.length === 1 ? "" : "s"} from the standard.`}
-          </div>
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>{member.fullName || member.email}</div>
+          <div style={{ fontSize: 12, color: "#94A3B8" }}>{sub}</div>
         </div>
-      </div>
-
-      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.6, margin: "4px 0 2px" }}>Workspace</div>
-      {group("workspace").map(row)}
-      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.6, margin: "16px 0 2px" }}>Settings</div>
-      {group("settings").map(row)}
-
-      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <button type="button" onClick={onCancel} disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #E2E8F0" }}>Cancel</button>
         <button type="button" disabled={busy}
           onClick={() => {
-            // Send deviations only — the server stores the same shape, so what is saved is
-            // exactly what this screen computed rather than a snapshot that goes stale when
-            // a preset improves.
+            // Deviations only — the column stores the same shape, so what is saved is what
+            // this screen computed, not a snapshot that goes stale when a preset improves.
             const access = {};
             for (const a of deviations) access[a.key] = map[a.key] || "none";
             onSave({ title, access });
           }}
           style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Save access</button>
-        <button type="button" onClick={onCancel} disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #E2E8F0" }}>Cancel</button>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "16px 0 4px" }}>
+        <span style={{ ...S.lbl, width: 40 }}>Title</span>
+        {titles.filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => {
+          const on = title === t.key;
+          return (
+            <button key={t.key} type="button" disabled={busy} onClick={() => pickTitle(t.key)} title={t.blurb}
+              style={{ border: on ? "1px solid #0F172A" : "1px solid #E2E8F0", background: on ? "#0F172A" : "#FFF",
+                color: on ? "#FFF" : "#475569", borderRadius: 20, padding: "6px 14px", fontSize: 12.5,
+                fontWeight: 700, fontFamily: "inherit", cursor: busy ? "default" : "pointer" }}>
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 4 }}>
+        Choosing a title fills the switches below — change any of them afterwards.
+        {deviations.length > 0 && <span style={{ color: ACCENT, fontWeight: 700 }}>{" "}{deviations.length} changed from the standard.</span>}
+      </div>
+
+      {groupHead("Workspace")}
+      {areas.filter((a) => a.group === "workspace").map(row)}
+      {groupHead("Settings")}
+      {areas.filter((a) => a.group === "settings").map(row)}
+
+      {title === "driver" && (
+        <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 10, padding: "11px 13px", marginTop: 16, fontSize: 12, color: "#1E40AF", lineHeight: 1.55 }}>
+          <span>🚚</span>
+          <div>
+            <b>Driver setup</b> — a Driver shows up in the Delivery Schedule, and their truck
+            decides what fits on a load.
+            {member.driver
+              ? <> Theirs is on file: <b>{member.driver}</b>.</>
+              : <> They have no truck on file yet, so the load planner can't size their deck.</>}
+            {" "}Truck and territory live in <b>Crews, drivers &amp; territories</b> above — one
+            place that writes that record, rather than two that can disagree.
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 10, padding: "11px 13px", marginTop: 12, fontSize: 12, color: "#92400E", lineHeight: 1.55 }}>
+        <span>🔒</span>
+        <div>
+          <b>Two things you can't hand out.</b> Billing and Team come with the job title —
+          they're the keys to the kingdom. And nobody can grant access they don't hold
+          themselves: an admin without QuickBooks sees that row greyed out, so no one can
+          quietly promote themselves.
+        </div>
       </div>
     </div>
   );
@@ -10014,6 +10132,7 @@ function CommissionTeamInner() {
   const [msg, setMsg] = useState(null);         // { ok } | { err }
   const [add, setAdd] = useState({ fullName: "", email: "", title: "sales_rep" });
   const [editingAccess, setEditingAccess] = useState(null);  // userId whose access grid is open
+  const [addOpen, setAddOpen] = useState(false);              // the "+ Add person" form
   const [edits, setEdits] = useState({});       // userId -> in-progress rate string
   const [removing, setRemoving] = useState(null); // member awaiting unlink/deactivate choice
   const [invite, setInvite] = useState(null);   // { email, link, emailSent } after an add
@@ -10039,6 +10158,7 @@ function CommissionTeamInner() {
       if (r.alreadyOnTeam) setMsg({ ok: `${add.email.trim()} is already on your team.` });
       else { setMsg({ ok: `Invited ${add.email.trim()}.` }); if (r.setupLink) setInvite({ email: add.email.trim(), link: r.setupLink, emailSent: r.emailSent }); }
       setAdd({ fullName: "", email: "", title: "sales_rep" });
+      setAddOpen(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
@@ -10068,8 +10188,6 @@ function CommissionTeamInner() {
     setBusy(false);
   };
 
-  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
-  const td = { fontSize: 13, padding: "10px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
   const saveAccess = async (m, next) => {
     setBusy(true); setMsg(null);
     try {
@@ -10098,126 +10216,164 @@ function CommissionTeamInner() {
   const meta = data.meta || { areas: [], titles: [], presets: {} };
   const canManageTeam = !!data.canManageTeam;
 
+  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const td = { fontSize: 13, padding: "12px 10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "middle" };
+  const editing = members.find((m) => m.userId === editingAccess) || null;
+
   return (
-    <div style={{ ...S.card, maxWidth: 860 }}>
+    <div style={S.card}>
       {err && <div style={S.err}>{err}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
-      <div style={{ ...S.h2, marginBottom: 3 }}>Team &amp; commission rates</div>
-      <p style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, margin: "0 0 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+        <div style={{ ...S.h2, margin: 0 }}>People</div>
+        <span style={{ background: "#F1F5F9", color: "#475569", borderRadius: 20, padding: "2px 9px", fontSize: 12, fontWeight: 800 }}>{members.length}</span>
+        <div style={{ flex: 1 }} />
+        {canManageTeam && (
+          <button type="button" onClick={() => setAddOpen(!addOpen)} style={S.btn(addOpen ? "#FFF" : ACCENT, addOpen ? "#475569" : "#FFF")}>
+            {addOpen ? "Cancel" : "+ Add person"}
+          </button>
+        )}
+      </div>
+      <p style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, margin: "0 0 14px" }}>
+        Job titles are starting points, not cages: pick one and it fills in sensible access, then
+        change any switch for that one person — tab by tab, each one No access / View / Edit.
         {isOwner
-          ? "Add the people who work in your account and set each one's commission rate. Rates and other people's payouts are visible to you only — grant an admin access per person with the toggles."
-          : "Add teammates for your account. Commission rates are set by the owner and shown as ••• here."}
+          ? " Commission rates and other people's payouts stay visible to you only."
+          : " Commission rates are set by the owner and shown as ••• here."}
       </p>
 
-      {/* Add a teammate */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 16 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <span style={S.lbl}>Full name</span>
-          <input value={add.fullName} onChange={(e) => setAdd((p) => ({ ...p, fullName: e.target.value }))} placeholder="Jordan Blake" style={{ ...S.input, width: 150 }} />
+      {addOpen && canManageTeam && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={S.lbl}>Full name</span>
+            <input value={add.fullName} onChange={(e) => setAdd((p) => ({ ...p, fullName: e.target.value }))} placeholder="Jordan Blake" style={{ ...S.input, width: 160 }} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={S.lbl}>Email</span>
+            <input value={add.email} onChange={(e) => setAdd((p) => ({ ...p, email: e.target.value }))} placeholder="jordan@company.com" style={{ ...S.input, width: 220 }} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={S.lbl}>Job title</span>
+            <select value={add.title} onChange={(e) => setAdd((p) => ({ ...p, title: e.target.value }))} style={{ ...S.input, width: 150 }}>
+              {(meta.titles || []).filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
+                <option key={t.key} value={t.key}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={addUser} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>Add &amp; send invite</button>
+          <div style={{ flexBasis: "100%", fontSize: 11.5, color: "#94A3B8" }}>
+            They get an email with a link to set their own password. You can fine-tune their access straight after.
+          </div>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <span style={S.lbl}>Email</span>
-          <input value={add.email} onChange={(e) => setAdd((p) => ({ ...p, email: e.target.value }))} placeholder="jordan@company.com" style={{ ...S.input, width: 200 }} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <span style={S.lbl}>Job title</span>
-          <select value={add.title} onChange={(e) => setAdd((p) => ({ ...p, title: e.target.value }))} style={{ ...S.input, width: 140 }}>
-            {(meta.titles || []).filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
-              <option key={t.key} value={t.key}>{t.label}</option>
-            ))}
-          </select>
-        </div>
-        <button onClick={addUser} disabled={busy} style={{ ...S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF") }}>Add &amp; send invite</button>
-      </div>
+      )}
 
       {invite && (
         <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 9, padding: "11px 13px", marginBottom: 14, fontSize: 12.5, color: "#3730A3" }}>
-          <b>{invite.email}</b> {invite.emailSent ? "was emailed a setup link." : "was added."} Share this one-time set-password link if the email doesn't arrive:
-          <div style={{ marginTop: 6 }}><input readOnly value={invite.link} onFocus={(e) => e.target.select()} style={{ ...S.input, width: "100%", fontSize: 11.5, color: "#475569" }} /></div>
+          <b>{invite.email}</b> {invite.emailSent ? "was emailed a setup link." : "was added."}
+          {invite.link
+            ? <> Share this one-time set-password link if the email doesn't arrive:
+                <div style={{ marginTop: 6 }}><input readOnly value={invite.link} onFocus={(e) => e.target.select()} style={{ ...S.input, width: "100%", fontSize: 11.5, color: "#475569" }} /></div></>
+            : <> They already had a password, so no setup link was created — they sign in with the one they have, or use “Forgot password”.</>}
         </div>
       )}
 
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr>
-            <th style={th}>Name</th><th style={th}>Email</th><th style={th}>Title</th><th style={th}>Access</th><th style={th}>Commission&nbsp;%</th>
+            <th style={th}>Name</th>
+            <th style={th}>Title</th>
+            <th style={th}>Access</th>
+            {canSeeRates && <th style={th}>Commission&nbsp;%</th>}
+            <th style={th}>Last active</th>
             {isOwner && <th style={th}>Sees all payouts</th>}
             {isOwner && <th style={th}>Full access</th>}
-            <th style={th}></th>
+            <th style={{ ...th, textAlign: "right" }}>Actions</th>
           </tr></thead>
           <tbody>
-            {members.map((m) => (
-              <tr key={m.userId}>
-                <td style={{ ...td, fontWeight: 700 }}>{m.fullName || <span style={{ color: "#94A3B8" }}>—</span>}{m.isSelf && <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}> (you)</span>}</td>
-                <td style={td}>{m.email}</td>
-                <td style={td}>{titleChip(m, meta.titles)}</td>
+            {members.map((m) => {
+              const nCustom = Object.keys(m.access || {}).length;
+              return (
+              <tr key={m.userId} style={editingAccess === m.userId ? { background: "#F8FAFC" } : undefined}>
                 <td style={td}>
-                  {m.role === "owner"
-                    ? <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Everything</span>
-                    : (() => {
-                        const n = Object.keys(m.access || {}).length;
-                        const label = n === 0 ? "Standard" : `${n} change${n === 1 ? "" : "s"}`;
-                        // Your own access is shown but never editable by you — the server
-                        // refuses it too. Access is something you receive, not something you
-                        // write for yourself.
-                        if (!canManageTeam || m.isSelf) return <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{label}</span>;
-                        return (
-                          <button type="button" onClick={() => setEditingAccess(editingAccess === m.userId ? null : m.userId)}
-                            style={{ background: "none", border: "1px solid #E2E8F0", borderRadius: 7, color: ACCENT, cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit", padding: "4px 9px" }}>
-                            {label} <span style={{ color: "#94A3B8" }}>{editingAccess === m.userId ? "▲" : "▾"}</span>
-                          </button>
-                        );
-                      })()}
+                  <div style={{ fontWeight: 700, color: "#0F172A" }}>
+                    {m.fullName || <span style={{ color: "#94A3B8" }}>—</span>}
+                    {m.isSelf && <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}> (you)</span>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{m.email}</div>
                 </td>
                 <td style={td}>
-                  {m.rateHidden
-                    ? <span style={{ color: "#94A3B8", fontWeight: 800, letterSpacing: 2 }}>🔒 •••</span>
-                    : m.role === "owner"
-                      ? <span style={{ color: "#94A3B8" }}>—</span>
-                      : <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-                          <input
-                            value={edits[m.userId] !== undefined ? edits[m.userId] : (m.commissionPercent == null ? "" : String(m.commissionPercent))}
-                            onChange={(e) => setEdits((p) => ({ ...p, [m.userId]: e.target.value.replace(/[^0-9.]/g, "") }))}
-                            onBlur={() => commitRate(m)}
-                            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-                            placeholder="—" disabled={busy}
-                            style={{ ...S.input, width: 64, textAlign: "right", padding: "6px 8px" }} />
-                          <span style={{ color: "#94A3B8" }}>%</span>
-                        </span>}
+                  {titleChip(m, meta.titles)}
+                  {nCustom > 0 && m.role !== "owner" && (
+                    <div style={{ marginTop: 4 }}>
+                      <span title={nCustom + " switch" + (nCustom === 1 ? "" : "es") + " differ from the standard for this title"}
+                        style={{ background: "#F1F5F9", color: "#64748B", borderRadius: 20, padding: "2px 8px", fontSize: 10, fontWeight: 800 }}>Custom</span>
+                    </div>
+                  )}
+                </td>
+                <td style={{ ...td, fontSize: 12, color: "#475569", maxWidth: 340, lineHeight: 1.45 }}>{ssAccessSummary(m, meta)}</td>
+                {canSeeRates && <td style={td}>
+                  {m.role === "owner"
+                    ? <span style={{ color: "#94A3B8" }}>—</span>
+                    : <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                        <input
+                          value={edits[m.userId] !== undefined ? edits[m.userId] : (m.commissionPercent == null ? "" : String(m.commissionPercent))}
+                          onChange={(e) => setEdits((p) => ({ ...p, [m.userId]: e.target.value.replace(/[^0-9.]/g, "") }))}
+                          onBlur={() => commitRate(m)}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                          placeholder="—" disabled={busy}
+                          style={{ ...S.input, width: 60, textAlign: "right", padding: "6px 8px" }} />
+                        <span style={{ color: "#94A3B8" }}>%</span>
+                      </span>}
+                </td>}
+                <td style={{ ...td, fontSize: 12, color: "#94A3B8", whiteSpace: "nowrap" }}>
+                  {m.deactivated ? <span style={{ color: "#DC2626", fontWeight: 700 }}>deactivated</span>
+                    : ssRelTime(m.lastActive) || <span title="They haven't set a password yet">invite pending</span>}
                 </td>
                 {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <span onClick={() => !busy && setGrant(m, "seesAllPayouts", !m.seesAllPayouts)} style={{ cursor: "pointer" }} title="Let this person see everyone's payouts">{sw(!!m.seesAllPayouts)}</span>}</td>}
                 {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <span onClick={() => !busy && setGrant(m, "fullAccess", !m.fullAccess)} style={{ cursor: "pointer" }} title="Let this person see and edit commission rates">{sw(!!m.fullAccess)}</span>}</td>}
                 <td style={{ ...td, whiteSpace: "nowrap", textAlign: "right" }}>
-                  {m.isSelf || m.role === "owner" ? null : removing && removing.userId === m.userId ? (
-                    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <button onClick={() => doRemove(m, "unlink")} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 9px", fontSize: 11 }}>Remove from team</button>
-                      <button onClick={() => doRemove(m, "deactivate")} disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA", padding: "5px 9px", fontSize: 11 }}>Deactivate login</button>
-                      <button onClick={() => setRemoving(null)} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>Cancel</button>
-                    </span>
-                  ) : (
-                    <button onClick={() => setRemoving(m)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>Remove</button>
-                  )}
+                  {m.role === "owner"
+                    ? <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{m.isSelf ? "Own account" : "Owner"}</span>
+                    : m.isSelf
+                      ? <span style={{ fontSize: 11.5, color: "#94A3B8" }} title="Access is something you receive, not something you set for yourself">Own account</span>
+                      : removing && removing.userId === m.userId ? (
+                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <button onClick={() => doRemove(m, "unlink")} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 9px", fontSize: 11 }}>Remove from team</button>
+                          <button onClick={() => doRemove(m, "deactivate")} disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA", padding: "5px 9px", fontSize: 11 }}>Deactivate login</button>
+                          <button onClick={() => setRemoving(null)} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>Cancel</button>
+                        </span>
+                      ) : (
+                        <span style={{ display: "inline-flex", gap: 10, alignItems: "center" }}>
+                          {canManageTeam && (
+                            <button onClick={() => setEditingAccess(editingAccess === m.userId ? null : m.userId)}
+                              style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", padding: 0 }}>
+                              {editingAccess === m.userId ? "Close" : "Edit"}
+                            </button>
+                          )}
+                          {canManageTeam && (
+                            <button onClick={() => setRemoving(m)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", padding: 0 }}>Remove</button>
+                          )}
+                        </span>
+                      )}
                 </td>
-              </tr>
-            )).flatMap((el, i) => {
-              const m = members[i];
-              if (editingAccess !== m.userId) return [el];
-              return [el, (
-                <tr key={m.userId + ":access"}>
-                  <td colSpan={isOwner ? 8 : 6} style={{ padding: "0 10px 14px", borderBottom: "1px solid #F1F5F9" }}>
-                    <AccessGrid member={m} meta={meta} myAccess={data.myAccess} isOwner={isOwner} busy={busy}
-                      onCancel={() => setEditingAccess(null)}
-                      onSave={(next) => saveAccess(m, next)} />
-                  </td>
-                </tr>
-              )];
+              </tr>);
             })}
-            {members.length === 0 && <tr><td colSpan={isOwner ? 8 : 6} style={{ ...td, color: "#64748B" }}>No teammates yet — add someone above.</td></tr>}
+            {members.length === 0 && (
+              <tr><td colSpan={9} style={{ ...td, color: "#64748B", textAlign: "center", padding: "26px 10px" }}>
+                No one here yet. Add the people who work in your account and give each of them
+                just the parts of StructureStudio they need.
+              </td></tr>
+            )}
           </tbody>
         </table>
       </div>
+
+      {editing && canManageTeam && (
+        <AccessGrid key={editing.userId} member={editing} meta={meta} myAccess={data.myAccess} isOwner={isOwner}
+          busy={busy} onCancel={() => setEditingAccess(null)} onSave={(next) => saveAccess(editing, next)} />
+      )}
 
       {isOwner && (
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 9, padding: "10px 12px", marginTop: 14, fontSize: 11.5, color: "#9A3412", lineHeight: 1.5 }}>

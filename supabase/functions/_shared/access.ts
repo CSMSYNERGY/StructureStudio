@@ -27,6 +27,15 @@ export interface Area {
   levels: Level[];
   /** Only an owner may hold or grant this, whatever an admin's own access says. */
   ownerOnly?: boolean;
+  /**
+   * Comes with the JOB TITLE and can never be handed out one switch at a time. Team is the
+   * area that hands out every other area, so a per-person override on it would let an owner
+   * give a driver the keys in two clicks, and would give admins a route to minting peers
+   * that bypasses "only an owner may set the Admin title". You get Team by being an Admin.
+   * Overrides on these areas are DROPPED rather than honoured — the switch renders locked,
+   * and the server agrees instead of trusting the screen.
+   */
+  byTitleOnly?: boolean;
 }
 
 const RVE: Level[] = ["none", "view", "edit"];
@@ -53,7 +62,7 @@ export const AREAS: Area[] = [
   { key: "settings_branding",   label: "Branding & Estimates", group: "settings", hint: "Your look, business details, lots",   levels: RVE },
   { key: "settings_crm",        label: "CRM Connection",       group: "settings", hint: "Synergy/GHL keys and pipelines",      levels: RVE },
   { key: "settings_quickbooks", label: "QuickBooks",           group: "settings", hint: "Accounting connection + mappings",    levels: RVE },
-  { key: "settings_team",       label: "Team",                 group: "settings", hint: "Add people and set their access",     levels: RVE },
+  { key: "settings_team",       label: "Team",                 group: "settings", hint: "Add people and set their access",     levels: RVE, byTitleOnly: true },
   // Owner-only, always: this is the card that pays for the product.
   { key: "settings_billing",    label: "Billing",              group: "settings", hint: "Your StructureStudio subscription",   levels: RVE, ownerOnly: true },
 ];
@@ -117,6 +126,7 @@ export function effectiveAccess(
     const area = AREA_BY_KEY.get(k);
     if (!area) continue;                       // unknown area: ignore, never trust the blob
     if (area.ownerOnly) continue;              // owner-only can never be granted by data
+    if (area.byTitleOnly) continue;            // Team comes with the title, never a switch
     if (area.levels.includes(v as Level)) out[k] = v as Level;
   }
   return out;
@@ -182,7 +192,7 @@ export function sanitizeAccess(raw: unknown): Record<string, Level> {
   if (!raw || typeof raw !== "object") return out;
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     const area = AREA_BY_KEY.get(k);
-    if (!area || area.ownerOnly) continue;
+    if (!area || area.ownerOnly || area.byTitleOnly) continue;
     if (area.levels.includes(v as Level)) out[k] = v as Level;
   }
   return out;

@@ -256,3 +256,19 @@ Deno.test("billing cannot be granted to anyone by anyone but an owner", () => {
   assertEquals(effectiveAccess("user", "admin", { settings_billing: "edit" }).settings_billing, "none");
   assertFalse(mayGrant("admin", admin, "settings_billing", "view"));
 });
+
+Deno.test("Team comes with the title and can never be granted as a switch", () => {
+  // Team is the area that hands out every OTHER area, so a per-person override on it is a
+  // back door around "only an owner may set the Admin title". The screen renders it locked;
+  // this is the half that matters, because the screen is not the control.
+  assertEquals(sanitizeAccess({ settings_team: "edit", designs: "view" }), { designs: "view" });
+  // Even a hand-edited database row cannot grant it.
+  assertEquals(effectiveAccess("user", "sales_rep", { settings_team: "edit" }).settings_team, "none");
+  // An ADMIN still holds it, because their title says so — otherwise no admin could manage
+  // people at all, which is most of the feature.
+  assertEquals(effectiveAccess("admin", "admin", null).settings_team, "edit");
+  assertEquals(effectiveAccess("owner", "owner", null).settings_team, "edit");
+  // And an owner can still create an admin: mayGrantMap must not refuse the resulting map.
+  const owner = effectiveAccess("owner", "owner", null);
+  assertEquals(mayGrantMap("owner", owner, effectiveAccess("admin", "admin", null)), null);
+});

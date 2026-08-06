@@ -189,11 +189,30 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const { data: cms } = await admin
           .from("commission_members").select("user_id, commission_percent, sees_all_payouts, full_access").eq("client_id", clientId);
         const cmById = new Map((cms || []).map((c: any) => [c.user_id, c]));
+        // Truck summary for the Driver callout in the access editor. Read-only here: the
+        // record itself is written in exactly one place (portal-schedule's save_driver), so
+        // the editor shows what is on file and points at that card rather than becoming a
+        // second writer of the same row.
+        const { data: dps } = await admin.from("driver_profiles")
+          .select("user_id, truck_name, deck_length_ft, max_width_ft, is_driver, active")
+          .eq("client_id", clientId).eq("is_driver", true).eq("active", true);
+        const dpById = new Map((dps || []).map((d: any) => [d.user_id, d]));
         const members = [];
         for (const r of rows || []) {
           const uid = (r as any).user_id;
           let email = "";
-          try { const { data: au } = await admin.auth.admin.getUserById(uid); email = au?.user?.email || ""; } catch { /* one missing auth user must not break the list */ }
+          let lastActive: string | null = null;
+          let deactivated = false;
+          try {
+            const { data: au } = await admin.auth.admin.getUserById(uid);
+            email = au?.user?.email || "";
+            lastActive = au?.user?.last_sign_in_at || null;
+            // A ~100-year ban is how remove_user deactivates a login. Surfacing it on the
+            // roster is what stops "I re-added them and they still can't get in" being an
+            // invisible state — see the ban-clearing in add_user.
+            const b = au?.user?.banned_until;
+            deactivated = !!b && new Date(b).getTime() > Date.now();
+          } catch { /* one missing auth user must not break the list */ }
           const cm: any = cmById.get(uid) || {};
           members.push({
             userId: uid,
@@ -212,6 +231,14 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             // server will actually enforce. The screen shows `effective` so nobody has to
             // do the preset-plus-overrides arithmetic in their head to answer "can Dana see
             // pricing?" — the honest answer is the resolved one.
+            lastActive,
+            deactivated,
+            driver: (() => {
+              const d: any = dpById.get(uid);
+              if (!d) return null;
+              return [d.truck_name, d.deck_length_ft ? d.deck_length_ft + "' deck" : null,
+                d.max_width_ft ? "max " + d.max_width_ft + "' wide" : null].filter(Boolean).join(" · ") || null;
+            })(),
             title: (r as any).title || null,
             access: ((r as any).access as Record<string, Level> | null) || null,
             effective: effectiveAccess((r as any).role, (r as any).title, (r as any).access),
