@@ -22,10 +22,14 @@
 //      compiled by whichever Babel that page loaded.
 //   3. Cache-buster lockstep: index.html and portal.html must reference the same
 //      structure-studio.component.js?v=… value.
-//   4. The dependency boot guard is present on all three pages and byte-identical across them. It
-//      is what turns a dependency that did not load into a message the visitor can act on instead
-//      of a permanently blank page; the three mount blocks are not twinned, so only this notices
-//      one page drifting.
+//   4. The dependency boot guard is present on all three pages, byte-identical across them,
+//      linted with the same correctness rules as the babel blocks (its body swallows every
+//      runtime error by design, so a typo inside is a silent no-op that byte-identity alone
+//      would wave through), and the LAST <script> in each body (hoisted above the vendor tags
+//      it would run before they load and replace every healthy page with the failure screen).
+//      It is what turns a dependency that did not load into a message the visitor can act on
+//      instead of a permanently blank page; the three mount blocks are not twinned, so only
+//      this notices one page drifting.
 //   5. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
 //      an edge function (qboFetch) — the client secret lives only there, and "we never call
 //      Intuit from the browser" is an answer we give Intuit in writing. Help links to
@@ -190,16 +194,42 @@ function run(files) {
   // Self-hosting the four libraries removed the CAUSE of both logged incidents, but not the class:
   // a routing rule, an incomplete deploy or a dropped connection can still lose a file, so the
   // guard stays. The per-page label lives on the tag attribute, outside the compared body.
-  const guardBody = (html) => {
-    const m = html.match(/<script data-ss-app="[^"]*">([\s\S]*?)<\/script>/);
-    return m ? m[1] : null;
-  };
-  const guards = Object.fromEntries(
-    ["index.html", "portal.html", "admin.html"].map((f) => [f, guardBody(files[f])]));
-  for (const [f, body] of Object.entries(guards)) {
-    if (body === null) {
+  //
+  // The tag regex tolerates attributes after the label ([^>]*) on purpose: adding a CSP nonce to
+  // the tag must not read as "guard is missing" — that message would send someone hunting for a
+  // guard that is right there, and the plausible fix for a phantom missing guard is deleting the
+  // rule that reports it.
+  const GUARD_TAG = /<script data-ss-app="[^"]*"[^>]*>([\s\S]*?)<\/script>/;
+  const guards = {};
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    const html = files[f];
+    const m = html.match(GUARD_TAG);
+    guards[f] = m ? m[1] : null;
+    if (!m) {
       errors.push(`${f}: the dependency boot guard (<script data-ss-app="…">) is missing — a `
         + "dependency that failed to load would leave the visitor a blank page again");
+      continue;
+    }
+    // The guard is the ONE script on these pages whose body deliberately swallows every error
+    // (a guard that throws is worse than no guard) — which also makes it the one place a typo
+    // is a SILENT no-op on all three pages at once, and the byte-identity rule below would pass
+    // three identically-broken copies without a murmur. So it gets the same correctness lint as
+    // every babel block, at push time instead of never.
+    errors.push(...lint(`${f} <boot guard>`, m[1],
+      html.slice(0, m.index).split("\n").length - 1 + 1));
+    // And its POSITION is load-bearing, not a style choice: byte-identical bytes hoisted into
+    // <head> run before the four vendor tags have loaded, see all four globals missing, and
+    // replace EVERY healthy page with the failure screen — the catastrophic false positive —
+    // while passing the byte-identity rule below. The guard's own comment explains why it must
+    // be plain JS at the end of the body; this asserts the "end of the body" half. Checked as
+    // "no <script after the guard's closing tag", NOT lastIndexOf over the whole page — the
+    // guard's own comment says "<script>" in prose, which a whole-page scan mistakes for a tag
+    // (the nonce self-test caught exactly that on this rule's first draft).
+    if (/<script\b/i.test(html.slice(m.index + m[0].length))) {
+      errors.push(`${f}: the dependency boot guard is not the LAST <script> in the body — earlier `
+        + "than that (e.g. hoisted into <head>) it runs before the vendor tags load, sees all four "
+        + "globals missing, and replaces a healthy page with the failure screen; later scripts "
+        + "would escape its neutralise step");
     }
   }
   for (const f of ["portal.html", "admin.html"]) {
@@ -471,7 +501,7 @@ if (process.argv.includes("--self-test")) {
   // exists precisely because nothing else notices a page losing its guard. Prove both failure
   // modes fire: a page with the guard deleted, and a page whose copy has drifted by one byte.
   const guardGone = load();
-  guardGone["admin.html"] = guardGone["admin.html"].replace(/<script data-ss-app="[^"]*">[\s\S]*?<\/script>/, "");
+  guardGone["admin.html"] = guardGone["admin.html"].replace(/<script data-ss-app="[^"]*"[^>]*>[\s\S]*?<\/script>/, "");
   if (!run(guardGone).some((e) => e.includes("boot guard") && e.includes("missing"))) {
     console.error("self-test FAILED: a missing dependency boot guard in admin.html was not caught");
     process.exit(1);
@@ -488,6 +518,81 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the dependency boot guard must be present on all three pages and identical");
+
+  // The guard LINT. Fire direction: a typo inside the guard's try/catch is a silent no-op at
+  // runtime on all three pages at once, so prove no-undef reaches inside it. The typo goes into
+  // ALL THREE copies identically, so byte-identity stays quiet and the failure is attributable
+  // to the lint alone.
+  const guardTypo = load();
+  const typoFrom = "var missing = [];";
+  if (!guardTypo["index.html"].includes(typoFrom)) {
+    console.error("self-test: boot-guard lint fixture line not found in index.html — update the self-test");
+    process.exit(1);
+  }
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    guardTypo[f] = guardTypo[f].replace(typoFrom, "var missing = misssingList;");
+  }
+  if (!run(guardTypo).some((e) => e.includes("<boot guard>") && e.includes("no-undef"))) {
+    console.error("self-test FAILED: an undefined identifier inside the boot guard was not caught — "
+      + "the guard's own try/catch makes that a silent no-op on every page in production");
+    process.exit(1);
+  }
+  // Quiet direction: the real guard is plain pre-library JS and must lint CLEAN under the page
+  // config — a rule that flags the healthy guard gets deleted by the next person it annoys.
+  const guardLintNoise = run(load()).filter((e) => e.includes("<boot guard>"));
+  if (guardLintNoise.length) {
+    console.error("self-test FAILED: the pristine boot guard does not lint clean:");
+    for (const e of guardLintNoise) console.error("  " + e);
+    process.exit(1);
+  }
+  console.log("self-test passed: a typo inside the boot guard is caught by the lint, and the real guard lints clean");
+
+  // The guard POSITION, both failure directions. Hoisted ahead of the vendor tags, byte-identical
+  // bytes run before the libraries load, see all four globals missing, and replace EVERY healthy
+  // page with the failure screen — while the missing/byte-identity rules pass. And a script added
+  // AFTER the guard escapes its neutralise step. Both must land on the position error.
+  const guardHoisted = load();
+  const hoistMatch = guardHoisted["admin.html"].match(/<script data-ss-app="[^"]*"[^>]*>[\s\S]*?<\/script>/);
+  if (!hoistMatch) {
+    console.error("self-test: no boot guard found in admin.html to hoist — update the self-test");
+    process.exit(1);
+  }
+  const firstTag = guardHoisted["admin.html"].indexOf("<script");
+  guardHoisted["admin.html"] = guardHoisted["admin.html"].replace(hoistMatch[0], "");
+  guardHoisted["admin.html"] = guardHoisted["admin.html"].slice(0, firstTag) + hoistMatch[0]
+    + guardHoisted["admin.html"].slice(firstTag);
+  if (!run(guardHoisted).some((e) => e.includes("admin.html") && e.includes("not the LAST <script>"))) {
+    console.error("self-test FAILED: the boot guard hoisted above the vendor tags in admin.html was "
+      + "not caught — it would fire on every healthy page load");
+    process.exit(1);
+  }
+  const guardTrailing = load();
+  guardTrailing["portal.html"] = guardTrailing["portal.html"].replace("</body>",
+    "<script>/* added after the guard */</script></body>");
+  if (!run(guardTrailing).some((e) => e.includes("portal.html") && e.includes("not the LAST <script>"))) {
+    console.error("self-test FAILED: a script added after the boot guard in portal.html was not caught");
+    process.exit(1);
+  }
+  console.log("self-test passed: the boot guard must be the last script in the body — hoisting it and trailing it are both caught");
+
+  // A CSP nonce (or any future attribute) on the guard TAG must not read as "guard is missing" —
+  // the body is unchanged, so every guard rule must stay quiet. This is the false-positive
+  // direction of the tag regex, same reasoning as the Intuit help link and exceljs cases.
+  const guardNonce = load();
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    guardNonce[f] = guardNonce[f].replace(/<script data-ss-app="([^"]*)">/, '<script data-ss-app="$1" nonce="c3lfdGVzdA">');
+    if (!guardNonce[f].includes('nonce="c3lfdGVzdA"')) {
+      console.error(`self-test: could not add a nonce to the boot guard tag in ${f} — update the self-test`);
+      process.exit(1);
+    }
+  }
+  const nonceNoise = run(guardNonce).filter((e) => e.includes("boot guard"));
+  if (nonceNoise.length) {
+    console.error("self-test FAILED: a CSP nonce on the boot guard tag tripped the guard rules:");
+    for (const e of nonceNoise) console.error("  " + e);
+    process.exit(1);
+  }
+  console.log("self-test passed: a CSP nonce on the boot guard tag does not read as a missing guard");
 
   // ── The vendored-dependency lock ────────────────────────────────────────────
   // This rule REPLACED one that had become vacuous, so proving it actually fires is the whole
