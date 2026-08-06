@@ -1053,16 +1053,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       />
-      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />}
-      {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {rows && rows.length > 0 && (
-        <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="design">
-          {styleOpts.length > 1 && <FacetSelect label="Building style" value={fStyle} onChange={setFStyle} options={styleOpts.map((s) => ({ value: s, label: s }))} allLabel="All styles" />}
-          {sizeOpts.length > 1 && <FacetSelect label="Size" value={fSize} onChange={setFSize} options={sizeOpts.map((s) => ({ value: s, label: s }))} allLabel="All sizes" />}
-          <DateRange label="Created" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
-          <FacetSelect label="Versions" value={fVersions} onChange={setFVersions} options={[{ value: "multi", label: "2+ versions" }]} allLabel="All" />
-        </FilterBar>
+        <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />
+          </div>
+          <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="design">
+            {styleOpts.length > 1 && <FacetSelect label="Building style" value={fStyle} onChange={setFStyle} options={styleOpts.map((s) => ({ value: s, label: s }))} allLabel="All styles" />}
+            {sizeOpts.length > 1 && <FacetSelect label="Size" value={fSize} onChange={setFSize} options={sizeOpts.map((s) => ({ value: s, label: s }))} allLabel="All sizes" />}
+            <DateRange label="Created" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
+            <FacetSelect label="Versions" value={fVersions} onChange={setFVersions} options={[{ value: "multi", label: "2+ versions" }]} allLabel="All" />
+          </FilterBar>
+        </div>
       )}
+      {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {error && <div style={S.err}>{error}</div>}
@@ -1447,19 +1451,23 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#EF4444", margin: "0 4px 0 10px", verticalAlign: "middle" }} />idle
         </span>
       </CardHead>
-      {rows && rows.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />}
+      {rows && rows.length > 0 && (
+        <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
+          </div>
+          <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="contact">
+            <DateRange label="Last activity" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
+            <FacetSelect label="Contact info" value={fContact} onChange={setFContact}
+              options={[{ value: "has", label: "Has email or phone" }, { value: "missing", label: "No contact info" }]} allLabel="All" />
+          </FilterBar>
+        </div>
+      )}
       {/* `browsing` is passed via `extra` because it is not a designs.status — it is the
           synthetic group built from captured_leads for people who never submitted anything. */}
       {rows && rows.length > 0 && (
         <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter}
           extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
-      )}
-      {rows && rows.length > 0 && (
-        <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="contact">
-          <DateRange label="Last activity" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
-          <FacetSelect label="Contact info" value={fContact} onChange={setFContact}
-            options={[{ value: "has", label: "Has email or phone" }, { value: "missing", label: "No contact info" }]} allLabel="All" />
-        </FilterBar>
       )}
       {error && <div style={S.err}>{error}</div>}
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
