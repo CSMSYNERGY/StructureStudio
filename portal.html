@@ -2063,6 +2063,7 @@ function BillingView({ viewingLabel = null }) {
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
   const [msg, setMsg] = useState(null);      // { ok } | { err }
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
+  const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
 
   const load = useCallback(async () => {
     setError(null);
@@ -2434,18 +2435,29 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         <p style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           The CRM that runs your sales — leads, pipelines, and follow-up. Priced by number of users; enroll on the sign-up page.
         </p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
           {[
-            { tier: "1 User", mo: "$200/mo", yr: "$2,000/yr" },
-            { tier: "2-3 Users", mo: "$300/mo", yr: "$3,000/yr" },
-            { tier: "Unlimited Users", mo: "$500/mo", yr: "$5,000/yr" },
-          ].map((t) => (
-            <div key={t.tier} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>{t.tier}</div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: "#3D3672" }}>{t.mo}</div>
-              <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2 }}>{t.yr}</div>
-            </div>
-          ))}
+            { tier: "1 User", monthly: 20000, annual: 200000 },
+            { tier: "2-3 Users", monthly: 30000, annual: 300000 },
+            { tier: "Unlimited Users", monthly: 50000, annual: 500000 },
+          ].map((t) => {
+            const iv = crmIv[t.tier] || "annual";
+            const cents = iv === "annual" ? t.annual : t.monthly;
+            return (
+              <div key={t.tier} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginBottom: 8 }}>{t.tier}</div>
+                <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
+                  {["monthly", "annual"].map((k) => (
+                    <button key={k} type="button" onClick={() => setCrmIv((p) => ({ ...p, [t.tier]: k }))}
+                      style={{ background: iv === k ? ACCENT : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                      {k === "annual" ? "Yearly" : "Monthly"}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: ACCENT }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
+              </div>
+            );
+          })}
         </div>
         <a href="https://streamlinedconstructionsystem.com/saas-enrollment" target="_blank" rel="noopener noreferrer"
           style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none" }}>
