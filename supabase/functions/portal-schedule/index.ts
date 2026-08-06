@@ -277,6 +277,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const { data: units } = await admin
         .from("inventory_units").select("id, serial, design_short_code, status")
         .eq("client_id", clientId).eq("status", "available").limit(500);
+      // Tray items read building-first like the cards, so inventory units need their
+      // master design's style+size label.
+      const masterCodes = [...new Set((units ?? []).map((u) => u.design_short_code).filter(Boolean))];
+      const { data: masters } = masterCodes.length
+        ? await admin.from("designs").select("short_code, selections").eq("client_id", clientId).in("short_code", masterCodes)
+        : { data: [] };
+      const masterLabel = Object.fromEntries((masters ?? []).map((m) => [m.short_code, buildingLabelFrom(m.selections as Record<string, unknown>)]));
       const { data: openRepairs } = await admin
         .from("repairs").select("id, repair_no, customer_name, description, serial, status")
         .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500);
@@ -289,6 +296,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         })),
         inventory: (units ?? []).filter((u) => !haveUnit.has(u.id)).map((u) => ({
           inventoryUnitId: u.id, serial: u.serial, designShortCode: u.design_short_code,
+          buildingLabel: masterLabel[u.design_short_code ?? ""] ?? "",
         })),
         repairs: (openRepairs ?? []).filter((rp) => !haveRepair.has(rp.id)).map((rp) => ({
           repairId: rp.id, repairNo: rp.repair_no, customerName: rp.customer_name,
