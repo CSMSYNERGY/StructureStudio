@@ -3610,10 +3610,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Call the submit-estimate Edge Function. It looks up the GHL credentials for
       // this clientId in Supabase (admin-configured), then either creates a new GHL
       // estimate or updates the existing one for this design and emails it.
-      // betaMode (detected from the deploy host, e.g. beta.structurestudio.app or a
-      // beta--* branch preview) makes the Edge Function redirect the estimate email
-      // to the internal QA inbox instead of the customer. The per-client beta_mode
-      // switch in client_settings does the same thing server-side.
+      // ⚠️ betaMode does NOT redirect the estimate email, and neither does the per-client
+      // beta_mode switch in client_settings. It is detected from the deploy host (beta.*
+      // on either apex, or a beta--* branch preview) and passed as TELEMETRY only — the
+      // edge function mails the submitted contact in every environment, beta included
+      // (`recipients = [contact?.email]`, and its own header says so). So a verification
+      // submit carrying a real lead's details emails that customer a live branded quote:
+      // submit with an address you control, or use a test tenant. A QA-inbox redirect did
+      // exist once; it pointed at a non-deliverable address so beta estimates silently
+      // failed to send, which is why it was removed rather than fixed.
       const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
         body: { ...payload, betaMode },
