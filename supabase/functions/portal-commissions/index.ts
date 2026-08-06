@@ -441,6 +441,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             amountCents: e.amount_cents, earnedOn: e.earned_on,
             periodKey: e.period_key, periodLabel: e.period_key ? periodLabel(e.period_key, freq, customDays) : "Unscheduled",
             status: e.status, kind: e.kind, isOverride: e.is_override,
+            splitShare: e.split_share == null ? null : Number(e.split_share),
           };
         });
         // The assignable team (names) — only for someone who may edit commissions.
@@ -506,6 +507,115 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         if (error) throw error;
         await audit(`split_entry ${entryId} → ${rows.length} parts`);
         return json({ ok: true, parts: rows.length });
+      }
+      // NOTE: split_entry above is LEGACY (kept for older cached portals). The UI now uses
+      // split_order below — splitting a LINE quartered an already-halved base when a split
+      // was split again (Carolyn hit this on order #1003, 2026-08-05); an ORDER-level
+      // allocation can be re-edited forever without compounding.
+
+      // ── completely remove ONE line (owner|full_access). Distinct from Exclude: an excluded
+      // line stays visible on the rep's report at $0; delete makes it as if it never existed.
+      // Paid lines and clawbacks are immutable, and a line a clawback points at can't go
+      // (the clawback would orphan) — exclude those instead.
+      case "delete_entry": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const entryId = Number(p.entryId);
+        const { data: entry } = await admin.from("commission_entries").select("id, status, kind").eq("client_id", clientId).eq("id", entryId).maybeSingle();
+        if (!entry) return json({ error: "Entry not found." }, 404);
+        if (entry.status === "paid" || entry.kind === "clawback") return json({ error: "Paid lines and clawbacks can't be deleted." }, 409);
+        const { data: cb } = await admin.from("commission_entries").select("id").eq("client_id", clientId).eq("clawback_of", entryId).limit(1);
+        if (cb && cb.length) return json({ error: "A clawback references this line — exclude it instead." }, 409);
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("id", entryId);
+        await audit(`delete_entry ${entryId}`);
+        return json({ ok: true });
+      }
+
+      // ── ORDER-level split: the modal shows everyone on the order; saving REPLACES the
+      // order's unpaid commission lines with one line per person, each a share of the ORDER'S
+      // FULL base — so re-editing an allocation never compounds. One person at 100% is legal
+      // (that's "give the whole order to X"). Paid lines block the edit; clawbacks untouched.
+      case "split_order": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const orderId = String(p.orderId || "");
+        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
+        if (!ord) return json({ error: "Order not found." }, 404);
+        const clean: { userId: string; share: number }[] = [];
+        let sum = 0;
+        for (const s of (Array.isArray(p.splits) ? p.splits : [])) {
+          const share = Number(s?.sharePercent);
+          if (isUuid(s?.userId) && Number.isFinite(share) && share > 0 && share <= 100) { clean.push({ userId: String(s.userId), share }); sum += share; }
+        }
+        if (clean.length < 1) return json({ error: "Pick at least one person." }, 400);
+        if (Math.abs(sum - 100) > 0.01) return json({ error: "Shares must add up to 100%." }, 400);
+        if (new Set(clean.map((c) => c.userId)).size !== clean.length) return json({ error: "The same person is listed twice." }, 400);
+        const teamIds = new Set(((await admin.from("client_users").select("user_id").eq("client_id", clientId)).data || []).map((r: any) => r.user_id));
+        for (const cs of clean) if (!teamIds.has(cs.userId)) return json({ error: "A selected person isn't on your team." }, 400);
+        const { data: exRows } = await admin.from("commission_entries").select("id, status, kind, base_cents, split_share, earned_on, period_key").eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission");
+        if ((exRows || []).some((r: any) => r.status === "paid")) return json({ error: "This order has a paid line — its allocation can't be edited." }, 409);
+        // Full-order base: the stored pre-tax subtotal; else reconstruct from an existing line
+        // (a line's base = full × share, so full = base ÷ share); else the order total.
+        let fullBase: number | null = ord.pretax_subtotal_cents ?? null;
+        if (fullBase == null) {
+          const withBase = (exRows || []).filter((r: any) => r.base_cents != null).sort((a: any, b: any) => b.base_cents - a.base_cents);
+          if (withBase.length) { const r0 = withBase[0]; fullBase = r0.split_share ? Math.round(r0.base_cents * 100 / Number(r0.split_share)) : r0.base_cents; }
+          else fullBase = ord.total_cents ?? null;
+        }
+        const keep = (exRows || []).find((r: any) => r.period_key) || (exRows || [])[0] || null;
+        const rateBy = new Map(((await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId)).data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
+        const now = new Date().toISOString();
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        const rows = clean.map((cs) => {
+          const baseShare = fullBase != null ? Math.round(fullBase * cs.share / 100) : null;
+          const rate = (rateBy.get(cs.userId) ?? null) as number | null;
+          return { client_id: clientId, order_id: ord.id, earner_user_id: cs.userId, base_cents: baseShare, rate_percent: rate, split_share: cs.share, amount_cents: (baseShare != null && rate != null) ? Math.round(baseShare * rate / 100) : null, earned_on: keep?.earned_on ?? (ord.ordered_at ? String(ord.ordered_at).slice(0, 10) : null), period_key: keep?.period_key ?? null, kind: "commission", status: "pending", is_override: true, updated_at: now };
+        });
+        const { error: insErr } = await admin.from("commission_entries").insert(rows);
+        if (insErr) throw insErr;
+        await audit(`split_order ${ord.id} → ${rows.length} people`);
+        return json({ ok: true, parts: rows.length });
+      }
+
+      // ── rebuild an order's commission to the default single line (owner|full_access):
+      // wipes the unpaid lines (splits, overrides, excluded — all of them) and re-materializes
+      // what compute would create — earner = invoice sender, their standard rate, full base.
+      // The rebuilt row is NOT an override, so the next compute keeps maintaining it. Paid
+      // lines block (the money is out the door); clawbacks are left untouched.
+      case "reset_order": {
+        if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        const orderId = String(p.orderId || "");
+        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
+        if (!ord) return json({ error: "Order not found." }, 404);
+        const { data: exRows } = await admin.from("commission_entries").select("id, status, kind").eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission");
+        if ((exRows || []).some((r: any) => r.status === "paid")) return json({ error: "This order has a paid line — it can't be reset." }, 409);
+        const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();
+        if (!settings || !settings.enabled) return json({ error: "Commission tracking isn't enabled." }, 409);
+        const { data: iv } = await admin.from("invoice_sends").select("sender_user_id, sent_by_operator").eq("client_id", clientId).eq("short_code", ord.short_code).maybeSingle();
+        let earner: string | null = (iv && !iv.sent_by_operator && iv.sender_user_id) ? String(iv.sender_user_id) : null;
+        if (earner) {
+          const { data: t } = await admin.from("client_users").select("user_id").eq("client_id", clientId).eq("user_id", earner).maybeSingle();
+          if (!t) earner = null;
+        }
+        let rate: number | null = null;
+        if (earner) {
+          const { data: m } = await admin.from("commission_members").select("commission_percent").eq("client_id", clientId).eq("user_id", earner).maybeSingle();
+          rate = m?.commission_percent == null ? null : Number(m.commission_percent);
+        }
+        const baseCents: number | null = ord.pretax_subtotal_cents ?? ord.total_cents ?? null;
+        let earnedDate: string | null = ord.ordered_at ? String(ord.ordered_at).slice(0, 10) : null;
+        if (settings.earned_on === "collected") {
+          const { data: pays } = await admin.from("payments").select("amount_cents, received_at, voided_at").eq("client_id", clientId).eq("order_id", ord.id);
+          earnedDate = collectedDate((pays || []).filter((x: any) => !x.voided_at), ord.total_cents);
+        }
+        const period = earnedDate ? periodKey(earnedDate, settings.payout_frequency, settings.period_anchor, settings.custom_days) : null;
+        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        const { error: insErr } = await admin.from("commission_entries").insert({
+          client_id: clientId, order_id: ord.id, earner_user_id: earner,
+          base_cents: baseCents, rate_percent: rate, amount_cents: (baseCents != null && rate != null) ? Math.round(baseCents * rate / 100) : null,
+          earned_on: earnedDate, period_key: period?.key ?? null, kind: "commission", status: "pending", is_override: false, updated_at: new Date().toISOString(),
+        });
+        if (insErr) throw insErr;
+        await audit(`reset_order ${ord.id}`);
+        return json({ ok: true });
       }
 
       // ── override the amount on one entry, e.g. a rep's mistake (owner|full_access) ──
