@@ -160,10 +160,16 @@ Rules that are easy to break and expensive to get wrong:
    inventory spec build gets hauled to the lot, which is a delivery), plus sold units
    needing their sale delivery, plus open repairs. Repairs appear once, via the repairs
    section, so nothing is listed twice.
-7. **`deno check` is the ONLY type-check over `portal-schedule`** — and Deno is not
-   installed on Carolyn's machine, so the preflight step has been skipping (loudly) through
-   every scheduling change. It is Supabase's runtime, unrelated to Netlify/Cloudflare
-   hosting; don't delete the step on the theory that the hosting move retired it.
+7. **`deno check` is the ONLY type-check over `portal-schedule`.** ✅ Verified 2026-08-05:
+   Deno **2.9.4 is installed** (scoop, `C:\Users\carol\scoop\shims\deno.exe`, on both the
+   PowerShell and Git Bash PATH), the gate covers **15 entrypoints + 3 test files**, and
+   every function — `portal-schedule` included — type-checks clean. Prove the steps are
+   really running rather than silently skipping with `node scripts/preflight.mjs
+   --self-test`; a clean run and a tool-missing run both print nothing, which is exactly
+   why that assertion exists. Deno is **Supabase's edge runtime** (every function opens
+   with `import "jsr:@supabase/functions-js/edge-runtime.d.ts"` and calls `Deno.env.get`),
+   NOT a Netlify artifact — the Netlify → Cloudflare hosting move did not retire it, so
+   don't delete the step on that theory.
 
 ## What's New changelog — what must NEVER be published
 
