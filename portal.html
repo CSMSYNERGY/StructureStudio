@@ -2086,9 +2086,17 @@ function BillingView({ viewingLabel = null }) {
   const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
   const baseLive = !!liveFeatures["simple_layout"];
 
-  // Simple Layout is required: preselect it (yearly) until it's subscribed.
+  // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
+  // (in the cart) or already live, its member features are covered — shown "Included" and not
+  // separately purchasable — and it satisfies the required base in place of Simple Layout.
+  const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"];
+  const suiteChosen = !!sel["full_suite"] || !!liveFeatures["full_suite"];
+  const memberCovered = (feat) => SUITE_MEMBERS.includes(feat) && suiteChosen;
+
+  // Simple Layout is required: preselect it (yearly) until it's subscribed — unless the Suite
+  // (which includes it) is chosen or already live.
   useEffect(() => {
-    if (data && data.configured && !baseLive && byFeature["simple_layout"] && !sel["simple_layout"]) {
+    if (data && data.configured && !baseLive && !sel["full_suite"] && !liveFeatures["full_suite"] && byFeature["simple_layout"] && !sel["simple_layout"]) {
       setSel((p) => ({ ...p, simple_layout: "annual" }));
     }
   }, [data]);
@@ -2158,11 +2166,20 @@ function BillingView({ viewingLabel = null }) {
 
   const toggleFeature = (f) => {
     if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
-    if (f.required && !baseLive) return;   // Simple Layout stays in the cart
-    setSel((p) => { const n = { ...p }; if (n[f.feature]) delete n[f.feature]; else n[f.feature] = "annual"; return n; });
+    if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
+    if (f.required && !baseLive && !sel["full_suite"]) return; // Simple Layout stays unless the Suite covers it
+    setSel((p) => {
+      const n = { ...p };
+      if (n[f.feature]) delete n[f.feature];
+      else {
+        n[f.feature] = "annual";
+        if (f.feature === "full_suite") SUITE_MEMBERS.forEach((m) => delete n[m]); // the Suite replaces the à-la-carte pieces
+      }
+      return n;
+    });
   };
   const setInterval_ = (f, iv) => {
-    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    if (f.availability !== "available" || liveFeatures[f.feature] || busy || memberCovered(f.feature)) return;
     setSel((p) => ({ ...p, [f.feature]: iv }));
   };
 
@@ -2332,25 +2349,27 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12 }}>
             {features.filter((f) => !liveFeatures[f.feature]).map((f) => {
               const soon = f.availability !== "available";
+              const covered = memberCovered(f.feature);
+              const veiled = soon || covered;   // shows an overlay + dims + blocks interaction
               const iv = sel[f.feature];
               const on = !!iv;
               const shown = f.plans[iv || "annual"];
               const lockedBase = f.required && !baseLive;
               return (
-                <div key={f.feature} onClick={() => toggleFeature(f)}
-                  style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: soon ? "default" : "pointer", overflow: "hidden" }}>
-                  {soon && (
+                <div key={f.feature} onClick={covered ? undefined : () => toggleFeature(f)}
+                  style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: veiled ? "default" : "pointer", overflow: "hidden" }}>
+                  {veiled && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2, pointerEvents: "none" }}>
-                      <span style={{ transform: "rotate(-12deg)", background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon"}</span>
+                      <span style={{ transform: "rotate(-12deg)", background: covered ? "#EDE9FE" : "#FEF3C7", color: covered ? "#5B21B6" : "#B45309", border: `1px solid ${covered ? "#C4B5FD" : "#FDE68A"}`, borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{covered ? "Included in the Suite" : (f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon")}</span>
                     </div>
                   )}
-                  <div style={{ opacity: soon ? 0.45 : 1 }}>
+                  <div style={{ opacity: veiled ? 0.45 : 1 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                       <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{f.name}</span>
                       {f.required && <span style={{ background: "#75E6DA", color: "#134E4A", borderRadius: 20, padding: "2px 8px", fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5 }}>Required</span>}
-                      {!soon && !lockedBase && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
+                      {!veiled && !lockedBase && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
                     </div>
-                    {!soon && (
+                    {!veiled && (
                       <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
                         {["monthly", "annual"].map((k) => (
                           <button key={k} type="button" onClick={() => setInterval_(f, k)}

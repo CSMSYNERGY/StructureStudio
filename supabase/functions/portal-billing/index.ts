@@ -126,6 +126,17 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const plans = allPlans.filter((p) => p.active);   // purchasable / gate-driving
   const planById = new Map(allPlans.map((p) => [p.id, p]));   // interpretive, includes retired
 
+  // BUNDLES: one subscription that grants several features. The Structure Studio Suite
+  // ("full_suite") unlocks everything except Self Serve Displays. expandFeature() turns a
+  // subscription/cart feature into the concrete features it confers — a bundle expands to itself
+  // PLUS its members, a plain feature to just itself. Used for entitlement, live-set, and the
+  // purchase guards so a bundle satisfies the base and can't be stacked on the pieces it covers.
+  const BUNDLE_FEATURES: Record<string, string[]> = {
+    full_suite: ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"],
+  };
+  const expandFeature = (f: string | null | undefined): string[] =>
+    !f ? [] : (BUNDLE_FEATURES[f] ? [f, ...BUNDLE_FEATURES[f]] : [f]);
+
   // All subscription rows for this tenant, newest first (cancelled kept for history).
   const { data: subRows, error: subsErr } = await admin
     .from("billing_subscriptions")
@@ -134,11 +145,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     .order("created_at", { ascending: false });
   if (subsErr) return json({ error: subsErr.message }, 500);
   const subs = subRows ?? [];
-  const liveFeatures = new Set(
-    subs.filter((s) => s.status !== "cancelled")
-      .map((s) => planById.get(s.plan_id)?.feature)
-      .filter(Boolean),
-  );
+  const liveFeatures = new Set<string>();
+  for (const s of subs) {
+    if (s.status === "cancelled") continue;
+    for (const t of expandFeature(planById.get(s.plan_id)?.feature)) liveFeatures.add(t);
+  }
 
   // Card on file? (NMI Customer Vault id — never sent to the browser.)
   const { data: vaultRow } = await admin
@@ -268,9 +279,12 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         st = { usable: true, state: "cancelled_paid", graceEnds: null };
       }
     }
-    const prior = featureState.get(feature);
     const rank = (x: { state: string }) => (x.state === "active" ? 3 : x.state === "grace" || x.state === "cancelled_paid" ? 2 : x.state === "past_due" ? 1 : 0);
-    if (!prior || rank(st) > rank(prior)) featureState.set(feature, st);
+    // A bundle subscription confers its state on every feature it includes.
+    for (const feat of expandFeature(feature)) {
+      const prior = featureState.get(feat);
+      if (!prior || rank(st) > rank(prior)) featureState.set(feat, st);
+    }
   }
 
   const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
@@ -424,9 +438,21 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     for (const f of features) {
       if (liveFeatures.has(f)) return json({ error: `You already have an active subscription for ${f}.` }, 409);
     }
-    // Simple Layout is the required base — in the cart or already live.
-    if (!features.includes("simple_layout") && !liveFeatures.has("simple_layout")) {
-      return json({ error: "Simple Layout is the required base plan — add it to your selection." }, 400);
+    // A bundle covers its members — don't let it stack on the pieces it already includes, whether
+    // those are in this same cart or already subscribed. (Switching an existing plan to the Suite
+    // is handled separately, later — for now the Suite is a clean choice for new signups.)
+    for (const p of chosen) {
+      const members = BUNDLE_FEATURES[p!.feature];
+      if (!members) continue;
+      if (features.some((f) => f !== p!.feature && members.includes(f)))
+        return json({ error: `The ${p!.name} already includes those features — remove them from your selection.` }, 400);
+      if (members.some((m) => liveFeatures.has(m)))
+        return json({ error: `You already subscribe to features the ${p!.name} includes. Switching to the Suite isn't automated yet — contact CSM Synergy.` }, 409);
+    }
+    // Required base (Simple Layout) must be covered — directly, via a bundle in the cart, or already live.
+    const cartCovers = new Set(chosen.flatMap((p) => expandFeature(p!.feature)));
+    if (!cartCovers.has("simple_layout") && !liveFeatures.has("simple_layout")) {
+      return json({ error: "Simple Layout is the required base plan — add it (or the Suite) to your selection." }, 400);
     }
 
     // Card: reuse the vault, or create it from a fresh Collect.js token.
