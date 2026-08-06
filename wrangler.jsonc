@@ -1,5 +1,9 @@
-// Cloudflare Worker config — PRODUCTION frontend (structurestudio.app, deploys branch `main`).
-// Beta twin: wrangler.beta.jsonc (structurestudio-beta, branch `beta`). Assets-only Worker:
+// Cloudflare Worker config — PRODUCTION frontend, STAGED BUT NOT YET SERVING (2026-08-05).
+// structurestudio.app is still served by Netlify (which deploys `main` on push); this Worker
+// has been uploaded but no zone route points at it yet — see the routes note at the bottom.
+// It becomes production at cutover, and deploys are MANUAL (no git integration) exactly like
+// beta:  npx wrangler deploy   /   npx wrangler deployments list --name structurestudio-app
+// Beta twin: wrangler.beta.jsonc (structurestudio-beta, live now). Assets-only Worker:
 // no "main" script, no bindings, no vars — this repo is PUBLIC, so nothing secret may ever
 // be added here (worker name + account_id are non-secret identifiers).
 {

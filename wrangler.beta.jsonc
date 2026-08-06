@@ -1,4 +1,9 @@
-// Cloudflare Worker config — BETA frontend (beta.structurestudio.app, deploys branch `beta`).
+// Cloudflare Worker config — BETA frontend, live at beta.structurestudiosuite.com.
+// ⚠️ DEPLOYS ARE MANUAL: there is no git integration, so pushing `beta` ships NOTHING here.
+//   npx wrangler deploy --config wrangler.beta.jsonc
+//   npx wrangler deployments list --name structurestudio-beta   # verify
+// (beta.structurestudio.app still resolves, but that is the STALE Netlify copy — the
+// migration moved beta to the structurestudiosuite.com domain; don't verify against it.)
 // Identical to wrangler.jsonc except the worker name; see that file for the reasoning
 // behind every setting (html_handling "none" is load-bearing — read before changing).
 {
