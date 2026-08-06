@@ -15,14 +15,16 @@
 //      never argue about formatting):
 //        no-undef, no-dupe-keys, no-dupe-args, no-const-assign, no-redeclare,
 //        no-unreachable, no-dupe-else-if, no-self-assign, valid-typeof, use-isnan
-//   2. The CDN version lock: all three pages must carry byte-identical React / ReactDOM /
-//      supabase-js / babel-standalone URLs (CLAUDE.md rule — one page upgrading alone
-//      silently changes behaviour for the shared module).
+//   2. The vendored-dependency lock (replaced the CDN version lock on 2026-08-06, when the four
+//      libraries moved to /vendor/): all three pages must reference the SAME four /vendor/ files,
+//      every one of those files must exist in the repo, and none of the four may be loaded from a
+//      CDN again. One page moving alone silently changes behaviour, since the same source text is
+//      compiled by whichever Babel that page loaded.
 //   3. Cache-buster lockstep: index.html and portal.html must reference the same
 //      structure-studio.component.js?v=… value.
-//   4. The CDN boot guard is present on all three pages and byte-identical across them. It is
-//      what turns a failed/blocked CDN request into a message the visitor can act on instead of
-//      a permanently blank page; the three mount blocks are not twinned, so only this notices
+//   4. The dependency boot guard is present on all three pages and byte-identical across them. It
+//      is what turns a dependency that did not load into a message the visitor can act on instead
+//      of a permanently blank page; the three mount blocks are not twinned, so only this notices
 //      one page drifting.
 //   5. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
 //      an edge function (qboFetch) — the client secret lives only there, and "we never call
@@ -136,23 +138,58 @@ function run(files) {
   errors.push(...lint("structure-studio.component.js", files["structure-studio.component.js"]));
   errors.push(...lint("StructureStudio.jsx", files["StructureStudio.jsx"]));
 
-  // CDN lock — identical library URLs on all three pages.
-  const cdnUrls = (html) =>
-    [...html.matchAll(/<script src="(https:\/\/[^"]+)"/g)].map((m) => m[1]).sort().join("\n");
-  const lock = cdnUrls(files["index.html"]);
+  // Vendored-dependency lock. Replaced the old CDN version lock when React / ReactDOM /
+  // supabase-js / babel-standalone moved to /vendor/ (2026-08-06) — a blocked third-party request
+  // had blanked the page twice, once to Googlebot. Note the old rule could not simply be left in
+  // place: it compared the set of `https://` script srcs, which is now EMPTY on all three pages,
+  // so it would have passed vacuously forever — exactly the silent-pass failure this file keeps
+  // getting bitten by. Three checks, because "same on all pages" is no longer sufficient on its
+  // own once the files are ours to lose.
+  const libTags = (html) =>
+    [...html.matchAll(/<script src="(\/vendor\/[^"]+)"/g)].map((m) => m[1]).join("\n");
+  const lock = libTags(files["index.html"]);
+  if (!lock) {
+    errors.push("index.html: no /vendor/ library tags — the four dependencies must be self-hosted "
+      + "(provenance and the update recipe are in vendor/README.md)");
+  }
   for (const f of ["portal.html", "admin.html"]) {
-    if (cdnUrls(files[f]) !== lock) {
-      errors.push(`${f}: CDN script URLs differ from index.html — the version lock (CLAUDE.md) is broken`);
+    if (libTags(files[f]) !== lock) {
+      errors.push(`${f}: /vendor/ library tags differ from index.html — same source text, different `
+        + "Babel/React, so one page moving alone silently changes behaviour (CLAUDE.md)");
+    }
+  }
+  // Referenced but absent is the new failure mode self-hosting introduces, and it is worse than a
+  // CDN outage: it would be permanent and it would hit EVERY page load, not a subset of visitors.
+  for (const src of lock.split("\n").filter(Boolean)) {
+    if (!existsSync(join(root, src.replace(/^\//, "")))) {
+      errors.push(`${src}: referenced by all three pages but not present in the repo — every `
+        + "visitor would land on the boot guard's fallback message");
+    }
+  }
+  // And no quietly going back to a CDN for these four. exceljs is deliberately NOT covered: it is
+  // injected on demand for a spreadsheet export, so a failed fetch costs one button rather than
+  // the whole page — which is also why its tag is dynamic rather than static.
+  const LIB_CDN =
+    /https:\/\/(?:cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net|unpkg\.com)\/[^"'\s]*(?:react|supabase-js|babel)[^"'\s]*/i;
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    const hit = files[f].match(LIB_CDN);
+    if (hit) {
+      const line = files[f].slice(0, hit.index).split("\n").length;
+      errors.push(`${f}:${line}  ${hit[0]} — React/ReactDOM/supabase-js/babel-standalone must come `
+        + "from /vendor/, never a CDN: one blocked third-party request blanks the whole page "
+        + "(happened 2026-08-04, and 2026-08-05 to Googlebot)");
     }
   }
 
   // Boot-guard lock — the plain <script data-ss-app="…"> block at the end of each page's body
   // must exist on all three, and its body must be byte-identical everywhere. It is the only
-  // thing standing between a failed CDN request and a permanently blank page (a blank page is
-  // what shipped until 2026-08-05, once to Googlebot), and unlike the designer the three mount
-  // blocks are NOT hand-mirrored twins — so nothing else in the repo would notice one page
-  // losing the guard or drifting from the others. Same argument as the CDN version lock above.
-  // The per-page label lives on the tag attribute, deliberately outside the compared body.
+  // thing standing between a dependency that did not load and a permanently blank page (a blank
+  // page is what shipped until 2026-08-05, once to Googlebot), and unlike the designer the three
+  // mount blocks are NOT hand-mirrored twins — so nothing else in the repo would notice one page
+  // losing the guard or drifting from the others. Same argument as the vendored lock above.
+  // Self-hosting the four libraries removed the CAUSE of both logged incidents, but not the class:
+  // a routing rule, an incomplete deploy or a dropped connection can still lose a file, so the
+  // guard stays. The per-page label lives on the tag attribute, outside the compared body.
   const guardBody = (html) => {
     const m = html.match(/<script data-ss-app="[^"]*">([\s\S]*?)<\/script>/);
     return m ? m[1] : null;
@@ -161,14 +198,14 @@ function run(files) {
     ["index.html", "portal.html", "admin.html"].map((f) => [f, guardBody(files[f])]));
   for (const [f, body] of Object.entries(guards)) {
     if (body === null) {
-      errors.push(`${f}: the CDN boot guard (<script data-ss-app="…">) is missing — a failed `
-        + "CDN request would leave the visitor a blank page again");
+      errors.push(`${f}: the dependency boot guard (<script data-ss-app="…">) is missing — a `
+        + "dependency that failed to load would leave the visitor a blank page again");
     }
   }
   for (const f of ["portal.html", "admin.html"]) {
     if (guards[f] !== null && guards["index.html"] !== null && guards[f] !== guards["index.html"]) {
-      errors.push(`${f}: the CDN boot guard body differs from index.html — the three copies must `
-        + "stay byte-identical (only the data-ss-app label may differ)");
+      errors.push(`${f}: the dependency boot guard body differs from index.html — the three copies `
+        + "must stay byte-identical (only the data-ss-app label may differ)");
     }
   }
 
@@ -397,7 +434,7 @@ if (process.argv.includes("--self-test")) {
   const guardGone = load();
   guardGone["admin.html"] = guardGone["admin.html"].replace(/<script data-ss-app="[^"]*">[\s\S]*?<\/script>/, "");
   if (!run(guardGone).some((e) => e.includes("boot guard") && e.includes("missing"))) {
-    console.error("self-test FAILED: a missing CDN boot guard in admin.html was not caught");
+    console.error("self-test FAILED: a missing dependency boot guard in admin.html was not caught");
     process.exit(1);
   }
   const guardDrift = load();
@@ -411,7 +448,51 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test FAILED: a drifted CDN boot guard in portal.html was not caught");
     process.exit(1);
   }
-  console.log("self-test passed: the CDN boot guard must be present on all three pages and identical");
+  console.log("self-test passed: the dependency boot guard must be present on all three pages and identical");
+
+  // ── The vendored-dependency lock ────────────────────────────────────────────
+  // This rule REPLACED one that had become vacuous, so proving it actually fires is the whole
+  // point. Three directions, one per failure mode it owns.
+  const libDrift = load();
+  libDrift["portal.html"] = libDrift["portal.html"].replace(
+    '<script src="/vendor/react-dom-18.2.0.production.min.js"></script>',
+    '<script src="/vendor/react-dom-18.3.1.production.min.js"></script>');
+  if (!run(libDrift).some((e) => e.includes("/vendor/ library tags differ"))) {
+    console.error("self-test FAILED: portal.html loading a different React DOM build was not caught");
+    process.exit(1);
+  }
+  const libGone = load();
+  libGone["index.html"] = libGone["index.html"].replace(
+    "/vendor/babel-standalone-7.23.9.min.js", "/vendor/babel-standalone-7.99.0.min.js");
+  libGone["portal.html"] = libGone["portal.html"].replace(
+    "/vendor/babel-standalone-7.23.9.min.js", "/vendor/babel-standalone-7.99.0.min.js");
+  libGone["admin.html"] = libGone["admin.html"].replace(
+    "/vendor/babel-standalone-7.23.9.min.js", "/vendor/babel-standalone-7.99.0.min.js");
+  if (!run(libGone).some((e) => e.includes("not present in the repo"))) {
+    console.error("self-test FAILED: a /vendor/ file referenced by all three pages but missing from "
+      + "the repo was not caught — every visitor would get the fallback message");
+    process.exit(1);
+  }
+  const cdnBack = load();
+  cdnBack["admin.html"] = cdnBack["admin.html"].replace("</body>",
+    '<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script></body>');
+  if (!run(cdnBack).some((e) => e.includes("must come") && e.includes("/vendor/"))) {
+    console.error("self-test FAILED: a React CDN tag reintroduced into admin.html was not caught");
+    process.exit(1);
+  }
+  // The other direction, same reasoning as the Intuit help-link case: exceljs is legitimately
+  // CDN-loaded on demand, and a rule that flags it gets deleted by the next person it annoys.
+  const exceljsOk = load();
+  if (!exceljsOk["portal.html"].includes("cdnjs.cloudflare.com/ajax/libs/exceljs/")) {
+    console.error("self-test: exceljs fixture not found in portal.html — update the self-test");
+    process.exit(1);
+  }
+  if (run(exceljsOk).some((e) => e.includes("must come") && e.includes("/vendor/"))) {
+    console.error("self-test FAILED: the on-demand exceljs CDN load tripped the vendored-lock rule");
+    process.exit(1);
+  }
+  console.log("self-test passed: the four libraries must be vendored, identical, present, and not "
+    + "CDN-loaded — while exceljs stays allowed");
 
   // ── The deno step ──────────────────────────────────────────────────────────
   // Asserts the MECHANISM, not a historical bug. A subprocess check whose clean result and

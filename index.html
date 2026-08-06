@@ -3,10 +3,22 @@
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
 </head><body><div id="root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js" crossorigin="anonymous"></script>
+<!-- SELF-HOSTED, deliberately not a CDN. These four are this page's only dependencies and there
+     is no build step, so one blocked or failed third-party request used to blank the page
+     entirely - twice in the wild (2026-08-04, 2026-08-05), the second time to Googlebot. Serving
+     them same-origin removes that failure mode instead of reporting it, and pins supabase-js,
+     which was floating on @2 and could change under us on any npm publish (it resolved to
+     2.112.1 the day these were vendored). ROOT-ABSOLUTE on purpose: portal.html is served at
+     /portal/<page>/<sub> too, where a relative src resolves against the URL depth and gets
+     swallowed by the /portal/* splat - the bug that once blanked the whole portal. Version is in
+     the filename so a bump is a visible rename, never a silent byte change. No crossorigin
+     attribute: same-origin scripts already give window.onerror full error detail, which is the
+     only thing that attribute bought us across a CDN. Keep all three pages identical and keep
+     the files present - preflight enforces both. Provenance + update recipe: vendor/README.md. -->
+<script src="/vendor/react-18.2.0.production.min.js"></script>
+<script src="/vendor/react-dom-18.2.0.production.min.js"></script>
+<script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
+<script src="/vendor/babel-standalone-7.23.9.min.js"></script>
 <script src="structure-studio.component.js?v=20260805d" type="text/babel"></script>
 <script type="text/babel">
 // ── Thin mount. The full designer body lives in structure-studio.component.js — the ONE
@@ -55,27 +67,34 @@ root.render(<StructureStudio/>);
 // reuses the single root above (creating a new root per message leaked one each time).
 window.addEventListener("message",(e)=>{if(ssAllowedOrigin(e.origin)&&e.data&&e.data.type==="structureConfig"&&e.data.config){root.render(<StructureStudio config={e.data.config}/>);}});
 </script><script data-ss-app="designer">
-/* ── CDN boot guard ───────────────────────────────────────────────────────────────────────
+/* ── Dependency boot guard ────────────────────────────────────────────────────────────────
    The four <script> tags at the top of this page are its ONLY dependencies, and there is no
-   build step. A single failed or blocked request used to produce a PERMANENTLY BLANK PAGE:
-   babel-standalone still compiled the mount block, the block threw on the first missing
-   global, and the visitor got nothing at all — no message, nothing to act on. Seen live on
-   2026-08-04 and 2026-08-05 ("Uncaught ReferenceError: ReactDOM is not defined"), the second
-   time to GOOGLEBOT, i.e. a tenant's public shopfront was crawled blank.
+   build step. If any one of them does not load, babel-standalone still compiles the mount
+   block, the block throws on the first missing global, and the visitor gets a PERMANENTLY
+   BLANK PAGE - no message, nothing to act on. That happened twice in the wild while those four
+   were loaded from CDNs ("Uncaught ReferenceError: ReactDOM is not defined", 2026-08-04 and
+   2026-08-05), the second time to GOOGLEBOT, i.e. a tenant's public shopfront was crawled blank.
+
+   Those four are now SELF-HOSTED under /vendor/, which removes the third-party failure mode
+   that caused both incidents. This guard stays because same-origin is not the same as
+   infallible, and the remaining causes are ones this repo has actually shipped: an asset that
+   404s because of a routing rule (the /portal/* splat once swallowed the component's relative
+   src and blanked the entire portal), a deploy that uploaded an incomplete tree, a host
+   exclusion list that grew a pattern matching /vendor, or a connection dropped mid-load.
 
    WHY THIS IS PLAIN JS AT THE END OF THE BODY, and not a check inside the mount block:
-     * If babel-standalone is the script that failed, EVERY type="text/babel" block on the
-       page never executes — blank and completely unlogged, because the error reporter itself
-       lives inside one of those blocks. Only plain JS can see and report that case.
+     * If babel-standalone is the file that failed, EVERY type="text/babel" block on the page
+       never executes - blank and completely unlogged, because the error reporter itself lives
+       inside one of those blocks. Only plain JS can see and report that case.
      * A plain inline script runs during parsing, while babel-standalone transforms on
-       DOMContentLoaded. So this runs BEFORE the blocks above and can still stop them —
+       DOMContentLoaded. So this runs BEFORE the blocks above and can still stop them -
        verified: document.readyState is "loading" here and the blocks have not run yet.
      * Sitting after them in the document means they are already in the DOM to neutralise.
-     * The four CDN tags block parsing, so all four have resolved (loaded or failed) by now.
+     * The four script tags block parsing, so all four have resolved (loaded or failed) by now.
 
-   KEEP THIS BLOCK BYTE-IDENTICAL ACROSS index.html / portal.html / admin.html — preflight
-   enforces it, exactly as it enforces the CDN version lock. The mount blocks themselves are
-   NOT twinned, so nothing else would notice one page drifting. The only per-page difference
+   KEEP THIS BLOCK BYTE-IDENTICAL ACROSS index.html / portal.html / admin.html - preflight
+   enforces it, exactly as it enforces the vendored-dependency lock. The mount blocks themselves
+   are NOT twinned, so nothing else would notice one page drifting. The only per-page difference
    is the data-ss-app label on the tag above, which names the app in the message.
 */
 (function () {
@@ -89,7 +108,7 @@ window.addEventListener("message",(e)=>{if(ssAllowedOrigin(e.origin)&&e.data&&e.
     if (!missing.length) return;
 
     // Stop Babel compiling the blocks above. Without this they still run and still throw on
-    // the missing global — an app_errors row that reads like a product bug, on top of a
+    // the missing global - an app_errors row that reads like a product bug, on top of a
     // message the visitor has already been given.
     var tags = document.querySelectorAll('script[type="text/babel"]');
     for (var i = 0; i < tags.length; i++) tags[i].type = "text/ss-boot-blocked";
@@ -101,17 +120,16 @@ window.addEventListener("message",(e)=>{if(ssAllowedOrigin(e.origin)&&e.data&&e.
     meta.setAttribute("content", "noindex");
     document.head.appendChild(meta);
 
-    // Plain HTML and no framework — the framework is what failed. The font is inherited from
-    // the page's own body rule, which is in the document, not on a CDN.
+    // Plain HTML and no framework - the framework is what failed. The font is inherited from
+    // the page's own body rule, which is in the document, not in a separate file.
     var host = document.getElementById("root") || document.body;
     host.innerHTML =
       '<div style="max-width:560px;margin:12vh auto;padding:0 24px;color:#1E293B">'
       + '<h1 style="font-size:20px;line-height:1.35;margin:0 0 10px">Couldn\'t load the ' + app + '</h1>'
       + '<p style="margin:0 0 16px;font-size:16px;line-height:1.5;color:#475569">Check your connection and reload the page.</p>'
-      + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">A library this page needs did not load ('
+      + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">A file this page needs did not load ('
       + missing.join(", ")
-      + '). That is usually a dropped connection, a VPN or company network, or a browser'
-      + ' extension blocking cdnjs.cloudflare.com or cdn.jsdelivr.net.</p>'
+      + '). This is usually a temporary network problem, so reloading should fix it.</p>'
       + '<button type="button" id="ss-boot-reload" style="font:inherit;font-size:15px;padding:9px 18px;'
       + 'border:0;border-radius:8px;background:#2563EB;color:#FFF;cursor:pointer">Reload</button>'
       + '</div>';
@@ -120,12 +138,13 @@ window.addEventListener("message",(e)=>{if(ssAllowedOrigin(e.origin)&&e.data&&e.
 
     // Report it. A distinct source AND code so these are trivially separable from real
     // product bugs: source "boot", code "boot_deps_missing". The page's own ssLogError cannot
-    // be used — it lives in the babel block just neutralised, and even hoisted its
+    // be used - it lives in the babel block just neutralised, and even hoisted its
     // SUPABASE_* consts never initialised. Duplicating the URL and anon key here is the same
     // deliberate trade index.html already documents for its own logger: babel blocks share no
     // top-level consts, and the anon key is browser-safe by design. log_error stamps the user
     // agent server-side from the request headers, which is what tells a crawler apart from a
-    // real visitor — the ambiguity that made the first of the two rows above hard to read.
+    // real visitor. Now that the four files are same-origin, a row here means OUR deploy or
+    // routing is wrong, not that someone else's CDN is unreachable - treat it as urgent.
     var KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
     fetch("https://jzeamjbhdrsbygdnphbm.supabase.co/rest/v1/rpc/log_error", {
       method: "POST",
@@ -133,7 +152,7 @@ window.addEventListener("message",(e)=>{if(ssAllowedOrigin(e.origin)&&e.data&&e.
       headers: { "Content-Type": "application/json", "apikey": KEY, "Authorization": "Bearer " + KEY },
       body: JSON.stringify({
         p_source: "boot",
-        p_message: "boot aborted: CDN dependencies did not load (" + missing.join(", ") + ")",
+        p_message: "boot aborted: vendored dependencies did not load (" + missing.join(", ") + ")",
         p_code: "boot_deps_missing",
         p_client_id: new URLSearchParams(location.search).get("client") || null,
         p_url: location.href.slice(0, 600),
