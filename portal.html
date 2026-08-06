@@ -7440,7 +7440,6 @@ function DriversTerritoriesCard() {
   const [busy, setBusy] = useState(false);
   const [drafts, setDrafts] = useState({});    // userId -> editable driver draft
   const [editingDriver, setEditingDriver] = useState(null); // one-liner rows; Edit expands
-  const [addDriverPick, setAddDriverPick] = useState("");
   const [tDraft, setTDraft] = useState(null);  // { id?, name, description } | null
   const [cDraft, setCDraft] = useState(null);  // { id?, name, color, memberUserIds } | null
   const load = useCallback(async () => {
@@ -7460,7 +7459,6 @@ function DriversTerritoriesCard() {
     });
     setDrafts(map);
     setEditingDriver(null);
-    setAddDriverPick("");
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -7482,6 +7480,9 @@ function DriversTerritoriesCard() {
   const driverName = (f) => f.displayName || nameOfU[f.userId] || "Driver";
   const saveDriver = async (key, overrides) => {
     const f = { ...draftFor(key), ...(overrides || {}) };
+    // A driver is a person on the team who can sign in — migration 101, and save_driver
+    // enforces the same thing. Ask for it here so the answer arrives before the form is full.
+    if (key === "new" && !f.userId) { setMsg({ err: "Pick the driver this truck belongs to. They need to be on your team first — add them under Team above." }); return; }
     if (!f.displayName.trim() && !f.userId) { setMsg({ err: "Give the driver a name." }); return; }
     setBusy(true); setMsg(null);
     const body = {
@@ -7632,22 +7633,19 @@ function DriversTerritoriesCard() {
         {/* ── Drivers — one line each (like Sales Locations); Edit expands in place.
                Name-first (095): type any name; linking a portal login is optional. ── */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "16px 0 8px" }}>
-          <span style={{ ...S.lbl, marginBottom: 0 }}>Drivers</span>
+          <span style={{ ...S.lbl, marginBottom: 0 }}>Trucks &amp; drivers</span>
           <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>— truck specs drive the load planner's deck math</span>
-          <select value={addDriverPick}
-            onChange={(e) => {
-              const v = e.target.value; setAddDriverPick("");
-              if (v === "__name") { setDraft("new", { ...blank }); setEditingDriver("new"); }
-              else if (v) { setDraft("new", { ...blank, userId: v, displayName: nameOfU[v] || "" }); setEditingDriver("new"); }
-            }}
-            style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 11.5, fontWeight: 700, marginLeft: "auto" }}>
-            <option value="">+ Add driver…</option>
-            <option value="__name">➕ New driver (name only, no login)</option>
-            {team.filter((m) => !(data.drivers || []).some((p) => p.user_id === m.userId)).map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)} (team login)</option>)}
-          </select>
+          <button type="button" disabled={busy || editingDriver === "new"}
+            onClick={() => { setDraft("new", { ...blank }); setEditingDriver("new"); }}
+            style={{ ...S.btn(editingDriver === "new" ? "#E2E8F0" : ACCENT, editingDriver === "new" ? "#94A3B8" : "#FFF"), padding: "5px 11px", fontSize: 11.5, marginLeft: "auto" }}>
+            + Add truck
+          </button>
         </div>
         {(data.drivers || []).filter((p) => p.is_driver).length === 0 && editingDriver !== "new" && (
-          <p style={{ fontSize: 12.5, color: "#64748B", padding: "4px 2px 8px" }}>No drivers yet — use "+ Add driver…" and just type their name; a portal login is optional.</p>
+          <p style={{ fontSize: 12.5, color: "#64748B", padding: "4px 2px 8px" }}>
+            No trucks yet — add a truck and connect the driver who runs it. Deck length and max
+            width are what the load planner uses to decide what fits.
+          </p>
         )}
         {(data.drivers || []).filter((p) => p.is_driver).map((p) => p.id).concat(editingDriver === "new" ? ["new"] : []).map((key) => {
           const f = draftFor(key);
@@ -7666,8 +7664,25 @@ function DriversTerritoriesCard() {
               {editing && (
                 <div style={{ borderTop: "1px solid #F1F5F9", padding: "9px 11px" }}>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "8px 10px" }}>
-                    <div><span style={lbl}>Driver name</span><input style={inp} value={f.displayName} onChange={(e) => setDraft(key, { displayName: e.target.value })} placeholder="Ray Detweiler" /></div>
                     <div><span style={lbl}>Truck / trailer</span><input style={inp} value={f.truckName} onChange={(e) => setDraft(key, { truckName: e.target.value })} placeholder="40' gooseneck" /></div>
+                    {key === "new" ? (
+                      <div>
+                        <span style={lbl}>Driver *</span>
+                        <select style={inp} value={f.userId || ""}
+                          onChange={(e) => { const v = e.target.value; setDraft(key, { userId: v || null, displayName: v ? (nameOfU[v] || "") : "" }); }}>
+                          <option value="">Who drives it?…</option>
+                          {team.filter((m) => !(data.drivers || []).some((p) => p.user_id === m.userId))
+                            .map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)}</option>)}
+                        </select>
+                      </div>
+                    ) : (
+                      <div>
+                        <span style={lbl}>Driver</span>
+                        <div style={{ ...inp, background: "#F8FAFC", color: "#475569", display: "flex", alignItems: "center", gap: 6 }}>
+                          {driverName(f)}{f.userId && <span style={schedChip("#EEF2FF", "#3D3672")}>login ✓</span>}
+                        </div>
+                      </div>
+                    )}
                     <div><span style={lbl}>Deck length (ft)</span><input style={inp} value={f.deck} onChange={(e) => setDraft(key, { deck: e.target.value })} placeholder="40" /></div>
                     <div><span style={lbl}>Max building width (ft)</span><input style={inp} value={f.maxW} onChange={(e) => setDraft(key, { maxW: e.target.value })} placeholder="14" /></div>
                     <div><span style={lbl}>Wide-load capable</span>
@@ -10256,7 +10271,7 @@ function CommissionTeamInner() {
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
-        <div style={{ ...S.h2, margin: 0 }}>People</div>
+        <div style={{ ...S.h2, margin: 0 }}>Team</div>
         <span style={{ background: "#F1F5F9", color: "#475569", borderRadius: 20, padding: "2px 9px", fontSize: 12, fontWeight: 800 }}>{members.length}</span>
         <div style={{ flex: 1 }} />
         {canManageTeam && (
