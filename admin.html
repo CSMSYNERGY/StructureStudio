@@ -1056,65 +1056,86 @@ ReactDOM.createRoot(document.getElementById("root")).render(<AdminApp />);
 (function () {
   try {
     var app = (document.currentScript && document.currentScript.getAttribute("data-ss-app")) || "page";
+
+    // PUBLISHED so a page's own mount block can reuse this exact failure screen for the one
+    // dependency this guard cannot see. Babel fetches src'd text/babel files (the shared
+    // structure-studio.component.js) by XHR AFTER this script has run, so a module that never
+    // loaded leaves all four library globals present, this guard silent, and the mount block
+    // holding `undefined` - which it then renders, throwing React error #130 onto a blank page.
+    // That reached GOOGLEBOT on 2026-08-06 (app_errors 96ce38ff). The check has to live in the
+    // mount block because only it runs late enough to see the module; the MESSAGE has to live
+    // here because a second hand-written copy per page is exactly the drift preflight exists to
+    // catch. `missing` names the file(s); `code` separates the two causes in app_errors.
+    function ssBootFail(missing, code) {
+      // Stop Babel compiling the blocks above. Without this they still run and still throw on
+      // the missing global - an app_errors row that reads like a product bug, on top of a
+      // message the visitor has already been given. A block that is ALREADY running (the
+      // module-missing caller below) is unaffected by a type change, so both callers can
+      // share this path.
+      var tags = document.querySelectorAll('script[type="text/babel"]');
+      for (var i = 0; i < tags.length; i++) tags[i].type = "text/ss-boot-blocked";
+
+      // A broken render must never be indexed. Googlebot executes this; the healthy path
+      // never calls in here, so a working page never gets the tag.
+      var meta = document.createElement("meta");
+      meta.setAttribute("name", "robots");
+      meta.setAttribute("content", "noindex");
+      document.head.appendChild(meta);
+
+      // Plain HTML and no framework - the framework is what failed. The font is inherited from
+      // the page's own body rule, which is in the document, not in a separate file.
+      var host = document.getElementById("root") || document.body;
+      host.innerHTML =
+        '<div style="max-width:560px;margin:12vh auto;padding:0 24px;color:#1E293B">'
+        + '<h1 style="font-size:20px;line-height:1.35;margin:0 0 10px">Couldn\'t load the ' + app + '</h1>'
+        + '<p style="margin:0 0 16px;font-size:16px;line-height:1.5;color:#475569">Check your connection and reload the page.</p>'
+        + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">A file this page needs did not load ('
+        + missing.join(", ")
+        + '). This is usually a temporary network problem, so reloading should fix it.</p>'
+        + '<button type="button" id="ss-boot-reload" style="font:inherit;font-size:15px;padding:9px 18px;'
+        + 'border:0;border-radius:8px;background:#2563EB;color:#FFF;cursor:pointer">Reload</button>'
+        + '</div>';
+      var btn = document.getElementById("ss-boot-reload");
+      if (btn) btn.addEventListener("click", function () { location.reload(); });
+
+      // Report it. A distinct source AND code so these are trivially separable from real
+      // product bugs: source "boot", plus the caller's code. The page's own ssLogError cannot
+      // be used - it lives in the babel block just neutralised, and even hoisted its
+      // SUPABASE_* consts never initialised. Duplicating the URL and anon key here is the same
+      // deliberate trade index.html already documents for its own logger: babel blocks share no
+      // top-level consts, and the anon key is browser-safe by design. log_error stamps the user
+      // agent server-side from the request headers, which is what tells a crawler apart from a
+      // real visitor. Every file this can name is now same-origin, so a row here means OUR
+      // deploy or routing is wrong, not that someone else's CDN is unreachable - urgent either
+      // way.
+      var KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+      fetch("https://jzeamjbhdrsbygdnphbm.supabase.co/rest/v1/rpc/log_error", {
+        method: "POST",
+        keepalive: true,
+        headers: { "Content-Type": "application/json", "apikey": KEY, "Authorization": "Bearer " + KEY },
+        body: JSON.stringify({
+          p_source: "boot",
+          p_message: "boot aborted: "
+            + (code === "boot_component_missing" ? "the shared component module" : "vendored dependencies")
+            + " did not load (" + missing.join(", ") + ")",
+          p_code: code,
+          p_client_id: new URLSearchParams(location.search).get("client") || null,
+          p_url: location.href.slice(0, 600),
+          p_context: { app: app, missing: missing }
+        })
+      }).catch(function () {});
+    }
+    window.ssBootFail = ssBootFail;
+
+    // This guard's own case: the four vendored libraries. All are plain <script src> tags that
+    // block parsing, so every one of them has already resolved (loaded or failed) by now.
     var missing = [];
     if (typeof React === "undefined" || !React) missing.push("react");
     if (typeof ReactDOM === "undefined" || !ReactDOM) missing.push("react-dom");
     if (!window.supabase || typeof window.supabase.createClient !== "function") missing.push("supabase-js");
     if (typeof Babel === "undefined" || !Babel) missing.push("babel-standalone");
     if (!missing.length) return;
-
-    // Stop Babel compiling the blocks above. Without this they still run and still throw on
-    // the missing global - an app_errors row that reads like a product bug, on top of a
-    // message the visitor has already been given.
-    var tags = document.querySelectorAll('script[type="text/babel"]');
-    for (var i = 0; i < tags.length; i++) tags[i].type = "text/ss-boot-blocked";
-
-    // A broken render must never be indexed. Googlebot executes this; the healthy path
-    // returns above, so a working page never gets the tag.
-    var meta = document.createElement("meta");
-    meta.setAttribute("name", "robots");
-    meta.setAttribute("content", "noindex");
-    document.head.appendChild(meta);
-
-    // Plain HTML and no framework - the framework is what failed. The font is inherited from
-    // the page's own body rule, which is in the document, not in a separate file.
-    var host = document.getElementById("root") || document.body;
-    host.innerHTML =
-      '<div style="max-width:560px;margin:12vh auto;padding:0 24px;color:#1E293B">'
-      + '<h1 style="font-size:20px;line-height:1.35;margin:0 0 10px">Couldn\'t load the ' + app + '</h1>'
-      + '<p style="margin:0 0 16px;font-size:16px;line-height:1.5;color:#475569">Check your connection and reload the page.</p>'
-      + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">A file this page needs did not load ('
-      + missing.join(", ")
-      + '). This is usually a temporary network problem, so reloading should fix it.</p>'
-      + '<button type="button" id="ss-boot-reload" style="font:inherit;font-size:15px;padding:9px 18px;'
-      + 'border:0;border-radius:8px;background:#2563EB;color:#FFF;cursor:pointer">Reload</button>'
-      + '</div>';
-    var btn = document.getElementById("ss-boot-reload");
-    if (btn) btn.addEventListener("click", function () { location.reload(); });
-
-    // Report it. A distinct source AND code so these are trivially separable from real
-    // product bugs: source "boot", code "boot_deps_missing". The page's own ssLogError cannot
-    // be used - it lives in the babel block just neutralised, and even hoisted its
-    // SUPABASE_* consts never initialised. Duplicating the URL and anon key here is the same
-    // deliberate trade index.html already documents for its own logger: babel blocks share no
-    // top-level consts, and the anon key is browser-safe by design. log_error stamps the user
-    // agent server-side from the request headers, which is what tells a crawler apart from a
-    // real visitor. Now that the four files are same-origin, a row here means OUR deploy or
-    // routing is wrong, not that someone else's CDN is unreachable - treat it as urgent.
-    var KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
-    fetch("https://jzeamjbhdrsbygdnphbm.supabase.co/rest/v1/rpc/log_error", {
-      method: "POST",
-      keepalive: true,
-      headers: { "Content-Type": "application/json", "apikey": KEY, "Authorization": "Bearer " + KEY },
-      body: JSON.stringify({
-        p_source: "boot",
-        p_message: "boot aborted: vendored dependencies did not load (" + missing.join(", ") + ")",
-        p_code: "boot_deps_missing",
-        p_client_id: new URLSearchParams(location.search).get("client") || null,
-        p_url: location.href.slice(0, 600),
-        p_context: { app: app, missing: missing }
-      })
-    }).catch(function () {});
+    ssBootFail(missing, "boot_deps_missing");
   } catch (_e) {
     /* A guard that throws is worse than no guard. */
   }
