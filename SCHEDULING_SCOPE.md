@@ -19,6 +19,29 @@ blocked by tooling permissions — correctly; it's a money switch):
 2. The What's New entry (hand-authored INSERT into release_notes; drafted in the launch
    notes, NO pricing per CLAUDE.md) — publish together with switch 1.
 `price_visible` stays false on both plans (055 decision; presentation-only).
+
+## Post-launch refinements from beta testing (2026-08-04 → 08-05)
+
+The decisions below supersede parts of the original spec. Migrations 092–095.
+
+13. **Every non-repair build job appears in the delivery pool** — an inventory spec build is
+    hauled shop → sales lot, which is a delivery. Consequence: a unit rides TWO loads over
+    its life (spec haul, then the sale), so migration 092 dropped the one-stop-per-unit
+    index in favour of "one OPEN stop at a time"; the sale stop carries the buyer's design
+    code and drives the delivered write-back.
+14. **The card reads building-first** (migration 093): style+size headline → roof type →
+    color swatches (hexes snapshotted from the tenant's `colors` catalog) → customer, with
+    the serial and source pill kept. Repairs lead with the work, then the building. Applies
+    to the tray rows too.
+15. **Crews, not individuals, are the build scheduling unit** (094). Named `build_crews`
+    with a color; logins optional. The calendar flips per crew and a drop assigns that crew.
+16. **The Build Schedule calendar is the main view**: real dates, Sunday-first, week +
+    month, weekends on/off, **one build date per job** (dropping on a day is the
+    reschedule), and exactly ONE Unscheduled tray above the calendar — it holds undated
+    jobs *and* intake items, and dropping an intake item on a day creates it scheduled.
+17. **Drivers are name-first** (095): typed `display_name`, portal login optional, loads
+    reference the driver *profile*. Settings → Team shows drivers (and crews, and
+    territories) as one-liners that expand on Edit, matching Sales Locations.
 This is the planning doc for the "Schedule Builds and Delivery" feature (billing key
 `schedule_builds`, already defined in migration 052 at $250/mo, `availability='coming_soon'`)
 plus the full Repairs tab. Both `build-schedule` and `delivery-schedule` exist today as

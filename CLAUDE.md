@@ -87,13 +87,52 @@ The widget is **portal-only** (`portal.html`: `FeedbackForm`, `FeedbackWidget`, 
 ## Scheduling suite (Build Schedule · Delivery Schedule · Repairs)
 
 Shipped 2026-08-04 (all five phases; spec + decisions in `SCHEDULING_SCOPE.md` — read it
-before touching anything here). Tables: `schedule_stages`, `build_jobs`, `schedule_activity`,
+before touching anything here), then refined daily through Carolyn's beta testing —
+**migrations 087–095**, so anything below that reads like a Phase-1 description is the
+older shape. Tables: `schedule_stages`, `build_jobs`, `schedule_activity`,
 `delivery_territories`, `driver_profiles` (service-role only, like `commission_members`),
-`delivery_loads`, `delivery_stops`, `repairs` (+ private `repair-photos` bucket), and
-`designs.delivered_at` (migrations 087–091). One edge function owns every read/write:
+`delivery_loads`, `delivery_stops`, `repairs` (+ private `repair-photos` bucket),
+`build_crews`, and `designs.delivered_at`. One edge function owns every read/write:
 **`portal-schedule`** (resolveTenant; READ = any role, STAFF = move_job/add_note/
 mark_stop_delivered, everything else owner/admin). UI is portal-only: `BuildScheduleTab`,
 `RepairsTab`, `DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+
+Post-launch shape changes (092–095), each from real use:
+- **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
+  build, then lot → buyer once sold), so the per-unit unique index is gone; the guard is
+  now "at most one OPEN (undelivered) stop per unit", enforced in `add_stop`. The SALE stop
+  is the one carrying the buyer's `sold_design_short_code` — that is how the pool knows a
+  sale is scheduled and how the delivered write-back reaches the buyer's estimate.
+- **093** — `build_jobs` snapshots appearance (`roof_type`, `roof_color`, `body_color`,
+  `trim_color` + three `_hex` columns, resolved from the tenant's `colors` catalog at
+  creation). The card reads **building-first**: style+size headline → roof → color
+  swatches → customer. Carolyn's ordering, not negotiable without asking her.
+- **094** — `build_crews` (name, color, optional `member_user_ids`) + `build_jobs.crew_id`.
+  Crews are the build scheduling unit: the calendar flips between per-crew calendars and a
+  drop on one assigns that crew. Crews do NOT require logins — most shop crews never sign in.
+- **095** — drivers are **name-first**: `driver_profiles` gained its own `id` (new PK) and
+  `display_name`; `user_id` is nullable (one profile per login, partial unique index).
+  `delivery_loads.driver_id` → the profile, with `driver_user_id` kept for legacy rows and
+  for a driver's own field access. Resolve a load's driver by profile id first, then the
+  legacy user link.
+- **The Build Schedule calendar is the DEFAULT view** (Calendar | Board | Table). Real
+  dates, Sunday-first, week + month, a weekends on/off toggle (localStorage), and **ONE
+  build date per job** — `due_date` is canonical, `scheduled_start` kept equal for
+  compatibility; every cross-check (past due, delivery conflicts, pool) keys on `due_date`.
+  Dragging a card to a day IS the reschedule. There is exactly ONE Unscheduled tray, above
+  the calendar, holding both undated board jobs and not-yet-created intake items; dropping
+  an intake item on a day creates the job already scheduled.
+
+Two data-shape traps that cost real debugging time — do not re-learn them:
+- **Stored designs key on `style` / `size`** (plus `roofType` / `roofColor`, and
+  `paint_colors.{body,trim}`). `buildingStyle` / `buildingSize` exist ONLY in the
+  submit-estimate webhook payload, never in the `designs` row. Reading the webhook names
+  against a stored row returns undefined silently — that is why early build cards had no
+  building label and no dimensions, and it needed a backfill to repair.
+- **There is no `user_profiles` table.** Migration `060_user_profiles.sql` put the columns
+  on **`client_users`** (`full_name`, `phone`). A `from("user_profiles")` read fails soft
+  and returns nothing, so names render blank / as id fragments with no error anywhere —
+  exactly how drivers and team pickers shipped nameless.
 
 Rules that are easy to break and expensive to get wrong:
 1. **Automation keys on stage `kind` (`queue|active|done`), NEVER the stage name** — names
@@ -116,6 +155,15 @@ Rules that are easy to break and expensive to get wrong:
    (coming_soon → available) is a HUMAN-run data change — see SCHEDULING_SCOPE.md's launch
    switches.
 6. The "to be loaded" pool is a QUERY, not a table — don't invent an "unassigned stops" row.
+   It covers **every non-repair build job without a stop** (Carolyn 2026-08-04: "every
+   building that is in the build schedule should also show in the delivery schedule" — an
+   inventory spec build gets hauled to the lot, which is a delivery), plus sold units
+   needing their sale delivery, plus open repairs. Repairs appear once, via the repairs
+   section, so nothing is listed twice.
+7. **`deno check` is the ONLY type-check over `portal-schedule`** — and Deno is not
+   installed on Carolyn's machine, so the preflight step has been skipping (loudly) through
+   every scheduling change. It is Supabase's runtime, unrelated to Netlify/Cloudflare
+   hosting; don't delete the step on the theory that the hosting move retired it.
 
 ## What's New changelog — what must NEVER be published
 
