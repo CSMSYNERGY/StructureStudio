@@ -241,18 +241,8 @@ function run(files) {
         + "would escape its neutralise step");
     }
   }
-  // Compared with line endings NORMALISED, deliberately. `core.autocrlf = true` is set on
-  // this repo (see .gitattributes' header) and git applies it per file by its own text/binary
-  // heuristic: index.html and admin.html check out CRLF, portal.html — 800KB with very long
-  // lines — checks out LF. So on a Windows clone the three guard bodies are byte-identical in
-  // git and NOT byte-identical on disk, and a raw comparison fails on a tree nobody touched.
-  // It did: it blocked a push whose only change was a markdown file. The rule's intent is that
-  // the guard's CODE is the same on all three pages; whether a checkout gave one of them CRLF
-  // is not a fact about the code, and cannot be fixed by editing the files.
-  const guardCode = (g) => (g === null ? null : g.split(String.fromCharCode(13)).join(""));
   for (const f of ["portal.html", "admin.html"]) {
-    if (guards[f] !== null && guards["index.html"] !== null
-        && guardCode(guards[f]) !== guardCode(guards["index.html"])) {
+    if (guards[f] !== null && guards["index.html"] !== null && guards[f] !== guards["index.html"]) {
       errors.push(`${f}: the dependency boot guard body differs from index.html — the three copies `
         + "must stay byte-identical (only the data-ss-app label may differ)");
     }
