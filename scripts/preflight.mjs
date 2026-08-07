@@ -22,10 +22,23 @@
 //      compiled by whichever Babel that page loaded.
 //   3. Cache-buster lockstep: index.html and portal.html must reference the same
 //      structure-studio.component.js?v=… value.
-//   4. The dependency boot guard is present on all three pages and byte-identical across them. It
-//      is what turns a dependency that did not load into a message the visitor can act on instead
-//      of a permanently blank page; the three mount blocks are not twinned, so only this notices
-//      one page drifting.
+//   4. The dependency boot guard is present on all three pages, byte-identical across them,
+//      linted with the same correctness rules as the babel blocks (its body swallows every
+//      runtime error by design, so a typo inside is a silent no-op that byte-identity alone
+//      would wave through), and the LAST <script> in each body (hoisted above the vendor tags
+//      it would run before they load and replace every healthy page with the failure screen).
+//      It is what turns a dependency that did not load into a message the visitor can act on
+//      instead of a permanently blank page; the three mount blocks are not twinned, so only
+//      this notices one page drifting.
+//   4b. The one dependency that guard CANNOT see: structure-studio.component.js, which Babel
+//      fetches by XHR after the guard has already run. So index.html's mount block must check
+//      the module global BEFORE rendering it (rendering undefined throws React #130 onto a
+//      blank page — it reached Googlebot on 2026-08-06), the check must sit before that render,
+//      both host pages must still report `boot_component_missing`, and the guard must keep
+//      publishing the failure screen the check reuses. Plus portal.html's module src must stay
+//      ROOT-ABSOLUTE: relative, it resolves under /portal/, the splat answers with portal.html
+//      at HTTP 200, and Babel's throw on that HTML aborts every block — the one failure mode no
+//      in-page check can reach, so the gate is its only defence.
 //   5. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
 //      an edge function (qboFetch) — the client secret lives only there, and "we never call
 //      Intuit from the browser" is an answer we give Intuit in writing. Help links to
@@ -190,16 +203,42 @@ function run(files) {
   // Self-hosting the four libraries removed the CAUSE of both logged incidents, but not the class:
   // a routing rule, an incomplete deploy or a dropped connection can still lose a file, so the
   // guard stays. The per-page label lives on the tag attribute, outside the compared body.
-  const guardBody = (html) => {
-    const m = html.match(/<script data-ss-app="[^"]*">([\s\S]*?)<\/script>/);
-    return m ? m[1] : null;
-  };
-  const guards = Object.fromEntries(
-    ["index.html", "portal.html", "admin.html"].map((f) => [f, guardBody(files[f])]));
-  for (const [f, body] of Object.entries(guards)) {
-    if (body === null) {
+  //
+  // The tag regex tolerates attributes after the label ([^>]*) on purpose: adding a CSP nonce to
+  // the tag must not read as "guard is missing" — that message would send someone hunting for a
+  // guard that is right there, and the plausible fix for a phantom missing guard is deleting the
+  // rule that reports it.
+  const GUARD_TAG = /<script data-ss-app="[^"]*"[^>]*>([\s\S]*?)<\/script>/;
+  const guards = {};
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    const html = files[f];
+    const m = html.match(GUARD_TAG);
+    guards[f] = m ? m[1] : null;
+    if (!m) {
       errors.push(`${f}: the dependency boot guard (<script data-ss-app="…">) is missing — a `
         + "dependency that failed to load would leave the visitor a blank page again");
+      continue;
+    }
+    // The guard is the ONE script on these pages whose body deliberately swallows every error
+    // (a guard that throws is worse than no guard) — which also makes it the one place a typo
+    // is a SILENT no-op on all three pages at once, and the byte-identity rule below would pass
+    // three identically-broken copies without a murmur. So it gets the same correctness lint as
+    // every babel block, at push time instead of never.
+    errors.push(...lint(`${f} <boot guard>`, m[1],
+      html.slice(0, m.index).split("\n").length - 1 + 1));
+    // And its POSITION is load-bearing, not a style choice: byte-identical bytes hoisted into
+    // <head> run before the four vendor tags have loaded, see all four globals missing, and
+    // replace EVERY healthy page with the failure screen — the catastrophic false positive —
+    // while passing the byte-identity rule below. The guard's own comment explains why it must
+    // be plain JS at the end of the body; this asserts the "end of the body" half. Checked as
+    // "no <script after the guard's closing tag", NOT lastIndexOf over the whole page — the
+    // guard's own comment says "<script>" in prose, which a whole-page scan mistakes for a tag
+    // (the nonce self-test caught exactly that on this rule's first draft).
+    if (/<script\b/i.test(html.slice(m.index + m[0].length))) {
+      errors.push(`${f}: the dependency boot guard is not the LAST <script> in the body — earlier `
+        + "than that (e.g. hoisted into <head>) it runs before the vendor tags load, sees all four "
+        + "globals missing, and replaces a healthy page with the failure screen; later scripts "
+        + "would escape its neutralise step");
     }
   }
   for (const f of ["portal.html", "admin.html"]) {
@@ -207,6 +246,137 @@ function run(files) {
       errors.push(`${f}: the dependency boot guard body differs from index.html — the three copies `
         + "must stay byte-identical (only the data-ss-app label may differ)");
     }
+  }
+
+  // ── The one dependency the boot guard CANNOT see ──────────────────────────────────────────
+  // structure-studio.component.js is a src'd text/babel file, so Babel fetches it by XHR AFTER
+  // the guard has already run and returned. When it does not load, all four library globals are
+  // present, the guard stays correctly silent, and index.html's mount block holds `undefined` —
+  // which it then renders, throwing React error #130 onto a permanently blank page. That is not
+  // hypothetical: it reached GOOGLEBOT crawling a tenant's shopfront on 2026-08-06 (app_errors
+  // 96ce38ff). Vendoring did not touch this path — the module was always same-origin.
+  //
+  // So the check has to live in the mount block (only it runs late enough to see the module) and
+  // therefore cannot be covered by the guard's byte-identity rule. Three things are asserted:
+  // the check EXISTS, it sits BEFORE the render it protects, and both host pages still report the
+  // cause. Note the two pages get deliberately DIFFERENT treatment and byte-identity would be the
+  // wrong rule: on index.html the module is the whole page, while the portal only loses its
+  // Designer tab and must NOT be blanked over it (verified: the portal renders its normal 3,261
+  // chars with the module absent).
+  const BOOT_COMPONENT_CODE = "boot_component_missing";
+  if (guards["index.html"] !== null && !/window\.ssBootFail\s*=/.test(guards["index.html"])) {
+    errors.push("index.html: the boot guard no longer publishes ssBootFail — the mount blocks call "
+      + "it to show the same failure screen when the shared component module is the thing that did "
+      + "not load, so without it that path throws instead of reporting");
+  }
+  // Order, not just presence. After the render the throw has already happened, so a check that
+  // moved below it would pass a presence-only rule while restoring the exact blank page.
+  const iCheck = files["index.html"].search(/if\s*\(\s*!\s*StructureStudio\s*\)/);
+  const iRender = files["index.html"].search(/root\.render\(\s*<StructureStudio\s*\/>\s*\)/);
+  const iShows = files["index.html"].replace(GUARD_TAG, "").search(/ssBootFail\s*\(/);
+  if (iCheck < 0) {
+    errors.push("index.html: the mount block renders the shared module's component without first "
+      + "checking that it loaded (`if (!StructureStudio)`) — if the module did not load this "
+      + "renders undefined, throws React error #130, and leaves the visitor a blank page "
+      + "(happened 2026-08-06, to Googlebot)");
+  } else if (iRender < 0) {
+    // The anchor going blind is this file's signature failure: a rule whose regex stops matching
+    // reports clean forever and nobody finds out. If the render is respelled, the ORDER half of
+    // this rule silently stops existing, so say so instead of quietly degrading to presence-only.
+    errors.push("index.html: the shared-module check is present but `root.render(<StructureStudio/>)` "
+      + "no longer matches, so the check-before-render half of this rule can no longer be verified — "
+      + "re-anchor it in scripts/preflight.mjs rather than leaving it silently inert");
+  } else if (iCheck > iRender) {
+    errors.push("index.html: the shared-module check sits AFTER root.render(<StructureStudio/>) — "
+      + "by then the #130 throw has already happened, so the check protects nothing");
+  }
+  // Reporting is not enough on index.html: there the module IS the page, so the visitor must get
+  // the failure SCREEN, not just a row in our table. Without this, downgrading index.html to
+  // portal.html's deliberate report-only treatment would pass every other rule here while handing
+  // the visitor back the blank page this whole change exists to remove.
+  if (iShows < 0) {
+    errors.push("index.html: nothing outside the boot guard calls ssBootFail() — the check must SHOW "
+      + "the failure screen here, not merely report; on this page the shared module is the entire "
+      + "page, so report-only leaves the visitor the same blank page as before");
+  }
+  for (const f of ["index.html", "portal.html"]) {
+    // Searched with the guard body REMOVED, which is the difference between a real rule and a
+    // vacuous one: the guard names this code itself (in the ternary that picks the report
+    // wording) and the guard is on all three pages, so a whole-file search would be satisfied
+    // by the guard alone and pass a page that reports nothing. The --self-test caught exactly
+    // that on this rule's first draft.
+    if (!files[f].replace(GUARD_TAG, "").includes(BOOT_COMPONENT_CODE)) {
+      errors.push(`${f}: nothing outside the boot guard reports "${BOOT_COMPONENT_CODE}" — this page `
+        + "hosts the shared component module, and a module that stops being served must not fail "
+        + "silently (index.html shows the boot guard's screen; portal.html degrades to its Designer "
+        + "tab message, which is invisible to us unless it reports)");
+    }
+  }
+
+  // portal.html's module tag must stay ROOT-ABSOLUTE, and this rule is the only thing that can
+  // protect the ONE failure mode no in-page check can reach. If the module URL resolves to
+  // something under /portal/ that is not a real asset, the `/portal/*` splat in _redirects returns
+  // portal.html itself with HTTP 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
+  // SyntaxError inside its own runner, and that throw ABORTS THE WHOLE QUEUE: the mount block
+  // never executes, so the page is blank AND completely unlogged, because the error reporter lives
+  // in the block that never ran. A check inside the mount block cannot help, by construction.
+  // That is not theoretical — it shipped, from exactly this cause: at /portal/settings/colors a
+  // relative src asked for /portal/settings/structure-studio.component.js and blanked the entire
+  // portal (see the comment above the tag). The src was made root-absolute to fix it, and NOTHING
+  // was enforcing that it stays so: the cache-buster regex below matches the relative and
+  // root-absolute forms identically, so a regression would pass the gate silently. A missing
+  // root-level file, by contrast, 404s cleanly on every host (`not_found_handling: "404-page"`)
+  // and the mount block's check handles it. index.html is deliberately exempt — it is only ever
+  // served from the root, which is documented at its own tag.
+  // Script ORDERING on these pages is load-bearing in two different ways, and both are now asserted
+  // rather than left to habit. Neither is hypothetical — both were reproduced in a browser against
+  // these exact files.
+  //
+  // (1) The shared-module tag must not be async/defer. Babel's runner only holds later blocks back
+  // while an earlier non-async src'd block is PENDING; `async` drops that barrier, so the mount
+  // block runs before the module has defined anything. Note what this is and is not: it does NOT
+  // make the new loaded-check lie about a working page — with async the page is broken either way,
+  // because the module contains no mount of its own (mounting is the host page's job), so a
+  // late-arriving module just declares a function nobody calls. Verified: pre-change + async is a
+  // blank page, post-change + async is the failure screen. The rule earns its place by refusing a
+  // config that silently breaks the page, not by protecting the check.
+  for (const f of ["index.html", "portal.html"]) {
+    const tag = files[f].match(/<script[^>]*structure-studio\.component\.js[^>]*>/);
+    if (tag && /\s(?:async|defer)\b/.test(tag[0])) {
+      errors.push(`${f}: the shared-module tag carries async/defer — that drops Babel's ordering `
+        + "barrier, so the mount block runs before the module defines StructureStudio. The module "
+        + "does not mount itself, so one arriving late cannot recover the page: it is a blank page "
+        + "before this check existed and the boot failure screen after. Load it synchronously");
+    }
+  }
+  // (2) The four /vendor/ tags must not be async/defer either — and THIS one is the real
+  // catastrophic false positive, the older hazard, and the one nothing was enforcing. The guard
+  // works only because those tags block parsing, so all four have resolved by the time it runs (its
+  // own comment says exactly that). Reproduced with `defer` on /vendor/react: React loaded fine and
+  // was present on the finished page, but the guard had already run, found it missing, and replaced
+  // a page that WOULD have worked with a screen reading "did not load (react)" — on all three pages
+  // at once, for every visitor. This was hand-checked when the guard shipped and then trusted to
+  // habit; habit is not a gate.
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    for (const tag of files[f].matchAll(/<script[^>]*src="\/vendor\/[^>]*>/g)) {
+      if (/\s(?:async|defer)\b/.test(tag[0])) {
+        errors.push(`${f}: a /vendor/ library tag carries async/defer (${tag[0].slice(0, 80)}…) — the `
+          + "boot guard runs during parsing and depends on all four having resolved by then, which "
+          + "is only true while they block parsing. Deferred, the library still loads and the page "
+          + "would have WORKED, but the guard fires first and shows every visitor the failure screen");
+      }
+    }
+  }
+  const portalModule = files["portal.html"].match(/<script src="([^"]*structure-studio\.component\.js[^"]*)"/);
+  if (!portalModule) {
+    errors.push("portal.html: no structure-studio.component.js tag — the in-portal Designer tab "
+      + "mounts the shared module and cannot work without it");
+  } else if (!portalModule[1].startsWith("/")) {
+    errors.push(`portal.html: the shared-module src "${portalModule[1]}" is not root-absolute — this `
+      + "page is served at /portal/<page>/<sub> too, where a relative src resolves against the URL "
+      + "depth and the /portal/* splat answers with portal.html at HTTP 200; Babel then throws on "
+      + "\"<!DOCTYPE html>\" and aborts every text/babel block, blanking the WHOLE portal with no "
+      + "error reported anywhere (this exact bug shipped once). Use /structure-studio.component.js");
   }
 
   // Intuit API/OAuth hosts must never appear in a browser-served file. Every QuickBooks call
@@ -471,7 +641,7 @@ if (process.argv.includes("--self-test")) {
   // exists precisely because nothing else notices a page losing its guard. Prove both failure
   // modes fire: a page with the guard deleted, and a page whose copy has drifted by one byte.
   const guardGone = load();
-  guardGone["admin.html"] = guardGone["admin.html"].replace(/<script data-ss-app="[^"]*">[\s\S]*?<\/script>/, "");
+  guardGone["admin.html"] = guardGone["admin.html"].replace(/<script data-ss-app="[^"]*"[^>]*>[\s\S]*?<\/script>/, "");
   if (!run(guardGone).some((e) => e.includes("boot guard") && e.includes("missing"))) {
     console.error("self-test FAILED: a missing dependency boot guard in admin.html was not caught");
     process.exit(1);
@@ -488,6 +658,175 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the dependency boot guard must be present on all three pages and identical");
+
+  // The guard LINT. Fire direction: a typo inside the guard's try/catch is a silent no-op at
+  // runtime on all three pages at once, so prove no-undef reaches inside it. The typo goes into
+  // ALL THREE copies identically, so byte-identity stays quiet and the failure is attributable
+  // to the lint alone.
+  const guardTypo = load();
+  const typoFrom = "var missing = [];";
+  if (!guardTypo["index.html"].includes(typoFrom)) {
+    console.error("self-test: boot-guard lint fixture line not found in index.html — update the self-test");
+    process.exit(1);
+  }
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    guardTypo[f] = guardTypo[f].replace(typoFrom, "var missing = misssingList;");
+  }
+  if (!run(guardTypo).some((e) => e.includes("<boot guard>") && e.includes("no-undef"))) {
+    console.error("self-test FAILED: an undefined identifier inside the boot guard was not caught — "
+      + "the guard's own try/catch makes that a silent no-op on every page in production");
+    process.exit(1);
+  }
+  // Quiet direction: the real guard is plain pre-library JS and must lint CLEAN under the page
+  // config — a rule that flags the healthy guard gets deleted by the next person it annoys.
+  const guardLintNoise = run(load()).filter((e) => e.includes("<boot guard>"));
+  if (guardLintNoise.length) {
+    console.error("self-test FAILED: the pristine boot guard does not lint clean:");
+    for (const e of guardLintNoise) console.error("  " + e);
+    process.exit(1);
+  }
+  console.log("self-test passed: a typo inside the boot guard is caught by the lint, and the real guard lints clean");
+
+  // The guard POSITION, both failure directions. Hoisted ahead of the vendor tags, byte-identical
+  // bytes run before the libraries load, see all four globals missing, and replace EVERY healthy
+  // page with the failure screen — while the missing/byte-identity rules pass. And a script added
+  // AFTER the guard escapes its neutralise step. Both must land on the position error.
+  const guardHoisted = load();
+  const hoistMatch = guardHoisted["admin.html"].match(/<script data-ss-app="[^"]*"[^>]*>[\s\S]*?<\/script>/);
+  if (!hoistMatch) {
+    console.error("self-test: no boot guard found in admin.html to hoist — update the self-test");
+    process.exit(1);
+  }
+  const firstTag = guardHoisted["admin.html"].indexOf("<script");
+  guardHoisted["admin.html"] = guardHoisted["admin.html"].replace(hoistMatch[0], "");
+  guardHoisted["admin.html"] = guardHoisted["admin.html"].slice(0, firstTag) + hoistMatch[0]
+    + guardHoisted["admin.html"].slice(firstTag);
+  if (!run(guardHoisted).some((e) => e.includes("admin.html") && e.includes("not the LAST <script>"))) {
+    console.error("self-test FAILED: the boot guard hoisted above the vendor tags in admin.html was "
+      + "not caught — it would fire on every healthy page load");
+    process.exit(1);
+  }
+  const guardTrailing = load();
+  guardTrailing["portal.html"] = guardTrailing["portal.html"].replace("</body>",
+    "<script>/* added after the guard */</script></body>");
+  if (!run(guardTrailing).some((e) => e.includes("portal.html") && e.includes("not the LAST <script>"))) {
+    console.error("self-test FAILED: a script added after the boot guard in portal.html was not caught");
+    process.exit(1);
+  }
+  console.log("self-test passed: the boot guard must be the last script in the body — hoisting it and trailing it are both caught");
+
+  // A CSP nonce (or any future attribute) on the guard TAG must not read as "guard is missing" —
+  // the body is unchanged, so every guard rule must stay quiet. This is the false-positive
+  // direction of the tag regex, same reasoning as the Intuit help link and exceljs cases.
+  const guardNonce = load();
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    guardNonce[f] = guardNonce[f].replace(/<script data-ss-app="([^"]*)">/, '<script data-ss-app="$1" nonce="c3lfdGVzdA">');
+    if (!guardNonce[f].includes('nonce="c3lfdGVzdA"')) {
+      console.error(`self-test: could not add a nonce to the boot guard tag in ${f} — update the self-test`);
+      process.exit(1);
+    }
+  }
+  const nonceNoise = run(guardNonce).filter((e) => e.includes("boot guard"));
+  if (nonceNoise.length) {
+    console.error("self-test FAILED: a CSP nonce on the boot guard tag tripped the guard rules:");
+    for (const e of nonceNoise) console.error("  " + e);
+    process.exit(1);
+  }
+  console.log("self-test passed: a CSP nonce on the boot guard tag does not read as a missing guard");
+
+  // ── The shared-module check (the dependency the guard cannot see) ───────────
+  // This rule exists because the failure it prevents ALREADY SHIPPED and was crawled by
+  // Googlebot (React #130 on a blank designer, app_errors 96ce38ff). Prove all four directions.
+  const compCheckGone = load();
+  compCheckGone["index.html"] = compCheckGone["index.html"].replace(/if \(!StructureStudio\) \{/, "if (false) {");
+  if (!run(compCheckGone).some((e) => e.includes("without first checking that it loaded"))) {
+    console.error("self-test FAILED: index.html rendering the shared module with no loaded-check was "
+      + "not caught — that is the exact #130 blank page that reached Googlebot");
+    process.exit(1);
+  }
+  // Order matters as much as presence: a check that survives but moves below the render is the
+  // same blank page with a rule that still passes.
+  const compCheckAfter = load();
+  const renderLine = "  root.render(<StructureStudio/>);";
+  if (!compCheckAfter["index.html"].includes(renderLine)) {
+    console.error("self-test: render fixture line not found in index.html — update the self-test");
+    process.exit(1);
+  }
+  compCheckAfter["index.html"] = compCheckAfter["index.html"].replace(renderLine, "")
+    .replace("if (!StructureStudio) {", renderLine + "\nif (!StructureStudio) {");
+  if (!run(compCheckAfter).some((e) => e.includes("sits AFTER root.render"))) {
+    console.error("self-test FAILED: a shared-module check moved below the render was not caught");
+    process.exit(1);
+  }
+  const bootFailUnpublished = load();
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    bootFailUnpublished[f] = bootFailUnpublished[f].replace("window.ssBootFail = ssBootFail;", "");
+  }
+  if (!run(bootFailUnpublished).some((e) => e.includes("no longer publishes ssBootFail"))) {
+    console.error("self-test FAILED: a boot guard that stopped publishing ssBootFail was not caught — "
+      + "the mount blocks' module-missing path would throw instead of showing the message");
+    process.exit(1);
+  }
+  // The FIRST occurrence in the file is the page's own reporter (the mount block precedes the
+  // guard), so this removes the report while leaving the guard — and therefore the guard's own
+  // mention of the same string — intact. That is the case the first draft of the rule missed.
+  const compReportGone = load();
+  compReportGone["portal.html"] = compReportGone["portal.html"].replace("boot_component_missing", "some_other_code");
+  if (!run(compReportGone).some((e) => e.includes("boot_component_missing") && e.includes("portal.html"))) {
+    console.error("self-test FAILED: portal.html no longer reporting a missing shared module was not "
+      + "caught — its Designer tab would degrade silently");
+    process.exit(1);
+  }
+  console.log("self-test passed: the shared-module check must exist, precede the render, keep its "
+    + "reporter, and keep the guard's published failure screen");
+
+  // The root-absolute module src on portal.html. This one guards the failure mode that CANNOT be
+  // checked in-page (Babel aborts every block, so the reporter never runs) — the gate is the only
+  // available defence, and until now nothing enforced it.
+  const portalRelSrc = load();
+  portalRelSrc["portal.html"] = portalRelSrc["portal.html"].replace(
+    '<script src="/structure-studio.component.js', '<script src="structure-studio.component.js');
+  if (portalRelSrc["portal.html"] === load()["portal.html"]) {
+    console.error("self-test: portal.html's root-absolute module tag not found — update the self-test");
+    process.exit(1);
+  }
+  if (!run(portalRelSrc).some((e) => e.includes("not root-absolute"))) {
+    console.error("self-test FAILED: portal.html's shared-module src regressing to a relative path was "
+      + "not caught — at /portal/<page>/<sub> that returns portal.html at 200, which blanks the whole "
+      + "portal with zero telemetry (it shipped once)");
+    process.exit(1);
+  }
+  console.log("self-test passed: portal.html's shared-module src must stay root-absolute");
+
+  // async/defer, on both the module tag and the four library tags. The second is the one that
+  // blanks a page which would otherwise have worked, so prove both fire.
+  const moduleAsync = load();
+  moduleAsync["index.html"] = moduleAsync["index.html"].replace(
+    'src="structure-studio.component.js?v=', 'async src="structure-studio.component.js?v=');
+  if (moduleAsync["index.html"] === load()["index.html"]) {
+    console.error("self-test: index.html's module tag not found — update the self-test");
+    process.exit(1);
+  }
+  if (!run(moduleAsync).some((e) => e.includes("shared-module tag carries async/defer"))) {
+    console.error("self-test FAILED: async on the shared-module tag was not caught — the mount block "
+      + "would run before the module defines anything, and the module cannot recover the page");
+    process.exit(1);
+  }
+  const libDefer = load();
+  libDefer["portal.html"] = libDefer["portal.html"].replace(
+    '<script src="/vendor/react-18.2.0', '<script defer src="/vendor/react-18.2.0');
+  if (libDefer["portal.html"] === load()["portal.html"]) {
+    console.error("self-test: portal.html's /vendor/react tag not found — update the self-test");
+    process.exit(1);
+  }
+  if (!run(libDefer).some((e) => e.includes("library tag carries async/defer"))) {
+    console.error("self-test FAILED: defer on a /vendor/ library tag was not caught — the library "
+      + "still loads and the page would have worked, but the guard runs first and replaces it with "
+      + "the failure screen for every visitor (reproduced in a browser with defer on react)");
+    process.exit(1);
+  }
+  console.log("self-test passed: neither the shared-module tag nor the /vendor/ library tags may "
+    + "carry async/defer");
 
   // ── The vendored-dependency lock ────────────────────────────────────────────
   // This rule REPLACED one that had become vacuous, so proving it actually fires is the whole

@@ -1373,7 +1373,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
       if (error) return json({ error: error.message }, 500);
-      if (!count) return json({ error: "Item not found." }, 404);
+      // Name the three ways this can match nothing, because "Item not found." sent a builder
+      // round in circles on 2026-08-05: the row can be gone, or belong to another builder,
+      // or — the one nobody guesses — be filed under a different category than the tab it is
+      // being saved from, since the update is scoped by category too.
+      if (!count) {
+        return json({ error: `That ${category} is no longer in ${clientId}'s catalog — it may have been deleted, or it is saved under a different category. Reload the page and try again.` }, 404);
+      }
       return json({ ok: true, id });
     }
     const { data: maxRow } = await admin.from("fixture_items").select("sort_order")
@@ -1391,11 +1397,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // own snapshot.
   if (action === "delete_fixture") {
     const id = String(payload?.id ?? "").trim();
-    if (!id) return json({ error: "id is required." }, 400);
+    // A row the page never managed to save has no id, and the old wording ("id is required")
+    // read as a bug in the app rather than as "this line was never saved".
+    if (!id) return json({ error: "That line was never saved, so there is nothing to delete — reload the page to clear it." }, 400);
     const { error, count } = await admin.from("fixture_items").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
     if (error) return json({ error: error.message }, 500);
-    if (!count) return json({ error: "Item not found." }, 404);
+    // Already gone is the common case and is harmless — say so rather than implying failure.
+    if (!count) return json({ error: `That item is not in ${clientId}'s catalog any more — it was probably already deleted. Reload the page.` }, 404);
     return json({ ok: true });
   }
 
@@ -2064,21 +2073,49 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   }
 
   if (action === "list_item_map") {
-    const [maps, styles, items] = await Promise.all([
+    const [maps, styles, items, types] = await Promise.all([
       admin.from("qbo_item_map")
         .select("id, line_kind, item_key, style_id, qbo_item_id, qbo_item_name")
         .eq("client_id", clientId),
       admin.from("building_styles")
         .select("id, label, active").eq("client_id", clientId).eq("active", true),
+      // label_override, NOT label: this table has no `label` column (it overrides the
+      // designer's built-in name), and PostgREST answers a bad column with a 400 rather
+      // than omitting it — so the old `label` select returned error + null data, the
+      // `?? []` below turned that into an empty list, and the grid rendered "No active
+      // layout items" for EVERY tenant. Layout items were therefore unmappable in the UI,
+      // sending every layout_item line (built-in doors/windows/ramps, lofts, workbenches,
+      // rough openings) to the tenant's `fallback` item instead. Sort so the grid order is
+      // stable rather than whatever Postgres returns.
       admin.from("client_layout_items")
-        .select("item_key, label, active").eq("client_id", clientId).eq("active", true),
+        .select("item_key, label_override, active, sort_order")
+        .eq("client_id", clientId).eq("active", true)
+        .order("sort_order", { ascending: true }).order("item_key", { ascending: true }),
+      // The designer's built-in names, so the grid reads "Rough Opening" rather than the raw
+      // `roughOpening` key. Same three-step fallback the `catalog` action above already uses.
+      admin.from("layout_item_types").select("item_key, label"),
     ]);
     if (maps.error) return json({ error: maps.error.message }, 500);
+    // Checked, not `?? []`-swallowed: an empty layoutItems list is indistinguishable from a
+    // tenant with none, which is exactly how the bug above stayed invisible. Same for styles —
+    // a silent empty there hides every per-style building override.
+    if (styles.error) return json({ error: styles.error.message }, 500);
+    if (items.error) return json({ error: items.error.message }, 500);
+    // types is presentation-only: a failure here costs nicer labels, not correctness, so it
+    // degrades to the item_key instead of failing the whole grid.
+    const labelByKey: Record<string, string> = {};
+    (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     return json({
       clientId,
       mappings: maps.data ?? [],
       styles: styles.data ?? [],
-      layoutItems: items.data ?? [],
+      layoutItems: (items.data ?? []).map((li: any) => ({
+        item_key: li.item_key,
+        // Passed through as `label` to keep portal.html's `li.label || li.item_key` contract
+        // unchanged; tenant override wins, then the built-in name, then the bare key.
+        label: li.label_override || labelByKey[li.item_key] || null,
+        active: li.active,
+      })),
     });
   }
 
