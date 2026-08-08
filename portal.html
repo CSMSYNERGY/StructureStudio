@@ -4107,19 +4107,21 @@ Anything not shown here will be removed from their account.`)) return;
         ) : (
           <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
             <colgroup>
-              {/* Widths sum to 100 in each branch. The Custom column added 2026-08-07 came
-                  out of the name and pricing columns, which had the most slack. */}
+              {/* Widths sum to 100 in each branch. The Custom column added 2026-08-07 came out
+                  of the name column, which holds a flexible text input and had the slack —
+                  measured in the real ~693px panel, the checkbox headers need ~55px ("DEFAULT"
+                  is the longest at 54px) and clip below that, so those three stay at 8%. */}
               {showST ? (
                 <>
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} />
                   <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} /><col style={{ width: "10%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} />
                 </>
               ) : (
                 <>
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "24%" }} />
-                  <col style={{ width: "19%" }} /><col style={{ width: "12%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "21%" }} />
+                  <col style={{ width: "17%" }} /><col style={{ width: "12%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "6%" }} />
                 </>
               )}
             </colgroup>
