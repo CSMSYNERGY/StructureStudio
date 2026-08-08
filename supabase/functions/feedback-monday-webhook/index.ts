@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 
 // Monday → Supabase sync for portal feedback (the return leg of portal-feedback).
 //
@@ -25,6 +25,15 @@ import { withErrorLog } from "../_shared/logError.ts";
 // supabase/functions/portal-feedback/index.ts. Change both.
 const BUG_BOARD = "18419456589";
 const FEATURE_BOARD = "18420525473";
+// Every spelling Monday has used for "a column value changed". `update_column_value` is
+// what it actually sends today for a change_column_value subscription; the others are kept
+// so a future rename cannot re-break this the same way.
+const COLUMN_EVENT_TYPES = new Set([
+  "update_column_value",        // what Monday sends TODAY (verified against their docs)
+  "change_column_value",        // the subscription name
+  "change_status_column_value", // status-specific subscription name
+  "update_column_values",       // plural, seen on batch updates
+]);
 const BUG_STATUS_COL = "bug_status";
 const FEATURE_STATUS_COL = "color_mm502bcj";
 
@@ -290,7 +299,14 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
   const type = ev.type;
 
   // ── Status change ─────────────────────────────────────────────────────────
-  if (type === "change_column_value" || type === "change_status_column_value") {
+  // ⚠️ THE SUBSCRIPTION NAME IS NOT THE PAYLOAD TYPE. We subscribe to
+  // `change_column_value`, and Monday delivers `type: "update_column_value"` — documented
+  // in their webhook reference, and the reason every status change was silently dropped
+  // between 2026-07-27 and 2026-08-08 while comments kept flowing (`create_update` DOES
+  // match its subscription name, so the two halves of the sync behaved differently and it
+  // looked like a status-mapping problem rather than a routing one). Match on all the
+  // spellings; an unmatched type now records an app_errors row instead of a silent 200.
+  if (COLUMN_EVENT_TYPES.has(String(type))) {
     const boardId = String(ev.boardId ?? "");
     const expectedCol = boardId === FEATURE_BOARD ? FEATURE_STATUS_COL
       : boardId === BUG_BOARD ? BUG_STATUS_COL : null;
@@ -335,5 +351,16 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
     return json({ ok: true, comment: updateId });
   }
 
+  // Reached only for an event type we do not handle on an item the portal DID create.
+  // Deliberately still a 200 — a non-2xx makes Monday retry, and eventually disable, a
+  // webhook that is working as intended. But it is recorded, because the last time this
+  // branch swallowed something it swallowed every status change for twelve days and
+  // nothing anywhere showed it. Type only: no payload, no customer data.
+  await logEdgeError({
+    fn: "feedback-monday-webhook",
+    message: `unhandled Monday event type "${String(type)}" on a portal-sourced item — if this is a status change, add it to COLUMN_EVENT_TYPES`,
+    code: "unhandled_event_type",
+    req,
+  });
   return json({ ok: true, ignored: "event:" + type });
 }, { minStatus: 400 }));
