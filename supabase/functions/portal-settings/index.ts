@@ -53,11 +53,11 @@ const GATES: GateTable = {
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   save_ramp_settings:             { area: "settings_options", level: "edit" },
-  // Legacy full-replace writers. The portal no longer calls these, but they are live
-  // endpoints and a live endpoint needs a gate whether or not anything drives it.
-  save_doors:   { area: "settings_options", level: "edit" },
-  save_ramps:   { area: "settings_options", level: "edit" },
-  save_windows: { area: "settings_options", level: "edit" },
+  // (save_doors / save_ramps / save_windows were here until 2026-08-07. They were legacy
+  // full-replace writers with no caller anywhere, each of which DELETED every fixture_items
+  // row of its category absent from the payload — so the endpoints, and these gates with
+  // them, were removed rather than left gated. Deleting a live endpoint means deleting its
+  // gate: the preflight cross-checks this table against the branches below.)
 
   // ── Branding, business details, lots ─────────────────────────────────────
   // `save` writes CRM credentials AND business identity/quote terms in one call, so it
@@ -142,6 +142,15 @@ function maskId(v: string | null): string | null {
   if (!v) return null;
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
 }
+
+// Upper bound on any caller-supplied bulk array. Not a business limit — it is far above
+// the largest real catalog (the biggest tenant runs ~424 sizes) — but these actions loop
+// per element issuing DB round trips, and several DELETE whatever is absent from the list,
+// so an unbounded array is both a long-running request and a large blast radius. Only
+// import_fixtures (500) had a cap before; the rest took whatever arrived.
+const MAX_BULK_ROWS = 2000;
+const tooMany = (arr: unknown[], what: string): string | null =>
+  arr.length > MAX_BULK_ROWS ? `Too many ${what} in one request (${arr.length}; limit ${MAX_BULK_ROWS}). Split it into smaller batches.` : null;
 
 // Deliberately permissive — an "obviously not an address" check, not an RFC 5322 parser.
 // Kept byte-identical to submit-estimate's copy on purpose: this one refuses to STORE a
@@ -621,6 +630,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // never from the body, so an owner can only ever import into their own tenant.
   if (action === "import_pricing_csv") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     try {
       const r = await importPricingRows(admin, clientId, payload.rows);
       return json({ ok: true, ...r });
@@ -634,6 +644,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // inferred by the upsert API. clientId is JWT-resolved, never trusted from the body.
   if (action === "save_layout_pricing") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
     if (itemsRes.error) return json({ error: itemsRes.error.message }, 500);
@@ -891,13 +902,6 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, url: pub.publicUrl });
   }
 
-  // Permanently delete one of this tenant's styles. The FK cascade removes the style's
-  // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
-  // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
-  // Irreversible — prefer set_style_active(false) to merely hide a style. Scoped to clientId
-  // so an owner can only delete their own styles. Past designs that used this style keep their
-  // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
-  // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
   // ── Delete one design, its version history, and its PDFs ────────────────────
   // Carolyn, 2026-06-24: deletions had to be done directly in Supabase. This is that control.
   //
@@ -1107,6 +1111,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     });
   }
 
+  // Permanently delete one of this tenant's styles. The FK cascade removes the style's
+  // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
+  // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
+  // Irreversible — prefer set_style_active(false) to merely hide a style. Scoped to clientId
+  // so an owner can only delete their own styles. Past designs that used this style keep their
+  // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
+  // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
+  // (This comment sat above delete_design until 2026-08-07 — a truncated edit had stranded
+  // it ~200 lines from the action it describes, which had none of its own.)
   if (action === "delete_style") {
     const styleId = String(payload.styleId ?? "").trim();
     if (!styleId) return json({ error: "styleId is required." }, 400);
@@ -1160,6 +1173,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // by (so the first id becomes the first style shown on the design page). Scoped to clientId.
   if (action === "reorder_styles") {
     if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    { const e = tooMany(payload.orderedIds, "items to reorder"); if (e) return json({ error: e }, 400); }
     let i = 0;
     for (const styleId of payload.orderedIds) {
       const sid = String(styleId ?? "").trim();
@@ -1180,6 +1194,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // never a price); rate/pricing_method are persisted here for a later paint-pricing pass.
   if (action === "save_colors") {
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
+    { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
     if (exRes.error) return json({ error: exRes.error.message }, 500);
@@ -1232,176 +1247,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, saved, deleted, skipped });
   }
 
-  // LEGACY (2026-08-03): the portal's catalog editors moved to per-line saves (save_fixture /
-  // delete_fixture below) and spreadsheet upsert (import_fixtures) — nothing in the current
-  // portal calls save_doors/save_ramps/save_windows anymore. Kept only so an older cached
-  // portal.html can still save; do not extend these.
-  //
-  // Full-replace this tenant's DOORS (Options tab → Doors section, fixture_items). Takes the
-  // COMPLETE desired door list: rows with an id update, rows without insert, and any existing
-  // door absent from the list is deleted. Scoped to category='door' so windows/ramps (same
-  // table, later) are never touched. clientId is JWT-resolved (own tenant only). A swing/op
-  // "default" is only persisted when BOTH opposite options are allowed (else null), matching
-  // the editor. Mirrors save_colors.
-  if (action === "save_doors") {
-    if (!Array.isArray(payload.doors)) return json({ error: "doors[] required" }, 400);
-    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "door");
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
-    const keptIds = new Set<string>();
-    // "" → null (blank), otherwise a finite number, else NaN (invalid → skipped).
-    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
-    let saved = 0; const skipped: string[] = [];
-    let i = 0;
-    for (const row of payload.doors) {
-      const name = String(row?.name ?? "").trim();
-      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
-      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
-      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
-      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid height`); i++; continue; }
-      const price = numOrNull(row?.price);           // null = not-yet-priced (hidden by NULL-price contract)
-      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
-      const swingIn = row?.swingIn === true, swingOut = row?.swingOut === true;
-      const opRight = row?.opRight === true, opLeft = row?.opLeft === true;
-      const opDouble = row?.opDouble === true, opSlideUp = row?.opSlideUp === true;
-      const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
-      const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
-      const rec: Record<string, unknown> = {
-        client_id: clientId, category: "door", name,
-        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-        show_image_on_estimate: row?.showImageOnEstimate !== false,
-        width_in: w, height_in: h, price,
-        swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
-        op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
-        active: row?.active !== false,
-        archived: row?.archived === true,
-        internal_only: row?.internalOnly === true,
-        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
-        updated_at: new Date().toISOString(),
-      };
-      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
-        : await admin.from("fixture_items").insert(rec);
-      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
-      saved++; i++;
-    }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
-    let deleted = 0;
-    if (toDelete.length) {
-      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
-      deleted = toDelete.length;
-    }
-    return json({ ok: true, saved, deleted, skipped });
-  }
-
-  // Full-replace this tenant's RAMP styles (Options → Ramps, custom mode). Same shape as
-  // save_doors but category='ramp' and no swing/operation (ramps don't swing); height_in holds
-  // the ramp LENGTH. Scoped to category='ramp' so doors are never touched.
-  if (action === "save_ramps") {
-    if (!Array.isArray(payload.ramps)) return json({ error: "ramps[] required" }, 400);
-    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "ramp");
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
-    const keptIds = new Set<string>();
-    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
-    let saved = 0; const skipped: string[] = [];
-    let i = 0;
-    for (const row of payload.ramps) {
-      const name = String(row?.name ?? "").trim();
-      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
-      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
-      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
-      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid length`); i++; continue; }
-      const price = numOrNull(row?.price);
-      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
-      const rec: Record<string, unknown> = {
-        client_id: clientId, category: "ramp", name,
-        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-        show_image_on_estimate: row?.showImageOnEstimate !== false,
-        width_in: w, height_in: h, price,
-        swing_in: false, swing_out: false, swing_default: null,
-        op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
-        active: row?.active !== false,
-        archived: row?.archived === true,
-        internal_only: row?.internalOnly === true,
-        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
-        updated_at: new Date().toISOString(),
-      };
-      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
-        : await admin.from("fixture_items").insert(rec);
-      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
-      saved++; i++;
-    }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
-    let deleted = 0;
-    if (toDelete.length) {
-      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
-      deleted = toDelete.length;
-    }
-    return json({ ok: true, saved, deleted, skipped });
-  }
-
-  // save_windows — like save_ramps but category='window'; height_in holds the window HEIGHT.
-  // No swing/operation (windows don't swing). Scoped to category='window' so doors/ramps are
-  // never touched. Full-list replace (delete rows the editor dropped), matching save_doors.
-  if (action === "save_windows") {
-    if (!Array.isArray(payload.windows)) return json({ error: "windows[] required" }, 400);
-    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "window");
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
-    const keptIds = new Set<string>();
-    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
-    let saved = 0; const skipped: string[] = [];
-    let i = 0;
-    for (const row of payload.windows) {
-      const name = String(row?.name ?? "").trim();
-      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
-      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
-      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
-      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid height`); i++; continue; }
-      const price = numOrNull(row?.price);
-      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
-      const rec: Record<string, unknown> = {
-        client_id: clientId, category: "window", name,
-        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-        show_image_on_estimate: row?.showImageOnEstimate !== false,
-        width_in: w, height_in: h, price,
-        swing_in: false, swing_out: false, swing_default: null,
-        op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
-        active: row?.active !== false,
-        archived: row?.archived === true,
-        internal_only: row?.internalOnly === true,
-        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
-        updated_at: new Date().toISOString(),
-      };
-      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
-        : await admin.from("fixture_items").insert(rec);
-      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
-      saved++; i++;
-    }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
-    let deleted = 0;
-    if (toDelete.length) {
-      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
-      deleted = toDelete.length;
-    }
-    return json({ ok: true, saved, deleted, skipped });
-  }
-
   // ═══ Per-line fixture editing (2026-08-03) ════════════════════════════════════
-  // The catalog editors save one line at a time now. One validation source shared by
-  // save_fixture and import_fixtures, mirroring the legacy full-replace rules above exactly.
+  // The catalog editors save one line at a time. One validation source shared by
+  // save_fixture and import_fixtures.
+  //
+  // (The full-replace save_doors/save_ramps/save_windows this superseded were deleted
+  // 2026-08-07. They had no caller anywhere in the repo and were kept only for a cached
+  // portal.html window that closed at the 2026-08-03 promotion — but each one DELETED every
+  // fixture_items row of its category absent from the payload, so three unreachable
+  // bulk-delete endpoints were sitting on a live table. They had also already drifted from
+  // the rules below: the legacy copies lacked the op-exclusivity normalization.)
   // Ramps/windows force swing/op false/null; ramp height_in holds LENGTH (error wording).
   // price NULL is legal (NULL-price contract: not-yet-priced = not offered) — never coerce
   // blank to 0. Op exclusivity (Double / Slide up are standalone) is normalized HERE because
@@ -1497,6 +1352,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const category = String(payload?.category ?? "").trim();
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
     if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    { const e = tooMany(payload.orderedIds, "items to reorder"); if (e) return json({ error: e }, 400); }
     let i = 0;
     for (const fid of payload.orderedIds) {
       const sid = String(fid ?? "").trim();
@@ -1518,7 +1374,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const category = String(payload?.category ?? "").trim();
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
-    if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);
+    if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);   // stricter than MAX_BULK_ROWS on purpose
     const exRes = await admin.from("fixture_items").select("id, sort_order").eq("client_id", clientId).eq("category", category);
     if (exRes.error) return json({ error: exRes.error.message }, 500);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
@@ -2076,18 +1932,6 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
   }
 
-  // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
-  // mutation, so the role gate above already applies). Converts the design's GHL
-  // estimate to an invoice (marking the estimate invoiced) and emails it to the
-  // customer — verified live against the LeadConnector API 2026-07-25.
-  //
-  // The convert is IRREVERSIBLE and the email is a separate call that can fail, so the
-  // whole action is serialised through the `invoice_sends` ledger (migration 052):
-  //   * the PK insert is the concurrency claim — a racing request cannot convert twice;
-  //   * a 'created' row means the invoice exists but was never emailed, so a retry
-  //     RE-SENDS the stored invoice id instead of converting again (no orphaned invoice);
-  //   * the userId the send endpoint requires is resolved BEFORE converting, so a missing
-  //     user fails fast instead of after the estimate has already been flipped.
   // ── QuickBooks Online ─────────────────────────────────────────────────────────────
   // Connection status + item-mapping grid. Deliberately its OWN select rather than a
   // widening of the "status" action's hand-enumerated list — QuickBooks state changes on
@@ -2208,6 +2052,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // the table's uniqueness lives in two partial indexes, which onConflict cannot
     // infer (same documented reason as save_layout_pricing above).
     if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "mappings"); if (e) return json({ error: e }, 400); }
 
     const KINDS = new Set(["building", "paint", "roof", "door", "window", "ramp", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
 
@@ -2437,6 +2282,21 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, clientId });
   }
 
+  // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
+  // mutation, so the role gate above already applies). Converts the design's GHL
+  // estimate to an invoice (marking the estimate invoiced) and emails it to the
+  // customer — verified live against the LeadConnector API 2026-07-25.
+  //
+  // The convert is IRREVERSIBLE and the email is a separate call that can fail, so the
+  // whole action is serialised through the `invoice_sends` ledger (migration 052):
+  //   * the PK insert is the concurrency claim — a racing request cannot convert twice;
+  //   * a 'created' row means the invoice exists but was never emailed, so a retry
+  //     RE-SENDS the stored invoice id instead of converting again (no orphaned invoice);
+  //   * the userId the send endpoint requires is resolved BEFORE converting, so a missing
+  //     user fails fast instead of after the estimate has already been flipped.
+  // (Restored here 2026-08-07: this note had been stranded ~330 lines up, above the
+  // unrelated qbo_pending action — the file's most consequential invariant documented
+  // nowhere near the code that implements it.)
   if (action === "send_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
@@ -2460,9 +2320,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
     }
 
+    // Only ghl_estimate_id is used. `contact` (the customer's name/email/phone/address) and
+    // `status` were selected and never read — status is checked against the LIVE GHL
+    // estimate further down, not this row. Dropped 2026-08-07: pulling a customer's PII
+    // into memory on the invoice path for nothing is the kind of dead read that later
+    // becomes an accidental log line.
     const { data: design, error: desErr } = await admin
       .from("designs")
-      .select("short_code, status, ghl_estimate_id, contact")
+      .select("short_code, ghl_estimate_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (desErr) return json({ error: desErr.message }, 500);
     if (!design) return json({ error: "Design not found." }, 404);

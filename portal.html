@@ -4032,6 +4032,23 @@ Anything not shown here will be removed from their account.`)) return;
   const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
   const chk = (gi, field) => <input type="checkbox" checked={!!rows[gi][field]} onChange={(e) => setRow(gi, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
 
+  // Which palette a row belongs to. Mirrors renderSection's filter exactly — paint is the
+  // absence of the other two flags, not a flag of its own.
+  const catOf = (r) => (r.shingle ? "shingle" : r.metal ? "metal" : "paint");
+
+  // "Custom" marks the ONE entry in a palette that lets the shopper type their own colour:
+  // the designer looks it up with `colors.find((c) => c.allowCustom)` and, when it is picked,
+  // swaps the dropdown for a free-text box. Because the designer takes the FIRST match, two
+  // custom rows in one palette would silently make the second one dead — so ticking one
+  // unticks the others in the same palette rather than leaving a state only the code can
+  // resolve. This column exists because `allow_custom` round-tripped through load and save
+  // with no control anywhere: a shipped designer feature no builder could switch on.
+  const setAllowCustom = (gi, checked) => setRows((rs) => {
+    const cat = catOf(rs[gi]);
+    return rs.map((r, i) => i === gi ? { ...r, allow_custom: checked }
+      : (checked && catOf(r) === cat && r.allow_custom) ? { ...r, allow_custom: false } : r);
+  });
+
   // Render one category card. `ckey` selects which rows show; `showST` adds the paint-only
   // Siding/Trim columns. Defined as a plain function (not a <Component/>) so inputs keep focus.
   const renderSection = (ckey, title, desc, showST) => {
@@ -4048,17 +4065,19 @@ Anything not shown here will be removed from their account.`)) return;
         ) : (
           <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
             <colgroup>
+              {/* Widths sum to 100 in each branch. The Custom column added 2026-08-07 came
+                  out of the name and pricing columns, which had the most slack. */}
               {showST ? (
                 <>
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "21%" }} />
-                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} /><col style={{ width: "11%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "17%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} /><col style={{ width: "10%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} />
                 </>
               ) : (
                 <>
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "29%" }} />
-                  <col style={{ width: "22%" }} /><col style={{ width: "13%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "24%" }} />
+                  <col style={{ width: "19%" }} /><col style={{ width: "12%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "6%" }} />
                 </>
               )}
             </colgroup>
@@ -4067,6 +4086,7 @@ Anything not shown here will be removed from their account.`)) return;
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
               <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+              <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
               <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
             </tr></thead>
             <tbody>
@@ -4092,6 +4112,11 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   <td style={ctr}>
                     <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(gi, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  <td style={ctr}>
+                    <input type="checkbox" checked={!!r.allow_custom} onChange={(e) => setAllowCustom(gi, e.target.checked)}
+                      title="Picking this entry in the designer shows a free-text box instead of a swatch"
+                      style={{ width: 16, height: 16, cursor: "pointer" }} />
                   </td>
                   <td style={ctr}>{chk(gi, "is_default")}</td>
                   <td style={ctr}>{chk(gi, "active")}</td>
@@ -4132,6 +4157,7 @@ Anything not shown here will be removed from their account.`)) return;
     Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
     Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
     (leave the rate at <b>0</b> for colors included in the base price). <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
+    <br />Tick <b>Custom</b> on one entry (name it something like “Other — my own color”) to let customers type a color you don’t stock; picking it in the designer swaps the swatch list for a text box. Only one entry per palette can be the custom one.
     <br />Need color ideas? See <b>hayleypaint.com</b> or use the quick-add library below.
   </>);
   const shingleDesc = (<>
@@ -7564,8 +7590,13 @@ function DriversTerritoriesCard() {
       maxWidthFt: f.maxW === "" ? null : Number(f.maxW),
       wideLoadCapable: f.wide, territoryIds: f.territoryIds,
     };
+    // `userId` goes up on EDITS as well as creates, so reassigning a truck to a different
+    // person actually reaches the server — it writes user_id whenever the key is present.
+    // Only sent when it has a value: the server reads a present-but-empty `userId` as an
+    // attempt to unlink and refuses it ("A driver must stay linked to a team member"),
+    // which is right, but sending it blindly would turn a half-filled form into that error.
     if (key === "new") { if (f.userId) body.userId = f.userId; }
-    else body.driverId = key;
+    else { body.driverId = key; if (f.userId) body.userId = f.userId; }
     const r = await call(body, f.isDriver ? `${driverName(f)} saved.` : `${driverName(f)} is no longer a driver.`);
     setBusy(false);
     if (r) { if (key === "new") setDrafts((d) => { const n = { ...d }; delete n.new; return n; }); load(); }
@@ -7738,24 +7769,28 @@ function DriversTerritoriesCard() {
                 <div style={{ borderTop: "1px solid #F1F5F9", padding: "9px 11px" }}>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "8px 10px" }}>
                     <div><span style={lbl}>Truck / trailer</span><input style={inp} value={f.truckName} onChange={(e) => setDraft(key, { truckName: e.target.value })} placeholder="40' gooseneck" /></div>
-                    {key === "new" ? (
-                      <div>
-                        <span style={lbl}>Driver *</span>
-                        <select style={inp} value={f.userId || ""}
-                          onChange={(e) => { const v = e.target.value; setDraft(key, { userId: v || null, displayName: v ? (nameOfU[v] || "") : "" }); }}>
-                          <option value="">Who drives it?…</option>
-                          {team.filter((m) => !(data.drivers || []).some((p) => p.user_id === m.userId))
-                            .map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)}</option>)}
-                        </select>
-                      </div>
-                    ) : (
-                      <div>
-                        <span style={lbl}>Driver</span>
-                        <div style={{ ...inp, background: "#F8FAFC", color: "#475569", display: "flex", alignItems: "center", gap: 6 }}>
-                          {driverName(f)}{f.userId && <span style={schedChip("#EEF2FF", "#3D3672")}>login ✓</span>}
+                    {/* Editable for an EXISTING driver too, not just a new one. It used to be a
+                        read-only box, so once a profile was created the truck was welded to
+                        that person: reassigning it meant deleting the driver and rebuilding
+                        the truck, deck, width and territories from scratch. The server has
+                        always supported the change (portal-schedule's save_driver writes
+                        user_id whenever `userId` is present), so this was a UI-only dead end.
+                        The list keeps the CURRENT person in it — filtering to "people without
+                        a profile" alone would drop the selected value and blank the field. */}
+                    <div>
+                      <span style={lbl}>Driver{key === "new" ? " *" : ""}</span>
+                      <select style={inp} value={f.userId || ""}
+                        onChange={(e) => { const v = e.target.value; setDraft(key, { userId: v || null, displayName: v ? (nameOfU[v] || "") : "" }); }}>
+                        <option value="">Who drives it?…</option>
+                        {team.filter((m) => m.userId === f.userId || !(data.drivers || []).some((p) => p.user_id === m.userId))
+                          .map((m) => <option key={m.userId} value={m.userId}>{m.name || m.userId.slice(0, 8)}</option>)}
+                      </select>
+                      {key !== "new" && (
+                        <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 3, lineHeight: 1.4 }}>
+                          Changing this hands the truck and its territories to someone else. Every driver must keep a login.
                         </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
                     <div><span style={lbl}>Deck length (ft)</span><input style={inp} value={f.deck} onChange={(e) => setDraft(key, { deck: e.target.value })} placeholder="40" /></div>
                     <div><span style={lbl}>Max building width (ft)</span><input style={inp} value={f.maxW} onChange={(e) => setDraft(key, { maxW: e.target.value })} placeholder="14" /></div>
                     <div><span style={lbl}>Wide-load capable</span>
