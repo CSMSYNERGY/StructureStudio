@@ -17,10 +17,13 @@ false" written elsewhere in this document are the pre-launch plan, not the curre
 grandfathered, internal, and free-period tenants all need a real subscription like everyone
 else (deployed + diff-verified same day).
 
-⚠️ **LAUNCH SWITCH 2 — STILL PENDING.** The What's New entry (hand-authored INSERT into
+⚠️ **LAUNCH SWITCH 2 — STILL PENDING.** The What's New entries (hand-authored INSERT into
 `release_notes`; NO pricing per CLAUDE.md). Switch 1 is live *without* it, so tenants can
 subscribe today and nothing in the product announces the feature. Drafted as migration
-`102_scheduling_release_notes.sql` — it is a publication to every tenant, so a human runs it.
+`104_scheduling_release_notes.sql` — it is a publication to every tenant, so a human runs it.
+The entries publish as **status='beta'** ("On beta for testing", migration 103) and the
+Monday merge workflow flips them to Live — see CLAUDE.md's release-notes section for the
+process.
 
 ## Post-launch refinements from beta testing (2026-08-04 → 08-05)
 

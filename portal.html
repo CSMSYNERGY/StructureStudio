@@ -4782,8 +4782,14 @@ function ReleasesView({ submissionsKey }) {
   const fixes = list.filter((r) => r.kind === "fix");
   const requested = list.filter((r) => r.kind === "requested");
 
+  // 'shipped' deliberately has NO badge — a live feature is just a feature, and badging the
+  // normal case would make every entry shout. Everything else says how real it is yet.
   const statusBadge = (status) => {
     const map = {
+      // On beta, not yet promoted to main (migration 103). Published the moment the work
+      // lands so tenants can watch it coming and try it, and flipped to 'shipped' by the
+      // Monday merge workflow — so an entry never claims to be live before it is.
+      beta:      { bg: "#FFF7ED", fg: "#C2410C", label: "On beta for testing" },
       roadmap:   { bg: "#EEF2FF", fg: "#4F46E5", label: "On the roadmap" },
       planned:   { bg: "#EEF2FF", fg: "#4F46E5", label: "Planned" },
       requested: { bg: "#FEF3C7", fg: "#B45309", label: "Requested" },

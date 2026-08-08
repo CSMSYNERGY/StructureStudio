@@ -1,4 +1,4 @@
--- 102_scheduling_release_notes: LAUNCH SWITCH 2 for the scheduling suite.
+-- 104_scheduling_release_notes: LAUNCH SWITCH 2 for the scheduling suite.
 --
 -- Switch 1 (billing_plans -> 'available', migration 094) is already live, so tenants can
 -- subscribe to "Schedule Builds and Delivery" today and nothing in the product tells them
@@ -12,7 +12,13 @@
 -- note describes what a tenant can now DO. Anything about what we charge, or about what we
 -- are willing to show of what we charge, ships silently.
 --
--- released_at is the launch date, not the build date — set it to the day you publish.
+-- status = 'beta' (migration 103): the code is on beta and NOT yet on main, so each entry
+-- renders with an "On beta for testing" badge. The Monday merge workflow flips these to
+-- 'shipped' once beta is actually promoted — do not hand-set 'shipped' here, or the notes
+-- will claim to be live a few days before they are.
+--
+-- released_at is the day the tenant can first SEE the entry (i.e. when you run this), not
+-- the day it reaches main — the list is sorted by it, so a future date would sort wrong.
 
 insert into public.release_notes (released_at, kind, title, detail, status, sort_order)
 values
@@ -24,7 +30,7 @@ values
    || 'add "Paint" or "Materials Pulled" if that is how you run. Every card carries the '
    || 'building, its size, colors and customer at a glance, and every move is logged with '
    || 'who did it and when.',
-   'shipped', 10),
+   'beta', 10),
 
   (current_date, 'feature',
    'Delivery Schedule — plan the truck, not just the date',
@@ -33,7 +39,7 @@ values
    || 'ready, so a load almost plans itself. Each load shows how much deck space is used '
    || 'against that driver''s trailer, flags wide loads automatically from the building''s '
    || 'real dimensions, and will not let a building go out before it is built.',
-   'shipped', 20),
+   'beta', 20),
 
   (current_date, 'feature',
    'Repairs — from the phone call to the fix',
@@ -42,7 +48,7 @@ values
    || 'yours, because you fix other people''s buildings too. Send the work to the Build '
    || 'Schedule if it is coming to the shop, or add it to a delivery load if you are going '
    || 'out to it. Every building keeps its full service history.',
-   'shipped', 30);
+   'beta', 30);
 
 -- Rollback:
 --   delete from public.release_notes

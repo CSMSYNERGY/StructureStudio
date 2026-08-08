@@ -207,6 +207,14 @@ Rules that are easy to break and expensive to get wrong:
 
 Log a release note when a tenant gains something they can *use* — a feature, a fix, a roadmap item. If the change is about what we charge or what we're willing to reveal about what we charge, it ships silently.
 
+**Publish as the work lands on beta, as `status='beta'` — never wait for Monday, and never hand-set `'shipped'`** (Carolyn 2026-08-08; migration 103 added the status). The lifecycle:
+
+1. When a feature/fix lands on `beta`, INSERT its note with `status='beta'`. The portal renders it with an **"On beta for testing"** badge (orange, `ReleasesView`'s `statusBadge`) so tenants can see what's coming and try it on beta before release. Badge only — no beta URL in the note; tell individual customers where beta is if you want them testing.
+2. On Monday, `.github/workflows/merge-beta-to-main.yml` promotes beta → main and its **"Flip beta release notes to Live"** step PATCHes every `status='beta'` row to `'shipped'` — keyed to the merge *succeeding*, not to the clock, so a failed/skipped promotion can never label unshipped work as Live. The outcome ("N note(s) now Live" / "skipped" / "FAILED") is included in the run's monday.com report.
+3. The step needs the **`SUPABASE_SERVICE_ROLE_KEY` repo secret** (GitHub → Settings → Secrets → Actions). If it's missing the step skips with a warning and notes stay on "On beta for testing" — the merge itself is never blocked by it.
+
+Consequences: a note written *after* the Monday flip for work already on main should be `'shipped'` directly (nothing will flip it); and if something must ship mid-week via `workflow_dispatch`, the flip rides along automatically.
+
 SQL migrations live in `supabase/migrations/`. `000`–`027` are **all applied to live** (the post-`004` ones were hand-applied via MCP `execute_sql` / `supabase db query --linked`, NOT via `db push`). **The migration ledger was reconciled on 2026-06-19**: every repo file-version (`000`–`027`) is now recorded in `supabase_migrations.schema_migrations` (marked applied via `version`+`name`, no re-execution), so `supabase db push` sees **zero pending** migrations and can no longer re-run `008`–`011`'s `DROP TABLE … recreate` and wipe the catalog. Note: the ledger also still carries 15 legacy **timestamp-versioned** rows (`20260504…`–`20260613…`) for the pre-tenancy schema + the originally-recorded `001`–`011`; these have no matching repo file, so `migration list` shows them as remote-only — harmless (push never deletes remote-only rows). **Going forward, add new migrations with the next `NNN_` prefix and record them in the ledger as you apply them; still hand-apply via the SQL Editor / MCP rather than `db push` until the team verifies a clean `migration list`.**
 
 ### ✅ Cutover state — COMPLETE (2026-06-14)
