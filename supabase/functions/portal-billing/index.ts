@@ -387,21 +387,34 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   };
 
   if (action === "status") {
-    // gateway_plan_id stays server-side; everything else drives the UI — including
-    // `price_visible`, which is a DISPLAY flag the Billing tab reads to decide whether
-    // to print the amount. Prices themselves are untouched here and in the gateway;
-    // hiding is deliberately presentation-only, so publishing a price later is a
-    // one-field flip with no billing-path involvement.
+    // gateway_plan_id stays server-side; everything else drives the UI.
     // charge_cents is what this tenant would actually be billed — equal to price_cents
     // for everyone without a discount. The UI shows the pair so a discounted customer
     // can see the list price struck through and what they save.
     // `active` is stripped alongside gateway_plan_id: this list is already filtered to active
     // rows, so the flag would only be noise the browser could come to depend on.
-    const publicPlans = plans.map(({ gateway_plan_id: _g, active: _a, ...p }) => ({
-      ...p,
-      charge_cents: chargeCentsFor(p),
-      discount_percent: discountForFeature(p.feature),
-    }));
+    //
+    // ⚠️ `price_visible = false` now REDACTS the amount rather than merely asking the UI not
+    // to print it (2026-08-07). Migration 055 made hiding presentation-only and recorded the
+    // consequence — "the figure is still visible to anyone who opens devtools" — as accepted.
+    // It was worse than that: `billing_plans` also carried `grant select to authenticated`
+    // with a `using (true)` policy, so any builder could read every unpublished price straight
+    // off the table. That grant is revoked (migration 102) and the number is dropped here, so
+    // the two paths agree. The point of the flag is that we are still costing these features
+    // and may have to raise the number — a builder who saw the old one is anchored to it.
+    //
+    // Redaction is safe precisely because a not-yet-published plan cannot be bought: the
+    // `subscribe` path re-reads price_cents server-side from `plans` (never from the body),
+    // so nothing in the billing flow depends on the browser having seen it.
+    const publicPlans = plans.map(({ gateway_plan_id: _g, active: _a, ...p }) => {
+      const hidden = p.price_visible === false;
+      return {
+        ...p,
+        price_cents: hidden ? null : p.price_cents,
+        charge_cents: hidden ? null : chargeCentsFor(p),
+        discount_percent: discountForFeature(p.feature),
+      };
+    });
     // BILLING FIELD FILTER. Everyone gets `entitlement` — it is what unlocks the rest of
     // the portal, and withholding it would lock the product instead of the tab. Nobody but
     // an owner gets the commercial detail: what this business pays, what discount it has,

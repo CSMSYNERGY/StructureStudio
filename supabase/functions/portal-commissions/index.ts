@@ -165,6 +165,33 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   try { p = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
   const action = p?.action;
 
+  // Operators may NOT act on a builder's commissions — Carolyn, 2026-08-07: "Operators
+  // should not be able to change commissions in builders pages."
+  //
+  // Stated HERE, server-side, rather than left to the UI. The rule already held, but only
+  // because portal.html hides the Commissions and Team sub-tabs while viewing another
+  // tenant — a courtesy, not a control, and one a later layout change could drop without
+  // anyone noticing. Two further reasons it could not be relied on:
+  //
+  //   * This function is deliberately absent from portal.html's SS_TENANT_SCOPED_FNS
+  //     allow-list, so the "view as" override is never injected into its calls. That is an
+  //     omission, and the allow-list's own comment warns that a function added later gets
+  //     no injection until someone names it — so the next person to "complete" that list
+  //     would silently hand operators the keys.
+  //   * It returns no `clientId`, so the wrapper's cross-tenant tripwire cannot fire either.
+  //
+  // A hard refusal rather than a silent ignore, for the same reason resolveTenant 403s an
+  // unauthorised override: a body field honoured for some callers and quietly dropped for
+  // others is what a later refactor turns into a cross-tenant hole, and silent-ignore makes
+  // the negative test pass for the wrong reason (200-with-own-data instead of a refusal).
+  // NOT an operator check — nobody may redirect this function at another tenant, so there
+  // is no capability that unlocks it and no need to consult app_operators.
+  if (p?.targetClientId !== undefined && p?.targetClientId !== null && p?.targetClientId !== "") {
+    return json({
+      error: "Commissions are per-builder and cannot be changed on another account's behalf. Ask that builder's owner to make the change.",
+    }, 403);
+  }
+
   const audit = async (note: string) => {
     try { await admin.from("admin_audit").insert({ action: "commissions", target_client_id: clientId, row_count: null, note: `tenant:${user.email || user.id} ${note}`.trim() }); }
     catch { /* best-effort */ }

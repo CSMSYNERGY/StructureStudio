@@ -143,6 +143,12 @@ function maskId(v: string | null): string | null {
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
 }
 
+// Deliberately permissive — an "obviously not an address" check, not an RFC 5322 parser.
+// Kept byte-identical to submit-estimate's copy on purpose: this one refuses to STORE a
+// beta_email that one would refuse to SEND to, so a divergence would let a tenant save a
+// value that then blocks every submission. Change both or neither.
+const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
 // ── floor-plans object keys ─────────────────────────────────────────────────────
 // delete_design hands object keys to a SERVICE-ROLE remove(), which bypasses storage RLS,
 // and the only record of which file belongs to which design is designs/design_versions
@@ -410,8 +416,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   if (action === "save") {
     const updates: Record<string, unknown> = {};
-    const trimOrNull = (v: unknown) => {
-      const s = String(v ?? "").trim();
+    // Capped, because every one of these is rendered onto a customer-facing estimate or
+    // used as a credential. Uncapped, a single save could park an unbounded blob in a
+    // service-role table that submit-estimate then tries to put on a PDF. Limits are
+    // generous enough that no legitimate value is near them — quote_terms is the only
+    // long-form field and 8k is several screens of terms.
+    const trimOrNull = (v: unknown, max = 300) => {
+      const s = String(v ?? "").trim().slice(0, max);
       return s ? s : null;
     };
     // Text fields: present in body → written (empty string clears to null).
@@ -421,17 +432,61 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if ("ghlStageAcceptedId" in payload) updates.ghl_stage_accepted_id = trimOrNull(payload.ghlStageAcceptedId);
     if ("ghlStageInvoicedId" in payload) updates.ghl_stage_invoiced_id = trimOrNull(payload.ghlStageInvoicedId);
     if ("ghlStageDeliveredId" in payload) updates.ghl_stage_delivered_id = trimOrNull(payload.ghlStageDeliveredId);
-    if ("businessName" in payload) updates.business_name = trimOrNull(payload.businessName);
-    if ("businessPhone" in payload) updates.business_phone = trimOrNull(payload.businessPhone);
-    if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite);
-    if ("businessLogoUrl" in payload) updates.business_logo_url = trimOrNull(payload.businessLogoUrl);
-    if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms);
-    if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail);
+    if ("businessName" in payload) updates.business_name = trimOrNull(payload.businessName, 200);
+    if ("businessPhone" in payload) updates.business_phone = trimOrNull(payload.businessPhone, 40);
+    if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite, 300);
+    if ("businessLogoUrl" in payload) updates.business_logo_url = trimOrNull(payload.businessLogoUrl, 1000);
+    if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms, 8000);
+    if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
+
+    // Beta mode has a CONSEQUENCE now (submit-estimate redirects the estimate email to
+    // beta_email instead of the customer), so the pair is validated as a pair. Refusing the
+    // save is the only place this can be caught before a tenant believes they are protected
+    // — submit-estimate's matching guard fires at submit time, which is later and louder
+    // than it needs to be. This save is presence-based and the two fields arrive from
+    // different cards, so the check is against the MERGED state, not just the payload.
+    if ("betaMode" in payload || "betaEmail" in payload) {
+      const { data: curBeta } = await admin
+        .from("client_settings").select("beta_mode, beta_email").eq("client_id", clientId).maybeSingle();
+      const nextMode = "betaMode" in payload ? Boolean(payload.betaMode) : Boolean(curBeta?.beta_mode);
+      const nextEmail = String(
+        ("betaEmail" in payload ? updates.beta_email : curBeta?.beta_email) ?? "",
+      ).trim();
+      if (nextEmail && !isEmail(nextEmail)) {
+        return json({ error: "That test inbox is not a valid email address." }, 400);
+      }
+      if (nextMode && !nextEmail) {
+        return json({
+          error: "Beta mode needs a test inbox — that is the address estimates go to instead of your customers. Add one, or leave beta mode off.",
+        }, 400);
+      }
+    }
+    // Allowlisted, not passed through. This jsonb lands in submit-estimate's
+    // `businessDetails.address` and is rendered onto the customer's estimate, so whatever
+    // is stored here leaves the system on a branded document. The previous version wrote
+    // any object verbatim — no key list, no caps, no size limit (and `typeof [] === "object"`,
+    // so an array passed too). Same `str(v, max)` shape as save_location below, which had
+    // it right; these are the only five keys the portal sends and the only ones GHL reads.
     if ("businessAddress" in payload) {
       const a = payload.businessAddress;
-      updates.business_address = a && typeof a === "object" ? a : null;
+      if (a && typeof a === "object" && !Array.isArray(a)) {
+        const str = (v: unknown, max: number) => { const s = String(v ?? "").trim().slice(0, max); return s || null; };
+        const addr = {
+          addressLine1: str((a as any).addressLine1, 200),
+          city: str((a as any).city, 100),
+          state: str((a as any).state, 60),
+          postalCode: str((a as any).postalCode, 12),
+          countryCode: str((a as any).countryCode, 2) ?? "US",
+        };
+        // An address of nothing but a country code is not an address — store null so the
+        // estimate omits the block entirely rather than printing a stray "US".
+        const hasAny = addr.addressLine1 || addr.city || addr.state || addr.postalCode;
+        updates.business_address = hasAny ? addr : null;
+      } else {
+        updates.business_address = null;
+      }
     }
     // Write-only secret: only overwritten when a non-empty value is sent.
     if (typeof payload.ghlApiKey === "string" && payload.ghlApiKey.trim()) {
@@ -452,12 +507,35 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Designer branding save → writes client_configs (the public ?client= link).
   // Optionally uploads a logo image (base64) to the public 'branding' bucket.
   if (action === "save_branding") {
-    const trimOrNull = (v: unknown) => { const s = String(v ?? "").trim(); return s ? s : null; };
+    const trimOrNull = (v: unknown, max = 300) => { const s = String(v ?? "").trim().slice(0, max); return s ? s : null; };
+    // These two are applied as COLOURS on the tenant's public designer page (served via the
+    // anon-callable get_config RPC), so they are the branding fields that actually reach a
+    // stylesheet — and they were the only ones accepting an arbitrary string.
+    //
+    // NOT hex-only, deliberately: header_bg legitimately holds gradients today
+    // (demo-sheds is on `linear-gradient(135deg, #1E293B 0%, #334155 100%)`), so a
+    // `^#[0-9a-fA-F]{3,8}$` check — the one save_colors uses for swatches — would reject a
+    // value already in production the next time that tenant saved. Instead this bounds the
+    // CHARACTER SET to what a colour or gradient needs and refuses the characters that turn
+    // a value into an injection: `;` (extra declarations), `{}` and `<>` (breaking out of a
+    // style block), and url()/expression() (fetches and legacy script execution).
+    const cssColorOrNull = (v: unknown): string | null | false => {
+      const s = String(v ?? "").trim();
+      if (!s) return null;
+      if (s.length > 200) return false;
+      if (!/^[#a-zA-Z0-9%.,()\s-]+$/.test(s)) return false;      // charset gate
+      if (/url\s*\(|expression\s*\(|\/\*|@import/i.test(s)) return false;
+      return s;
+    };
     const updates: Record<string, unknown> = {};
-    if ("companyName" in payload) updates.company_name = trimOrNull(payload.companyName);
-    if ("tagline" in payload)     updates.tagline      = trimOrNull(payload.tagline);
-    if ("accentColor" in payload) updates.accent_color = trimOrNull(payload.accentColor);
-    if ("headerBg" in payload)    updates.header_bg    = trimOrNull(payload.headerBg);
+    if ("companyName" in payload) updates.company_name = trimOrNull(payload.companyName, 200);
+    if ("tagline" in payload)     updates.tagline      = trimOrNull(payload.tagline, 300);
+    for (const [key, col] of [["accentColor", "accent_color"], ["headerBg", "header_bg"]] as const) {
+      if (!(key in payload)) continue;
+      const val = cssColorOrNull((payload as any)[key]);
+      if (val === false) return json({ error: `${key === "accentColor" ? "Accent color" : "Header background"} must be a color like #D97706 or a gradient — it can't contain punctuation such as ; { } < >.` }, 400);
+      updates[col] = val;
+    }
 
     if (typeof payload.logoBase64 === "string" && payload.logoBase64.trim()) {
       const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
@@ -524,7 +602,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
     ]);
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes]) if (r.error) return json({ error: r.error.message }, 500);
+    // csRamp is in this list. It used to be the one query of the nine whose error was not
+    // checked, and its defaults are not neutral: `rs` would come back undefined and the
+    // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
+    // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
+    // Failing the request is right for a settings read; a half-true catalog is not.
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp]) if (r.error) return json({ error: r.error.message }, 500);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)

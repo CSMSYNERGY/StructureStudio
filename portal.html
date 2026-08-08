@@ -132,7 +132,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script src="/structure-studio.component.js?v=20260806a" type="text/babel"></script>
+<script src="/structure-studio.component.js?v=20260807a" type="text/babel"></script>
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const { createClient } = window.supabase;
@@ -191,6 +191,12 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 // ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
 // never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
 // rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
+// Same permissive shape as portal-settings' and submit-estimate's copies. Kept identical
+// on purpose — this one only decides what the UI lets you SAVE, so if it were looser than
+// the server's the owner would get a rejected save with no explanation, and if it were
+// stricter they could not save a value the server would happily accept.
+const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
+
 const SS_ERR_SOURCE = "portal";
 function ssLogError(source, message, code, context) {
   try {
@@ -247,6 +253,11 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // Allow-list, not a deny-list: a function added later gets NO injection until it is named
 // here. operator-portal is deliberately absent — it passes its own explicit clientId, and
 // its list_clients is a cross-tenant listing that must never look tenant-scoped.
+// ⛔ portal-commissions is DELIBERATELY absent and must stay absent. Carolyn, 2026-08-07:
+// "Operators should not be able to change commissions in builders pages." Adding it here
+// would inject targetClientId and hand operators exactly that. The function itself refuses
+// a targetClientId with a 403, so adding it here would break every operator call rather
+// than quietly widening access — that pairing is intentional, not an oversight to fix.
 const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
@@ -1800,7 +1811,14 @@ function SettingsView({ section }) {
 
   const save = async (e) => {
     e.preventDefault();
-    setError(null); setSaved(false); setBusy(true);
+    setError(null); setSaved(false);
+    // Caught here as well as server-side so the owner is stopped at the control they just
+    // touched, rather than after a round trip. The server check is the one that counts.
+    if (form.betaMode && !ssIsEmail(form.betaEmail)) {
+      setError("Beta mode needs a working test inbox — that's the address estimates go to instead of your customers. Add one, or turn beta mode off.");
+      return;
+    }
+    setBusy(true);
     const hasAddr = form.addr1 || form.addrCity || form.addrState || form.addrZip;
     const body = {
       action: "save",
@@ -2029,7 +2047,11 @@ function SettingsView({ section }) {
             </div>
             <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
           </div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / SVG / WebP, under 2MB. Preview shows it on your header color.</div>
+          {/* No SVG: the upload actions in portal-settings deliberately allowlist raster
+              types only (an SVG is a script-capable document, and this one is served from
+              a public bucket onto the tenant's own designer page). The text used to offer
+              it while both the input and the server refused it. */}
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / WebP, under 2MB. Preview shows it on your header color.</div>
         </div>
         <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
       </div>
@@ -2075,6 +2097,12 @@ function SettingsView({ section }) {
         </p>
       </div>
 
+      {/* Testing. The checkbox states a real consequence: submit-estimate redirects the
+          estimate email to `betaEmail` while this is on. It said so for a long time while
+          doing nothing, which is how a verification quote reached a real customer — so the
+          UI now refuses to arm the switch without an inbox, and the server refuses too
+          (portal-settings' save guard + submit-estimate's pre-flight check). Three places,
+          because the only failure that matters here is the silent one. */}
       <div style={S.card}>
         <div style={S.h2}>Testing</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B", marginBottom: 10 }}>
@@ -2083,6 +2111,18 @@ function SettingsView({ section }) {
         </label>
         <div style={{ maxWidth: 320 }}><span style={S.lbl}>Test inbox</span>
           <input style={S.input} type="email" value={form.betaEmail} onChange={set("betaEmail")} placeholder="you@yourbusiness.com" /></div>
+        {form.betaMode && !ssIsEmail(form.betaEmail) && (
+          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Beta mode needs a working test inbox before it can be saved. Until one is set,
+            leave beta mode off — estimates would otherwise go to your customers.
+          </div>
+        )}
+        {form.betaMode && ssIsEmail(form.betaEmail) && (
+          <div style={{ marginTop: 10, background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            While this is on, <strong>every</strong> estimate goes to {form.betaEmail} — your
+            customers receive nothing. Turn it off when you're done testing.
+          </div>
+        )}
       </div>
 
       <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
@@ -7838,8 +7878,8 @@ function LocationsCard() {
       <div style={{ borderTop: "1px solid #EDF1F6", margin: "18px 0 14px" }}></div>
       <div style={S.h2}>Building Serial Numbers</div>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-        Every inventory building — and, once Orders ships, every customer order — takes the next number
-        in one shared sequence, in the order they're created.
+        Every inventory building — and every customer order that reaches your build board — takes
+        the next number in one shared sequence, in the order they're created.
       </div>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
         <div>
@@ -7854,8 +7894,14 @@ function LocationsCard() {
           It advances on its own and can never go backwards past a used number.
         </span>
       </div>
+      {/* Says what these locations DO, not what they will one day do. The previous copy
+          promised "assigning team members to locations arrives with Build & Delivery
+          Scheduling" — scheduling shipped 2026-08-04 and renders on this very tab, while
+          member↔location assignment was never built, so the banner read as a delivered
+          feature the owner could not find. */}
       <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600, marginTop: 14, lineHeight: 1.5 }}>
-        📍 Assigning team members to locations arrives with Build &amp; Delivery Scheduling — the location list you build here is what it will use.
+        📍 Locations are where your buildings live: each inventory building sits at one, and
+        the Delivery Schedule uses it as the pickup point when that building sells.
       </div>
     </div>
   );
@@ -9815,7 +9861,6 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   );
 }
 
-// mounted without them.
 // ─── Commission structure (owner-only Settings sub-tab) ───
 // The tenant's commission RULES: who earns by default, the base, the earned-on date, the
 // payout cadence, and the cancel-clawback rule. Owner-only — the row is RLS-gated to the
@@ -9926,7 +9971,7 @@ function CommissionStructure({ clientId }) {
         {saving ? "Saving…" : "Save commission structure"}
       </button>
       <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12, lineHeight: 1.5 }}>
-        Per-person rates and the Commissions report come next — this sets the rules they'll run on. Every period is still reviewed and approved by you before it's payable.
+        This sets the rules that per-person rates (Settings → Team) and the Commissions report run on. Every period is still reviewed and approved by you before it's payable.
       </div>
     </div>
   );

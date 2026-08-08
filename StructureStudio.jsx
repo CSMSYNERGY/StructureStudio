@@ -3610,15 +3610,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Call the submit-estimate Edge Function. It looks up the GHL credentials for
       // this clientId in Supabase (admin-configured), then either creates a new GHL
       // estimate or updates the existing one for this design and emails it.
-      // ⚠️ betaMode does NOT redirect the estimate email, and neither does the per-client
-      // beta_mode switch in client_settings. It is detected from the deploy host (beta.*
-      // on either apex, or a beta--* branch preview) and passed as TELEMETRY only — the
-      // edge function mails the submitted contact in every environment, beta included
-      // (`recipients = [contact?.email]`, and its own header says so). So a verification
-      // submit carrying a real lead's details emails that customer a live branded quote:
-      // submit with an address you control, or use a test tenant. A QA-inbox redirect did
-      // exist once; it pointed at a non-deliverable address so beta estimates silently
-      // failed to send, which is why it was removed rather than fixed.
+      // ⚠️ This `betaMode` flag is TELEMETRY ONLY and does not redirect anything. It is
+      // detected from the deploy host (beta.* on either apex, or a beta--* branch preview),
+      // which nobody opts into — so it must never gain a side effect, or every submission
+      // from the beta host would divert (and hard-fail for tenants with no test inbox).
+      //
+      // What DOES redirect is the tenant's own beta_mode switch in Settings → Branding →
+      // Testing (restored 2026-08-07): with it on, submit-estimate mails that tenant's
+      // beta_email instead of the customer, and refuses the submission outright if no valid
+      // test inbox is set rather than falling back to the customer. So on a tenant WITHOUT
+      // that switch on, a verification submit carrying a real lead's details still emails
+      // that customer a live branded quote — turn beta mode on first, or use an address you
+      // control. An earlier QA-inbox redirect pointed at one hard-coded non-deliverable
+      // address so beta estimates silently failed to send; the per-tenant address plus the
+      // refuse-if-unset rule are what make this version safe to have back.
       const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
         body: { ...payload, betaMode },
