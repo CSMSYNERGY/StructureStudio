@@ -716,9 +716,25 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: `Couldn't reach GoHighLevel to verify: ${(e as Error).message}` }, 502);
     }
     if (!prodOk) {
+      // An authored hint, never GoHighLevel's raw body. This used to paste 600 characters
+      // of a third party's response straight into the browser — arbitrary text we neither
+      // author nor control, on a screen a builder is looking at. The body is still captured
+      // for diagnosis, it just goes to app_errors (server-side) instead of the response.
+      // This is not a step back from c38b5aa: that change was about surfacing the reasons
+      // THIS function writes rather than swallowing them behind "non-2xx", and a sentence we
+      // wrote is more actionable to a builder than GHL's JSON either way.
       const hint = prodStatus === 401 || prodStatus === 403
         ? "The API key is wrong, expired, or not authorized for this Location ID."
-        : `GoHighLevel responded: ${prodBody}`;
+        : prodStatus === 404
+          ? "That Location ID doesn't exist on this GoHighLevel account."
+          : prodStatus >= 500
+            ? "GoHighLevel is having trouble right now — try again in a few minutes."
+            : "GoHighLevel rejected the request. Check the Location ID and API key are from the same sub-account.";
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: prodStatus,
+        message: `verify_save_ghl: GoHighLevel rejected the products probe (HTTP ${prodStatus})`,
+        context: { action: "verify_save_ghl", body: prodBody.slice(0, 600) },
+      }).catch(() => {});
       return json({ error: `Verification failed (HTTP ${prodStatus}). ${hint}` }, 400);
     }
 
@@ -782,10 +798,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: `Couldn't reach GoHighLevel: ${(e as Error).message}` }, 502);
     }
     if (!r.ok) {
+      // Authored hint, not GoHighLevel's raw body — same reasoning as verify_save_ghl above.
       const body = (await r.text()).slice(0, 300);
       const hint = (r.status === 401 || r.status === 403)
         ? "The saved API key may be wrong or expired — re-verify the connection above."
-        : body;
+        : r.status >= 500
+          ? "GoHighLevel is having trouble right now — try Refresh again shortly."
+          : "GoHighLevel rejected the request — re-verify the connection above.";
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: r.status,
+        message: `list_ghl_pipelines: GoHighLevel rejected the pipelines fetch (HTTP ${r.status})`,
+        context: { action: "list_ghl_pipelines", body },
+      }).catch(() => {});
       return json({ error: `Couldn't load pipelines (HTTP ${r.status}). ${hint}` }, 400);
     }
     const data = await r.json().catch(() => ({}));
