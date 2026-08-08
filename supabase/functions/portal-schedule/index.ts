@@ -8,7 +8,6 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { addressFrom, territoryFor } from "../_shared/contactAddress.ts";
 import {
   deriveLifecycle,
-  effectiveLifecycle,
   type Lifecycle,
   LIFECYCLE_LABEL,
   LIFECYCLE_RANK,
@@ -231,15 +230,16 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     return data;
   };
 
-  // Where a set of inventory units are on the build ladder. The ladder is a PROJECTION, not a
-  // stored column (see _shared/inventoryLifecycle.ts for why), so anything that wants to show
-  // it gathers the same facts: the unit's approval, its one build job, that job's stage KIND —
-  // never the tenant-editable stage NAME — and its delivery stops.
+  // Where a set of inventory units are on the build ladder. The ladder is a PROJECTION of
+  // this function's own rows (see _shared/inventoryLifecycle.ts for why), gathered the same
+  // way everywhere: the unit's one build job, that job's stage KIND — never the
+  // tenant-editable stage NAME — and its delivery stops. Nothing is stored and nothing is
+  // hand-set, so this and the boards cannot disagree.
   const lifecycleByUnit = async (unitIds: string[]) => {
-    if (!unitIds.length) return {} as Record<string, { lifecycle: Lifecycle; source: "auto" | "manual" }>;
+    if (!unitIds.length) return {} as Record<string, { lifecycle: Lifecycle }>;
     const [uRes, jRes, sRes] = await Promise.all([
       admin.from("inventory_units")
-        .select("id, accepted_at, sold_design_short_code, lifecycle_manual, lifecycle_manual_basis")
+        .select("id, sold_design_short_code")
         .eq("client_id", clientId).in("id", unitIds),
       admin.from("build_jobs").select("inventory_unit_id, stage_id, due_date, completed_at")
         .eq("client_id", clientId).in("inventory_unit_id", unitIds),
@@ -259,23 +259,22 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         deliveredAt: s.delivered_at ?? null,
       });
     }
-    const out: Record<string, { lifecycle: Lifecycle; source: "auto" | "manual" }> = {};
+    const out: Record<string, { lifecycle: Lifecycle }> = {};
     for (const u of uRes.data ?? []) {
       const j = jobByUnit[u.id];
-      const derived = deriveLifecycle({
-        acceptedAt: u.accepted_at ?? null,
-        soldDesignShortCode: u.sold_design_short_code ?? null,
-        job: j
-          ? {
-            stageKind: (kindById[j.stage_id] ?? null) as StageKind | null,
-            dueDate: j.due_date ?? null,
-            completedAt: j.completed_at ?? null,
-          }
-          : null,
-        stops: stopsByUnit[u.id] ?? [],
-      });
-      const eff = effectiveLifecycle(u, derived);
-      out[u.id] = { lifecycle: eff.lifecycle, source: eff.source };
+      out[u.id] = {
+        lifecycle: deriveLifecycle({
+          soldDesignShortCode: u.sold_design_short_code ?? null,
+          job: j
+            ? {
+              stageKind: (kindById[j.stage_id] ?? null) as StageKind | null,
+              dueDate: j.due_date ?? null,
+              completedAt: j.completed_at ?? null,
+            }
+            : null,
+          stops: stopsByUnit[u.id] ?? [],
+        }),
+      };
     }
     return out;
   };
@@ -453,15 +452,15 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .from("designs").select("short_code, contact, selections, status")
         .eq("client_id", clientId).in("status", ["accepted", "invoiced"]).is("inventory_unit_id", null)
         .limit(500);
-      // APPROVED, not "available" (migration 102). Two changes in one line:
-      //   * a unit only becomes queue-eligible when somebody accepts the request — a building
-      //     nobody has said yes to should not be sitting in the shop's tray.
-      //   * sale state is deliberately NOT filtered. A building can be sold before it is
-      //     built, and selling it does not build it: dropping sold units out of the tray
-      //     (which the old status='available' test did) would quietly stop them being made.
+      // EVERY unit without a build job belongs here — this tray IS the approval step
+      // (migration 105). There is no accepted_at flag any more: a requested building sits in
+      // this tray, and dragging it onto the board is the one human decision that moves it to
+      // In Queue. Sale state is deliberately NOT filtered either: a building can be sold
+      // before it is built, and selling it does not build it — dropping sold units out of the
+      // tray would quietly stop them being made.
       const { data: units } = await admin
         .from("inventory_units").select("id, serial, design_short_code, sale_state, sold_first_name")
-        .eq("client_id", clientId).not("accepted_at", "is", null).limit(500);
+        .eq("client_id", clientId).limit(500);
       // Tray items read building-first like the cards, so inventory units need their
       // master design's style+size label.
       const masterCodes = [...new Set((units ?? []).map((u) => u.design_short_code).filter(Boolean))];
@@ -906,15 +905,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         mintSerial = true;
       } else if (source === "inventory") {
         const unit = await requireRow("inventory_units", payload?.inventoryUnitId, "Inventory unit");
-        // Approval is what makes a building queue-eligible (migration 102). The tray only
-        // offers approved units, but a tray is a UI — this is the rule. Deliberately NO sale
-        // check beside it: a unit sold before it was finished still has to be finished.
-        if (!unit.accepted_at) {
-          return json({
-            error: `Building #${unit.serial} hasn't been approved for the build queue yet. `
-              + `Approve it on the Inventory tab first.`,
-          }, 409);
-        }
+        // Creating this job IS the approval (migration 105) — a requested building becomes
+        // In Queue right here, by a person's decision on the production page. Deliberately NO
+        // sale check: a unit sold before it was finished still has to be finished.
         row.inventory_unit_id = unit.id;
         row.serial = unit.serial;
         row.design_short_code = null; // the unit's master design is reachable via the unit

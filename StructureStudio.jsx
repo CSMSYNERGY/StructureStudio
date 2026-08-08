@@ -1726,11 +1726,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // of a building that has not been cut yet cannot change anything about it — the opposite of
   // what a pre-build sale is for. So the lock keys on the ladder, not on the mere existence
   // of a link. UNKNOWN FAILS TOWARD LOCKED: that is today's behaviour, so this can only ever
-  // loosen where we are sure. (invLifecycleRank returns -1 for a missing value; the built
-  // rank is 4 — see _shared/inventoryLifecycle.ts, which owns the ladder.)
-  const INV_BUILT_RANK = 4;
-  const INV_RANKS = { requested: 0, accepted: 1, in_queue: 2, scheduled_build: 3, built: 4,
-    scheduled_delivery: 5, at_location: 6, delivered: 7 };
+  // loosen where we are sure. (Seven rungs since migration 105 — `accepted` retired; the
+  // built rank is 3 — see _shared/inventoryLifecycle.ts, which owns the ladder.)
+  const INV_BUILT_RANK = 3;
+  const INV_RANKS = { requested: 0, in_queue: 1, scheduled_build: 2, built: 3,
+    scheduled_delivery: 4, at_location: 5, delivered: 6 };
   const unitIsBuilt = !designUnit || !designUnit.lifecycle
     || (INV_RANKS[designUnit.lifecycle] ?? INV_BUILT_RANK) >= INV_BUILT_RANK;
   const planLocked = Boolean(
@@ -5351,8 +5351,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div style={{ fontSize: 13, color: "#475569", marginBottom: 16 }}>
                   {invDialog.done.updated
                     ? <>Find it on your portal's Inventory tab.</>
-                    : <>Find it on your portal's Inventory tab and <strong>accept</strong> it to put it in the build queue.
-                       You can quote it to a customer at any time — a building can be sold before it's built.</>}
+                    : <>Find it on your portal's Inventory tab, and put it on the <strong>Build Schedule</strong> when
+                       you're ready to make it. You can quote it to a customer at any time — a building can be
+                       sold before it's built.</>}
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button type="button" onClick={() => setInvDialog(null)}
@@ -5413,7 +5414,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {(inventoryNew || inventoryMaster)
                 ? (inventoryMaster && inventoryMaster.unitId
                   ? <>Design the building and pick its location, then click <strong>Update Inventory Building</strong>.</>
-                  : <>Design the building and pick where it will sit, then click <strong>Request this build</strong>. It lands on your Inventory list as a request — accept it there to put it in the build queue.</>)
+                  : <>Design the building and pick where it will sit, then click <strong>Request this build</strong>. It lands on your Inventory list as a request — put it on the Build Schedule when you're ready to make it.</>)
                 : hasExistingEstimate
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}

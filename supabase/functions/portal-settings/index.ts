@@ -5,15 +5,7 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
-import {
-  deriveLifecycle,
-  effectiveLifecycle,
-  isLifecycle,
-  LIFECYCLE_LABEL,
-  type Lifecycle,
-  type StageKind,
-  type UnitFacts,
-} from "../_shared/inventoryLifecycle.ts";
+import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 
 import type { GateTable } from "../_shared/access.ts";
@@ -118,10 +110,10 @@ const GATES: GateTable = {
   // gate is a contradiction (see resolveTenant's note) — a granted title would pass the table
   // and then be refused anyway, which defeats per-person access. inventory:'edit' is
   // owner/admin by preset today; every read-only title has 'view'.
-  accept_inventory: { area: "inventory", level: "edit" },
-  sell_inventory:   { area: "inventory", level: "edit" },
+  // Releasing a wrongly-sold building. There is deliberately no sell_inventory to match it:
+  // a sale is a consequence of an invoice or a payment, never a button (Carolyn 2026-08-08).
+  // See claimUnitSale below for the three places a sale is actually recorded.
   unsell_inventory: { area: "inventory", level: "edit" },
-  set_lifecycle:    { area: "inventory", level: "edit" },
   // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
   // is a Designs deletion happening under an Inventory verb, so it needs both.
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
@@ -410,40 +402,57 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
 
-  // ── The schedule facts one inventory unit's build stage is derived from ──────────
-  // The ladder is a projection, not a stored column (see _shared/inventoryLifecycle.ts), so
-  // every place that needs a unit's stage gathers the same three facts. list_inventory does
-  // this in bulk for the whole tab; this single-unit version is for set_lifecycle, which
-  // needs to know what the schedule says at the moment somebody overrides it.
-  const unitFacts = async (
-    unitId: string,
-    acceptedAt: string | null,
-    soldDesignShortCode: string | null,
-  ): Promise<UnitFacts> => {
-    const [jobRes, stopRes] = await Promise.all([
-      admin.from("build_jobs").select("stage_id, due_date, completed_at")
-        .eq("client_id", clientId).eq("inventory_unit_id", unitId).maybeSingle(),
-      admin.from("delivery_stops").select("design_short_code, delivered_at")
-        .eq("client_id", clientId).eq("inventory_unit_id", unitId),
-    ]);
-    let stageKind: StageKind | null = null;
-    if (jobRes.data?.stage_id) {
-      // KIND, never the tenant-editable stage NAME.
-      const { data: stage } = await admin.from("schedule_stages").select("kind")
-        .eq("id", jobRes.data.stage_id).eq("client_id", clientId).maybeSingle();
-      stageKind = (stage?.kind ?? null) as StageKind | null;
+  // ── Record that a building has been sold ────────────────────────────────────────
+  // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
+  // There is no button and no action behind this — a sale is a CONSEQUENCE, recorded in
+  // exactly three places, all server-side:
+  //
+  //   1. HERE, from send_invoice, the moment the customer's invoice is raised.
+  //   2. sync-design-status, when a design reaches `invoiced` some other way — the tenant
+  //      raised the invoice directly in GoHighLevel, or GHL reports the estimate as paid.
+  //   3. The payments_claim_inventory trigger (migration 105), when money is recorded against
+  //      the order. Payments are inserted straight from the browser under RLS, so a database
+  //      trigger is the only choke point that cannot be bypassed.
+  //
+  // CLAIM ONLY, NEVER RELEASE, and always a compare-and-swap on `sale_state = 'unsold'`: of
+  // two concurrent claims exactly one matches a row, so a building cannot be sold twice. A
+  // deliberate release (unsell_inventory) records the design it was released from, and this
+  // skips that design — otherwise releasing a wrongly-sold building would be pointless,
+  // because the buyer's design is still `invoiced` and the next sync would re-sell it.
+  //
+  // Best-effort by contract: the invoice has already gone to the customer by the time this
+  // runs, so a failure here must never fail that. It is logged, not thrown.
+  const claimUnitSale = async (unitId: string, buyerCode: string, why: string) => {
+    try {
+      const { data: buyer } = await admin.from("designs").select("contact")
+        .eq("client_id", clientId).eq("short_code", buyerCode).maybeSingle();
+      const now = new Date().toISOString();
+      const { data: won, error } = await admin.from("inventory_units").update({
+        sale_state: "sold",
+        sold_design_short_code: buyerCode,
+        sold_first_name: firstNameOf(buyer?.contact),
+        sold_at: now,
+        sold_by: userId,
+        updated_at: now,
+      })
+        .eq("id", unitId).eq("client_id", clientId)
+        .eq("sale_state", "unsold")
+        .or(`sale_released_from.is.null,sale_released_from.neq.${buyerCode}`)
+        .select("id, serial").maybeSingle();
+      if (error) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "inventory_sale_claim_failed",
+          message: `claim via ${why} failed for unit ${unitId}: ${(error as { code?: string }).code ?? ""}`,
+        });
+        return;
+      }
+      if (won) await auditStrict("portal_inventory_sold", 1, `unit=${unitId} serial=${won.serial} via=${why} buyer=${buyerCode}`);
+    } catch (e) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "inventory_sale_claim_failed",
+        message: `claim via ${why} threw for unit ${unitId}: ${(e as Error)?.message ?? ""}`,
+      });
     }
-    return {
-      acceptedAt,
-      soldDesignShortCode,
-      job: jobRes.data
-        ? { stageKind, dueDate: jobRes.data.due_date ?? null, completedAt: jobRes.data.completed_at ?? null }
-        : null,
-      stops: (stopRes.data ?? []).map((s: { design_short_code: string | null; delivered_at: string | null }) => ({
-        designShortCode: s.design_short_code ?? null,
-        deliveredAt: s.delivered_at ?? null,
-      })),
-    };
   };
 
   // ── The caller's own name and phone ─────────────────────────────────────────────
@@ -1784,11 +1793,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const uIns = await admin.from("inventory_units").insert({
       client_id: clientId, serial, design_short_code: shortCode,
       location_id: locationId, asking_price_cents: askingPriceCents,
-      // Saving to Inventory IS the request (migration 102). accepted_at stays null until
-      // somebody approves it, which is what makes it eligible for the build queue — spelled
-      // out rather than left to the column default, because "a building nobody has said yes
-      // to is not stock on a lot" is the whole point of the ladder.
-      sale_state: "unsold", accepted_at: null,
+      // Saving to Inventory IS the request. It reads `requested` until somebody puts it on
+      // the Build Schedule — that act is the approval (migration 105), so there is no flag
+      // here to fall out of step with the board.
+      sale_state: "unsold",
     }).select("id").maybeSingle();
     if (uIns.error) {
       // Don't leave an orphan master behind a failed unit insert.
@@ -1801,10 +1809,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   }
 
   // ── Unit field edits from the Inventory tab (price, lot) ────────────────────
-  // Selling, releasing, approving and correcting the build stage each have their OWN action
-  // below. They were one `status` field here until migration 102, and that is precisely how
-  // a building could be sold twice: a bare field write has no room for the compare-and-swap
-  // that makes a sale exclusive, or for recording who bought it.
+  // The ONLY things a person edits on a building directly. Its build status comes from the
+  // Build and Delivery schedules, and its sale comes from an invoice or a payment — neither
+  // is settable here, or anywhere else by hand.
   if (action === "update_inventory") {
     const unitId = String(payload.unitId ?? "").trim();
     if (!unitId) return json({ error: "unitId is required." }, 400);
@@ -1813,8 +1820,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // building — the worst possible outcome for this particular write.
     if (Object.prototype.hasOwnProperty.call(payload, "status")) {
       return json({
-        error: "Inventory status moved to two separate fields. Use sell_inventory to record a sale, "
-          + "accept_inventory to approve a request, or set_lifecycle to correct a build stage.",
+        error: "A building's status can't be set by hand. It follows your Build and Delivery "
+          + "schedules, and it sells when you invoice it.",
       }, 400);
     }
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -1841,126 +1848,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true });
   }
 
-  // ── Approve a requested building for the build queue ────────────────────────
-  // Requirement (Carolyn 2026-08-07): a new inventory building starts at REQUESTED, and one
-  // explicit approval moves it to ACCEPTED. This writes a FACT (accepted_at), never an
-  // override — if it wrote lifecycle_manual, every approved unit would wear the manual
-  // marker and stop auto-advancing, which would look exactly like the automation being
-  // broken.
-  if (action === "accept_inventory") {
-    const unitId = String(payload.unitId ?? "").trim();
-    if (!unitId) return json({ error: "unitId is required." }, 400);
-    const accept = payload.accepted !== false;
-    const { data: unit } = await admin.from("inventory_units")
-      .select("id, serial, accepted_at").eq("id", unitId).eq("client_id", clientId).maybeSingle();
-    if (!unit) return json({ error: "Inventory unit not found." }, 404);
-
-    const now = new Date().toISOString();
-    const patch: Record<string, unknown> = { updated_at: now };
-    if (accept) {
-      if (unit.accepted_at) return json({ ok: true, already: true });   // idempotent
-      patch.accepted_at = now;
-      patch.accepted_by = userId;
-    } else {
-      // Un-approving a building the shop is already building would strand its card on a
-      // board the unit is no longer eligible for.
-      const { data: job } = await admin.from("build_jobs").select("id")
-        .eq("client_id", clientId).eq("inventory_unit_id", unitId).maybeSingle();
-      if (job) {
-        return json({
-          error: `Building #${unit.serial} is already on the build schedule. Remove its build card first.`,
-        }, 409);
-      }
-      patch.accepted_at = null;
-      patch.accepted_by = null;
-      // The override vocabulary starts at in_queue, so any stored correction is meaningless
-      // once the unit drops back to requested.
-      patch.lifecycle_manual = null;
-      patch.lifecycle_manual_basis = null;
-      patch.lifecycle_manual_at = null;
-      patch.lifecycle_manual_by = null;
-    }
-    const { error } = await admin.from("inventory_units").update(patch)
-      .eq("id", unitId).eq("client_id", clientId);
-    if (error) return dbFail(req, clientId, "accept that building", error);
-    await audit(accept ? "portal_accept_inventory" : "portal_unaccept_inventory", 1,
-      `unit=${unitId} serial=${unit.serial}`);
-    return json({ ok: true });
-  }
-
-  // ── Record a sale — the one write that must never happen twice ──────────────
-  if (action === "sell_inventory") {
-    const unitId = String(payload.unitId ?? "").trim();
-    if (!unitId) return json({ error: "unitId is required." }, 400);
-    const code = String(payload.soldDesignShortCode ?? "").trim();
-    // Carolyn 2026-08-07: a walk-in is entered as an estimate first. So there is no
-    // "sold to nobody" path, and the CHECK in 102 agrees — this returns a sentence rather
-    // than letting the caller hit a constraint-violation string.
-    if (!code) {
-      return json({ error: "Pick which estimate bought this building." }, 400);
-    }
-    const { data: buyer } = await admin.from("designs")
-      .select("short_code, status, inventory_unit_id, contact")
-      .eq("client_id", clientId).eq("short_code", code).maybeSingle();
-    if (!buyer) return json({ error: "That estimate isn't in your account." }, 404);
-    if (buyer.status === "inventory") {
-      return json({ error: "That's the building's own design, not a customer's estimate." }, 400);
-    }
-    if (buyer.inventory_unit_id !== unitId) {
-      return json({
-        error: "That estimate wasn't quoted from this building. Send the estimate from the building first.",
-      }, 409);
-    }
-
-    const now = new Date().toISOString();
-    // ═══ THE GUARD ═══
-    // PostgREST emits: UPDATE inventory_units SET … WHERE id=$1 AND client_id=$2
-    //                  AND sale_state='unsold' RETURNING …
-    // Under READ COMMITTED two concurrent claims serialize on the row lock; the loser
-    // re-evaluates its WHERE against the WINNER'S COMMITTED row, sees sale_state='sold', and
-    // matches ZERO rows. Exactly one caller ever gets a row back — no advisory lock, no
-    // serializable transaction, no unique index needed for this property.
-    // `won === null` IS the test: it means somebody else already has it (or it isn't ours),
-    // never "it worked".
-    const { data: won, error } = await admin.from("inventory_units").update({
-      sale_state: "sold",
-      sold_design_short_code: code,
-      sold_at: now,
-      sold_by: userId,
-      sold_first_name: firstNameOf(buyer.contact),
-      updated_at: now,
-    })
-      .eq("id", unitId).eq("client_id", clientId)
-      .eq("sale_state", "unsold")
-      .select("id, serial").maybeSingle();
-
-    if (error) {
-      // inventory_units_one_sale_per_design: this estimate is already the buyer of a
-      // DIFFERENT building.
-      if ((error as { code?: string }).code === "23505") {
-        return json({ error: "That estimate is already recorded as the buyer of another building." }, 409);
-      }
-      return dbFail(req, clientId, "mark that building sold", error);
-    }
-    if (!won) {
-      const { data: cur } = await admin.from("inventory_units")
-        .select("serial, sale_state, sold_design_short_code, sold_first_name")
-        .eq("id", unitId).eq("client_id", clientId).maybeSingle();
-      if (!cur) return json({ error: "Inventory unit not found." }, 404);
-      // The same buyer re-submitting (a double-click, a retried sync) is not an error.
-      if (cur.sold_design_short_code === code) return json({ ok: true, already: true });
-      const who = cur.sold_first_name ?? cur.sold_design_short_code ?? "another customer";
-      return json({
-        error: `Building #${cur.serial} is already sold to ${who}. Design a new build for this customer instead.`,
-      }, 409);
-    }
-    // auditStrict, not best-effort audit: a sale is the one inventory write where an
-    // unattributable success is worse than a failure.
-    await auditStrict("portal_sell_inventory", 1, `unit=${unitId} serial=${won.serial} buyer=${code}`);
-    return json({ ok: true, serial: won.serial });
-  }
-
   // ── Release a sold building back onto the market ────────────────────────────
+  // The ONE correction path for a sale, and the only reason it exists: there is no way to void
+  // a customer invoice anywhere in this product — no action, no button, no inbound GHL
+  // webhook — so a CRM-side void is invisible to us. Without this, one mis-clicked invoice
+  // would take a building out of sellable stock permanently.
+  //
+  // It records WHICH design it was released from, and every automatic claim skips that design.
+  // Without that marker this action would be theatre: the buyer's design is still `invoiced`,
+  // so the very next sync would re-sell the building. A different estimate can still sell it,
+  // which is the real case — a re-sale after a cancelled one comes with a new estimate anyway.
   if (action === "unsell_inventory") {
     const unitId = String(payload.unitId ?? "").trim();
     const reason = String(payload.reason ?? "").trim();
@@ -1987,59 +1884,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // inventory_units_unsold_is_clean forces every one of these to null, so a partial clear
     // is rejected by the database rather than leaving a stale buyer the pool query and the
     // delivered write-back would keep acting on.
+    const now = new Date().toISOString();
     const { error } = await admin.from("inventory_units").update({
       sale_state: "unsold", sold_design_short_code: null, sold_at: null,
-      sold_by: null, sold_first_name: null, updated_at: new Date().toISOString(),
+      sold_by: null, sold_first_name: null, updated_at: now,
+      // The suppression marker. Keep it OUT of the CHECK's "must be clean when unsold" set —
+      // it is a record of what happened, not sale residue.
+      sale_released_at: now, sale_released_from: unit.sold_design_short_code,
     }).eq("id", unitId).eq("client_id", clientId).eq("sale_state", "sold");
     if (error) return dbFail(req, clientId, "put that building back on the lot", error);
     await auditStrict("portal_unsell_inventory", 1,
       `unit=${unitId} serial=${unit.serial} was=${unit.sold_design_short_code} reason=${reason.slice(0, 500)}`);
     return json({ ok: true });
-  }
-
-  // ── Correct a build stage by hand ───────────────────────────────────────────
-  // For facts the schedule cannot express — the crew built it on the lot, so there is no haul
-  // stop and it would never derive at_location on its own. House rule for everything else:
-  // a wrong stage should be fixed ON THE SCHEDULE, because that is where the shop looks.
-  if (action === "set_lifecycle") {
-    const unitId = String(payload.unitId ?? "").trim();
-    if (!unitId) return json({ error: "unitId is required." }, 400);
-    const raw = payload.lifecycle;
-    // null clears the override and hands the unit back to the schedule.
-    const to = raw == null || raw === "" ? null : String(raw);
-    if (to !== null && !isLifecycle(to)) return json({ error: "Unknown build stage." }, 400);
-    if (to === "requested" || to === "accepted") {
-      return json({
-        error: "Use Approve to move a building between Requested and Accepted.",
-      }, 400);
-    }
-    const { data: unit } = await admin.from("inventory_units")
-      .select("id, serial, accepted_at, sold_design_short_code")
-      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
-    if (!unit) return json({ error: "Inventory unit not found." }, 404);
-    if (to !== null && !unit.accepted_at) {
-      return json({ error: `Building #${unit.serial} hasn't been approved yet — approve it first.` }, 409);
-    }
-
-    const derived = deriveLifecycle(await unitFacts(unitId, unit.accepted_at, unit.sold_design_short_code));
-    const now = new Date().toISOString();
-    // Setting it to what the schedule ALREADY says clears the override instead of storing it,
-    // so there is no way to create a permanent no-op pin.
-    const patch = (to === null || to === derived)
-      ? {
-        lifecycle_manual: null, lifecycle_manual_basis: null,
-        lifecycle_manual_at: null, lifecycle_manual_by: null, updated_at: now,
-      }
-      : {
-        lifecycle_manual: to, lifecycle_manual_basis: derived,
-        lifecycle_manual_at: now, lifecycle_manual_by: userId, updated_at: now,
-      };
-    const { error } = await admin.from("inventory_units").update(patch)
-      .eq("id", unitId).eq("client_id", clientId);
-    if (error) return dbFail(req, clientId, "update that building's status", error);
-    await audit("portal_set_inventory_lifecycle", 1,
-      `unit=${unitId} to=${to ?? "auto"} schedule_said=${derived}`);
-    return json({ ok: true, lifecycle: to ?? derived, derived });
   }
 
   // ── Remove a unit (the master design is deleted by a follow-up delete_design) ─
@@ -2096,8 +1952,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [unitsRes, locsRes] = await Promise.all([
       admin.from("inventory_units")
         .select("id, serial, design_short_code, location_id, asking_price_cents, "
-          + "sale_state, sold_design_short_code, sold_at, sold_first_name, accepted_at, "
-          + "lifecycle_manual, lifecycle_manual_basis, created_at, updated_at")
+          + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at")
         .eq("client_id", clientId).order("created_at", { ascending: false }),
       admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
     ]);
@@ -2152,7 +2007,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // ── Build-stage facts for every unit, in three queries rather than three per unit ──
     // The ladder is derived (see _shared/inventoryLifecycle.ts), so the tab needs each unit's
     // build job, that job's stage KIND (never its tenant-editable name) and its delivery
-    // stops. Fetched in bulk here; unitFacts() above is the single-unit equivalent.
+    // stops. Fetched in bulk for the whole tab in one round trip per table.
     const [jobsRes, stopsRes] = await Promise.all([
       unitIds.length
         ? admin.from("build_jobs").select("id, inventory_unit_id, stage_id, due_date, completed_at")
@@ -2208,32 +2063,24 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const job = jobByUnit.get(u.id) ?? null;
       const stage = job?.stage_id ? stageById.get(job.stage_id) ?? null : null;
       const stops = stopsByUnit.get(u.id) ?? [];
-      const derived = deriveLifecycle({
-        acceptedAt: u.accepted_at ?? null,
+      // Purely a function of the schedule rows above — there is nothing stored to fold in and
+      // nothing hand-set to respect. The status this returns and the Build/Delivery boards
+      // cannot disagree, because they are the same facts read twice.
+      const lifecycle = deriveLifecycle({
         soldDesignShortCode: u.sold_design_short_code ?? null,
         job: job
           ? { stageKind: stage?.kind ?? null, dueDate: job.due_date ?? null, completedAt: job.completed_at ?? null }
           : null,
         stops: stops.map((s) => ({ designShortCode: s.design_short_code, deliveredAt: s.delivered_at })),
       });
-      const eff = effectiveLifecycle(u, derived);
-      const openStop = stops.find((s) => !s.delivered_at) ?? null;
 
       return {
         id: u.id, serial: u.serial, shortCode: u.design_short_code,
         locationId: u.location_id, locationName: loc?.name ?? null, locationCity: loc?.city ?? null,
         askingPriceCents: u.asking_price_cents,
         // ── Axis 1: where it is on the build ladder ──
-        lifecycle: eff.lifecycle,
-        lifecycleLabel: LIFECYCLE_LABEL[eff.lifecycle],
-        // What the SCHEDULE says, always — the tab shows this beneath a hand-set status when
-        // the two disagree, so an override never reads as the automation being broken.
-        lifecycleDerived: eff.derived,
-        lifecycleDerivedLabel: LIFECYCLE_LABEL[eff.derived],
-        lifecycleSource: eff.source,
-        accepted: !!u.accepted_at, acceptedAt: u.accepted_at ?? null,
-        buildJobId: job?.id ?? null, buildStageName: stage?.name ?? null,
-        openStopId: openStop?.id ?? null, openStopLoadId: openStop?.load_id ?? null,
+        lifecycle,
+        lifecycleLabel: LIFECYCLE_LABEL[lifecycle],
         // ── Axis 2: whether it is still for sale ──
         saleState: u.sale_state, soldDesignShortCode: u.sold_design_short_code,
         soldFirstName: u.sold_first_name ?? null, soldAt: u.sold_at ?? null,
@@ -2984,6 +2831,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     await admin.from("designs")
       .update({ status: "invoiced", updated_at: nowIso() })
       .eq("client_id", clientId).eq("short_code", shortCode);
+
+    // ── 6b. If this estimate was quoted from a lot building, that building is now SOLD. ──
+    // THIS is what makes "invoice it and the row reads SOLD — Dave" true, and true AT THIS
+    // MOMENT. Before this, the sale was only noticed by sync-design-status on somebody's next
+    // page load — and it fired at `accepted`, a rung too early, so a building went off the
+    // market on a handshake rather than an invoice.
+    if (design.inventory_unit_id) {
+      await claimUnitSale(design.inventory_unit_id, shortCode, "invoice");
+    }
     // Result row closes the attempt row written before the convert. Best-effort here —
     // the money has already moved, so failing the response now would only mislead.
     if (operator) audit("operator_send_invoice_result", null, `short_code=${shortCode} invoice=${invoiceNumber ?? invoiceId}`);

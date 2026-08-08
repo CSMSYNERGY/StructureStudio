@@ -307,31 +307,33 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     }
   } catch (e) { console.warn("order total sync failed:", (e as Error)?.message); }
 
-  // 9. Persist the sale that a unit's winning estimate implies.
+  // 9. A lot building whose estimate has been INVOICED is sold.
   //
-  //    Until migration 102 this was derived in the BROWSER only — the Inventory tab showed a
-  //    building as Sold when any linked estimate reached accepted+, and never wrote it down.
-  //    So the portal and the scheduler disagreed about the same building: the tab said Sold,
-  //    the build board still offered it as unbuilt stock, and the delivery pool (which filters
-  //    on the stored value) never listed it, so a sold building was never scheduled to its
-  //    buyer. Nothing server-side could enforce "sell it once" either, because add_stop, the
-  //    pool query and link_design_to_unit all read a flag the sale never set.
+  //    This is the safety net, not the main path. `send_invoice` claims the unit the moment it
+  //    raises the invoice, so a portal-driven sale is already recorded before anyone gets here.
+  //    What this catches is an invoice raised SOMEWHERE ELSE: the tenant billed the customer
+  //    directly in GoHighLevel, or GHL reports the estimate as paid (mapEstimateStatus maps
+  //    both `invoiced` and `paid` to invoiced), or they dragged the opportunity into their
+  //    configured invoiced pipeline stage. This function is the only place that learns any of
+  //    that, and the Inventory tab already calls it — so this finishes a round trip that
+  //    existed rather than adding one.
   //
-  //    This function is the ONLY place in the system that learns "this estimate just became
-  //    accepted" from GHL, and the Inventory tab already calls it for exactly that — so this
-  //    finishes a round trip that existed, rather than adding one.
+  //    INVOICED, NOT ACCEPTED. Carolyn 2026-08-08: "we should never be able to mark it sold.
+  //    Always needs an invoice." Claiming at `accepted` — which is what this did until
+  //    migration 105 — took a building off the market on a handshake, before anything had been
+  //    billed, and before the customer had committed to anything we could hold them to.
   //
   //    CLAIM ONLY, NEVER RELEASE: this promotes unsold → sold and does nothing else. A unit
-  //    already sold to a DIFFERENT design is left alone — that is the legitimate
-  //    two-customers-accepted case the portal flags with "offer a new build?", and
-  //    first-committed-wins is the same rule the manual path uses.
+  //    already sold to a DIFFERENT design is left alone — first-committed-wins. And a unit
+  //    deliberately RELEASED from this design is skipped, because otherwise unsell_inventory
+  //    would be theatre: the design is still `invoiced`, so this would re-sell it seconds later.
   //
   //    Deliberately OUTSIDE the per-design loop above: the delivered fence `continue`s, so a
   //    buyer whose estimate is already delivered would never be reached from inside it.
   try {
     const claimable = (designs ?? []).filter((d) =>
       d.inventory_unit_id &&
-      STAGE_RANK[(statuses[d.short_code] ?? "") as keyof typeof STAGE_RANK] >= STAGE_RANK.accepted
+      STAGE_RANK[(statuses[d.short_code] ?? "") as keyof typeof STAGE_RANK] >= STAGE_RANK.invoiced
     );
     for (const d of claimable) {
       const now = new Date().toISOString();
@@ -339,9 +341,9 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
       // this product; this is the same split submit-estimate uses to title an estimate.
       const full = String((d.contact as Record<string, unknown>)?.name ?? "").trim();
       const firstName = full ? full.split(/\s+/)[0] || null : null;
-      // The same compare-and-swap portal-settings' sell_inventory uses: the `sale_state`
-      // predicate is re-evaluated against the committed row, so of two concurrent claims
-      // exactly one matches a row. `won === null` means somebody else already owns this sale —
+      // The same compare-and-swap the other two claim paths use: the `sale_state` predicate is
+      // re-evaluated against the committed row, so of two concurrent claims exactly one matches
+      // a row. `won === null` means somebody else already owns this sale, or it was released —
       // a no-op, not an error.
       const { data: won, error: cErr } = await admin.from("inventory_units").update({
         sale_state: "sold",
@@ -353,6 +355,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
       })
         .eq("id", d.inventory_unit_id).eq("client_id", clientId)
         .eq("sale_state", "unsold")
+        .or(`sale_released_from.is.null,sale_released_from.neq.${d.short_code}`)
         .select("id, serial").maybeSingle();
       if (cErr) {
         // 23505 = inventory_units_one_sale_per_design: this estimate is already recorded as

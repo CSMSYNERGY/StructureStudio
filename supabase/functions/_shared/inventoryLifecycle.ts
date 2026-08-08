@@ -1,34 +1,37 @@
-// Where an inventory building is in its life, and how a hand-set correction behaves.
+// Where an inventory building is in its life.
 //
-// An inventory unit has TWO INDEPENDENT AXES (migration 102):
+// An inventory unit has TWO INDEPENDENT AXES:
 //
-//   BUILD LIFECYCLE — requested → accepted → in_queue → scheduled_build → built →
-//     scheduled_delivery → at_location → delivered. This module.
-//   SALE — unsold | sold. A stored column, because a sale is an event with an exclusivity
-//     invariant and nothing upstream to project from. Not this module's business.
+//   BUILD LIFECYCLE — requested → in_queue → scheduled_build → built → scheduled_delivery →
+//     at_location → delivered. This module.
+//   SALE — unsold | sold. A stored column, driven by an invoice or a recorded payment and
+//     nothing else. Not this module's business.
 //
-// They are independent because a customer can legitimately buy a spec build that is still
-// in the queue (Carolyn 2026-08-07). A single column would need one value per
-// (lifecycle × sale) pair and every consumer would be string-matching prefixes to ask
-// "is it sold?".
+// They are independent because a customer can legitimately buy a spec build that is still in
+// the queue (Carolyn 2026-08-07). A single column would need one value per (lifecycle × sale)
+// pair and every consumer would be string-matching prefixes to ask "is it sold?".
 //
-// WHY THE LADDER IS DERIVED AND NOT STORED. Every rung past "accepted" is already a fact in
-// build_jobs / delivery_stops. A stamped column would be the same duplicate bookkeeping that
-// SCHEDULING_SCOPE's "the to-be-loaded pool is a QUERY, not a table" decision forbids one
-// table over — and, worse, it would need a REVERSE transition at every call site that can
-// undo a schedule fact: delete_job, remove_stop, delete_load's cascade, move_job out of a
-// done stage, clearing a due_date, and alsoCompleteBuilds (which writes build_jobs directly
-// and bypasses both move_job and complete_job). Miss one and the unit is pinned to a stale
-// status with no error anywhere. A projection has no forward transitions, so it cannot have
-// a missing reverse one: every one of those events reverses for free because the fact it
-// was derived from is gone.
+// EVERY RUNG IS DERIVED. Nothing here is stored, and nothing is hand-set — Carolyn
+// 2026-08-08: "NO SCHEDULING EVER HAPPENS FROM THE INVENTORY PAGE. It should only state the
+// status." The Inventory page reports; the Build and Delivery schedules decide.
 //
-// The only lifecycle facts STORED on the row are the two no schedule event can produce:
-// accepted_at (the one explicit approval) and lifecycle_manual + _basis (the correction).
+// A stamped column would be the same duplicate bookkeeping that SCHEDULING_SCOPE's "the
+// to-be-loaded pool is a QUERY, not a table" decision forbids one table over — and, worse, it
+// would need a REVERSE transition at every call site that can undo a schedule fact:
+// delete_job, remove_stop, delete_load's cascade, move_job out of a done stage, clearing a
+// due_date, and alsoCompleteBuilds (which writes build_jobs directly and bypasses both
+// move_job and complete_job). Miss one and the unit is pinned to a stale status with no error
+// anywhere. A projection has no forward transitions, so it cannot have a missing reverse one:
+// every one of those events reverses for free because the fact it was derived from is gone.
+//
+// WHY THERE IS NO "accepted" RUNG (dropped in migration 105). It was the one state nothing
+// could derive, so it needed a button — and the button was on the Inventory page, which is
+// exactly what should not be there. PUTTING A BUILDING ON THE BUILD SCHEDULE IS THE APPROVAL:
+// a unit reads `requested` until it has a build job, and `in_queue` the moment it does. The
+// decision still gets made by a person, on the page where production decisions belong.
 
 export const LIFECYCLE = [
   "requested",
-  "accepted",
   "in_queue",
   "scheduled_build",
   "built",
@@ -46,7 +49,6 @@ export const LIFECYCLE_RANK = Object.fromEntries(
 /** Carolyn's words, verbatim where she gave them. The portal renders these. */
 export const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
   requested: "Requested",
-  accepted: "Accepted",
   in_queue: "In Queue",
   scheduled_build: "Scheduled to build",
   built: "Built",
@@ -61,8 +63,6 @@ export const SELLABLE_LIFECYCLE: Lifecycle = "at_location";
 export type StageKind = "queue" | "active" | "done";
 
 export interface UnitFacts {
-  /** inventory_units.accepted_at — null until somebody approves the request. */
-  acceptedAt: string | null;
   /** inventory_units.sold_design_short_code — identifies which stop is the SALE stop. */
   soldDesignShortCode: string | null;
   /** At most one, guaranteed by the build_jobs_one_per_unit index (migration 087). */
@@ -80,10 +80,6 @@ export interface UnitFacts {
  * building WENT, never that it reached a lot, so it must never be read as arrival.
  */
 export function deriveLifecycle(f: UnitFacts): Lifecycle {
-  // Saving to Inventory IS the request. One explicit approval is the only way out of it —
-  // nothing implicit, or "approved to build" stops meaning anything.
-  if (!f.acceptedAt) return "requested";
-
   const isSale = (s: { designShortCode: string | null }) =>
     !!f.soldDesignShortCode && s.designShortCode === f.soldDesignShortCode;
 
@@ -119,43 +115,9 @@ export function deriveLifecycle(f: UnitFacts): Lifecycle {
   if (haul.some((s) => s.deliveredAt)) return "at_location";
   if (haul.length) return "scheduled_delivery";
 
-  return jobDone ? "built" : "accepted";
-}
-
-export interface ManualOverride {
-  lifecycle_manual: string | null;
-  lifecycle_manual_basis: string | null;
-}
-
-export interface EffectiveLifecycle {
-  /** What to show. */
-  lifecycle: Lifecycle;
-  /** What the schedule says, always — the UI shows this when the two disagree. */
-  derived: Lifecycle;
-  source: "auto" | "manual";
-}
-
-/**
- * Fold the owner's correction into the derivation.
- *
- * THE RULE: a manual value holds while the schedule says nothing new, and yields the moment
- * the schedule says something different.
- *
- * That is what `_basis` — the derived value AT THE MOMENT OF THE OVERRIDE — buys, and why
- * this is not a boolean. A boolean `lifecycle_manual` pins the unit forever: the wrong auto
- * state is replaced by a wrong manual state that no future truth can correct, which is
- * strictly worse than the bug it fixes. With a basis, reordering stops / editing a note /
- * renaming a stage leaves `derived` unchanged so the override survives; the crew marking the
- * card done changes `derived`, the basis goes stale, and the newer physical truth wins.
- *
- * Callers should treat a yielded override as spent and null the columns out.
- */
-export function effectiveLifecycle(u: ManualOverride, derived: Lifecycle): EffectiveLifecycle {
-  const manual = u.lifecycle_manual;
-  if (manual && isLifecycle(manual) && u.lifecycle_manual_basis === derived) {
-    return { lifecycle: manual, derived, source: "manual" };
-  }
-  return { lifecycle: derived, derived, source: "auto" };
+  // No job, no stops: nobody has decided to build it yet. Putting it on the Build Schedule is
+  // what moves it on, and that is a decision made over there.
+  return jobDone ? "built" : "requested";
 }
 
 export function isLifecycle(v: unknown): v is Lifecycle {

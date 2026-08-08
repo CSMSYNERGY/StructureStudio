@@ -4,7 +4,7 @@
  * WHY THESE EXIST. The whole reason the ladder is derived rather than stamped is that a
  * projection reverses for free — delete the build job and the unit walks back down on its
  * own. That claim is only worth making if something checks it, and checking it by hand means
- * driving a real tenant's board forwards and then backwards through eight states after every
+ * driving a real tenant's board forwards and then backwards through seven states after every
  * future edit, which nobody will do twice. So the forward AND reverse behaviour is pinned
  * here, where it runs on every push.
  *
@@ -16,7 +16,8 @@
  *      report "Available to sell at Location" — that is the one wrong answer that would put
  *      a sold building back on the market.
  *   4. Nothing keys on a stage NAME. Tenants rename stages; ids and kinds survive.
- *   5. An override holds through noise and yields to real news, and can never pin forever.
+ *   5. Nothing here is hand-set. There is no override and no approval flag: if a fact is not
+ *      on the Build or Delivery schedule, it is not a status.
  *
  * Run: deno test supabase/functions/_shared/inventoryLifecycle.test.ts
  * (the pre-push gate runs this for you — see scripts/preflight.mjs)
@@ -24,7 +25,6 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import {
   deriveLifecycle,
-  effectiveLifecycle,
   isLifecycle,
   LIFECYCLE,
   LIFECYCLE_LABEL,
@@ -36,12 +36,11 @@ import {
   type UnitFacts,
 } from "./inventoryLifecycle.ts";
 
-const APPROVED = "2026-08-07T10:00:00Z";
 const BUYER = "SS-BUYER12345";
 
 /** A unit with nothing on the schedule. Spread over it to add one fact at a time. */
 function unit(over: Partial<UnitFacts> = {}): UnitFacts {
-  return { acceptedAt: APPROVED, soldDesignShortCode: null, job: null, stops: [], ...over };
+  return { soldDesignShortCode: null, job: null, stops: [], ...over };
 }
 function job(stageKind: StageKind | null, dueDate: string | null = null, completedAt: string | null = null) {
   return { stageKind, dueDate, completedAt };
@@ -51,18 +50,11 @@ const saleStop = (deliveredAt: string | null = null) => ({ designShortCode: BUYE
 
 // ── 1. Every rung, reached by the fact it names ────────────────────────────────────────
 
-Deno.test("requested — until somebody approves it", () => {
-  // Saving to Inventory is the request, not the approval. A building nobody has said yes to
-  // must never look like it is on its way, whatever else is true of it.
-  assertEquals(deriveLifecycle(unit({ acceptedAt: null })), "requested");
-  assertEquals(
-    deriveLifecycle(unit({ acceptedAt: null, job: job("done"), stops: [haulStop("2026-08-08")] })),
-    "requested",
-  );
-});
-
-Deno.test("accepted — approved, nothing on the schedule yet", () => {
-  assertEquals(deriveLifecycle(unit()), "accepted");
+Deno.test("requested — designed, but nobody has decided to build it", () => {
+  // There is no `accepted` rung and no approval flag: putting the building on the Build
+  // Schedule IS the approval, and that decision is made over there. A unit with no job is
+  // simply still a request.
+  assertEquals(deriveLifecycle(unit()), "requested");
 });
 
 Deno.test("in_queue — a build job sitting in a queue stage with no date", () => {
@@ -129,11 +121,9 @@ Deno.test("reverse — every schedule fact reverses with no reverse logic anywhe
   assertEquals(deriveLifecycle(unit({ job: job("queue", "2026-08-20") })), "scheduled_build");
   assertEquals(deriveLifecycle(unit({ job: job("queue", null) })), "in_queue");
 
-  // delete_job: anything → accepted
-  assertEquals(deriveLifecycle(unit({ job: null })), "accepted");
-
-  // un-approve: → requested
-  assertEquals(deriveLifecycle(unit({ acceptedAt: null })), "requested");
+  // delete_job: anything → requested. Taking a building off the Build Schedule un-approves it,
+  // which is the whole point of not having a separate approval flag to fall out of step.
+  assertEquals(deriveLifecycle(unit({ job: null })), "requested");
 });
 
 // ── 3. The sale stop is never arrival ──────────────────────────────────────────────────
@@ -159,10 +149,7 @@ Deno.test("a sold unit's SALE stop must never read as arrival at a lot", () => {
 
   // Sold BEFORE it was built (the pre-selling case): the sale stop exists, no haul ever
   // happened. It must NOT claim the building reached a lot.
-  assertEquals(
-    deriveLifecycle(unit({ ...sold, stops: [saleStop(null)] })),
-    "built",
-  );
+  assertEquals(deriveLifecycle(unit({ ...sold, stops: [saleStop(null)] })), "built");
 });
 
 Deno.test("an unfinished build caps the ladder — a stop cannot claim a building exists", () => {
@@ -190,16 +177,16 @@ Deno.test("an unfinished build caps the ladder — a stop cannot claim a buildin
 
 Deno.test("a tenant who never uses the build board still climbs to at_location", () => {
   // No build job at all — plenty of shops just haul a finished building to a lot. The cap
-  // above must not strand them at `accepted` forever.
-  assertEquals(deriveLifecycle(unit({ job: null, stops: [] })), "accepted");
+  // above must not strand them at `requested` forever.
+  assertEquals(deriveLifecycle(unit({ job: null, stops: [] })), "requested");
   assertEquals(deriveLifecycle(unit({ job: null, stops: [haulStop(null)] })), "scheduled_delivery");
   assertEquals(deriveLifecycle(unit({ job: null, stops: [haulStop("2026-08-21")] })), "at_location");
 });
 
 Deno.test("with no buyer recorded, every stop is a haul", () => {
   // sold_design_short_code null means we cannot tell which stop is the sale, so nothing is
-  // special-cased. The 102 CHECK makes this state unreachable for a SOLD unit; an unsold unit
-  // legitimately has only haul stops anyway.
+  // special-cased. The CHECK from migration 102 makes this state unreachable for a SOLD unit;
+  // an unsold unit legitimately has only haul stops anyway.
   assertEquals(
     deriveLifecycle(unit({ soldDesignShortCode: null, stops: [{ designShortCode: BUYER, deliveredAt: "2026-09-02" }] })),
     "at_location",
@@ -211,13 +198,13 @@ Deno.test("a unit sold before it is built still climbs the build rungs", () => {
   // shop still has to. If this collapsed, a sold-but-unbuilt building would fall out of
   // production and never get made.
   const sold = { soldDesignShortCode: BUYER, stops: [] };
-  assertEquals(deriveLifecycle(unit({ ...sold, job: null })), "accepted");
+  assertEquals(deriveLifecycle(unit({ ...sold, job: null })), "requested");
   assertEquals(deriveLifecycle(unit({ ...sold, job: job("queue") })), "in_queue");
   assertEquals(deriveLifecycle(unit({ ...sold, job: job("queue", "2026-08-20") })), "scheduled_build");
   assertEquals(deriveLifecycle(unit({ ...sold, job: job("done") })), "built");
 });
 
-// ── 4. Nothing keys on a stage name ────────────────────────────────────────────────────
+// ── 4. Nothing keys on a stage name, and nothing is hand-set ───────────────────────────
 
 Deno.test("stage NAME is irrelevant — only kind decides", () => {
   // The facts carry no name at all: UnitFacts has no field for one, so a tenant renaming
@@ -225,62 +212,16 @@ Deno.test("stage NAME is irrelevant — only kind decides", () => {
   // version of scheduling rule 1, and this test is here so a future refactor that adds a name
   // to UnitFacts has to delete an assertion that says why not.
   assertEquals(Object.keys(job("done")).sort(), ["completedAt", "dueDate", "stageKind"]);
-  // An unrecognised kind still counts as "there is a job" rather than falling back to accepted
-  // — losing a building out of production is worse than showing it one rung low.
+  // An unrecognised kind still counts as "there is a job" rather than falling back to
+  // requested — losing a building out of production is worse than showing it one rung low.
   assertEquals(deriveLifecycle(unit({ job: job(null) })), "in_queue");
 });
 
-// ── 5. The override: holds through noise, yields to news, never pins forever ───────────
-
-Deno.test("override holds while the schedule says nothing new", () => {
-  // The case this exists for: the crew built it on the lot, so there is no haul stop and the
-  // derivation can never reach at_location on its own.
-  const eff = effectiveLifecycle(
-    { lifecycle_manual: "at_location", lifecycle_manual_basis: "accepted" },
-    "accepted",
-  );
-  assertEquals(eff, { lifecycle: "at_location", derived: "accepted", source: "manual" });
-});
-
-Deno.test("override yields the moment the derivation changes", () => {
-  // Newer physical truth beats an older correction. A pin that outlives its reason is the
-  // bug factory in the other direction.
-  const eff = effectiveLifecycle(
-    { lifecycle_manual: "at_location", lifecycle_manual_basis: "accepted" },
-    "built",
-  );
-  assertEquals(eff, { lifecycle: "built", derived: "built", source: "auto" });
-});
-
-Deno.test("an override equal to the derivation is not a pin", () => {
-  // set_lifecycle clears rather than stores in this case, but if one ever lands in the column
-  // it must still report auto — otherwise the row wears the manual marker for no reason and
-  // silently stops advancing.
-  const eff = effectiveLifecycle(
-    { lifecycle_manual: "built", lifecycle_manual_basis: "built" },
-    "built",
-  );
-  assertEquals(eff.source, "manual");
-  assertEquals(eff.lifecycle, "built");
-  // …and it yields on the very next real change, so it cannot outlive its basis.
-  assertEquals(
-    effectiveLifecycle({ lifecycle_manual: "built", lifecycle_manual_basis: "built" }, "at_location").source,
-    "auto",
-  );
-});
-
-Deno.test("no override, or a corrupted one, falls through to the derivation", () => {
-  assertEquals(effectiveLifecycle({ lifecycle_manual: null, lifecycle_manual_basis: null }, "in_queue").source, "auto");
-  // A value the CHECK constraint would reject must not be rendered as a status.
-  assertEquals(
-    effectiveLifecycle({ lifecycle_manual: "on_fire", lifecycle_manual_basis: "in_queue" }, "in_queue").lifecycle,
-    "in_queue",
-  );
-  // Paired columns are enforced in the database; a half-set row still resolves to auto here.
-  assertEquals(
-    effectiveLifecycle({ lifecycle_manual: "built", lifecycle_manual_basis: null }, "in_queue").source,
-    "auto",
-  );
+Deno.test("the status is a pure function of schedule facts — there is nothing to hand-set", () => {
+  // Carolyn 2026-08-08: "It should only state the status." UnitFacts carries the buyer link
+  // (to tell a sale stop from a haul) and the schedule rows, and nothing else — no approval
+  // flag, no override, no stored rung. A future change that adds one has to delete this.
+  assertEquals(Object.keys(unit()).sort(), ["job", "soldDesignShortCode", "stops"]);
 });
 
 // ── Vocabulary integrity ───────────────────────────────────────────────────────────────
@@ -291,6 +232,8 @@ Deno.test("the ladder is ordered, complete, and every rung has a label", () => {
   LIFECYCLE.forEach((k, i) => assertEquals(LIFECYCLE_RANK[k], i));
   LIFECYCLE.forEach((k) => assertEquals(typeof LIFECYCLE_LABEL[k], "string"));
   assertEquals(Object.keys(LIFECYCLE_LABEL).length, LIFECYCLE.length);
+  assertEquals(LIFECYCLE.length, 7);
+  assertEquals((LIFECYCLE as readonly string[]).includes("accepted"), false);
   assertEquals(LIFECYCLE_RANK.built < LIFECYCLE_RANK[SELLABLE_LIFECYCLE], true);
   assertEquals(LIFECYCLE_RANK[SELLABLE_LIFECYCLE] < LIFECYCLE_RANK.delivered, true);
 });
@@ -298,6 +241,7 @@ Deno.test("the ladder is ordered, complete, and every rung has a label", () => {
 Deno.test("isLifecycle / lifecycleRank reject unknown values instead of guessing", () => {
   assertEquals(isLifecycle("built"), true);
   assertEquals(isLifecycle("Built"), false);
+  assertEquals(isLifecycle("accepted"), false);   // retired in 105
   assertEquals(isLifecycle(null), false);
   assertEquals(lifecycleRank("requested"), 0);
   // Unknown sorts BELOW requested, so a `rank >= built` gate can never be passed by a value
@@ -308,9 +252,8 @@ Deno.test("isLifecycle / lifecycleRank reject unknown values instead of guessing
 
 Deno.test("every rung is reachable from some combination of facts", () => {
   // Guards against a rung being added to the vocabulary that the derivation can never return
-  // — a status the UI offers in its override picker but the schedule can never justify.
+  // — a status the UI can show but the schedule can never justify.
   const reachable = new Set<Lifecycle>([
-    deriveLifecycle(unit({ acceptedAt: null })),
     deriveLifecycle(unit()),
     deriveLifecycle(unit({ job: job("queue") })),
     deriveLifecycle(unit({ job: job("queue", "2026-08-20") })),
