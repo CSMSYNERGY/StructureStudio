@@ -157,6 +157,49 @@ function json(body: unknown, status = 200) {
   });
 }
 
+/**
+ * A database or storage call failed. Log the real reason server-side; tell the caller
+ * something they can act on.
+ *
+ * WHY (2026-08-07): ~40 handlers returned PostgREST's `error.message` verbatim, which is
+ * written for whoever wrote the schema — "null value in column \"label\" of relation
+ * \"colors\" violates not-null constraint" names tables, columns and constraints, and it
+ * lands on a builder's settings screen where none of that is actionable. It is also not
+ * ours to publish: the wording changes with the Postgres version.
+ *
+ * This is NOT a return to swallowing errors — the failure c38b5aa fixed. That change was
+ * about the portal hiding the reasons THIS FUNCTION writes behind supabase-js's generic
+ * "non-2xx", and every one of those authored messages ("Not signed in.", "invalid width",
+ * "That user is not in this account.") still reaches the browser untouched. What changes
+ * here is only the text we did not write. Nothing is lost either: the raw message goes to
+ * `app_errors` with the same `where` label the caller is shown, so a support question
+ * ("it says it couldn't save my colors") maps to one row.
+ *
+ * `where` completes "Couldn't …" and is the correlation key — keep it short, specific and
+ * stable, because it is both user-facing text and the thing you grep app_errors for.
+ */
+function dbFail(
+  req: Request,
+  clientId: string | null,
+  where: string,
+  // deno-lint-ignore no-explicit-any
+  err: any,
+  status = 500,
+) {
+  logEdgeError({
+    fn: "portal-settings",
+    req,
+    clientId,
+    code: err?.code ?? status,
+    message: `${where}: ${err?.message ?? "unknown database error"}`,
+    context: { where, pgCode: err?.code ?? null, details: err?.details ?? null, hint: err?.hint ?? null },
+  }).catch(() => {});
+  return json({
+    error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
+    ref: where,
+  }, status);
+}
+
 function maskId(v: string | null): string | null {
   if (!v) return null;
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
@@ -410,7 +453,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "get_profile") {
     const { data, error } = await admin
       .from("client_users").select("full_name, phone, role").eq("user_id", userId).maybeSingle();
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your profile", error);
     return json({
       fullName: data?.full_name ?? "",
       phone: data?.phone ?? "",
@@ -428,7 +471,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("client_users")
       .update({ full_name: fullName, phone: phone || null })
       .eq("user_id", userId);        // own row only
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save your name and phone", error);
     return json({ ok: true, fullName, phone });
   }
 
@@ -438,7 +481,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your settings", error);
     // Designer branding lives in client_configs (drives the public ?client= link).
     const { data: cfg } = await admin
       .from("client_configs")
@@ -582,7 +625,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error: upErr } = await admin
       .from("client_settings")
       .upsert(updates, { onConflict: "client_id" });
-    if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
+    if (upErr) return dbFail(req, clientId, "save your settings", upErr);
     return json({ ok: true });
   }
 
@@ -631,7 +674,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
       const path = `${clientId}/logo-${Date.now()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-      if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
+      if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
       updates.logo_url = pub.publicUrl;
     } else if ("logoUrl" in payload) {
@@ -640,7 +683,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
     if (Object.keys(updates).length === 0) return json({ error: "Nothing to save." }, 400);
     const { error: upErr } = await admin.from("client_configs").update(updates).eq("client_id", clientId);
-    if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
+    if (upErr) return dbFail(req, clientId, "save your branding", upErr);
     return json({ ok: true, logoUrl: updates.logo_url ?? null });
   }
 
@@ -661,7 +704,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const prefix = payload.kind === "business" ? "biz-logo" : "logo";
     const path = `${clientId}/${prefix}-${Date.now()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -689,7 +732,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp]) if (r.error) return json({ error: r.error.message }, 500);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
@@ -707,7 +750,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     try {
       const r = await importPricingRows(admin, clientId, payload.rows);
       return json({ ok: true, ...r });
-    } catch (e) { return json({ error: (e as Error).message || String(e) }, 500); }
+    } catch (e) { return dbFail(req, clientId, "import that pricing sheet", e); }
   }
 
   // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
@@ -720,10 +763,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
-    if (itemsRes.error) return json({ error: itemsRes.error.message }, 500);
+    if (itemsRes.error) return dbFail(req, clientId, "load your option list", itemsRes.error);
     const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
     const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "load your current option prices", exRes.error);
     const idByKey = new Map<string, string>();
     for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
     let saved = 0; const skipped: string[] = [];
@@ -763,7 +806,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("ghl_location_id, ghl_api_key")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (curErr) return json({ error: curErr.message }, 500);
+    if (curErr) return dbFail(req, clientId, "read your saved CRM credentials", curErr);
 
     const locationId = trim(payload.ghlLocationId) || (cur?.ghl_location_id ?? "");
     const apiKey = trim(payload.ghlApiKey) || (cur?.ghl_api_key ?? "");
@@ -832,7 +875,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if ("ghlStageInvoicedId" in payload) updates.ghl_stage_invoiced_id = trim(payload.ghlStageInvoicedId) || null;
     if ("ghlStageDeliveredId" in payload) updates.ghl_stage_delivered_id = trim(payload.ghlStageDeliveredId) || null;
     const { error: upErr } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
-    if (upErr) return json({ error: `Verified, but the save failed: ${upErr.message}` }, 500);
+    // "verified, but the save failed" is a state worth naming: the credentials the owner
+    // just typed are GOOD, so re-entering them is not the fix and they should not go hunting
+    // for a wrong key. dbFail's stock sentence would have lost that, so this one keeps its
+    // own wording while still logging through the same path.
+    if (upErr) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: upErr.code ?? 500,
+        message: `save your CRM connection: ${upErr.message}`, context: { where: "save your CRM connection" } }).catch(() => {});
+      return json({ error: 'Your CRM credentials are correct, but saving them failed. Please try again — if it keeps happening, tell CSM Synergy and mention "save your CRM connection".', ref: "save your CRM connection" }, 500);
+    }
 
     // Pricing comes from the per-tenant CSV catalog (building_sizes), not GHL products, so a
     // missing product catalog is no longer worth warning about. A missing USER still blocks
@@ -853,7 +904,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("ghl_location_id, ghl_api_key")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (curErr) return json({ error: curErr.message }, 500);
+    if (curErr) return dbFail(req, clientId, "read your saved CRM credentials", curErr);
     const locationId = cur?.ghl_location_id ?? "";
     const apiKey = cur?.ghl_api_key ?? "";
     if (!locationId || !apiKey) {
@@ -914,7 +965,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
       const path = `${clientId}/style-${Date.now()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
       imageUrl = pub.publicUrl;
     }
@@ -927,7 +978,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
         .select("id, key").maybeSingle();
       if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
-      if (ins.error.code !== "23505") return json({ error: ins.error.message }, 500);
+      if (ins.error.code !== "23505") return dbFail(req, clientId, "create that building style", ins.error);
       key = `${base}-${++n}`;
     }
     return json({ error: "Could not allocate a unique style key." }, 500);
@@ -941,7 +992,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("building_styles")
       .update({ active: payload.active !== false })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "show or hide that style", error);
     return json({ ok: true });
   }
 
@@ -953,7 +1004,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("building_styles")
       .update({ show_image_on_estimate: payload.show !== false })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "update that style's estimate image", error);
     return json({ ok: true });
   }
 
@@ -973,7 +1024,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
     const path = `${clientId}/layout-${Date.now()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -994,7 +1045,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
     const path = `${clientId}/door-${Date.now()}.${ext}`;
     const up = await admin.storage.from("fixtures").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("fixtures").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -1035,7 +1086,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { data: design, error: findErr } = await admin.from("designs")
       .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-    if (findErr) return json({ error: findErr.message }, 500);
+    if (findErr) return dbFail(req, clientId, "find that design", findErr);
     if (!design) return json({ error: "Design not found (or not yours)." }, 404);
 
     const st = design.status && ["sent", "accepted", "invoiced", "delivered"].includes(design.status)
@@ -1061,7 +1112,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     //    strictly better than an orphan nobody can trace.
     const { data: versions, error: verErr } = await admin.from("design_versions")
       .select("id, image_url").eq("client_id", clientId).eq("short_code", shortCode);
-    if (verErr) return json({ error: verErr.message }, 500);
+    if (verErr) return dbFail(req, clientId, "read that design's version history", verErr);
 
     // 2. Storage. Every candidate key must be one THIS design could have produced — under
     //    this tenant's prefix and carrying this design's globally-unique short_code. That
@@ -1169,10 +1220,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     //    action is idempotent, so a retry finishes the job.
     const { error: verDelErr, count: versionsDeleted } = await admin.from("design_versions")
       .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
-    if (verDelErr) return json({ error: verDelErr.message }, 500);
+    if (verDelErr) return dbFail(req, clientId, "delete that design's version history", verDelErr);
     const { error: delErr, count } = await admin.from("designs")
       .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
-    if (delErr) return json({ error: delErr.message }, 500);
+    if (delErr) return dbFail(req, clientId, "delete that design", delErr);
     if (!count) return json({ error: "Design not found (or not yours)." }, 404);
 
     // Durable: deleting a customer's design is not something we accept losing the record of.
@@ -1223,7 +1274,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error, count } = await admin.from("building_styles")
       .delete({ count: "exact" })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true });
   }
@@ -1251,7 +1302,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
       const path = `${clientId}/style-${Date.now()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
       updates.image_url = pub.publicUrl;
     }
@@ -1260,7 +1311,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error, count } = await admin.from("building_styles")
       .update(updates, { count: "exact" })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
   }
@@ -1278,7 +1329,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const { error } = await admin.from("building_styles")
         .update({ sort_order: i })
         .eq("client_id", clientId).eq("id", sid);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "reorder your styles", error);
       i++;
     }
     return json({ ok: true });
@@ -1294,7 +1345,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "read your current colors", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
     const keptIds = new Set<string>();
     let saved = 0; const skipped: string[] = [];
@@ -1338,7 +1389,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let deleted = 0;
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
+      if (del.error) return dbFail(req, clientId, "remove the colors you deleted", del.error);
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
@@ -1407,7 +1458,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "save that line", error);
       // Name the three ways this can match nothing, because "Item not found." sent a builder
       // round in circles on 2026-08-05: the row can be gone, or belong to another builder,
       // or — the one nobody guesses — be filed under a different category than the tab it is
@@ -1422,7 +1473,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .order("sort_order", { ascending: false }).limit(1).maybeSingle();
     v.rec!.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
     const ins = await admin.from("fixture_items").insert(v.rec!).select("id").maybeSingle();
-    if (ins.error) return json({ error: ins.error.message }, 500);
+    if (ins.error) return dbFail(req, clientId, "add that line", ins.error);
     return json({ ok: true, id: ins.data!.id });
   }
 
@@ -1437,7 +1488,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!id) return json({ error: "That line was never saved, so there is nothing to delete — reload the page to clear it." }, 400);
     const { error, count } = await admin.from("fixture_items").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that line", error);
     // Already gone is the common case and is harmless — say so rather than implying failure.
     if (!count) return json({ error: `That item is not in ${clientId}'s catalog any more — it was probably already deleted. Reload the page.` }, 404);
     return json({ ok: true });
@@ -1456,7 +1507,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!sid) continue;
       const { error } = await admin.from("fixture_items").update({ sort_order: i })
         .eq("client_id", clientId).eq("category", category).eq("id", sid);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "reorder those lines", error);
       i++;
     }
     return json({ ok: true });
@@ -1473,7 +1524,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
     if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);   // stricter than MAX_BULK_ROWS on purpose
     const exRes = await admin.from("fixture_items").select("id, sort_order").eq("client_id", clientId).eq("category", category);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "read your current catalog lines", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
     let nextSort = (exRes.data ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.sort_order) || 0), -1) + 1;
     let saved = 0, added = 0; const skipped: string[] = [];
@@ -1507,7 +1558,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const archived = payload?.archived === true;
     const { error } = await admin.from("client_layout_items")
       .update({ archived }).eq("client_id", clientId).eq("item_key", key);
-    if (error) return json({ error: `Archive failed: ${error.message}` }, 500);
+    if (error) return dbFail(req, clientId, "archive that option", error);
     return json({ ok: true });
   }
 
@@ -1521,7 +1572,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const internalOnly = payload?.internalOnly === true;
     const { error } = await admin.from("client_layout_items")
       .update({ internal_only: internalOnly }).eq("client_id", clientId).eq("item_key", key);
-    if (error) return json({ error: `Save failed: ${error.message}` }, 500);
+    if (error) return dbFail(req, clientId, "update that option", error);
     return json({ ok: true });
   }
 
@@ -1546,7 +1597,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (Object.prototype.hasOwnProperty.call(p, "enabled")) updates.ramp_enabled = p.enabled === true;
     if (Object.prototype.hasOwnProperty.call(p, "imageUrl")) updates.ramp_image_url = String(p.imageUrl ?? "").trim() || null;
     const { error } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
-    if (error) return json({ error: `Save failed: ${error.message}` }, 500);
+    if (error) return dbFail(req, clientId, "save your ramp settings", error);
     return json({ ok: true });
   }
 
@@ -1563,7 +1614,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .eq("client_id", clientId).eq("active", true).order("sort_order").order("created_at"),
       admin.from("inventory_units").select("location_id").eq("client_id", clientId),
     ]);
-    if (locs.error) return json({ error: locs.error.message }, 500);
+    if (locs.error) return dbFail(req, clientId, "load your locations", locs.error);
     const counts: Record<string, number> = {};
     for (const u of units.data ?? []) { if (u.location_id) counts[u.location_id] = (counts[u.location_id] || 0) + 1; }
     const locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
@@ -1587,7 +1638,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Scoped by BOTH id and client_id — an id from another tenant matches nothing.
       const { error, count } = await admin.from("builder_locations").update(row, { count: "exact" })
         .eq("id", id).eq("client_id", clientId);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "save that location", error);
       if (!count) return json({ error: "Location not found." }, 404);
       return json({ ok: true, id });
     }
@@ -1595,7 +1646,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).order("sort_order", { ascending: false }).limit(1).maybeSingle();
     row.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
     const ins = await admin.from("builder_locations").insert(row).select("id").maybeSingle();
-    if (ins.error) return json({ error: ins.error.message }, 500);
+    if (ins.error) return dbFail(req, clientId, "add that location", ins.error);
     return json({ ok: true, id: ins.data!.id });
   }
 
@@ -1606,7 +1657,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // so they show "no location" rather than blocking the delete or vanishing.
     const { error, count } = await admin.from("builder_locations").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that location", error);
     if (!count) return json({ error: "Location not found." }, 404);
     return json({ ok: true });
   }
@@ -1638,7 +1689,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("client_settings").upsert(
       { client_id: clientId, next_serial: n, updated_at: new Date().toISOString() },
       { onConflict: "client_id" });
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save your next serial number", error);
     await audit("portal_save_serial_start", 1, `next_serial=${n}`);
     return json({ ok: true, nextSerial: n });
   }
@@ -1689,7 +1740,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (imageUrl) dPatch.image_url = imageUrl;   // null never blanks an existing PDF
       const dUp = await admin.from("designs").update(dPatch)
         .eq("client_id", clientId).eq("short_code", unit.design_short_code).eq("status", "inventory");
-      if (dUp.error) return json({ error: dUp.error.message }, 500);
+      if (dUp.error) return dbFail(req, clientId, "save that building", dUp.error);
       // Version append mirrors save_design's history contract.
       const { data: vMax } = await admin.from("design_versions").select("version")
         .eq("short_code", unit.design_short_code).order("version", { ascending: false }).limit(1).maybeSingle();
@@ -1702,7 +1753,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (Object.prototype.hasOwnProperty.call(payload, "askingPriceCents")) uPatch.asking_price_cents = askingPriceCents;
       if (Object.prototype.hasOwnProperty.call(payload, "locationId")) uPatch.location_id = locationId;
       const uUp = await admin.from("inventory_units").update(uPatch).eq("id", unitId).eq("client_id", clientId);
-      if (uUp.error) return json({ error: uUp.error.message }, 500);
+      if (uUp.error) return dbFail(req, clientId, "save that inventory unit", uUp.error);
       await audit("portal_update_inventory", 1, `unit=${unitId}`);
       return json({ ok: true, unitId, shortCode: unit.design_short_code });
     }
@@ -1716,13 +1767,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
     // Serial LAST among the validations — a rejected payload must not burn a number.
     const { data: serial, error: serErr } = await admin.rpc("take_next_serial", { p_client_id: clientId });
-    if (serErr || serial == null) return json({ error: serErr?.message || "Could not assign a serial number." }, 500);
+    // `serial == null` with no error is not a database failure — take_next_serial simply
+    // returned nothing — so it keeps its own sentence rather than being folded into dbFail.
+    if (serErr) return dbFail(req, clientId, "get the next serial number", serErr);
+    if (serial == null) return json({ error: "Could not assign a serial number." }, 500);
 
     const dIns = await admin.from("designs").insert({
       short_code: shortCode, client_id: clientId, status: "inventory",
       contact: {}, ...design, image_url: imageUrl,
     });
-    if (dIns.error) return json({ error: dIns.error.message }, 500);
+    if (dIns.error) return dbFail(req, clientId, "create that building", dIns.error);
     await admin.from("design_versions").insert({
       short_code: shortCode, client_id: clientId, version: 1, contact: {},
       ...design, image_url: imageUrl,
@@ -1740,7 +1794,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Don't leave an orphan master behind a failed unit insert.
       await admin.from("design_versions").delete().eq("short_code", shortCode).eq("client_id", clientId);
       await admin.from("designs").delete().eq("short_code", shortCode).eq("client_id", clientId);
-      return json({ error: uIns.error.message }, 500);
+      return dbFail(req, clientId, "create that inventory unit", uIns.error);
     }
     await audit("portal_save_inventory", 1, `unit=${uIns.data!.id} serial=${serial}`);
     return json({ ok: true, unitId: uIns.data!.id, serial, shortCode });
@@ -1781,7 +1835,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
     const { error, count } = await admin.from("inventory_units").update(patch, { count: "exact" })
       .eq("id", unitId).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that building", error);
     if (!count) return json({ error: "Inventory unit not found." }, 404);
     await audit("portal_update_inventory", 1, `unit=${unitId}`);
     return json({ ok: true });
@@ -1828,7 +1882,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
     const { error } = await admin.from("inventory_units").update(patch)
       .eq("id", unitId).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "accept that building", error);
     await audit(accept ? "portal_accept_inventory" : "portal_unaccept_inventory", 1,
       `unit=${unitId} serial=${unit.serial}`);
     return json({ ok: true });
@@ -1886,7 +1940,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if ((error as { code?: string }).code === "23505") {
         return json({ error: "That estimate is already recorded as the buyer of another building." }, 409);
       }
-      return json({ error: error.message }, 500);
+      return dbFail(req, clientId, "mark that building sold", error);
     }
     if (!won) {
       const { data: cur } = await admin.from("inventory_units")
@@ -1937,7 +1991,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       sale_state: "unsold", sold_design_short_code: null, sold_at: null,
       sold_by: null, sold_first_name: null, updated_at: new Date().toISOString(),
     }).eq("id", unitId).eq("client_id", clientId).eq("sale_state", "sold");
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "put that building back on the lot", error);
     await auditStrict("portal_unsell_inventory", 1,
       `unit=${unitId} serial=${unit.serial} was=${unit.sold_design_short_code} reason=${reason.slice(0, 500)}`);
     return json({ ok: true });
@@ -1982,7 +2036,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       };
     const { error } = await admin.from("inventory_units").update(patch)
       .eq("id", unitId).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "update that building's status", error);
     await audit("portal_set_inventory_lifecycle", 1,
       `unit=${unitId} to=${to ?? "auto"} schedule_said=${derived}`);
     return json({ ok: true, lifecycle: to ?? derived, derived });
@@ -1999,7 +2053,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // FK nulls out. Only the unit row goes here; the portal then calls delete_design
     // for the master (reusing its storage/version cascade unchanged).
     const { error } = await admin.from("inventory_units").delete().eq("id", unitId).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that building", error);
 
     // The master design goes with it, HERE rather than in a second call from the browser.
     // Split across two requests, a failed/abandoned second call left a status='inventory'
@@ -2047,7 +2101,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .eq("client_id", clientId).order("created_at", { ascending: false }),
       admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
     ]);
-    if (unitsRes.error) return json({ error: unitsRes.error.message }, 500);
+    if (unitsRes.error) return dbFail(req, clientId, "load your inventory", unitsRes.error);
     const units = unitsRes.data ?? [];
     const locById = new Map((locsRes.data ?? []).map((l: any) => [l.id, l]));
     const codes = units.map((u: any) => u.design_short_code);
@@ -2062,7 +2116,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
           .eq("client_id", clientId).in("inventory_unit_id", unitIds).order("created_at", { ascending: false })
         : Promise.resolve({ data: [], error: null } as any),
     ]);
-    if (mastersRes.error) return json({ error: mastersRes.error.message }, 500);
+    if (mastersRes.error) return dbFail(req, clientId, "load your inventory buildings", mastersRes.error);
     // Spell out the master rows' shape. The empty-input branch above is `as any`, so
     // `mastersRes.data` is `any` and a bare `new Map(rows.map(...))` has nothing to infer
     // K/V from — it quietly becomes Map<unknown, unknown>, `.get()` returns `unknown`, and
@@ -2234,7 +2288,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // Never relabel the master itself, and never touch another tenant's design.
     const { error, count } = await admin.from("designs").update({ inventory_unit_id: unitId }, { count: "exact" })
       .eq("client_id", clientId).eq("short_code", shortCode).neq("status", "inventory");
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "link that design to the building", error);
     if (!count) return json({ error: "Design not found (or it is an inventory master)." }, 404);
 
     // Stamp the NEWEST version row (migration 080) so the Designs tab can label each
@@ -2286,8 +2340,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .eq("client_id", clientId).in("short_code", codes)
         .order("version", { ascending: true }),
     ]);
-    if (dRes.error) return json({ error: dRes.error.message }, 500);
-    if (vRes.error) return json({ error: vRes.error.message }, 500);
+    if (dRes.error) return dbFail(req, clientId, "load this contact's designs", dRes.error);
+    if (vRes.error) return dbFail(req, clientId, "load this contact's design history", vRes.error);
 
     // GHL estimate events for these designs' estimates (best-effort — timeline still
     // renders from DB data if GHL is unreachable/unconfigured).
@@ -2361,7 +2415,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).eq("status", "sent")
       .is("qbo_invoice_id", null).not("qbo_error", "is", null)
       .order("updated_at", { ascending: false }).limit(50);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your pending QuickBooks pushes", error);
     return json({
       ok: true, clientId,
       pending: (data ?? []).map((r: any) => ({
@@ -2382,7 +2436,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at, qbo_disconnect_reason")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your QuickBooks connection", error);
 
     const connected = !!data?.qbo_realm_id && !!data?.qbo_connected_at;
     const { count } = await admin
@@ -2433,12 +2487,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // `roughOpening` key. Same three-step fallback the `catalog` action above already uses.
       admin.from("layout_item_types").select("item_key, label"),
     ]);
-    if (maps.error) return json({ error: maps.error.message }, 500);
+    if (maps.error) return dbFail(req, clientId, "load your QuickBooks mappings", maps.error);
     // Checked, not `?? []`-swallowed: an empty layoutItems list is indistinguishable from a
     // tenant with none, which is exactly how the bug above stayed invisible. Same for styles —
     // a silent empty there hides every per-style building override.
-    if (styles.error) return json({ error: styles.error.message }, 500);
-    if (items.error) return json({ error: items.error.message }, 500);
+    if (styles.error) return dbFail(req, clientId, "load your building styles", styles.error);
+    if (items.error) return dbFail(req, clientId, "load your option list", items.error);
     // types is presentation-only: a failure here costs nicer labels, not correctness, so it
     // degrades to the item_key instead of failing the whole grid.
     const labelByKey: Record<string, string> = {};
@@ -2474,7 +2528,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       admin.from("building_styles").select("id").eq("client_id", clientId),
       admin.from("qbo_item_map").select("id, line_kind, item_key, style_id").eq("client_id", clientId),
     ]);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "read your current QuickBooks mappings", exRes.error);
     const validKeys = new Set((itemsRes.data ?? []).map((i: any) => i.item_key));
     const validStyles = new Set((stylesRes.data ?? []).map((s: any) => s.id));
     const keyOf = (k: string, ik: string, sid: string | null) => `${k}|${ik}|${sid ?? ""}`;
@@ -2687,7 +2741,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // an earlier displacement is now stale and must not sit on the card explaining THIS one.
       qbo_disconnect_reason: null,
     }).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "disconnect QuickBooks", error);
 
     await auditStrict("qbo_disconnect", 1, `realm kept as tombstone`);
     return json({ ok: true, clientId });
@@ -2743,7 +2797,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // removed as a dead PII read on the invoice path.
       .select("short_code, ghl_estimate_id, inventory_unit_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-    if (desErr) return json({ error: desErr.message }, 500);
+    if (desErr) return dbFail(req, clientId, "find that design", desErr);
     if (!design) return json({ error: "Design not found." }, 404);
     if (!design.ghl_estimate_id) return json({ error: "This design has no estimate yet." }, 400);
 
@@ -2751,7 +2805,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .from("client_settings")
       .select("ghl_location_id, ghl_api_key")
       .eq("client_id", clientId).maybeSingle();
-    if (curErr) return json({ error: curErr.message }, 500);
+    if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
     if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
       return json({ error: "Connect your CRM first (Settings → CRM Connection)." }, 400);
     }
@@ -2805,7 +2859,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const { data: prior } = await admin.from("invoice_sends")
         .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-      if (!prior) return json({ error: claimIns.error.message }, 500);
+      if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
       const st = String(prior.status || "");
       if (st === "sent") {
         return json({ error: `Invoice ${prior.invoice_number ?? ""} was already sent for this design.` }, 400);
