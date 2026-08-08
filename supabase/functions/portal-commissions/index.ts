@@ -329,7 +329,9 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         if (!isOwner && (wantTitle === "owner" || wantTitle === "admin")) {
           return json({ error: "Only an owner can add another owner or admin." }, 403);
         }
-        const seedAccess = sanitizeAccess(p.access);
+        // Title-aware so a billing seed survives only on an admin (owner-added, per the
+        // gate two lines up) — anything else is dropped here and refused by mayGrantMap.
+        const seedAccess = sanitizeAccess(p.access, wantTitle);
         const tooHigh = mayGrantMap(role, myAccess, effectiveAccess(wantRole, wantTitle, seedAccess));
         if (tooHigh) return json({ error: `You can't give someone access to ${tooHigh} that you don't have yourself.` }, 403);
         const fullName = typeof p.fullName === "string" ? p.fullName.trim().slice(0, 120) : null;
@@ -458,9 +460,21 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           return json({ error: "Only an owner can make someone an owner or admin." }, 403);
         }
 
+        // 4b. Billing goes to ADMINS, by an OWNER (ownerGranted — Carolyn 2026-08-08).
+        //     A loud refusal, not the silent drop sanitizeAccess would do: the grid updates
+        //     from this response, so a silently-dropped switch snaps back with no
+        //     explanation, which reads as "the save is broken". mayGrantMap in step 6
+        //     already refuses non-owner granters; this is the target-side half.
+        const wantsBilling = p.access !== undefined &&
+          ["view", "edit"].includes((p.access as Record<string, unknown>)?.settings_billing as string);
+        if (wantsBilling && nextTitle !== "admin") {
+          return json({ error: "Billing can only be granted to an Admin. Change their job title first." }, 400);
+        }
+
         // 5. Store only real deviations, so the row never contains a claim the resolver
-        //    ignores — what the owner sees on the grid is what is saved.
-        const nextAccess = p.access === undefined ? ((target.access as Record<string, Level> | null) || {}) : sanitizeAccess(p.access);
+        //    ignores — what the owner sees on the grid is what is saved. Title-aware so an
+        //    owner-granted area is stored only on a row whose title may hold it.
+        const nextAccess = p.access === undefined ? ((target.access as Record<string, Level> | null) || {}) : sanitizeAccess(p.access, nextTitle);
         const nextRole = roleForTitle(nextTitle);
 
         // 6. NOBODY GRANTS ABOVE THEMSELVES — checked against the RESOLVED result, not the

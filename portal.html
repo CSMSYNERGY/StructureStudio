@@ -10576,11 +10576,24 @@ function ssLevelLabel(areaKey, lv) {
   return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
 }
 
-// Two areas you hold by TITLE and can never hand out one switch at a time. Billing is the
-// card that pays for the product; Team is the one that hands out everything else. Making
-// them grantable would mean an owner could give a driver the keys with two clicks, and an
-// admin could mint peer admins. Being an Admin is how someone gets Team.
-const NON_GRANTABLE = { settings_team: "By title", settings_billing: "Owner only" };
+// Which switches are locked, and why — driven by the AREA FLAGS the server ships in its
+// metadata (access.ts is the one definition; hard-coding keys here is the drift this
+// screen's design forbids). Two different locks:
+//   * byTitleOnly (Team): comes with the job title, never a switch, for anyone. Team hands
+//     out every other area, so a grantable Team switch would let admins mint peers.
+//   * ownerGranted (Billing, 2026-08-08): a real switch, but only an OWNER may set it and
+//     only an ADMIN may hold it. Default for every admin is off — the owner grants the one
+//     admin they trust with the card. (Was "Owner only" — ungrantable — until Carolyn's
+//     audit decision made it per-admin.)
+// Returns the lock label, or null when this viewer may use the switch on this person.
+function ssSwitchLock(area, isOwner, title) {
+  if (area.byTitleOnly) return "By title";
+  if (area.ownerGranted) {
+    if (title !== "admin") return "Admins only";
+    if (!isOwner) return "Owner grants";
+  }
+  return null;
+}
 
 const TITLE_CHIP = {
   owner:       ["#EDE9FE", "#5B21B6"],
@@ -10622,10 +10635,16 @@ function ssAccessSummary(m, meta) {
   const lvl = (k) => eff[k] || "none";
   if (!areas.length) return "";
   // An untouched Admin is every tab plus every settings card except Billing — worth saying
-  // in four words rather than listing seventeen areas.
+  // in four words rather than listing seventeen areas. An admin who has been GRANTED
+  // Billing is not untouched, so they fall through to the itemised summary below and the
+  // grant is visible in the list rather than hidden behind this shorthand.
   const adminPreset = presets.admin || {};
   if (m.title === "admin" && areas.every((a) => lvl(a.key) === (adminPreset[a.key] || "none"))) {
     return "All tabs · Settings except Billing";
+  }
+  if (m.title === "admin" && lvl("settings_billing") !== "none" &&
+      areas.every((a) => a.key === "settings_billing" || lvl(a.key) === (adminPreset[a.key] || "none"))) {
+    return "All tabs · Settings incl. Billing";
   }
   const names = (level) => areas.filter((a) => lvl(a.key) === level).map((a) => a.label);
   const parts = [];
@@ -10659,36 +10678,43 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
   // What may THIS granter hand out? Never above their own level. The server enforces the
   // same rule (mayGrantMap); this only keeps the UI from offering a click that will 403.
   const canGrant = (area, level) => {
-    if (NON_GRANTABLE[area.key]) return false;
+    if (ssSwitchLock(area, isOwner, title)) return false;
     if (level === "none") return true;                      // taking away is always allowed
     if (isOwner) return true;
     return LEVEL_RANK[level] <= LEVEL_RANK[(myAccess || {})[area.key] || "none"];
   };
 
   const preset = presets[title] || {};
-  const deviations = areas.filter((a) => !NON_GRANTABLE[a.key] && (map[a.key] || "none") !== (preset[a.key] || "none"));
+  // by-title areas never count as deviations; an owner-granted one (Billing) does — a
+  // granted admin IS a deviation from the preset and the owner should see it flagged.
+  const deviations = areas.filter((a) => !a.byTitleOnly && (map[a.key] || "none") !== (preset[a.key] || "none"));
   const sub = member.email + (member.lastActive ? " · last active " + ssRelTime(member.lastActive)
     : member.invitePending ? " · invite pending" : "");
 
   const row = (a) => {
     const cur = map[a.key] || "none";
-    const locked = !!NON_GRANTABLE[a.key];
-    const changed = !locked && (preset[a.key] || "none") !== cur;
+    const lockLabel = ssSwitchLock(a, isOwner, title);
+    const locked = !!lockLabel;
+    const changed = !a.byTitleOnly && (preset[a.key] || "none") !== cur;
     return (
       <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 0", borderBottom: "1px solid #F1F5F9", opacity: locked ? 0.55 : 1 }}>
         <div style={{ width: 190, flexShrink: 0, fontSize: 13.5, fontWeight: 700, color: locked ? "#94A3B8" : "#1E293B" }}>{a.label}</div>
         <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "#94A3B8" }}>{a.hint}</div>
         {changed && <div style={{ fontSize: 11, fontWeight: 700, color: ACCENT, whiteSpace: "nowrap" }}>changed from title</div>}
-        {locked && <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", whiteSpace: "nowrap" }}>🔒 {NON_GRANTABLE[a.key]}</div>}
+        {locked && <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", whiteSpace: "nowrap" }}>🔒 {lockLabel}</div>}
         <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
           {a.levels.map((lv) => {
             const on = cur === lv;
             const allowed = canGrant(a, lv);
             return (
               <button key={lv} type="button" disabled={busy || !allowed}
-                title={allowed ? undefined : (locked
+                title={allowed ? undefined : (a.byTitleOnly
                   ? a.label + " comes with the job title, and can't be handed out one switch at a time."
-                  : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
+                  : a.ownerGranted
+                    ? (title !== "admin"
+                      ? a.label + " can only be held by an Admin — change their job title first."
+                      : "Only an owner can grant " + a.label + ".")
+                    : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
                 onClick={() => setMap((prev) => ({ ...prev, [a.key]: lv }))}
                 style={{
                   border: "none", borderLeft: a.levels[0] === lv ? "none" : "1px solid #E2E8F0",

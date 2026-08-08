@@ -14,10 +14,12 @@ import { withErrorLog } from "../_shared/logError.ts";
 // money-shaped half of the payload is filtered inside the branch instead (search: BILLING
 // FIELD FILTER); what stays open is entitlement, which every role's UI genuinely needs.
 //
-// subscribe/cancel are settings_billing:'edit' = OWNERS ONLY. This is a deliberate change
-// from "owner or admin": Carolyn's design makes Billing owner-only, and PRESETS.admin sets
-// it to 'none'. Checked before shipping — this tenant base has 11 owners and no admins at
-// all, so no existing person loses an ability they use today.
+// subscribe/cancel are settings_billing:'edit' = owners, plus any ADMIN an owner has
+// granted Billing to (ownerGranted, 2026-08-08 — this reconciled Carolyn's two calls:
+// "Billing stays with owners" and "admin should be able to as well". The owner decides
+// which admin, per person, on the Team screen; the default for every admin is still
+// 'none', and a granted admin cannot pass the grant on). The gate itself is unchanged —
+// effectiveAccess simply resolves 'edit' for a granted admin now.
 const GATES: GateTable = {
   status:    "open",
   subscribe: { area: "settings_billing", level: "edit" },

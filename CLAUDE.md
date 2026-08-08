@@ -118,6 +118,35 @@ a push where an action and its gate disagree. The **Crew Leader** preset carries
   cannot override") true. It is checked in the edge function and mirrored in the UI. Do not
   fold it into the gate table; the table cannot express it.
 
+**Owner vs admin — settled 2026-08-08.** Two instructions from Carolyn had to be reconciled:
+her audit answer *"yes, admin should be able to as well"* (about sending invoices, the GHL
+API key, deleting designs, QuickBooks — all of which admins already hold, since those areas
+are `edit` in the admin preset) and the shipped model's *"Billing stays with owners."* The
+resolution is a **third area flag, `ownerGranted`** (`_shared/access.ts`), which now carries
+`settings_billing` — `ownerOnly` no longer exists:
+- Default for every admin is still **`none`**. Nobody gains Billing by being an admin.
+- **Only an OWNER may set the switch**, and **only an ADMIN may hold it.** An owner grants
+  the one admin they trust with the card, per person, on the Team screen.
+- **Holding it is not the right to pass it on** — `mayGrant` refuses `ownerGranted` for
+  every non-owner *including a granted holder*, so "one trusted admin" cannot quietly
+  become several. Tested at all three holding levels, because the generic "you may pass on
+  what you hold" rule would otherwise wave the granted-admin case straight through.
+- **A demotion revokes it structurally.** The title check lives in `effectiveAccess`, not
+  just at the `set_access` door, so a stored grant on a non-admin row resolves to `none`
+  even if the override survives in the database — verified live: after demoting a granted
+  admin to Sales Rep the row still read `{settings_billing:"edit"}` and effective access
+  read `none`. Nobody has to remember to also clear the switch.
+- `set_access` refuses a billing grant on a non-admin **loudly** (400, "Billing can only be
+  granted to an Admin") rather than letting `sanitizeAccess` drop it silently — the Team
+  grid re-renders from that response, so a silent drop looks like a broken save.
+
+`sanitizeAccess(raw, title?)` is title-aware for the same reason; **calling it without a
+title drops owner-granted keys**, which is the safe direction for a caller that doesn't know
+whose map it is holding. `access.ts` is bundled per function, so a change here means
+redeploying **every** consumer (`portal-billing`, `portal-commissions`, `portal-schedule`,
+`portal-settings`, `qbo-oauth-connect`, `sync-design-status`) — leaving one behind means two
+copies of the permission model disagreeing, which is unobservable until it matters.
+
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
   build, then lot → buyer once sold), so the per-unit unique index is gone; the guard is

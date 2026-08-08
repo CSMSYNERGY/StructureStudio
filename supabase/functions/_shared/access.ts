@@ -25,8 +25,21 @@ export interface Area {
   group: "workspace" | "settings";
   hint: string;
   levels: Level[];
-  /** Only an owner may hold or grant this, whatever an admin's own access says. */
-  ownerOnly?: boolean;
+  /**
+   * Only an OWNER may set this switch, and only an ADMIN may hold it. Distinct from
+   * byTitleOnly in both directions: the area does not come with any title (the admin
+   * preset is 'none'), and holding it never lets you pass it on — mayGrant refuses
+   * ownerGranted areas for every non-owner, INCLUDING a holder.
+   *
+   * History (2026-08-08, Carolyn): Billing was `ownerOnly` — unholdable by anyone but an
+   * owner, full stop — while her audit decision said "admin should be able to as well."
+   * The reconciliation is this flag: Billing stays off for every admin by default, and an
+   * owner flips it on for the one admin they trust with the card. Two rules keep that
+   * from widening: only owners grant it (a granted admin editing a sales_rep cannot pass
+   * Billing along), and only admins hold it (a stored grant on any other title resolves
+   * to 'none' in effectiveAccess, so a title downgrade also revokes it structurally).
+   */
+  ownerGranted?: boolean;
   /**
    * Comes with the JOB TITLE and can never be handed out one switch at a time. Team is the
    * area that hands out every other area, so a per-person override on it would let an owner
@@ -63,8 +76,9 @@ export const AREAS: Area[] = [
   { key: "settings_crm",        label: "CRM Connection",       group: "settings", hint: "Synergy/GHL keys and pipelines",      levels: RVE },
   { key: "settings_quickbooks", label: "QuickBooks",           group: "settings", hint: "Accounting connection + mappings",    levels: RVE },
   { key: "settings_team",       label: "Team",                 group: "settings", hint: "Add people and set their access",     levels: RVE, byTitleOnly: true },
-  // Owner-only, always: this is the card that pays for the product.
-  { key: "settings_billing",    label: "Billing",              group: "settings", hint: "Your StructureStudio subscription",   levels: RVE, ownerOnly: true },
+  // The card that pays for the product: off for every admin by default, granted per person
+  // by an owner, never grantable by anyone else. See the ownerGranted doc above.
+  { key: "settings_billing",    label: "Billing",              group: "settings", hint: "Your StructureStudio subscription",   levels: RVE, ownerGranted: true },
 ];
 
 export const AREA_KEYS: string[] = AREAS.map((a) => a.key);
@@ -72,7 +86,7 @@ const AREA_BY_KEY = new Map(AREAS.map((a) => [a.key, a]));
 
 export const TITLES: { key: Title; label: string; blurb: string }[] = [
   { key: "owner",       label: "Owner",       blurb: "Everything, always — cannot be reduced" },
-  { key: "admin",       label: "Admin",       blurb: "Runs the business day to day; Billing stays with owners" },
+  { key: "admin",       label: "Admin",       blurb: "Runs the business day to day; an owner can grant Billing" },
   { key: "sales_rep",   label: "Sales Rep",   blurb: "Sells: designs, quotes, contacts, own commission" },
   { key: "crew_leader", label: "Crew Leader", blurb: "Runs builds and repairs" },
   { key: "driver",      label: "Driver",      blurb: "Runs deliveries" },
@@ -125,7 +139,11 @@ export function effectiveAccess(
   for (const [k, v] of Object.entries(overrides ?? {})) {
     const area = AREA_BY_KEY.get(k);
     if (!area) continue;                       // unknown area: ignore, never trust the blob
-    if (area.ownerOnly) continue;              // owner-only can never be granted by data
+    // owner-granted areas resolve ONLY on an admin. Checked at resolution and not just at
+    // the set_access door so the property survives data that arrives some other way — and
+    // so demoting an admin to a staff title structurally revokes their Billing grant
+    // without anyone remembering to also clear the switch.
+    if (area.ownerGranted && normTitle(title) !== "admin") continue;
     if (area.byTitleOnly) continue;            // Team comes with the title, never a switch
     if (area.levels.includes(v as Level)) out[k] = v as Level;
   }
@@ -147,7 +165,9 @@ export function seesAllPayouts(access: Record<string, Level>): boolean {
  * May `granter` hand `level` on `area` to someone else?
  *
  * Two rules, both load-bearing:
- *   1. owner-only areas are owner-only, full stop.
+ *   1. owner-granted areas (Billing) are granted by owners, full stop — HOLDING one does
+ *      not let you pass it on, or the "one trusted admin" an owner picked could quietly
+ *      become several.
  *   2. NOBODY GRANTS ABOVE THEMSELVES — an admin without QuickBooks cannot give QuickBooks
  *      to anyone, including themselves. Without this the whole model is decorative: any
  *      admin could self-promote to everything in two clicks and nothing would record it.
@@ -162,7 +182,7 @@ export function mayGrant(
   if (!a) return false;
   if (!a.levels.includes(level)) return false;
   if (granterRole === "owner") return true;
-  if (a.ownerOnly) return false;
+  if (a.ownerGranted) return false;
   return RANK[level] <= RANK[granterAccess[area] ?? "none"];
 }
 
@@ -183,16 +203,22 @@ export function roleForTitle(title: unknown): "owner" | "admin" | "user" {
 
 /**
  * Keep only what is safe to store in client_users.access: known areas, valid levels for
- * THAT area, and never an owner-only area. Mirrors what effectiveAccess would ignore
- * anyway — but dropping it at the door means the stored row never contains a claim the
- * resolver silently disregards, so what an owner sees on the Team screen is what is saved.
+ * THAT area, no by-title area, and an owner-granted area only when the row's title is
+ * admin. Mirrors what effectiveAccess would ignore anyway — but dropping it at the door
+ * means the stored row never contains a claim the resolver silently disregards, so what
+ * an owner sees on the Team screen is what is saved.
+ *
+ * `title` is the title the row is being saved WITH. Omitting it drops owner-granted keys
+ * entirely — the safe direction for a caller that doesn't know who this map is for.
  */
-export function sanitizeAccess(raw: unknown): Record<string, Level> {
+export function sanitizeAccess(raw: unknown, title?: unknown): Record<string, Level> {
   const out: Record<string, Level> = {};
   if (!raw || typeof raw !== "object") return out;
+  const isAdmin = title !== undefined && normTitle(title) === "admin";
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     const area = AREA_BY_KEY.get(k);
-    if (!area || area.ownerOnly || area.byTitleOnly) continue;
+    if (!area || area.byTitleOnly) continue;
+    if (area.ownerGranted && !isAdmin) continue;
     if (area.levels.includes(v as Level)) out[k] = v as Level;
   }
   return out;
