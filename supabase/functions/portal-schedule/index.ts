@@ -450,7 +450,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // would have the shop make it twice. create_job enforces the same rule server-side.
       const { data: soldDesigns } = await admin
         .from("designs").select("short_code, contact, selections, status")
-        .eq("client_id", clientId).in("status", ["accepted", "invoiced"]).is("inventory_unit_id", null)
+        // SOLD = INVOICED (Carolyn 2026-08-08) — an accepted quote is not a sale yet, and
+        // the shop never starts a build before the invoice exists. Widening this back to
+        // include "accepted" puts unsold buildings in the tray.
+        .eq("client_id", clientId).eq("status", "invoiced").is("inventory_unit_id", null)
         .limit(500);
       // EVERY unit without a build job belongs here — this tray IS the approval step
       // (migration 105). There is no accepted_at flag any more: a requested building sits in
@@ -715,12 +718,23 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         if (j.design_short_code) byDesign[j.design_short_code] = chip;
         if (j.inventory_unit_id) byUnit[j.inventory_unit_id] = chip;
       }
-      // Which units already ride a load, so Inventory can offer "Add to a load" only when
+      // Which units already ride a load, so a row offers "Schedule delivery" only when
       // there isn't one open already (add_stop would 409).
       const { data: stops } = await admin
         .from("delivery_stops").select("inventory_unit_id").eq("client_id", clientId).is("delivered_at", null);
       const onLoad = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
-      return json({ byDesign, byUnit, unitsOnLoad: onLoad });
+      // A LOT SALE looks like any other order on the Orders page — it has its own sale
+      // design and its own orders row — but the building already exists, so it goes
+      // straight to delivery and must never be offered a build. This map is how Orders
+      // tells the two apart: sale design code -> the unit being sold.
+      const { data: soldUnits } = await admin
+        .from("inventory_units").select("id, serial, sold_design_short_code")
+        .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null).limit(2000);
+      const saleDesigns: Record<string, unknown> = {};
+      for (const u of soldUnits ?? []) {
+        saleDesigns[u.sold_design_short_code] = { unitId: u.id, serial: u.serial, onLoad: onLoad.includes(u.id) };
+      }
+      return json({ byDesign, byUnit, unitsOnLoad: onLoad, saleDesigns });
     }
 
     if (action === "list_drivers") {
@@ -882,6 +896,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           .eq("client_id", clientId).eq("short_code", code).maybeSingle();
         if (error) throw error;
         if (!design) return json({ error: "That design isn't in your account." }, 404);
+        // SOLD = INVOICED (Carolyn 2026-08-08): the shop schedules sold buildings, and a
+        // sale exists when the invoice does — an accepted quote can still be walked away
+        // from. Enforced here, not just in the tray/Orders gating, because create_job is
+        // callable directly. `delivered` passes too: re-scheduling an already-delivered
+        // building (warranty rebuild) is deliberate, not an accident this guard should stop.
+        if (design.status !== "invoiced" && design.status !== "delivered") {
+          return json({ error: "That building isn't invoiced yet — send the invoice first, then schedule the build from Orders." }, 409);
+        }
         // THE ROUTING RULE (Carolyn 2026-08-07): an INVENTORY sale skips the build schedule.
         // The building is already on a lot, or already being built as a spec unit under its
         // OWN source='inventory' job — either way the buyer's order must not create a second

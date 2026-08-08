@@ -329,9 +329,17 @@ accepted. The build board shows an "Unscheduled" tray and the load planner shows
 avoids clutter for tenants who ignore the feature, and matches "two independent lists …
 added deliberately".
 
-Entry points elsewhere in the portal (small additions):
-- Designs/Orders row (status ≥ accepted): **"Add to build schedule"** (hidden if a job exists; shows the job's stage chip instead).
-- Inventory row: **"Queue build"** (available, no job) / **"Add to a load"** (sold).
+Entry points elsewhere in the portal — **ORDERS ONLY** (Carolyn 2026-08-08, superseding the
+original "Designs/Orders row + Inventory row" plan, which shipped and was pulled the same
+week). "Orders is actually all SALES. Even an inventory building will need delivery so it is
+an ORDER." Designs and Inventory are **report** pages: they state status and never schedule.
+A single `Schedule` column on the Orders row, gated on the design being **invoiced** —
+SOLD = INVOICED, an accepted quote is not a sale:
+- **Lot sale** (the order's design is some unit's `sold_design_short_code`): already built,
+  so **"Schedule delivery →"** — never a build. Shows "On a load" once it has a stop.
+- **Custom build**: **"Add to build schedule"**, replaced by the job's stage chip once on
+  the board. It reaches delivery on its own via the pool after it is built.
+- Not invoiced yet: "Invoice first", no action.
 - Repair detail: **"Schedule shop work"** (build board) / **"Site visit — add to a load"**.
 
 ## Portal UI

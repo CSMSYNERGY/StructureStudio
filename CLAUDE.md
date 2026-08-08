@@ -110,8 +110,17 @@ a push where an action and its gate disagree. The **Crew Leader** preset carries
 - **The tabs gate on the AREA, not on `canAdmin`.** Each of the three takes an `access` prop
   and derives its own `canEdit`. Gating on `canAdmin` locks out exactly the people those two
   titles exist for — which is what it did between migration 100 and 2026-08-07, while the
-  server was already letting them through. Designs/Inventory's schedule entry points key on
-  the same flags (`schedCanEdit` / `deliverCanEdit`), AND on `schedUnlocked` for billing.
+  server was already letting them through. The Orders page's Schedule column keys on the
+  same flags (`schedCanEdit` / `deliverCanEdit`), AND on `schedUnlocked` for billing.
+- **Scheduling is reachable from the three schedule pages and from ORDERS — nowhere else**
+  (Carolyn 2026-08-08). "Orders is actually all SALES. Even an inventory building will need
+  delivery so it is an ORDER." Designs and Inventory **report** status and carry no schedule
+  actions; both briefly had them (`48c4012`) and both were stripped within two days. The
+  Orders row routes by what was sold: a lot sale (its design is a unit's
+  `sold_design_short_code`, from `schedule_links.saleDesigns`) goes straight to **delivery**
+  because the building exists; a custom build goes to the **build board** and reaches
+  delivery on its own via the pool. **SOLD = INVOICED** — the tray, the Orders column, and
+  `create_job` all require `status='invoiced'`; an accepted quote is not a sale.
 - **`canAdmin` still guards exactly ONE thing:** the built-before-delivered override. The
   gate for `mark_load_out` is `delivery_schedule:'edit'` — precisely what a Driver holds — so
   the explicit role check inside that branch is the only thing keeping decision 11 ("crew

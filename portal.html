@@ -1082,34 +1082,10 @@ function SourceChip({ unitId, serial, lifecycle = null }) {
   );
 }
 
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, schedOn = false }) {
-  // "Add to build schedule" on a sold design — SCHEDULING_SCOPE.md's entry points. The
-  // schedule is deliberately PULL, not push (nothing auto-creates a job when a design is
-  // accepted), which only works if the pull is offered where the sale happens. `schedOn`
-  // means the tenant has the feature AND this person may write to the board.
-  const [schedLinks, setSchedLinks] = useState(null);
-  const [schedBusy, setSchedBusy] = useState(null);
-  const loadSchedLinks = useCallback(async () => {
-    if (!schedOn) return;
-    const { data } = await sb.functions.invoke("portal-schedule", { body: { action: "schedule_links" } });
-    if (data && !data.error) setSchedLinks(data);
-  }, [schedOn, clientId]);
-  useEffect(() => { loadSchedLinks(); }, [loadSchedLinks, refreshKey]);
-  const addToBuildSchedule = async (r) => {
-    setSchedBusy(r.short_code);
-    const { data, error: fnErr } = await sb.functions.invoke("portal-schedule", {
-      body: { action: "create_job", source: "order", designShortCode: r.short_code },
-    });
-    setSchedBusy(null);
-    // Say so when it fails. A button that quietly does nothing reads as a broken page — and
-    // this one can legitimately refuse (409 if the building is already on the board).
-    if (!data || data.error) {
-      setError((data && data.error) || (fnErr ? await fnError(fnErr) : "Could not add that to the build schedule."));
-      return;
-    }
-    setError(null);
-    loadSchedLinks();
-  };
+// NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
+// "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
+// and it is from Orders that a sold building goes to the Build or Delivery schedule.
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null }) {
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
   const [unitSerials, setUnitSerials] = useState({});
@@ -1363,21 +1339,6 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === r.short_code ? 0.6 : 1 }}>
                           {invBusyKey === r.short_code ? "Sending…" : "Send invoice"}
                         </button>
-                      )}
-                      {/* Sold design → the shop floor. Shows the stage it's already in once
-                          it's on the board, so the row never offers a duplicate (the server
-                          409s on one anyway — one job per design). */}
-                      {schedOn && (normStatus(r.status) === "accepted" || normStatus(r.status) === "invoiced") && (
-                        schedLinks && schedLinks.byDesign && schedLinks.byDesign[r.short_code]
-                          ? <span style={{ ...schedChip("#F1F5F9", "#334155"), marginLeft: 10 }}>
-                              <span style={{ width: 8, height: 8, borderRadius: "50%", background: schedLinks.byDesign[r.short_code].color || "#94A3B8", display: "inline-block" }}></span>
-                              {schedLinks.byDesign[r.short_code].stage || "On the board"}
-                            </span>
-                          : <button type="button" onClick={() => addToBuildSchedule(r)} disabled={schedBusy === r.short_code}
-                              title="Put this building on the Build Schedule — it takes the next shop serial number"
-                              style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", marginLeft: 10, padding: "5px 10px", fontSize: 12 }}>
-                              {schedBusy === r.short_code ? "Adding…" : "Add to build schedule"}
-                            </button>
                       )}
                       {/* Owner/admin only — a team member must not be able to destroy a
                           customer record. The server re-checks regardless (delete_design is
@@ -5034,9 +4995,19 @@ const centsFrom = (txt) => {
 const todayLocal = () => new Date().toLocaleDateString("en-CA");
 const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["ach", "Bank / ACH"], ["other", "Other"]];
 
-function OrdersView({ clientId }) {
+// ORDERS IS ALL SALES (Carolyn 2026-08-08): "even an inventory building will need delivery
+// so it is an ORDER." So this is the ONE page a sold building leaves for the shop or the
+// truck — Designs and Inventory report, Orders dispatches. Two routes out, decided by what
+// was actually sold:
+//   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
+//   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
+// Both are gated on the design being INVOICED, which is what "sold" means here.
+function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null }) {
   const [rows, setRows] = useState(null);   // null = loading; [{order, design, paid}]
   const [error, setError] = useState(null);
+  const [schedLinks, setSchedLinks] = useState(null);   // { byDesign, saleDesigns, … }
+  const [schedBusy, setSchedBusy] = useState(null);
+  const [schedMsg, setSchedMsg] = useState(null);       // { ok } | { err }
   const [openId, setOpenId] = useState(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
@@ -5099,10 +5070,74 @@ function OrdersView({ clientId }) {
     if (!didSync.current) { didSync.current = true; syncFromGhl(); }
   }, [load, syncFromGhl]);
 
+  // Which buildings are already on the board or on a load, and which orders are lot sales.
+  // Only fetched when this person can actually act on it — a read of the schedule is still
+  // a read of the schedule.
+  const loadSchedLinks = useCallback(async () => {
+    if (!schedOn && !deliverOn) return;
+    const { data } = await sb.functions.invoke("portal-schedule", { body: { action: "schedule_links" } });
+    if (data && !data.error) setSchedLinks(data);
+  }, [schedOn, deliverOn, clientId]);
+  useEffect(() => { loadSchedLinks(); }, [loadSchedLinks]);
+
+  const addToBuildSchedule = async (r) => {
+    setSchedBusy(r.o.id); setSchedMsg(null);
+    const { data, error: fnErr } = await sb.functions.invoke("portal-schedule", {
+      body: { action: "create_job", source: "order", designShortCode: r.o.short_code },
+    });
+    setSchedBusy(null);
+    // Say so when it fails. This one legitimately refuses — an uninvoiced design, an
+    // inventory sale that belongs on a load, or a building already on the board.
+    if (!data || data.error) {
+      setSchedMsg({ err: (data && data.error) || (fnErr ? await fnError(fnErr) : "Could not add that to the build schedule.") });
+      return;
+    }
+    setSchedMsg({ ok: `${nameOf(r)}'s building is on the Build Schedule.` });
+    loadSchedLinks();
+  };
+
   const nameOf = (r) => ((r.d && r.d.contact && r.d.contact.name) || "—");
   const bldgOf = (r) => {
     const sel = (r.d && r.d.selections) || {};
     return [titleCase(sel.style), sel.size].filter(Boolean).join(" ") || "—";
+  };
+
+  // The Schedule column. Three questions in order: is it sold yet, is it a lot building or
+  // a build, and has it already gone where it's going?
+  const schedChipStyle = (bg, fg) => ({ display: "inline-flex", alignItems: "center", gap: 5, background: bg, color: fg, borderRadius: 20, padding: "4px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" });
+  const schedLinkBtn = (label, title, onClick, busy) => (
+    <button type="button" onClick={onClick} disabled={busy} title={title}
+      style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "5px 10px", fontSize: 12 }}>
+      {busy ? "Working…" : label}
+    </button>
+  );
+  const schedCell = (r) => {
+    const links = schedLinks || {};
+    const sale = (links.saleDesigns || {})[r.o.short_code];   // set = this order sold a LOT building
+    const job = (links.byDesign || {})[r.o.short_code];       // set = already on the build board
+    // SOLD = INVOICED. Before that there is nothing to schedule, and the server refuses too.
+    const sold = r.d && (normStatus(r.d.status) === "invoiced" || normStatus(r.d.status) === "delivered");
+    if (!sold) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Invoice first</span>;
+
+    if (sale) {
+      // Already built and sitting on a lot — it never touches the build board, it just
+      // needs a truck. Serial shown because that is how the yard refers to it.
+      if (sale.onLoad) return <span style={schedChipStyle("#EEF2FF", "#3D3672")}>On a load</span>;
+      if (!deliverOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>#{sale.serial} · needs a load</span>;
+      return schedLinkBtn("Schedule delivery →", `Building #${sale.serial} is on the lot — take it to the Delivery Schedule`,
+        () => onScheduleDelivery && onScheduleDelivery(sale), false);
+    }
+    if (job) {
+      return (
+        <span style={schedChipStyle("#F1F5F9", "#334155")}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: job.color || "#94A3B8", display: "inline-block" }}></span>
+          {job.stage || "On the board"}
+        </span>
+      );
+    }
+    if (!schedOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Not scheduled</span>;
+    return schedLinkBtn("Add to build schedule", "Put this building on the Build Schedule — it takes the next shop serial number",
+      () => addToBuildSchedule(r), schedBusy === r.o.id);
   };
   const balOf = (r) => (r.o.total_cents == null ? null : r.o.total_cents - r.paid);
   const stateOf = (r) => {
@@ -5168,6 +5203,8 @@ function OrdersView({ clientId }) {
 
   return (
     <div>
+      {schedMsg && schedMsg.ok && <div style={S.okMsg}>{schedMsg.ok}</div>}
+      {schedMsg && schedMsg.err && <div style={S.err}>{schedMsg.err}</div>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
         {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
         {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
@@ -5216,7 +5253,9 @@ function OrdersView({ clientId }) {
               <thead><tr>
                 <th style={S.th}>Order</th><th style={S.th}>Customer</th><th style={S.th}>Building</th><th style={S.th}>Ordered</th>
                 <th style={{ ...S.th, textAlign: "right" }}>Total</th><th style={{ ...S.th, textAlign: "right" }}>Paid</th>
-                <th style={{ ...S.th, textAlign: "right" }}>Balance</th><th style={S.th}>Status</th><th style={S.th}></th>
+                <th style={{ ...S.th, textAlign: "right" }}>Balance</th><th style={S.th}>Status</th>
+                {(schedOn || deliverOn) && <th style={S.th}>Schedule</th>}
+                <th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {shown.map((r) => {
@@ -5235,6 +5274,10 @@ function OrdersView({ clientId }) {
                         {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
                       </td>
                       <td style={S.td}><span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span></td>
+                      {(schedOn || deliverOn) && (
+                        // stopPropagation throughout: the row itself opens the order detail.
+                        <td style={{ ...S.td, whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{schedCell(r)}</td>
+                      )}
                       <td style={{ ...S.td, whiteSpace: "nowrap" }}><span style={{ color: ACCENT, fontWeight: 700, fontSize: 12 }}>Open →</span></td>
                     </tr>
                   );
@@ -12152,7 +12195,6 @@ function Dashboard({ session }) {
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
                 isAdmin={canAdmin}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
-                schedOn={schedUnlocked && schedCanEdit}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "leads" && (
@@ -12173,7 +12215,13 @@ function Dashboard({ session }) {
                  nothing, so keep the locked preview there). Everyone else sees the locked
                  example-data preview. */
               (isOperator && !viewing)
-                ? <OrdersView clientId={tenant.clientId} />
+                ? <OrdersView clientId={tenant.clientId}
+                    schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
+                    /* A sold lot building is already waiting in the Delivery Schedule's
+                       "to be loaded" pool (the pool is a query over sold units without a
+                       sale stop), so this just takes the dispatcher there — no focus/
+                       hand-off state to keep in sync. */
+                    onScheduleDelivery={() => navigate("delivery-schedule")} />
                 : <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).
