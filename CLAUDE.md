@@ -97,9 +97,25 @@ older shape. Tables: `schedule_stages`, `build_jobs`, `schedule_activity`,
 `delivery_territories`, `driver_profiles` (service-role only, like `commission_members`),
 `delivery_loads`, `delivery_stops`, `repairs` (+ private `repair-photos` bucket),
 `build_crews`, and `designs.delivered_at`. One edge function owns every read/write:
-**`portal-schedule`** (resolveTenant; READ = any role, STAFF = move_job/add_note/
-mark_stop_delivered, everything else owner/admin). UI is portal-only: `BuildScheduleTab`,
-`RepairsTab`, `DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+**`portal-schedule`**. UI is portal-only: `BuildScheduleTab`, `RepairsTab`,
+`DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+
+**Access is per-area, not per-role (migration 100).** The old READ/STAFF/ADMIN tiers are
+gone: the function declares a `GATES` table (`build_schedule` / `delivery_schedule` /
+`repairs` × `view|edit`) that `resolveTenant` checks before dispatch, and preflight refuses
+a push where an action and its gate disagree. The **Crew Leader** preset carries
+`build_schedule:edit` + `repairs:edit`; the **Driver** preset carries
+`delivery_schedule:edit`. Two consequences worth knowing before touching this:
+- **The tabs gate on the AREA, not on `canAdmin`.** Each of the three takes an `access` prop
+  and derives its own `canEdit`. Gating on `canAdmin` locks out exactly the people those two
+  titles exist for — which is what it did between migration 100 and 2026-08-07, while the
+  server was already letting them through. Designs/Inventory's schedule entry points key on
+  the same flags (`schedCanEdit` / `deliverCanEdit`), AND on `schedUnlocked` for billing.
+- **`canAdmin` still guards exactly ONE thing:** the built-before-delivered override. The
+  gate for `mark_load_out` is `delivery_schedule:'edit'` — precisely what a Driver holds — so
+  the explicit role check inside that branch is the only thing keeping decision 11 ("crew
+  cannot override") true. It is checked in the edge function and mirrored in the UI. Do not
+  fold it into the gate table; the table cannot express it.
 
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
@@ -115,10 +131,15 @@ Post-launch shape changes (092–095), each from real use:
   Crews are the build scheduling unit: the calendar flips between per-crew calendars and a
   drop on one assigns that crew. Crews do NOT require logins — most shop crews never sign in.
 - **095** — drivers are **name-first**: `driver_profiles` gained its own `id` (new PK) and
-  `display_name`; `user_id` is nullable (one profile per login, partial unique index).
-  `delivery_loads.driver_id` → the profile, with `driver_user_id` kept for legacy rows and
-  for a driver's own field access. Resolve a load's driver by profile id first, then the
-  legacy user link.
+  `display_name`. `delivery_loads.driver_id` → the profile, with `driver_user_id` kept for
+  legacy rows and for a driver's own field access. Resolve a load's driver by profile id
+  first, then the legacy user link.
+- **101 corrects 095's optional-login half** — **every driver is a team member with a
+  login** (`user_id NOT NULL`). 095 inferred that a name should be able to stand alone; it
+  can't, because a driver signs in to see their loads and per-person access (100) can only
+  attach to something you can sign in as. `display_name` survives as an optional label on
+  top of their real name. `save_driver` refuses to create or unlink a login-less driver, and
+  `save_crew` requires every crew member to be on this tenant's team.
 - **The Build Schedule calendar is the DEFAULT view** (Calendar | Board | Table). Real
   dates, Sunday-first, week + month, a weekends on/off toggle (localStorage), and **ONE
   build date per job** — `due_date` is canonical, `scheduled_start` kept equal for
@@ -148,16 +169,19 @@ Rules that are easy to break and expensive to get wrong:
    a rejected payload must not burn a number. Testing "add order to board" on a real tenant
    consumes a real serial.
 4. **Built-before-delivered:** loads can't go out/delivered with an unbuilt stop; the 409
-   carries `{blocked, unbuilt}` and the admin override (required reason) is audit-logged and
-   stamped on the load. The width rule (building wider than the driver's `max_width_ft`) has
-   NO override anywhere — keep it that way.
+   carries `{blocked, unbuilt}` and the **owner/admin-only** override (required reason) is
+   audit-logged and stamped on the load — see the per-area note above for why that role check
+   is explicit rather than expressed in `GATES`. The width rules have NO override anywhere:
+   a building wider than the driver's `max_width_ft`, or a wide load (>8'6") assigned to a
+   driver whose `wide_load_capable` is off. Keep it that way.
 5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` = operator OR
    `entitlement.features.schedule_builds`. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
    grandfathered into this."** portal-billing's `PAID_ONLY_FEATURES` set excludes
    `schedule_builds` from the exempt/transition blankets — a real subscription is the only
    tenant path in; do not "fix" that back to the blanket. The plans' `availability` flip
-   (coming_soon → available) is a HUMAN-run data change — see SCHEDULING_SCOPE.md's launch
-   switches.
+   (coming_soon → available) **has been thrown** — migration `094_scheduler_available`, live
+   and verified 2026-08-07 at $195/mo · $1,950/yr with `price_visible = true`. The second
+   launch switch, the hand-authored What's New entry, is still pending.
 6. The "to be loaded" pool is a QUERY, not a table — don't invent an "unassigned stops" row.
    It covers **every non-repair build job without a stop** (Carolyn 2026-08-04: "every
    building that is in the build schedule should also show in the delivery schedule" — an

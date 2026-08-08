@@ -1008,7 +1008,34 @@ function SourceChip({ unitId, serial }) {
   );
 }
 
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, schedOn = false }) {
+  // "Add to build schedule" on a sold design — SCHEDULING_SCOPE.md's entry points. The
+  // schedule is deliberately PULL, not push (nothing auto-creates a job when a design is
+  // accepted), which only works if the pull is offered where the sale happens. `schedOn`
+  // means the tenant has the feature AND this person may write to the board.
+  const [schedLinks, setSchedLinks] = useState(null);
+  const [schedBusy, setSchedBusy] = useState(null);
+  const loadSchedLinks = useCallback(async () => {
+    if (!schedOn) return;
+    const { data } = await sb.functions.invoke("portal-schedule", { body: { action: "schedule_links" } });
+    if (data && !data.error) setSchedLinks(data);
+  }, [schedOn, clientId]);
+  useEffect(() => { loadSchedLinks(); }, [loadSchedLinks, refreshKey]);
+  const addToBuildSchedule = async (r) => {
+    setSchedBusy(r.short_code);
+    const { data, error: fnErr } = await sb.functions.invoke("portal-schedule", {
+      body: { action: "create_job", source: "order", designShortCode: r.short_code },
+    });
+    setSchedBusy(null);
+    // Say so when it fails. A button that quietly does nothing reads as a broken page — and
+    // this one can legitimately refuse (409 if the building is already on the board).
+    if (!data || data.error) {
+      setError((data && data.error) || (fnErr ? await fnError(fnErr) : "Could not add that to the build schedule."));
+      return;
+    }
+    setError(null);
+    loadSchedLinks();
+  };
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
   const [unitSerials, setUnitSerials] = useState({});
@@ -1262,6 +1289,21 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === r.short_code ? 0.6 : 1 }}>
                           {invBusyKey === r.short_code ? "Sending…" : "Send invoice"}
                         </button>
+                      )}
+                      {/* Sold design → the shop floor. Shows the stage it's already in once
+                          it's on the board, so the row never offers a duplicate (the server
+                          409s on one anyway — one job per design). */}
+                      {schedOn && (normStatus(r.status) === "accepted" || normStatus(r.status) === "invoiced") && (
+                        schedLinks && schedLinks.byDesign && schedLinks.byDesign[r.short_code]
+                          ? <span style={{ ...schedChip("#F1F5F9", "#334155"), marginLeft: 10 }}>
+                              <span style={{ width: 8, height: 8, borderRadius: "50%", background: schedLinks.byDesign[r.short_code].color || "#94A3B8", display: "inline-block" }}></span>
+                              {schedLinks.byDesign[r.short_code].stage || "On the board"}
+                            </span>
+                          : <button type="button" onClick={() => addToBuildSchedule(r)} disabled={schedBusy === r.short_code}
+                              title="Put this building on the Build Schedule — it takes the next shop serial number"
+                              style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", marginLeft: 10, padding: "5px 10px", fontSize: 12 }}>
+                              {schedBusy === r.short_code ? "Adding…" : "Add to build schedule"}
+                            </button>
                       )}
                       {/* Owner/admin only — a team member must not be able to destroy a
                           customer record. The server re-checks regardless (delete_design is
@@ -5322,7 +5364,32 @@ const invMoney = (cents) => cents == null ? "—" :
 const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
 const invEffStatus = (u) =>
   (u.status === "sold" || (u.estimates || []).some((e) => INV_SOLD_EST.has(normStatus(e.status)))) ? "sold" : "available";
-function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesign = null, onSendEstimate = null, onNew = null }) {
+function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesign = null, onSendEstimate = null, onNew = null, schedOn = false, deliverOn = false }) {
+  // Inventory's two schedule entry points (SCHEDULING_SCOPE.md): "Queue build" for a spec
+  // unit that still has to be built, "Add to a load" once it is sold and needs hauling.
+  // Two different areas, so two different flags — a Crew Leader queues builds, a Driver
+  // loads them, and neither is an admin.
+  const [schedLinks, setSchedLinks] = useState(null);
+  const [schedBusy, setSchedBusy] = useState(null);
+  const loadSchedLinks = useCallback(async () => {
+    if (!schedOn && !deliverOn) return;
+    const { data } = await sb.functions.invoke("portal-schedule", { body: { action: "schedule_links" } });
+    if (data && !data.error) setSchedLinks(data);
+  }, [schedOn, deliverOn, clientId]);
+  useEffect(() => { loadSchedLinks(); }, [loadSchedLinks, refreshKey]);
+  const queueBuild = async (u) => {
+    setSchedBusy(u.id);
+    const { data, error: fnErr } = await sb.functions.invoke("portal-schedule", {
+      body: { action: "create_job", source: "inventory", inventoryUnitId: u.id },
+    });
+    setSchedBusy(null);
+    if (!data || data.error) {
+      setMsg({ err: (data && data.error) || (fnErr ? await fnError(fnErr) : "Could not queue that build.") });
+      return;
+    }
+    setMsg({ ok: `#${u.serial} queued on the Build Schedule.` });
+    loadSchedLinks();
+  };
   const [rows, setRows] = useState(null);      // null = loading
   const [locations, setLocations] = useState([]);
   const [error, setError] = useState(null);
@@ -5498,6 +5565,25 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
                             style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Send estimate</button>
                         )}
                         {u.imageUrl && ssSafeUrl(u.imageUrl) && <a href={u.imageUrl} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginRight: 10 }}>PDF</a>}
+                        {/* Not yet built → queue it. Already on the board → say where it is. */}
+                        {schedOn && (
+                          schedLinks && schedLinks.byUnit && schedLinks.byUnit[u.id]
+                            ? <span style={{ ...schedChip("#F1F5F9", "#334155"), marginRight: 10 }}>
+                                <span style={{ width: 8, height: 8, borderRadius: "50%", background: schedLinks.byUnit[u.id].color || "#94A3B8", display: "inline-block" }}></span>
+                                {schedLinks.byUnit[u.id].stage || "On the board"}
+                              </span>
+                            : <button type="button" disabled={schedBusy === u.id} onClick={() => queueBuild(u)}
+                                title="Put this spec unit on the Build Schedule"
+                                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>
+                                {schedBusy === u.id ? "Queueing…" : "Queue build"}
+                              </button>
+                        )}
+                        {/* Sold and not already riding a load → it needs hauling to the buyer.
+                            The pool on the Delivery Schedule is where the load gets built, so
+                            this points there rather than duplicating the load picker here. */}
+                        {deliverOn && st === "sold" && schedLinks && (schedLinks.unitsOnLoad || []).indexOf(u.id) === -1 && (
+                          <span style={{ ...schedChip("#FFF7ED", "#9A3412"), marginRight: 10 }}>Needs a load</span>
+                        )}
                         {isAdmin && (u.status === "sold"
                           ? <button type="button" disabled={busyId === u.id} onClick={() => markStatus(u, "available")}
                               style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#64748B", fontWeight: 700, marginRight: 10 }}>Mark available</button>
@@ -5577,9 +5663,59 @@ const schedPastDue = (job, kind) => {
 };
 const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
 
+// The read side of schedule_activity. The edge function has written a row on every move,
+// note and completion since day one, and NOTHING displayed them — so "Add note", which is
+// the one write a crew member has always been able to make, wrote to a table no screen
+// read. Rendered inline as a compact line (SCHEDULING_SCOPE.md: "no popouts"), lazily —
+// one fetch when a card is expanded, not one per card on the board.
+const SCHED_ACT_VERB = {
+  created: "added", moved: "moved", updated: "edited", noted: "note", completed: "marked built",
+  deleted: "removed", loaded: "put on a load", unloaded: "taken off a load",
+  out: "sent out", delivered: "delivered", override: "override",
+};
+function SchedJobHistory({ jobId, refreshKey = 0 }) {
+  const [rows, setRows] = useState(null);   // null = loading, [] = none
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const { data, error } = await sb.functions.invoke("portal-schedule", { body: { action: "job_activity", jobId } });
+      if (dead) return;
+      if (error || !data || data.error) { setErr((data && data.error) || "Could not load the history."); setRows([]); return; }
+      setErr(null); setRows(data.activity || []);
+    })();
+    return () => { dead = true; };
+  }, [jobId, refreshKey]);
+  if (rows === null) return <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 600, marginTop: 8 }}>Loading history…</div>;
+  if (err) return <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 600, marginTop: 8 }}>{err}</div>;
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginTop: 9, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
+      <span style={{ ...S.lbl, marginBottom: 4, color: "#94A3B8" }}>History</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {rows.map((a) => (
+          <div key={a.id} style={{ fontSize: 11, color: "#64748B", fontWeight: 600, lineHeight: 1.45 }}>
+            <span style={{ color: "#334155", fontWeight: 800 }}>{a.userName || "Someone"}</span>
+            {" "}{SCHED_ACT_VERB[a.action] || a.action}
+            {a.action === "moved" && a.toStage ? <> to <strong>{a.toStage}</strong></> : null}
+            {a.detail ? <span style={{ color: "#475569" }}> — {a.detail}</span> : null}
+            <span style={{ color: "#B9C4D6" }}> · {fmtDate(a.createdAt)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Inline editor rendered INSIDE the expanded card/row — job info stays at face value,
-// never in a popout (scope decision 6). Admin edits fields; every role can add a note.
-function SchedJobEditor({ job, stages, team, crews = [], canAdmin, busy, onSave, onComplete, onDelete, onMove, onNote, onOpenDesign }) {
+// never in a popout (scope decision 6).
+//
+// `canEdit` = build_schedule:'edit' (migration 100), NOT the owner/admin role. The stage
+// dropdown and the note box below used to sit outside every check on the theory that "any
+// linked role may move a card" — which was true under the old STAFF tier and is not true
+// now: move_job and add_note both require build_schedule:'edit', so a view-only member was
+// being offered two controls the server refuses.
+function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComplete, onDelete, onMove, onNote, onOpenDesign }) {
   // ONE build date (Carolyn 2026-08-04: most builds finish within a day). It writes both
   // date columns so every existing check (past due, delivery conflicts, pool) keys off it.
   const [f, setF] = useState({
@@ -5588,12 +5724,15 @@ function SchedJobEditor({ job, stages, team, crews = [], canAdmin, busy, onSave,
     crewId: job.crew_id || "", notes: job.notes || "",
   });
   const [note, setNote] = useState("");
+  // Bumped after a note lands so the history below re-reads it — the note is stored as an
+  // activity row, so without this the writer sees nothing happen.
+  const [historyKey, setHistoryKey] = useState(0);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
   return (
     <div style={{ borderTop: "1px solid #F1F5F9", marginTop: 8, paddingTop: 9 }} onClick={(e) => e.stopPropagation()}>
-      {canAdmin && (<>
+      {canEdit && (<>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 10px", marginBottom: 8 }}>
           <div><span style={lbl}>Customer</span><input style={inp} value={f.customerName} onChange={set("customerName")} /></div>
           <div><span style={lbl}>Building</span><input style={inp} value={f.buildingLabel} onChange={set("buildingLabel")} /></div>
@@ -5620,14 +5759,24 @@ function SchedJobEditor({ job, stages, team, crews = [], canAdmin, busy, onSave,
         </div>
       </>)}
       {/* Stage move without drag — the touch/keyboard path, and the crew path on phones. */}
-      <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-        <select style={{ ...inp, width: "auto" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
-          {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-        <input style={{ ...inp, flex: 1, minWidth: 120 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
-        <button type="button" disabled={busy || !note.trim()} style={S.btn("#F1F5F9", "#334155")}
-          onClick={() => { if (note.trim()) { onNote(note.trim()); setNote(""); } }}>Add note</button>
-      </div>
+      {canEdit && (
+        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+          <select style={{ ...inp, width: "auto" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
+            {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input style={{ ...inp, flex: 1, minWidth: 120 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
+          <button type="button" disabled={busy || !note.trim()} style={S.btn("#F1F5F9", "#334155")}
+            onClick={async () => {
+              if (!note.trim()) return;
+              await onNote(note.trim());
+              setNote(""); setHistoryKey((k) => k + 1);
+            }}>Add note</button>
+        </div>
+      )}
+      {/* History — every move, note and completion, with who and when. This is the read side
+          of schedule_activity, which the edge function has always written and nothing ever
+          showed: a crew note went into the log and vanished from the screen. */}
+      <SchedJobHistory jobId={job.id} refreshKey={historyKey} />
     </div>
   );
 }
@@ -5685,7 +5834,14 @@ function SchedStageEditor({ stages, busy, onClose, onSave }) {
   );
 }
 
-function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
+function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
+  // Who may WRITE here is build_schedule:'edit' (migration 100) — a Crew Leader has it, a
+  // Sales Rep does not, and neither is an admin. `canAdmin` alone was the old owner/admin
+  // gate: it locked every write control for exactly the people the Crew Leader title was
+  // created for, while the server was already letting them through.
+  const canEdit = canAdmin || !!(access && access.build_schedule === "edit");
+  // Closing a repair is a REPAIRS write — offered only to someone who holds that area.
+  const canRepairs = canAdmin || !!(access && access.repairs === "edit");
   const [data, setData] = useState(null);        // { stages, jobs, stopByJob, tray, team } | null = loading
   const [error, setError] = useState(null);
   const [view, setView] = useState("calendar"); // calendar (main) | board | table
@@ -5810,7 +5966,19 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   const completeJob = async (job) => {
     setBusy(true); setMsg(null);
     const r = await call({ action: "complete_job", jobId: job.id }, `${job.customer_name || job.title || "Job"} marked built.`);
-    setBusy(false); if (r) { setExpandedId(null); load(); }
+    setBusy(false);
+    if (!r) return;
+    setExpandedId(null);
+    // The shop work on a repair is done — offer to close the repair too. PROMPT, never
+    // automatic: the repair's status is what the customer is told, and it may still be
+    // waiting on a part or on payment (SCHEDULING_SCOPE.md).
+    if (r.repairPrompt && canRepairs) {
+      const p = r.repairPrompt;
+      if (window.confirm(`That was the last shop job for R-${p.repairNo}. Mark the repair completed as well?`)) {
+        await call({ action: "update_repair", repairId: p.repairId, status: "completed" }, `R-${p.repairNo} completed.`);
+      }
+    }
+    load();
   };
   const deleteJob = async (job) => {
     if (!window.confirm(`Remove ${job.customer_name || job.title || "this job"} from the build schedule? The order/design itself is not touched.`)) return;
@@ -5861,7 +6029,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
     ].filter(Boolean);
     const custLine = job.customer_name || (job.source === "inventory" ? "Spec build for the lot" : null);
     return (
-      <div key={job.id} draggable={!open && (opts.dragAdmin ? canAdmin : true)} tabIndex={0} role="button" aria-expanded={open}
+      <div key={job.id} draggable={!open && canEdit} tabIndex={0} role="button" aria-expanded={open}
         onDragStart={(e) => { setDragId(job.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
         onDragEnd={() => { setDragId(null); setDropStage(null); }}
         onClick={() => setExpandedId(open ? null : job.id)}
@@ -5921,7 +6089,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
         ) : null}
         {job.notes && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600, marginTop: 6, whiteSpace: "pre-wrap" }}>{job.notes}</div>}
         {open && (
-          <SchedJobEditor job={job} stages={stages} team={team} crews={crews} canAdmin={canAdmin} busy={busy}
+          <SchedJobEditor job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
             onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
             onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
         )}
@@ -5942,7 +6110,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
   // In calendar view a tray item is DRAGGABLE — drop it on a date and the job is created
   // with that build date (addFromTrayDated). The + button still adds it unscheduled.
   const trayItem = (key, chipConf, who, what, addBody, label) => {
-    const draggable = canAdmin && view === "calendar";
+    const draggable = canEdit && view === "calendar";
     return (
       <div key={key} draggable={draggable}
         onDragStart={draggable ? () => setDragIntake({ body: addBody, label }) : undefined}
@@ -5953,7 +6121,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
           <div style={{ fontSize: 12.5, fontWeight: 700 }}>{who}</div>
           {what && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{what}</div>}
         </div>
-        {canAdmin && (
+        {canEdit && (
           <button type="button" disabled={busy} onClick={() => addFromTray(addBody, label)}
             title={view === "calendar" ? "Add without a date (or drag onto a day below)" : "Add to the board"}
             style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
@@ -5975,8 +6143,8 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
             ))}
           </div>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
-          {canAdmin && <button type="button" onClick={() => setEditingStages(true)} style={S.btn("#FFF", "#475569")}>Edit stages</button>}
-          {canAdmin && <button type="button" onClick={() => setAddOpen(!addOpen)} style={S.btn(ACCENT, "#FFF")}>+ Add job</button>}
+          {canEdit && <button type="button" onClick={() => setEditingStages(true)} style={S.btn("#FFF", "#475569")}>Edit stages</button>}
+          {canEdit && <button type="button" onClick={() => setAddOpen(!addOpen)} style={S.btn(ACCENT, "#FFF")}>+ Add job</button>}
         </>} />
 
       {/* Summary tiles */}
@@ -5997,7 +6165,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
 
       {/* Manual add (admin) */}
-      {addOpen && canAdmin && (
+      {addOpen && canEdit && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
           <div style={{ flex: 2, minWidth: 160 }}><span style={S.lbl}>Job title</span><input style={S.input} value={manual.title} onChange={(e) => setManual({ ...manual, title: e.target.value })} placeholder='e.g. "Shop maintenance day"' /></div>
           <div style={{ flex: 2, minWidth: 140 }}><span style={S.lbl}>Customer (optional)</span><input style={S.input} value={manual.customerName} onChange={(e) => setManual({ ...manual, customerName: e.target.value })} /></div>
@@ -6011,9 +6179,9 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
           straight onto a date below; dropping a scheduled card back clears its date. */}
       {data && (trayCount > 0 || (view === "calendar" && undatedJobs.length > 0)) && (
         <div
-          onDragOver={view === "calendar" && canAdmin ? (e) => { e.preventDefault(); setDropStage("cal:none"); } : undefined}
-          onDragLeave={view === "calendar" && canAdmin ? () => setDropStage((d) => d === "cal:none" ? null : d) : undefined}
-          onDrop={view === "calendar" && canAdmin ? (e) => {
+          onDragOver={view === "calendar" && canEdit ? (e) => { e.preventDefault(); setDropStage("cal:none"); } : undefined}
+          onDragLeave={view === "calendar" && canEdit ? () => setDropStage((d) => d === "cal:none" ? null : d) : undefined}
+          onDrop={view === "calendar" && canEdit ? (e) => {
             e.preventDefault(); setDropStage(null);
             const job = jobs.find((j) => j.id === dragId);
             if (job && schedBuildDate(job)) moveJobDate(job, null);
@@ -6026,13 +6194,13 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
             <span style={schedChip("#EEF2FF", "#3D3672")}>{trayCount + (view === "calendar" ? undatedJobs.length : 0)}</span>
             <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>
               {view === "calendar"
-                ? "— drag anything here onto a day below to schedule it" + (canAdmin ? "; drag a scheduled card back here to clear its date" : "")
+                ? "— drag anything here onto a day below to schedule it" + (canEdit ? "; drag a scheduled card back here to clear its date" : "")
                 : "— sold orders, inventory, and repairs that aren't on the board yet"}
             </span>
           </div>
           <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2 }}>
             {view === "calendar" && undatedJobs.map((j) => (
-              <div key={j.id} style={{ flex: "0 0 230px" }}>{jobCard(j, { hideDate: true, showStage: true, dragAdmin: true })}</div>
+              <div key={j.id} style={{ flex: "0 0 230px" }}>{jobCard(j, { hideDate: true, showStage: true })}</div>
             ))}
             {/* Building-first like the cards: style+size bold, customer in the small line. */}
             {tray.orders.map((o) => trayItem("o" + o.designShortCode, SCHED_SRC_CHIP.order,
@@ -6140,7 +6308,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
                     </tr>
                     {open && (
                       <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
-                        <SchedJobEditor job={j} stages={stages} team={team} crews={crews} canAdmin={canAdmin} busy={busy}
+                        <SchedJobEditor job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
                           onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
                           onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
                       </td></tr>
@@ -6185,7 +6353,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
           if (calView === "week") c.setDate(c.getDate() + dir * 7); else c.setMonth(c.getMonth() + dir);
           setCursorMs(c.getTime());
         };
-        const dropProps = (iso) => canAdmin ? {
+        const dropProps = (iso) => canEdit ? {
           onDragOver: (e) => { e.preventDefault(); setDropStage("cal:" + (iso || "none")); },
           onDragLeave: () => setDropStage((d) => d === "cal:" + (iso || "none") ? null : d),
           onDrop: (e) => {
@@ -6268,7 +6436,7 @@ function BuildScheduleTab({ clientId, canAdmin, onOpenDesign }) {
                           <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px", fontVariantNumeric: "tabular-nums" }}>{dayJobs.length}</span>
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 7, minHeight: 40 }}>
-                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true, dragAdmin: true }))}
+                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true }))}
                         </div>
                       </div>
                     );
@@ -6346,7 +6514,13 @@ const REPAIR_STATUS = {
 };
 const REPAIR_OPEN = new Set(["requested", "approved", "in_progress"]);
 
-function RepairsTab({ clientId, canAdmin }) {
+function RepairsTab({ clientId, canAdmin, access = null }) {
+  // repairs:'edit' (migration 100) — the Crew Leader preset carries it. Same reasoning as
+  // the Build Schedule: the old owner/admin gate hid intake and status from the people
+  // whose job this is.
+  const canEdit = canAdmin || !!(access && access.repairs === "edit");
+  // Putting a repair on a load is a DELIVERY write, not a repairs one — gate it on that.
+  const canDeliver = canAdmin || !!(access && access.delivery_schedule === "edit");
   const [data, setData] = useState(null);        // { repairs, jobs, stops } | null = loading
   const [error, setError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -6355,6 +6529,7 @@ function RepairsTab({ clientId, canAdmin }) {
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
+  const [loadPick, setLoadPick] = useState(null);  // null = picker closed; array = planned loads
   const [intake, setIntake] = useState({ customerName: "", phone: "", email: "", serial: "", description: "", quote: "" });
   const [photos, setPhotos] = useState(null);    // for the selected repair; null = loading
   const [detail, setDetail] = useState(null);    // editable copy of the selected repair
@@ -6397,6 +6572,7 @@ function RepairsTab({ clientId, canAdmin }) {
     if (!selected) { setDetail(null); setPhotos(null); return; }
     setDetail({ status: selected.status, quote: selected.quote_cents == null ? "" : String(selected.quote_cents / 100), notes: selected.notes || "" });
     setPhotos(null);
+    setLoadPick(null);   // a picker left open would apply to the wrong repair
     let dead = false;
     (async () => {
       const { data: d } = await sb.functions.invoke("portal-schedule", { body: { action: "repair_photos", repairId: selected.id } });
@@ -6429,7 +6605,9 @@ function RepairsTab({ clientId, canAdmin }) {
     const quoteCents = intake.quote.trim() ? Math.round(Number(intake.quote) * 100) : null;
     const r = await call({
       action: "create_repair", customerName: intake.customerName, phone: intake.phone, email: intake.email,
-      serial: intake.serial.trim() ? Number(intake.serial.replace(/[^0-9]/g, "")) : null,
+      // Raw — the server decides whether that's a serial or a design code and links the
+      // building either way. Parsing it here would drop the code half on the floor.
+      buildingRef: intake.serial.trim() || null,
       description: intake.description, quoteCents: Number.isFinite(quoteCents) ? quoteCents : null,
     });
     setBusy(false);
@@ -6465,6 +6643,30 @@ function RepairsTab({ clientId, canAdmin }) {
     const r = await call({ action: "create_job", source: "repair", repairId: selected.id },
       `R-${selected.repair_no} added to the Build Schedule.`);
     setBusy(false); if (r) load();
+  };
+  // Site visit = a stop on a delivery load. The loads list is fetched only when asked for:
+  // it is a delivery_schedule read, and a Crew Leader (repairs:edit, no delivery access)
+  // must not have this whole tab 403 just because the control exists.
+  const openLoadPick = async () => {
+    setBusy(true); setMsg(null);
+    const { data: d, error } = await sb.functions.invoke("portal-schedule", { body: { action: "loads" } });
+    setBusy(false);
+    if (error || !d || d.error) { setMsg({ err: (d && d.error) || "Could not read the delivery schedule." }); return; }
+    setLoadPick((d.loads || []).filter((l) => l.status === "planned"));
+  };
+  const addSiteVisit = async (loadId) => {
+    if (!selected) return;
+    setBusy(true); setMsg(null);
+    let target = loadId;
+    if (target === "new") {
+      const created = await call({ action: "create_load" });
+      if (!created || !created.load) { setBusy(false); return; }
+      target = created.load.id;
+    }
+    const r = await call({ action: "add_stop", loadId: target, source: "repair", repairId: selected.id },
+      `R-${selected.repair_no} added to the load.`);
+    setBusy(false);
+    if (r) { setLoadPick(null); load(); }
   };
   const uploadPhoto = async (file) => {
     if (!selected || !file) return;
@@ -6514,7 +6716,7 @@ function RepairsTab({ clientId, canAdmin }) {
       <CardHead title="Repairs" count={repairs.length}
         right={<>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
-          {canAdmin && <button type="button" onClick={() => setIntakeOpen(!intakeOpen)} style={S.btn(ACCENT, "#FFF")}>+ Log a repair</button>}
+          {canEdit && <button type="button" onClick={() => setIntakeOpen(!intakeOpen)} style={S.btn(ACCENT, "#FFF")}>+ Log a repair</button>}
         </>} />
 
       {data && (
@@ -6534,13 +6736,13 @@ function RepairsTab({ clientId, canAdmin }) {
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
 
       {/* ── Intake ── */}
-      {intakeOpen && canAdmin && (
+      {intakeOpen && canEdit && (
         <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "12px 14px", marginBottom: 13 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "8px 12px", marginBottom: 8 }}>
             <div><span style={lbl}>Customer *</span><input style={S.input} value={intake.customerName} onChange={(e) => setIntake({ ...intake, customerName: e.target.value })} /></div>
             <div><span style={lbl}>Phone</span><input style={S.input} value={intake.phone} onChange={(e) => setIntake({ ...intake, phone: e.target.value })} /></div>
             <div><span style={lbl}>Email</span><input style={S.input} value={intake.email} onChange={(e) => setIntake({ ...intake, email: e.target.value })} /></div>
-            <div><span style={lbl}>Building serial # <span style={{ fontWeight: 500, textTransform: "none" }}>(blank if not one of ours)</span></span><input style={S.input} value={intake.serial} onChange={(e) => setIntake({ ...intake, serial: e.target.value })} placeholder="e.g. 11640" /></div>
+            <div><span style={lbl}>Building serial # or design code <span style={{ fontWeight: 500, textTransform: "none" }}>(blank if not one of ours)</span></span><input style={S.input} value={intake.serial} onChange={(e) => setIntake({ ...intake, serial: e.target.value })} placeholder="e.g. 11640 or SS-NR4DV8XK2P" /></div>
             <div><span style={lbl}>Quote ($)</span><input style={S.input} value={intake.quote} onChange={(e) => setIntake({ ...intake, quote: e.target.value })} placeholder="optional" /></div>
           </div>
           <span style={lbl}>What's wrong? *</span>
@@ -6619,12 +6821,12 @@ function RepairsTab({ clientId, canAdmin }) {
                 <div><span style={lbl}>Contact</span><div style={{ fontSize: 13, fontWeight: 600 }}>{selected.phone || selected.email || "—"}</div></div>
                 <div>
                   <span style={lbl}>Quote ($)</span>
-                  {canAdmin
+                  {canEdit
                     ? <input style={{ ...S.input, padding: "6px 8px" }} value={detail.quote} onChange={(e) => setDetail({ ...detail, quote: e.target.value })} />
                     : <div style={{ fontSize: 13, fontWeight: 700 }}>{invMoney(selected.quote_cents)}</div>}
                 </div>
               </div>
-              {canAdmin && (
+              {canEdit && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px", marginBottom: 10 }}>
                   <div>
                     <span style={lbl}>Status</span>
@@ -6644,14 +6846,16 @@ function RepairsTab({ clientId, canAdmin }) {
                     <a href={p.url} target="_blank" rel="noopener noreferrer">
                       <img src={p.url} alt="Repair photo" style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 9, border: "1px solid #E2E8F0", display: "block" }} />
                     </a>
-                    {canAdmin && (
+                    {canEdit && (
                       <button type="button" onClick={() => deletePhoto(p)} title="Remove photo" aria-label="Remove photo"
                         style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: "50%", border: "1px solid #FECACA", background: "#FEF2F2", color: "#DC2626", fontSize: 10, fontWeight: 800, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
                     )}
                   </div>
                 ))}
-                <button type="button" disabled={busy} onClick={() => fileRef.current && fileRef.current.click()}
-                  style={{ width: 64, height: 64, borderRadius: 9, border: "1px dashed #CBD5E1", background: "#FFF", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer" }}>+</button>
+                {canEdit && (
+                  <button type="button" disabled={busy} onClick={() => fileRef.current && fileRef.current.click()}
+                    style={{ width: 64, height: 64, borderRadius: 9, border: "1px dashed #CBD5E1", background: "#FFF", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer" }}>+</button>
+                )}
                 <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" style={{ display: "none" }}
                   onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) uploadPhoto(f); e.target.value = ""; }} />
               </div>
@@ -6660,10 +6864,20 @@ function RepairsTab({ clientId, canAdmin }) {
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "5px 0 11px" }}>
                 {selJob
                   ? <span style={schedChip("#F0FDF4", "#15803D")}>On the Build Schedule ✓</span>
-                  : (canAdmin && <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={scheduleShopWork}>Schedule shop work →</button>)}
+                  : (canEdit && <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={scheduleShopWork}>Schedule shop work →</button>)}
                 {selStops.length > 0
                   ? <span style={schedChip("#EEF2FF", "#3D3672")}>{selStops.some((s) => s.delivered_at) ? "Site visit done ✓" : "Site visit on a load ✓"}</span>
-                  : <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600, alignSelf: "center" }}>Site visits ride a delivery load — coming with the Delivery Schedule.</span>}
+                  : canDeliver
+                    ? (loadPick === null
+                        ? <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
+                            onClick={openLoadPick}>Site visit — add to a load →</button>
+                        : <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addSiteVisit(e.target.value); }}
+                            style={{ ...S.input, padding: "6px 8px", fontSize: 12, width: "auto", fontWeight: 700 }}>
+                            <option value="">{loadPick.length ? "Pick a load…" : "No planned loads — start one"}</option>
+                            {loadPick.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}</option>)}
+                            <option value="new">➕ New load</option>
+                          </select>)
+                    : <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600, alignSelf: "center" }}>Site visits ride a delivery load — ask someone with Delivery Schedule access to add it.</span>}
               </div>
 
               {history.length > 0 && (<>
@@ -6679,7 +6893,7 @@ function RepairsTab({ clientId, canAdmin }) {
                 </div>
               </>)}
 
-              {canAdmin && (
+              {canEdit && (
                 <div style={{ display: "flex", gap: 8, borderTop: "1px solid #F1F5F9", paddingTop: 10 }}>
                   <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={saveDetail}>Save</button>
                   <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), marginLeft: "auto" }} onClick={deleteRepair}>Delete</button>
@@ -6691,7 +6905,7 @@ function RepairsTab({ clientId, canAdmin }) {
       </>)}
 
       <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 12 }}>
-        Log a repair once, then schedule the work where it happens — shop repairs go on the Build Schedule; site visits will ride a delivery load. Service history follows the building's serial number forever.
+        Log a repair once, then schedule the work where it happens — shop repairs go on the Build Schedule; site visits ride a delivery load as a stop. Service history follows the building's serial number forever.
       </p>
     </div>
   );
@@ -6761,7 +6975,15 @@ function SchedStopEditor({ stop, territories, busy, onSave, onCancel }) {
   );
 }
 
-function DeliveryScheduleTab({ clientId, canAdmin }) {
+function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
+  // delivery_schedule:'edit' (migration 100) — the Driver preset carries it, which is the
+  // point: a driver plans and closes out their own loads.
+  //
+  // canEdit SURVIVES in exactly one place below — the built-before-delivered override.
+  // Decision 11 says crew cannot override, and since the gate for mark_load_out is the
+  // very level a Driver holds, the role check is the only thing separating "may dispatch"
+  // from "may overrule the built check". portal-schedule re-checks it server-side.
+  const canEdit = canAdmin || !!(access && access.delivery_schedule === "edit");
   const [data, setData] = useState(null);      // loads payload
   const [pool, setPool] = useState(null);      // pool payload
   const [error, setError] = useState(null);
@@ -6975,7 +7197,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
     if (s.source === "repair") return <span style={schedChip("#FDF2F8", "#BE185D")}>Field work</span>;
     return <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12 }}>—</span>;
   };
-  const poolRow = (key, src, serial, customer, building, size, wide, ready, extraSub, addBody, label) => (
+  const poolRow = (key, src, serial, customer, building, size, wide, ready, extraSub, addBody, label, dest) => (
     <tr key={key}>
       <td style={{ ...S.td, whiteSpace: "nowrap" }}>
         <span style={{ fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{serial}</span>
@@ -6984,9 +7206,10 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
       <td style={S.td}><strong>{customer}</strong>{extraSub && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{extraSub}</div>}</td>
       <td style={S.td}>{building}</td>
       <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>{size}{wide && <span style={{ ...schedChip("#FEF3C7", "#92400E"), marginLeft: 5 }}>WIDE</span>}</td>
+      <td style={S.td}>{dest || <span style={{ color: "#CBD5E1", fontWeight: 600 }}>—</span>}</td>
       <td style={S.td}>{ready}</td>
       <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-        {canAdmin && (
+        {canEdit && (
           <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addToLoad(e.target.value, addBody, label); }}
             style={{ ...inp, width: "auto", fontWeight: 700 }}>
             <option value="">Add to load…</option>
@@ -6997,6 +7220,56 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
       </td>
     </tr>
   );
+
+  // Pool rows bucketed by territory. The server annotates each build job with the corridor
+  // it will land in (same city/zip rule add_stop uses), so the grouping a dispatcher sees
+  // is the territory the stop actually gets. Sold lot units and repairs have no destination
+  // of their own yet — they sit in the trailing "no destination" group.
+  const poolGroups = (() => {
+    const buckets = new Map();       // territoryId | "" -> rows
+    const push = (tid, row) => {
+      const k = tid || "";
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(row);
+    };
+    poolJobs.forEach((j) => push(j.territoryId, {
+      key: "j" + j.buildJobId,
+      render: () => poolRow("j" + j.buildJobId, SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual,
+        j.serial ? "#" + j.serial : "—",
+        j.customerName || j.title || (j.source === "inventory" ? "Spec build" : "—"),
+        j.buildingLabel || j.title || "—",
+        (j.widthFt && j.lengthFt) ? `${Number(j.widthFt)}×${Number(j.lengthFt)}` : "—", j.wide,
+        j.buildKind === "done"
+          ? <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓{j.completedAt ? " " + fmtDate(j.completedAt) : ""}</span>
+          : <span style={schedChip("#FFFBEB", "#B45309")}>{j.buildStage || "In build"}{j.dueDate ? " · due " + fmtDate(j.dueDate) : ""}</span>,
+        j.source === "inventory" ? "spec build → haul to the sales lot" : null,
+        { source: j.source, buildJobId: j.buildJobId },
+        j.customerName || (j.serial ? "#" + j.serial : "Building"),
+        [j.destCity, j.destState].filter(Boolean).join(", ")),
+    }));
+    poolInv.forEach((u) => push(null, {
+      key: "u" + u.inventoryUnitId,
+      render: () => poolRow("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory,
+        "#" + u.serial, u.location ? u.location.name : "Sales lot", "Sold lot building", "—", false,
+        <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>,
+        "sold — deliver to the buyer", { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial, null),
+    }));
+    poolRepairs.forEach((rp) => push(null, {
+      key: "r" + rp.id,
+      render: () => poolRow("r" + rp.id, SCHED_SRC_CHIP.repair,
+        "R-" + rp.repair_no, rp.customer_name, (rp.description || "").slice(0, 50), "—", false,
+        <span style={schedChip("#FDF2F8", "#BE185D")}>{(REPAIR_STATUS[rp.status] || {}).label || rp.status}</span>,
+        rp.serial ? "building #" + rp.serial : null, { source: "repair", repairId: rp.id }, "R-" + rp.repair_no, null),
+    }));
+    const named = territories
+      .filter((t) => buckets.has(t.id))
+      .map((t) => ({
+        key: t.id, territory: t, rows: buckets.get(t.id),
+        drivers: drivers.filter((p) => p.is_driver && (p.territory_ids || []).indexOf(t.id) !== -1).map((p) => profName(p)),
+      }));
+    const loose = buckets.get("") || [];
+    return loose.length ? named.concat([{ key: "none", territory: null, rows: loose, drivers: [] }]) : named;
+  })();
 
   return (
     <div style={S.card}>
@@ -7013,7 +7286,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
           <button type="button" disabled title="Coming later: fits buildings to each driver's deck, groups stops by territory, routes by map"
             style={{ ...S.btn("#FFF", "#B9C4D6"), border: "1px solid #E2E8F0", cursor: "default" }}>⚡ Auto-plan · soon</button>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
-          {canAdmin && <button type="button" onClick={() => setNewLoad(newLoad ? null : { driverId: "", loadDate: "", routeLabel: "" })} style={S.btn(ACCENT, "#FFF")}>+ New load</button>}
+          {canEdit && <button type="button" onClick={() => setNewLoad(newLoad ? null : { driverId: "", loadDate: "", routeLabel: "" })} style={S.btn(ACCENT, "#FFF")}>+ New load</button>}
         </>} />
 
       {data && (
@@ -7033,7 +7306,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
 
       {/* ── New load form ── */}
-      {newLoad && canAdmin && (
+      {newLoad && canEdit && (
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
           <div style={{ minWidth: 180 }}>
             <span style={lbl}>Driver</span>
@@ -7059,30 +7332,39 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
               <span style={schedChip("#EEF2FF", "#3D3672")}>{poolCount}</span>
               <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600 }}>— sorted by when each building is ready; pick a load, or start a new one</span>
             </div>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>{["Serial", "Customer", "Building", "Size", "Ready", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
-              <tbody>
-                {poolJobs.map((j) => poolRow("j" + j.buildJobId, SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual,
-                  j.serial ? "#" + j.serial : "—",
-                  j.customerName || j.title || (j.source === "inventory" ? "Spec build" : "—"),
-                  j.buildingLabel || j.title || "—",
-                  (j.widthFt && j.lengthFt) ? `${Number(j.widthFt)}×${Number(j.lengthFt)}` : "—", j.wide,
-                  j.buildKind === "done"
-                    ? <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓{j.completedAt ? " " + fmtDate(j.completedAt) : ""}</span>
-                    : <span style={schedChip("#FFFBEB", "#B45309")}>{j.buildStage || "In build"}{j.dueDate ? " · due " + fmtDate(j.dueDate) : ""}</span>,
-                  j.source === "inventory" ? "spec build → haul to the sales lot" : null,
-                  { source: j.source, buildJobId: j.buildJobId },
-                  j.customerName || (j.serial ? "#" + j.serial : "Building")))}
-                {poolInv.map((u) => poolRow("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory,
-                  "#" + u.serial, u.location ? u.location.name : "Sales lot", "Sold lot building", "—", false,
-                  <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>,
-                  "sold — deliver to the buyer", { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial))}
-                {poolRepairs.map((rp) => poolRow("r" + rp.id, SCHED_SRC_CHIP.repair,
-                  "R-" + rp.repair_no, rp.customer_name, (rp.description || "").slice(0, 50), "—", false,
-                  <span style={schedChip("#FDF2F8", "#BE185D")}>{(REPAIR_STATUS[rp.status] || {}).label || rp.status}</span>,
-                  rp.serial ? "building #" + rp.serial : null, { source: "repair", repairId: rp.id }, "R-" + rp.repair_no))}
-              </tbody>
-            </table>
+            {/* Grouped by TERRITORY (SCHEDULING_SCOPE.md decision 9b + Phase 4): each group
+                header carries the corridor description and whoever covers it, so a
+                dispatcher reads "everything going West, soonest first" instead of one
+                undifferentiated list. Buildings with no destination yet fall to the bottom
+                group rather than being hidden. */}
+            {poolGroups.map((g) => (
+              <div key={g.key} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", padding: "6px 2px 3px", borderTop: "1px solid #EEF2F8" }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: g.territory ? "#334155" : "#94A3B8" }}>
+                    {g.territory ? g.territory.name : "Not in a territory yet"}
+                  </span>
+                  <span style={schedChip("#F1F5F9", "#475569")}>{g.rows.length}</span>
+                  {g.territory && g.territory.description && (
+                    <span style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{g.territory.description}</span>
+                  )}
+                  {g.drivers.length > 0 && (
+                    <span style={{ fontSize: 11, color: ACCENT, fontWeight: 700 }}>· {g.drivers.join(", ")}</span>
+                  )}
+                  {g.territory && g.drivers.length === 0 && (
+                    <span style={{ fontSize: 11, color: "#B45309", fontWeight: 700 }}>· no driver covers this yet</span>
+                  )}
+                  {!g.territory && (
+                    <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 600 }}>
+                      set the territory once on a stop in the same town and the rest follow it from then on
+                    </span>
+                  )}
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>{["Serial", "Customer", "Building", "Size", "Destination", "Ready", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+                  <tbody>{g.rows.map((r) => r.render())}</tbody>
+                </table>
+              </div>
+            ))}
           </div>
         )}
 
@@ -7145,15 +7427,15 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                           </span>
                         </span>
                       )}
-                      {canAdmin && l.status === "planned" && <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "4px 10px", fontSize: 11.5 }} onClick={() => setEditLoadId(editLoadId === l.id ? null : l.id)}>{editLoadId === l.id ? "Close" : "Edit"}</button>}
-                      {canAdmin && l.status === "planned" && <button type="button" disabled={busy} style={{ ...S.btn("#FFFBEB", "#B45309"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => markLoad(l, false)}>Mark out →</button>}
-                      {canAdmin && l.status !== "delivered" && <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => markLoad(l, true)}>✓ Delivered</button>}
-                      {canAdmin && l.status === "planned" && lStops.length === 0 && <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => deleteLoad(l)}>Delete</button>}
+                      {canEdit && l.status === "planned" && <button type="button" style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "4px 10px", fontSize: 11.5 }} onClick={() => setEditLoadId(editLoadId === l.id ? null : l.id)}>{editLoadId === l.id ? "Close" : "Edit"}</button>}
+                      {canEdit && l.status === "planned" && <button type="button" disabled={busy} style={{ ...S.btn("#FFFBEB", "#B45309"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => markLoad(l, false)}>Mark out →</button>}
+                      {canEdit && l.status !== "delivered" && <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => markLoad(l, true)}>✓ Delivered</button>}
+                      {canEdit && l.status === "planned" && lStops.length === 0 && <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "4px 10px", fontSize: 11.5 }} onClick={() => deleteLoad(l)}>Delete</button>}
                     </span>
                   </div>
 
                   {/* Header edit (in place) */}
-                  {editLoadId === l.id && canAdmin && (
+                  {editLoadId === l.id && canEdit && (
                     <SchedLoadHeaderEditor l={l} drivers={drivers} nameOf={nameOf} busy={busy}
                       onSave={(fields) => saveLoadHeader(l, fields)} onCancel={() => setEditLoadId(null)} />
                   )}
@@ -7219,8 +7501,8 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                                 <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.leg_miles != null ? Number(s.leg_miles) + " mi" : "—"}</td>
                                 <td style={{ ...S.td, whiteSpace: "nowrap" }}>{s.time_window || "—"}</td>
                                 <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right" }}>
-                                  {l.status === "out" && !s.delivered_at && <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "3px 8px", fontSize: 11 }} onClick={() => markStopDelivered(s)}>✓ Delivered</button>}
-                                  {canAdmin && l.status === "planned" && (<>
+                                  {canEdit && l.status === "out" && !s.delivered_at && <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "3px 8px", fontSize: 11 }} onClick={() => markStopDelivered(s)}>✓ Delivered</button>}
+                                  {canEdit && l.status === "planned" && (<>
                                     <button type="button" onClick={() => bumpStop(l, s, -1)} title="Move up" style={{ border: "none", background: "none", cursor: "pointer", color: "#94A3B8", fontSize: 11, padding: "0 2px" }}>▲</button>
                                     <button type="button" onClick={() => bumpStop(l, s, 1)} title="Move down" style={{ border: "none", background: "none", cursor: "pointer", color: "#94A3B8", fontSize: 11, padding: "0 2px" }}>▼</button>
                                     <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "3px 8px", fontSize: 11, marginLeft: 4 }} onClick={() => setEditStopId(editStopId === s.id ? null : s.id)}>{editStopId === s.id ? "Close" : "Edit"}</button>
@@ -7303,13 +7585,13 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
         const step = (dir) => { if (calView === "month") { const d = new Date(monthCursor); d.setMonth(d.getMonth() + dir); d.setDate(1); setMonthCursor(d.getTime()); } else setWeekOffset(weekOffset + dir); };
         const goToday = () => { setWeekOffset(0); const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); setMonthCursor(d.getTime()); };
 
-        const dayDrop = (iso) => canAdmin ? {
+        const dayDrop = (iso) => canEdit ? {
           onDragOver: (e) => { if (dragItem) { e.preventDefault(); setDropKey("day:" + iso); } },
           onDragLeave: () => setDropKey((k) => k === "day:" + iso ? null : k),
           onDrop: (e) => { e.preventDefault(); const it = dragItem; setDropKey(null); setDragItem(null); if (it) dropOnDay(iso, it); },
         } : {};
         const dayGlow = (iso) => dropKey === "day:" + iso ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -2 } : {};
-        const loadDrop = (id) => canAdmin ? {
+        const loadDrop = (id) => canEdit ? {
           onDragOver: (e) => { if (dragItem) { e.preventDefault(); e.stopPropagation(); setDropKey("load:" + id); } },
           onDragLeave: () => setDropKey((k) => k === "load:" + id ? null : k),
           onDrop: (e) => { e.preventDefault(); e.stopPropagation(); const it = dragItem; setDropKey(null); setDragItem(null); if (it) dropOnLoad(id, it); },
@@ -7417,7 +7699,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
               </div>
             )}
 
-            {canAdmin && trayItems.length > 0 && (
+            {canEdit && trayItems.length > 0 && (
               <div style={{ background: "#FFF7ED", border: "0.5px dashed #FDBA74", borderRadius: 10, padding: "8px 11px", marginBottom: 12 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, color: "#9A3412", marginBottom: 6 }}>To be loaded · {trayItems.length}<span style={{ fontWeight: 600, color: "#B45309" }}> — drag onto a day to start a load, or onto an existing load</span></div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -7448,7 +7730,7 @@ function DeliveryScheduleTab({ clientId, canAdmin }) {
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                           {dayLoads.map(loadCard)}
-                          {dayLoads.length === 0 && <div style={{ border: "1px dashed #CBD5E1", borderRadius: 12, padding: "16px 8px", textAlign: "center", color: "#94A3B8", fontSize: 11 }}>{canAdmin && dragItem ? "Drop to start a load" : "No loads"}</div>}
+                          {dayLoads.length === 0 && <div style={{ border: "1px dashed #CBD5E1", borderRadius: 12, padding: "16px 8px", textAlign: "center", color: "#94A3B8", fontSize: 11 }}>{canEdit && dragItem ? "Drop to start a load" : "No loads"}</div>}
                         </div>
                       </div>
                     );
@@ -11327,6 +11609,11 @@ function Dashboard({ session }) {
   // free-period blankets deliberately do NOT cover it, so grandfathered tenants see
   // the teaser like everyone else until they subscribe.
   const schedUnlocked = isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features.schedule_builds));
+  // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
+  // is only whether the tenant has bought the feature. Both must be true before Designs and
+  // Inventory offer their schedule entry points.
+  const schedCanEdit = canAdmin || !!(myAccess && myAccess.build_schedule === "edit");
+  const deliverCanEdit = canAdmin || !!(myAccess && myAccess.delivery_schedule === "edit");
   const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt
     ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
@@ -11593,6 +11880,7 @@ function Dashboard({ session }) {
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
                 isAdmin={canAdmin}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                schedOn={schedUnlocked && schedCanEdit}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "leads" && (
@@ -11663,6 +11951,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "build-schedule" && (
               schedUnlocked ? (
                 <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
+                  access={viewing ? null : myAccess}
                   onOpenDesign={(code) => openInDesigner(code)} />
               ) : (
               <ComingSoon
@@ -11680,7 +11969,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "delivery-schedule" && (
               schedUnlocked ? (
-                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin} />
+                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
+                  access={viewing ? null : myAccess} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"
@@ -11697,6 +11987,7 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "inventory" && (
               <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={canAdmin}
+                schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
                 refreshKey={designsRefreshKey}
                 onOpenDesign={openInDesigner}
                 onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial })}
@@ -11704,7 +11995,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "repairs" && (
               schedUnlocked ? (
-                <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={canAdmin} />
+                <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
+                  access={viewing ? null : myAccess} />
               ) : (
               <ComingSoon
                 title="Repairs"
