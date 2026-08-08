@@ -97,10 +97,68 @@ jobs:
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
+      # Release notes are published the moment work lands on BETA, carrying an "On beta for
+      # testing" badge (status='beta', migration 103) so tenants can see and try things
+      # before release. THIS is the moment they become true, so this is where they flip.
+      #
+      # Deliberately keyed to the merge above rather than to its own cron: a clock-based
+      # flip would announce "Live" for code that never shipped on any week the merge failed
+      # or was skipped — and this workflow has silently skipped a promotion before (see the
+      # -50 / SIGPIPE note in the merge step). If the merge did not run, neither does this.
+      #
+      # Needs repo secret SUPABASE_SERVICE_ROLE_KEY. Without it the step SKIPS rather than
+      # failing the run — the merge itself has already pushed and must not be reported as
+      # broken — but it says so, and the monday.com update below carries the outcome, which
+      # is the channel the team actually reads.
+      - name: Flip beta release notes to Live
+        id: notes
+        if: ${{ success() }}
+        env:
+          SUPABASE_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co"
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "::warning::SUPABASE_SERVICE_ROLE_KEY is not set - release notes still say 'On beta for testing'."
+            echo "notes_result=skipped (SUPABASE_SERVICE_ROLE_KEY not set)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # PATCH ... ?status=eq.beta  -> every note that beta has now made real.
+          # return=representation gives back the rows so we can report a real count.
+          RESP="$(curl -sS -X PATCH \
+            "${SUPABASE_URL}/rest/v1/release_notes?status=eq.beta" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d '{"status":"shipped"}')" || {
+              echo "::error::Could not reach Supabase to flip release notes."
+              echo "notes_result=FAILED (network)" >> "$GITHUB_OUTPUT"
+              exit 1
+            }
+
+          # A PostgREST error is a JSON OBJECT with .message; success is an ARRAY.
+          if ! printf '%s' "$RESP" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            MSG="$(printf '%s' "$RESP" | jq -r '.message // .hint // "unknown error"' 2>/dev/null || echo "unparseable response")"
+            echo "::error::Flipping release notes failed: ${MSG}"
+            echo "notes_result=FAILED (${MSG})" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          COUNT="$(printf '%s' "$RESP" | jq 'length')"
+          echo "Flipped ${COUNT} release note(s) from beta to Live."
+          if [ "$COUNT" = "0" ]; then
+            echo "notes_result=none waiting" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes_result=${COUNT} note(s) now Live" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Report to monday.com
         if: ${{ always() && env.MONDAY_API_TOKEN != '' }}
         env:
           JOB_STATUS: ${{ job.status }}
+          NOTES_RESULT: ${{ steps.notes.outputs.notes_result }}
           RESULT: ${{ steps.merge.outputs.result }}
           MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
           COMMITS: ${{ steps.merge.outputs.commits }}
@@ -121,7 +179,7 @@ jobs:
 
           esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
-          BODY="<b>${HEADER}</b><br>${DATE}<br>Repo: ${REPO}<br>Result: ${RESULT:-n/a}<br>Merge commit: ${MERGED_SHA:-n/a}<br><br><b>Commits promoted from beta:</b><br>"
+          BODY="<b>${HEADER}</b><br>${DATE}<br>Repo: ${REPO}<br>Result: ${RESULT:-n/a}<br>Merge commit: ${MERGED_SHA:-n/a}<br>Release notes: ${NOTES_RESULT:-not attempted}<br><br><b>Commits promoted from beta:</b><br>"
           BODY="${BODY}$(printf '%s\n' "$COMMITS" | esc | sed 's/$/<br>/')"
           if [ -n "${CONFLICTS:-}" ]; then
             BODY="${BODY}<br><b>Files that conflicted (auto-resolved in beta's favor - please review):</b><br>"
