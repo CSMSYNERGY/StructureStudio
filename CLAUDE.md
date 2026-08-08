@@ -85,6 +85,24 @@ Two rules that are easy to break and expensive to get wrong:
 1. **`/client` is the publication marker.** A Monday update reaches the tenant's portal ONLY if its text starts with `/client`. Unmarked updates are discarded by the webhook and never written to our database at all — so internal triage stays internal even if a later RLS or UI change goes wrong. Do **not** "simplify" this into storing everything with a `visible_to_client` flag; the whole safety property is that there is nothing there to leak.
 2. **Tenants never see Monday's raw status labels.** `bug_status` / `color_mm502bcj` are mapped down to a client-facing ladder (`submitted → in_review → planned → in_progress → shipped`, plus `needs_info`, `declined`, `duplicate`) so internal vocabulary like "Move to 'Sprints'" or "Known Bug" never surfaces. An **unmapped** label deliberately leaves the tenant's status untouched rather than inventing one — so adding a new Monday label is safe, but it won't move the client's view until you add it to `STATUS_BY_ID` in **both** functions (the functions log `UNMAPPED Monday status …` when this happens; check `get_logs edge-function-runtime` if a status looks stuck).
 
+**Monday's SUBSCRIPTION NAME is not the payload's `event.type`.** We subscribe to
+`change_column_value`; Monday delivers `type: "update_column_value"` (their webhook
+reference says so plainly). The handler tested only for the subscription spellings, matched
+nothing, and returned a silent `200 {ignored}` — so **every status change was dropped
+between 2026-07-27 and 2026-08-08** while comments kept arriving, because `create_update`
+does match its own name. That asymmetry made it look like a status-MAPPING problem when the
+map was fine. `COLUMN_EVENT_TYPES` now accepts every spelling, and an unhandled event on a
+portal-sourced item writes an `app_errors` row (still a 200 — a non-2xx makes Monday retry
+and eventually disable a healthy webhook).
+
+⚠️ **There is NO scheduled reconcile.** `sync_all` carries the comment "Run by pg_cron every
+10 minutes"; **pg_cron is not installed on this project** (verified 2026-08-08 — extension
+and `cron` schema both absent), so it has never run. It was written after a 2026-07-26
+incident where an API-driven status change produced no webhook at all, precisely to
+guarantee convergence — and its absence is why the routing bug above stayed invisible for
+twelve days. The only paths today are the webhook and the portal's "Check for updates"
+button. Do not assume statuses self-heal.
+
 **The map is keyed on Monday's label ID, never its text.** Label text is editable in the Monday UI and the team does rename it — "Shipped" became "Completed" on 2026-07-27, which silently stalled every feature-request sync until the map was re-keyed. IDs survive renames. They are also **per-board and collide across the two boards with different meanings** (id `2` is "Missing Info" on the bug board and "Declined" on the feature board), so every lookup must be `(board, id)` — which is why the reconcile query asks for `board { id }` and `column_values { value }` rather than just `text`.
 
 The widget is **portal-only** (`portal.html`: `FeedbackForm`, `FeedbackWidget`, `MySubmissions`; surfaced under What's New → My Submissions). It was removed from the public designer on 2026-07-26 — submissions must be attributable to a signed-in user and tenant, and the designer's visitors are anonymous shed-shoppers who should never see a "Report a bug" button on a tenant's customer-facing page. `FeedbackWidget.jsx` is now an empty signpost file; nothing imports it. The widget is also hidden while an operator is viewing another tenant's account, since the submission would be attributed to the operator's own tenant.

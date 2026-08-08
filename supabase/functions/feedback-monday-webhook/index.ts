@@ -185,7 +185,16 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
 
   // ── Scheduled reconcile ───────────────────────────────────────────────────
   // {"action":"sync_all"} — pulls status + /client updates for every open
-  // submission across all tenants. Run by pg_cron every 10 minutes.
+  // submission across all tenants.
+  //
+  // ⚠️ NOTHING CALLS THIS ON A SCHEDULE. This comment used to say "Run by pg_cron every
+  // 10 minutes"; checked 2026-08-08 and pg_cron is not installed on this project — the
+  // extension and the `cron` schema are both absent, so it has never run. That is the only
+  // reason a webhook routing bug could hide for twelve days: the mechanism built to
+  // guarantee convergence when a webhook is missed was never wired up. Today the only
+  // callers are the portal's "Check for updates" button (portal-feedback's `refresh`,
+  // per-tenant) and a manual POST. Believing the old comment means believing statuses
+  // self-heal. They do not.
   //
   // WHY this exists rather than trusting the webhooks alone: on 2026-07-26 a live
   // status change made through the Monday API produced NO webhook delivery (Monday
