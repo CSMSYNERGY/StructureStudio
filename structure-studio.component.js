@@ -1537,7 +1537,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The inventory unit an ALREADY-SAVED design was quoted from (designs.inventory_unit_id,
   // read at load). Distinct from inventoryUnitRef, which arms a not-yet-submitted
   // send-estimate flow — this one survives reopening the estimate later.
-  const [designUnit, setDesignUnit] = useState(null);   // { id, serial } | null
+  const [designUnit, setDesignUnit] = useState(null);   // { id, serial, lifecycle } | null
   // Staff chose "Design a new build instead" on a locked estimate: the plan unlocks and
   // the next submit saves a NEW version that is no longer tied to the unit.
   const [newBuildMode, setNewBuildMode] = useState(false);
@@ -1557,8 +1557,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // estimate later, on the public share link too. NEVER applies to the inventory MASTER
   // itself (that is the builder editing their own building via "Update Inventory
   // Building"), and staff can lift it deliberately with "Design a new build instead".
+  //
+  // …but only once the building actually EXISTS (migration 102). A unit can now be sold
+  // while it is still Requested or in the build queue, and locking those would mean the buyer
+  // of a building that has not been cut yet cannot change anything about it — the opposite of
+  // what a pre-build sale is for. So the lock keys on the ladder, not on the mere existence
+  // of a link. UNKNOWN FAILS TOWARD LOCKED: that is today's behaviour, so this can only ever
+  // loosen where we are sure. (invLifecycleRank returns -1 for a missing value; the built
+  // rank is 4 — see _shared/inventoryLifecycle.ts, which owns the ladder.)
+  const INV_BUILT_RANK = 4;
+  const INV_RANKS = { requested: 0, accepted: 1, in_queue: 2, scheduled_build: 3, built: 4,
+    scheduled_delivery: 5, at_location: 6, delivered: 7 };
+  const unitIsBuilt = !designUnit || !designUnit.lifecycle
+    || (INV_RANKS[designUnit.lifecycle] ?? INV_BUILT_RANK) >= INV_BUILT_RANK;
   const planLocked = Boolean(
-    (inventoryUnitRef.current || designUnit) && !inventoryMaster && !newBuildMode
+    (inventoryUnitRef.current || designUnit) && !inventoryMaster && !newBuildMode && unitIsBuilt
   );
   // The canvas handlers are useCallbacks with their own dep arrays — reading the lock
   // through a ref keeps them from capturing a stale value (and from re-creating on every
@@ -1871,9 +1884,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // owner-select policy, absent for an anon visitor — never let it block the lock.
     setNewBuildMode(false);
     if (data.inventory_unit_id) {
-      setDesignUnit({ id: data.inventory_unit_id, serial: null });
+      // lifecycle stays null here on purpose. It is DERIVED from build_jobs + delivery_stops
+      // (see _shared/inventoryLifecycle.ts) — not a column this read could fetch, and
+      // re-deriving it in the browser would be a third copy of a rule that must not drift.
+      // Null means "unknown", which fails toward LOCKED — the behaviour this path has always
+      // had, and staff still have "Design a new build instead" to lift it deliberately. The
+      // Inventory tab, which does know, passes it through openDesign below.
+      setDesignUnit({ id: data.inventory_unit_id, serial: null, lifecycle: null });
       supabase.from("inventory_units").select("serial").eq("id", data.inventory_unit_id).maybeSingle()
-        .then(({ data: u }) => { if (u && !isCancelled()) setDesignUnit({ id: data.inventory_unit_id, serial: u.serial }); },
+        .then(({ data: u }) => { if (u && !isCancelled()) setDesignUnit((p) => ({ ...(p || {}), id: data.inventory_unit_id, serial: u.serial })); },
               () => {});
     } else {
       setDesignUnit(null);
@@ -2027,10 +2046,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // asNew is a NEW quote on that building: the lock comes from the armed ref, and
         // designUnit (which tracks a SAVED row's link) must not also be set yet.
         setDesignUnit(openDesign.inventoryUnitId
-          ? { id: openDesign.inventoryUnitId, serial: openDesign.unitSerial ?? null }
+          ? { id: openDesign.inventoryUnitId, serial: openDesign.unitSerial ?? null,
+              // The Inventory tab knows where the building is on the ladder, so it says so —
+              // that is what lets a not-yet-built unit be quoted with an editable plan.
+              lifecycle: openDesign.unitLifecycle ?? null }
           : null);
         setNewBuildMode(false);
         inventoryUnitRef.current = openDesign.inventoryUnitId || null;
+      } else if (openDesign.newBuild) {
+        // "Quote a new build for this customer" from a sold building's estimate list. Exactly
+        // what the in-designer "Design a new build instead" button does — the plan unlocks and
+        // unitToLink resolves to null at submit, so the new version reads New rather than
+        // inheriting the sold unit. No extra confirm here: openInDesigner already asked about
+        // replacing what is in the Designer tab, and the user clicked a button that says this.
+        inventoryUnitRef.current = null;
+        setNewBuildMode(true);
       } else {
         inventoryUnitRef.current = null;
         if (openDesign.unit) {
@@ -4050,6 +4080,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ✎ Designing a new build for this customer — submitting saves it as another version, no longer tied to building{designUnit.serial != null ? ` #${designUnit.serial}` : ""}.
         </div>
       )}
+      {/* Quoting a spec build that has NOT been built yet (migration 102 made this reachable:
+          a customer can buy a building that is still in the queue). The plan is deliberately
+          editable here — but the rep needs to know that what they change is what the shop
+          will make, which is a very different thing from adjusting a quote. */}
+      {embedded && !planLocked && !newBuildMode && designUnit && designUnit.lifecycle
+        && (INV_RANKS[designUnit.lifecycle] ?? INV_BUILT_RANK) < INV_BUILT_RANK && (
+        <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FDE68A", padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#92400E" }}>
+          ⚠ Building{designUnit.serial != null ? ` #${designUnit.serial}` : ""} isn’t built yet — what you change here is what gets built.
+        </div>
+      )}
       {/* Configuration Panel — style, size, roof, paint and options all describe the
           BUILDING, so the whole panel goes inert together when the plan is locked. One
           gate here beats fifteen `disabled` props that a new control would silently miss. */}
@@ -5057,10 +5097,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", marginBottom: 6 }}>
                   {invDialog.done.updated
                     ? "Inventory building updated"
-                    : `Added to inventory${invDialog.done.serial != null ? ` — Serial #${invDialog.done.serial}` : ""}`}
+                    : `Requested${invDialog.done.serial != null ? ` — Serial #${invDialog.done.serial}` : ""}`}
                 </div>
                 <div style={{ fontSize: 13, color: "#475569", marginBottom: 16 }}>
-                  Find it on your portal's Inventory tab{invDialog.done.updated ? "" : " — it can be quoted to customers from there"}.
+                  {invDialog.done.updated
+                    ? <>Find it on your portal's Inventory tab.</>
+                    : <>Find it on your portal's Inventory tab and <strong>accept</strong> it to put it in the build queue.
+                       You can quote it to a customer at any time — a building can be sold before it's built.</>}
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button type="button" onClick={() => setInvDialog(null)}
@@ -5070,12 +5113,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ) : (
               <React.Fragment>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>
-                  {inventoryMaster && inventoryMaster.unitId ? "Update inventory building" : "Save to Inventory"}
+                  {inventoryMaster && inventoryMaster.unitId ? "Update inventory building" : "Request this build"}
                 </div>
                 <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
                   {inventoryMaster && inventoryMaster.unitId
                     ? "Saves your design changes to this building. Its serial number and any estimates already sent are unaffected."
-                    : "No customer needed — this building goes on your lot and takes the next serial number automatically."}
+                    : "No customer needed. This goes on your Inventory list as a REQUEST and takes the next serial number automatically — it isn't on the lot yet, and won't show as available to sell until it's built and brought to a location."}
                 </div>
                 {invDialog.err && (
                   <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
@@ -5099,7 +5142,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
                   <button type="button" onClick={saveInventory} disabled={invDialog.busy}
                     style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
-                    {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Add to Inventory")}
+                    {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Send request")}
                   </button>
                 </div>
               </React.Fragment>
@@ -5119,7 +5162,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
               {(inventoryNew || inventoryMaster)
-                ? <>Design the building and pick its location, then click <strong>{inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}</strong>.</>
+                ? (inventoryMaster && inventoryMaster.unitId
+                  ? <>Design the building and pick its location, then click <strong>Update Inventory Building</strong>.</>
+                  : <>Design the building and pick where it will sit, then click <strong>Request this build</strong>. It lands on your Inventory list as a request — accept it there to put it in the build queue.</>)
                 : hasExistingEstimate
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
@@ -5156,7 +5201,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     boxShadow: (submitting || (invDialog && invDialog.busy)) ? "none" : `0 4px 14px ${accent}50`,
                   }}
                 >
-                  {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Save to Inventory"}
+                  {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Request this build"}
                 </button>
               </div>
             )}

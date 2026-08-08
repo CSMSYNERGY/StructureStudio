@@ -645,6 +645,74 @@ const STATUS_COLORS = {
 // (draft → sent → accepted → invoiced → delivered) rather than sorting alphabetically.
 const STATUS_RANK = { draft: -1, sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
 
+// ── Inventory: the TWO axes a lot building has (migration 102) ───────────────────────────
+//
+// It lives HERE, beside its siblings above, rather than next to InventoryTable 4,600 lines
+// down — which is exactly why no shared map was ever written for it and the Status column was
+// an inline ternary. Four different components read these (InventoryTable, the build tray,
+// the delivery pool, SourceChip), and the first of them appears above the last.
+//
+// ONE object-map, not three parallel ones. Parallel maps are what let RANK → STATUS_RANK ship
+// with a leftover usage and put the Contacts tab on "Loading…" for every tenant: eight rungs
+// across three objects is 24 chances to forget a key, and nothing would fail loudly.
+//
+// The server owns these values (_shared/inventoryLifecycle.ts derives them and list_inventory
+// sends both the key and its label). This map is for PRESENTATION only — colour, rank, and
+// the short label a table cell can hold.
+const INV_STAGES = {
+  requested:          { label: "Requested",          group: "production", rank: 0 },
+  accepted:           { label: "Accepted",           group: "production", rank: 1 },
+  in_queue:           { label: "In queue",           group: "production", rank: 2 },
+  scheduled_build:    { label: "Scheduled to build", group: "production", rank: 3 },
+  built:              { label: "Built",              group: "built",      rank: 4 },
+  scheduled_delivery: { label: "Heading to lot",     group: "built",      rank: 5 },
+  at_location:        { label: "At location",        group: "sellable",   rank: 6 },
+  delivered:          { label: "Delivered",          group: "gone",       rank: 7 },
+};
+// Carolyn's full wording, for the override picker and tooltips where there is room for it.
+const INV_STAGE_LONG = {
+  requested: "Requested",
+  accepted: "Accepted",
+  in_queue: "In Queue",
+  scheduled_build: "Scheduled to build",
+  built: "Built",
+  scheduled_delivery: "Scheduled to be brought to location",
+  at_location: "Available to sell at Location",
+  delivered: "Delivered to the buyer",
+};
+// Colour by GROUP, not by stage. Eight badge colours is a rainbow nobody can read, and the
+// question a colour should answer is "roughly where is this?" — the label answers "exactly
+// where". Every pair below is already in use elsewhere in this file, so nothing new enters
+// the palette. GREEN MEANS SELLABLE STOCK AND NOTHING ELSE: that is what makes "sold must be
+// unavailable to sell" something you can check by looking, because a green pill beside a SOLD
+// pill is a contradiction you can spot across the room.
+const INV_GROUP_COLORS = {
+  production: { bg: "#FFFBEB", fg: "#B45309" },   // amber — as invoiced / "In build"
+  built:      { bg: "#ECFEFF", fg: "#0E7490" },   // cyan  — as delivered / the inventory chip
+  sellable:   { bg: "#F0FDF4", fg: "#15803D" },   // green — as accepted / "Built ✓"
+  gone:       { bg: "#F1F5F9", fg: "#475569" },   // slate — as draft / manual
+};
+const INV_SALE_COLORS = { bg: "#EEF2FF", fg: "#3D3672" };
+
+// An unknown stage falls back to `requested` — the BOTTOM rung, so a value nobody recognises
+// can never pass a "is it built yet" test.
+const invStage = (u) => (u && INV_STAGES[u.lifecycle] ? u.lifecycle : "requested");
+const invRank = (u) => INV_STAGES[invStage(u)].rank;
+const invStageMeta = (u) => INV_STAGES[invStage(u)];
+// Sold-ness is now a STORED fact (u.saleState), not a browser derivation. It used to be
+// `stored sold OR any linked estimate accepted+`, computed only here — so a CRM sale showed
+// Sold on this tab while the database still said available, the build board still offered the
+// building as unbuilt stock, and the delivery pool never listed it, meaning a sold building
+// was never scheduled to its buyer. sync-design-status now persists that claim, so keeping
+// the `||` would only hide a stored-vs-derived disagreement.
+const invSold = (u) => !!u && u.saleState === "sold";
+// The one state that means "this is stock a customer can buy today".
+const invSellable = (u) => invStage(u) === "at_location" && !invSold(u);
+// "SOLD — Dave" (Carolyn 2026-08-07). The name is snapshotted on the unit at the sale, so
+// this never has to reach into a customer's design row to render — which is also what lets a
+// future public listing show it.
+const invSoldLabel = (u) => (u && u.soldFirstName ? `SOLD — ${u.soldFirstName}` : "SOLD");
+
 // Only let a design's image_url become a clickable href when it is an https URL on our own
 // origin or Supabase storage. image_url is stored VERBATIM by the anon-granted save_design
 // RPC, so a hostile caller can stash a javascript: or off-site phishing URL against any
@@ -997,10 +1065,16 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
 // Where a quote's building came from, shown behind the building name (Carolyn, 2026-08-02).
 // PER VERSION, not per design: one customer can be quoted a lot building (v1 = Inventory)
 // and then a fresh custom build (v2 = New) on the same quote.
-function SourceChip({ unitId, serial }) {
+function SourceChip({ unitId, serial, lifecycle = null }) {
   const inv = Boolean(unitId);
+  // "already on the lot" became a lie the day a building could be quoted before it was built,
+  // so say where it actually is when we know. Falls back to the old wording when we don't —
+  // an operator in view-as cannot read inventory_units (owner-select RLS).
+  const stageWord = lifecycle && INV_STAGE_LONG[lifecycle] ? INV_STAGE_LONG[lifecycle] : null;
   return (
-    <span title={inv ? "Quoted from a building already on the lot" : "Designed for this customer"}
+    <span title={inv
+      ? (stageWord ? `Quoted from building #${serial != null ? serial : "?"} — ${stageWord}` : "Quoted from one of your inventory buildings")
+      : "Designed for this customer"}
       style={{ marginLeft: 7, background: inv ? "#DBEAFF" : "#F1F5F9", color: inv ? "#3D3672" : "#475569",
         borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 8px", whiteSpace: "nowrap" }}>
       {inv ? (serial != null ? `Inventory #${serial}` : "Inventory") : "New"}
@@ -5361,12 +5435,15 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 // sb.functions targetClientId injection and writes get the server-side can_write gate.
 const invMoney = (cents) => cents == null ? "—" :
   "$" + (cents / 100).toLocaleString(undefined, { minimumFractionDigits: cents % 100 ? 2 : 0, maximumFractionDigits: 2 });
-// A unit displays Sold when explicitly marked, OR when any estimate sent from it has been
-// accepted (or further) — a sale recorded only in the CRM still flips the row here.
+// Estimate statuses that mean a customer has committed. Still used to spot which of a
+// building's estimates is the buyer, and to warn on the others — but NOT to decide sold-ness
+// any more: that is stored now (see invSold above the fold).
 const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
-const invEffStatus = (u) =>
-  (u.status === "sold" || (u.estimates || []).some((e) => INV_SOLD_EST.has(normStatus(e.status)))) ? "sold" : "available";
-function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesign = null, onSendEstimate = null, onNew = null, schedOn = false, deliverOn = false }) {
+function InventoryTable({
+  clientId, refreshKey = 0, isAdmin = false, schedOn = false, deliverOn = false,
+  onOpenDesign = null, onSendEstimate = null, onNew = null, onQuoteNewBuild = null,
+  onAddToLoad = null,
+}) {
   // Inventory's two schedule entry points (SCHEDULING_SCOPE.md): "Queue build" for a spec
   // unit that still has to be built, "Add to a load" once it is sold and needs hauling.
   // Two different areas, so two different flags — a Crew Leader queues builds, a Driver
@@ -5391,16 +5468,22 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
     }
     setMsg({ ok: `#${u.serial} queued on the Build Schedule.` });
     loadSchedLinks();
+    load();
   };
   const [rows, setRows] = useState(null);      // null = loading
   const [locations, setLocations] = useState([]);
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  // One filter object rather than three loose states, so "no contradictory combination is
+  // reachable" is enforceable in one place (see setBucket / setStage below).
+  const [filt, setFilt] = useState({ bucket: "all", stage: "all", sale: "any" });
   const [locFilter, setLocFilter] = useState("all");
-  const [expanded, setExpanded] = useState({});  // unit id -> bool
+  const [expanded, setExpanded] = useState({});  // unit id -> estimates drawer open
+  const [moreOpen, setMoreOpen] = useState({});  // unit id -> second row of actions open
   const [busyId, setBusyId] = useState(null);
   const [msg, setMsg] = useState(null);          // { ok } | { err }
+  const [sellFor, setSellFor] = useState(null);  // unit whose buyer is being picked
+  const [override, setOverride] = useState(null); // { unit, to }
 
   const load = useCallback(async () => {
     setError(null);
@@ -5412,29 +5495,47 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
     const units = data.units || [];
     setRows(units);
     setLocations(data.locations || []);
-    // list_inventory reports each estimate's CACHED designs.status, and nothing else on
-    // this tab talks to GHL — so a customer accepting in the CRM would not flip the
-    // building to Sold until somebody happened to open the Designs tab. Refresh the
-    // linked estimates here and re-derive. Additive: any failure just leaves the cache.
+    // list_inventory reports each estimate's CACHED designs.status, and nothing else on this
+    // tab talks to GHL — so a customer accepting in the CRM would not reach this page until
+    // somebody happened to open the Designs tab. sync-design-status now PERSISTS the sale it
+    // finds (it is the only place that learns "this estimate just became accepted"), so this
+    // re-loads afterwards rather than patching statuses locally: the newly stored sale, the
+    // buyer's name and the recomputed stage all have to come from the server to agree.
+    // Additive — any failure just leaves what we already rendered.
     const codes = units.flatMap((u) => (u.estimates || []).map((e) => e.shortCode)).filter(Boolean);
     if (codes.length) {
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: codes } });
-        const statuses = sync && sync.statuses;
-        if (statuses) {
-          setRows(units.map((u) => ({
-            ...u,
-            estimates: (u.estimates || []).map((e) => statuses[e.shortCode] ? { ...e, status: statuses[e.shortCode] } : e),
-          })));
+        if (sync && sync.statuses) {
+          const { data: fresh } = await sb.functions.invoke("portal-settings", { body: { action: "list_inventory" } });
+          if (fresh && fresh.units) { setRows(fresh.units); setLocations(fresh.locations || []); }
         }
-      } catch (_e) { /* cached statuses stand */ }
+      } catch (_e) { /* what we already rendered stands */ }
     }
   }, [clientId]);
   useEffect(() => { load(); }, [load, refreshKey]);
 
-  const counts = (rows || []).reduce((a, u) => { const k = invEffStatus(u); a[k] = (a[k] || 0) + 1; return a; }, {});
+  // Four semantic buckets, not eight. A rep's real questions are "what can I sell today",
+  // "what's coming", "what's spoken for" — the 8-stage detail lives one control away.
+  const bucketOf = (u) => invSold(u) ? "sold" : (invSellable(u) ? "sellable" : "production");
+  const counts = (rows || []).reduce((a, u) => {
+    a[bucketOf(u)] = (a[bucketOf(u)] || 0) + 1;
+    a.stage[invStage(u)] = (a.stage[invStage(u)] || 0) + 1;
+    return a;
+  }, { stage: {} });
+  const anyFilterOn = filt.bucket !== "all" || filt.stage !== "all" || filt.sale !== "any"
+    || locFilter !== "all" || !!query.trim();
+  const clearFilters = () => { setFilt({ bucket: "all", stage: "all", sale: "any" }); setLocFilter("all"); setQuery(""); };
+  // Picking a stage clears the bucket and vice versa: they are two views of the same axis, so
+  // holding both at once is how you get an empty table that looks like a bug.
+  const setBucket = (b) => setFilt((f) => ({ ...f, bucket: b, stage: "all" }));
+  const setStage = (s) => setFilt((f) => ({ ...f, stage: s, bucket: "all" }));
+
   const filtered = (rows || []).filter((u) => {
-    if (statusFilter !== "all" && invEffStatus(u) !== statusFilter) return false;
+    if (filt.bucket !== "all" && bucketOf(u) !== filt.bucket) return false;
+    if (filt.stage !== "all" && invStage(u) !== filt.stage) return false;
+    if (filt.sale === "for_sale" && invSold(u)) return false;
+    if (filt.sale === "sold" && !invSold(u)) return false;
     if (locFilter !== "all" && String(u.locationId || "") !== locFilter) return false;
     const q = query.trim().toLowerCase();
     if (!q) return true;
@@ -5453,10 +5554,37 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
     if (okMsg) setMsg({ ok: okMsg });
     return data;
   };
-  const markStatus = async (u, to) => {
+  const accept = async (u) => {
     setBusyId(u.id); setMsg(null);
-    await invoke({ action: "update_inventory", unitId: u.id, status: to },
-      to === "sold" ? `#${u.serial} marked sold.` : `#${u.serial} is available again.`);
+    await invoke({ action: "accept_inventory", unitId: u.id },
+      `#${u.serial} accepted — it can go in the build queue now.`);
+    setBusyId(null); load();
+  };
+  // Selling needs a BUYER: the database rejects a sold building that names nobody, because
+  // "which customer bought this" was exactly what the old model could never answer. The
+  // picker below collects it; this is the commit.
+  const sellTo = async (u, code) => {
+    setBusyId(u.id); setMsg(null); setSellFor(null);
+    await invoke({ action: "sell_inventory", unitId: u.id, soldDesignShortCode: code },
+      `#${u.serial} marked sold.`);
+    setBusyId(null); load();
+  };
+  const unsell = async (u) => {
+    const reason = window.prompt(
+      `Put building #${u.serial} back on the market?\n\n`
+      + `The estimate that bought it is NOT changed in your CRM — this only makes the building `
+      + `available to quote again.\n\nWhy is it being released?`);
+    if (reason === null) return;                      // cancelled
+    if (!reason.trim()) { setMsg({ err: "Releasing a sold building needs a reason." }); return; }
+    setBusyId(u.id); setMsg(null);
+    await invoke({ action: "unsell_inventory", unitId: u.id, reason: reason.trim() },
+      `#${u.serial} is available again.`);
+    setBusyId(null); load();
+  };
+  const setLifecycle = async (u, to) => {
+    setBusyId(u.id); setMsg(null); setOverride(null);
+    await invoke({ action: "set_lifecycle", unitId: u.id, lifecycle: to },
+      to === null ? `#${u.serial} follows the schedule again.` : `#${u.serial} set to ${INV_STAGE_LONG[to]}.`);
     setBusyId(null); load();
   };
   const del = async (u) => {
@@ -5474,8 +5602,13 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
     setBusyId(null); load();
   };
 
+  // ALWAYS rendered, even at zero. The old version hid a chip whose count was 0 while the
+  // filter stayed applied — so clearing the last sold building while filtered to Sold made the
+  // chip vanish and left the table stuck on "No buildings match" with no control to undo it.
+  // These are four fixed categories, not data-derived keys: a zero on "For sale" is real
+  // information about the lot, not a dead feature.
   const chip = (k, label, n, on) => (
-    <button key={k} type="button" aria-pressed={on} onClick={() => setStatusFilter(k)}
+    <button key={k} type="button" aria-pressed={on} onClick={() => setBucket(k)}
       style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontFamily: "inherit",
         fontSize: 12, fontWeight: 700, borderRadius: 16, padding: "5px 12px",
         background: on ? "#1E293B" : "#FFF", color: on ? "#FFF" : "#475569",
@@ -5483,26 +5616,88 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
       {label}<span style={{ fontSize: 10.5, opacity: 0.75 }}>{n}</span>
     </button>
   );
-  const total = (rows || []).length;
+  const selStyle = { fontSize: 12, fontWeight: 700, color: "#334155", border: "1px solid #E2E8F0",
+    background: "#FFF", borderRadius: 9, padding: "6px 10px" };
+  const linkBtn = (extra) => ({ background: "none", border: "none", padding: 0, cursor: "pointer",
+    fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, marginRight: 10, ...extra });
   const tag = { background: "#DBEAFF", color: "#3D3672", borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 9px", whiteSpace: "nowrap" };
+
+  // ── The Status cell: two pills, one per axis ────────────────────────────────────────
+  // A building can be sold at ANY point on the build ladder (a customer legitimately buys a
+  // spec build that is still in the queue), so these cannot collapse into one value. The sale
+  // pill is smaller and only appears when sold, so the common row still reads as one thing.
+  const statusCell = (u) => {
+    const meta = invStageMeta(u);
+    const c = INV_GROUP_COLORS[meta.group];
+    const manual = u.lifecycleSource === "manual";
+    // Only when the hand-set value DISAGREES with the schedule. This one line is what stops an
+    // override from reading as "the automation is broken": you can see the automation still
+    // running underneath, and being deliberately ignored.
+    const disagrees = manual && u.lifecycleDerived && u.lifecycleDerived !== u.lifecycle;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <span title={INV_STAGE_LONG[invStage(u)]}
+            style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px",
+              fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>
+            {meta.label}{manual ? " ✎" : ""}
+          </span>
+          {invSold(u) && (
+            <span style={{ background: INV_SALE_COLORS.bg, color: INV_SALE_COLORS.fg, borderRadius: 14,
+              padding: "3px 9px", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+              {invSoldLabel(u)}
+            </span>
+          )}
+        </div>
+        {disagrees && (
+          <span style={{ fontSize: 11, color: "#B45309" }}>
+            schedule says: {INV_STAGES[u.lifecycleDerived] ? INV_STAGES[u.lifecycleDerived].label : u.lifecycleDerived}
+          </span>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div style={S.card}>
-      <CardHead title="Inventory" count={total}
+      {/* `count` follows the DesignsTable precedent: it must agree with the table, and the
+          `rows ?` guard kills the phantom 0 that used to render during load. */}
+      <CardHead title="Inventory"
+        count={rows ? (anyFilterOn ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
-          {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New inventory building</button>}
+          {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New building request</button>}
         </>} />
       <input value={query} onChange={(e) => setQuery(e.target.value)}
         placeholder="Search inventory — serial #, building, location, customer…"
         style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 11 }} />
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 13, alignItems: "center" }}>
-        {chip("all", "All", total, statusFilter === "all")}
-        {(counts.available || 0) > 0 && chip("available", "Available", counts.available, statusFilter === "available")}
-        {(counts.sold || 0) > 0 && chip("sold", "Sold", counts.sold, statusFilter === "sold")}
+        {chip("all", "All", (rows || []).length, filt.bucket === "all" && filt.stage === "all")}
+        {chip("sellable", "For sale", counts.sellable || 0, filt.bucket === "sellable")}
+        {chip("production", "In production", counts.production || 0, filt.bucket === "production")}
+        {chip("sold", "Sold", counts.sold || 0, filt.bucket === "sold")}
+        {/* The 8-stage detail, one control away from the four buckets. A zero-count stage
+            renders disabled rather than disappearing — "none right now" is information. */}
+        <select value={filt.stage} onChange={(e) => setStage(e.target.value)} style={selStyle}>
+          <option value="all">All stages</option>
+          {Object.keys(INV_STAGES).map((k) => (
+            <option key={k} value={k} disabled={!(counts.stage[k] || 0)}>
+              {INV_STAGE_LONG[k]}{counts.stage[k] ? ` (${counts.stage[k]})` : ""}
+            </option>
+          ))}
+        </select>
+        <select value={filt.sale} onChange={(e) => setFilt((f) => ({ ...f, sale: e.target.value }))} style={selStyle}>
+          <option value="any">Sold or not</option>
+          <option value="for_sale">Not sold</option>
+          <option value="sold">Sold</option>
+        </select>
+        {anyFilterOn && (
+          <button type="button" onClick={clearFilters}
+            style={{ ...linkBtn({ color: "#64748B", fontSize: 12 }), marginRight: 0 }}>Clear filters</button>
+        )}
         {locations.length > 0 && (
           <select value={locFilter} onChange={(e) => setLocFilter(e.target.value)}
-            style={{ marginLeft: "auto", fontSize: 12, fontWeight: 700, color: "#334155", border: "1px solid #E2E8F0", background: "#FFF", borderRadius: 9, padding: "6px 10px" }}>
+            style={{ ...selStyle, marginLeft: "auto" }}>
             <option value="all">📍 All locations</option>
             {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
@@ -5514,11 +5709,14 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
       {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
-          Nothing on the lot yet. Design a building in the <strong>Designer</strong> tab and click <strong>Save to Inventory</strong> — it takes the next serial number automatically.
+          Nothing on the lot yet. Design a building in the <strong>Designer</strong> tab and click <strong>Request this build</strong> — it takes the next serial number automatically and lands here as a request for you to accept.
         </p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
-        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No buildings match{query ? <> “{query}”</> : null}.</p>
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
+          No buildings match{query ? <> “{query}”</> : null}.{" "}
+          <button type="button" onClick={clearFilters} style={{ ...linkBtn({ color: ACCENT }), marginRight: 0 }}>Clear filters</button>
+        </p>
       )}
       {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }}>
@@ -5530,10 +5728,37 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
             </tr></thead>
             <tbody>
               {filtered.map((u) => {
-                const st = invEffStatus(u);
+                const sold = invSold(u);
                 const ests = u.estimates || [];
                 const isOpen = !!expanded[u.id];
-                const winner = ests.find((e) => INV_SOLD_EST.has(normStatus(e.status)));
+                // The buyer is now a RECORDED fact, not a guess. This used to be
+                // `ests.find(accepted+)` — first match in a newest-first list — because
+                // nothing stored which estimate actually bought the building.
+                const winner = ests.find((e) => e.shortCode === u.soldDesignShortCode);
+                const rank = invRank(u);
+                const stage = invStage(u);
+                // Exactly ONE contextual primary is ever applicable, which is what keeps the
+                // cell readable: requested → Accept, accepted → Queue build, built/heading →
+                // Add to a load, and nothing once it is standing on the lot.
+                //
+                // Gated per AREA, not by one scheduling flag: a Crew Leader queues builds and
+                // a Driver loads them, and neither is an admin. Absent the area, the action
+                // simply isn't offered — the tab itself stays usable, because Inventory
+                // predates scheduling and is not behind that (pay-only) gate.
+                const onBoard = schedLinks && schedLinks.byUnit && schedLinks.byUnit[u.id];
+                const onLoad = schedLinks && (schedLinks.unitsOnLoad || []).indexOf(u.id) !== -1;
+                const primary = stage === "requested"
+                  ? { key: "accept", label: "Accept", run: () => accept(u), admin: true }
+                  : (stage === "accepted" && !onBoard && schedOn
+                    ? { key: "queue", label: schedBusy === u.id ? "Queueing…" : "Queue build",
+                        run: () => queueBuild(u), busy: schedBusy === u.id,
+                        title: "Put this spec unit on the Build Schedule" }
+                    : (rank >= INV_STAGES.built.rank && rank < INV_STAGES.delivered.rank
+                        && !onLoad && deliverOn && onAddToLoad
+                      ? { key: "load", label: sold ? "Schedule delivery" : "Add to a load",
+                          run: () => onAddToLoad(u),
+                          title: "Find it in the to-be-loaded pool on the Delivery Schedule" }
+                      : null));
                 return (
                   <React.Fragment key={u.id}>
                     <tr>
@@ -5552,47 +5777,74 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
                         )}
                       </td>
                       <td style={{ ...S.td, whiteSpace: "nowrap", color: "#64748B" }}>{fmtDate(u.createdAt)}</td>
+                      <td style={S.td}>{statusCell(u)}</td>
                       <td style={S.td}>
-                        <span style={{ background: st === "sold" ? "#EEF2FF" : "#F0FDF4", color: st === "sold" ? "#3D3672" : "#15803D", borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>
-                          {st === "sold" ? "Sold" : "Available"}
-                        </span>
-                      </td>
-                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                        <button type="button" disabled={busyId === u.id}
-                          onClick={() => onOpenDesign && onOpenDesign(u.shortCode, null, { unit: { unitId: u.id, askingPriceCents: u.askingPriceCents, locationId: u.locationId } })}
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                        {st !== "sold" && (
+                        <div style={{ whiteSpace: "nowrap" }}>
                           <button type="button" disabled={busyId === u.id}
-                            onClick={() => onSendEstimate && onSendEstimate(u)}
-                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Send estimate</button>
+                            onClick={() => onOpenDesign && onOpenDesign(u.shortCode, null, { unit: { unitId: u.id, askingPriceCents: u.askingPriceCents, locationId: u.locationId, lifecycle: u.lifecycle } })}
+                            style={linkBtn({ color: ACCENT })}>Open</button>
+                          {/* Sold ⇒ not sellable, at EVERY stage. Hiding this is a courtesy;
+                              link_design_to_unit refuses the link server-side, because anyone
+                              can call that endpoint directly with a valid session. */}
+                          {!sold && (
+                            <button type="button" disabled={busyId === u.id}
+                              onClick={() => onSendEstimate && onSendEstimate(u)}
+                              style={linkBtn({ color: ACCENT })}>Send estimate</button>
+                          )}
+                          {primary && (!primary.admin || isAdmin) && (
+                            <button type="button" disabled={busyId === u.id || primary.busy} onClick={primary.run}
+                              title={primary.title} style={linkBtn({ color: ACCENT })}>
+                              {primary.label}
+                            </button>
+                          )}
+                          {/* Where it already is, when there is nothing to do about it. The
+                              stage name and colour are the board's own, so this chip and the
+                              Build Schedule cannot disagree about a building. */}
+                          {onBoard && (
+                            <span style={{ ...schedChip("#F1F5F9", "#334155"), marginRight: 10 }}>
+                              <span style={{ width: 8, height: 8, borderRadius: "50%", background: onBoard.color || "#94A3B8", display: "inline-block" }}></span>
+                              {onBoard.stage || "On the board"}
+                            </span>
+                          )}
+                          {onLoad && <span style={{ ...schedChip("#F1F5F9", "#334155"), marginRight: 10 }}>On a load</span>}
+                          {/* Sold, built, and nobody has scheduled the haul to its buyer yet. */}
+                          {deliverOn && sold && !onLoad && rank >= INV_STAGES.built.rank && rank < INV_STAGES.delivered.rank && (
+                            <span style={{ ...schedChip("#FFF7ED", "#9A3412"), marginRight: 10 }}>Needs a load</span>
+                          )}
+                          {u.imageUrl && ssSafeUrl(u.imageUrl) && <a href={u.imageUrl} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginRight: 10 }}>PDF</a>}
+                          {isAdmin && (
+                            <button type="button" onClick={() => setMoreOpen((x) => ({ ...x, [u.id]: !x[u.id] }))}
+                              title="More actions" style={linkBtn({ color: "#94A3B8", marginRight: 0 })}>⋯</button>
+                          )}
+                        </div>
+                        {/* Everything admin-only and rare goes on a second line inside the same
+                            cell — eleven actions do not fit on one, and this reuses the
+                            expand idiom already in this table rather than adding a menu. */}
+                        {isAdmin && moreOpen[u.id] && (
+                          <div style={{ whiteSpace: "nowrap", marginTop: 6, paddingTop: 6, borderTop: "1px solid #EDF1F6" }}>
+                            {/* BOTH branches key on the same value. They used to disagree —
+                                one on the stored status, one on the browser derivation — so a
+                                CRM-sold building matched NEITHER and had no status control at
+                                all. */}
+                            {sold
+                              ? <button type="button" disabled={busyId === u.id} onClick={() => unsell(u)}
+                                  style={linkBtn({ color: "#64748B" })}>Mark available</button>
+                              : (ests.length
+                                ? <button type="button" disabled={busyId === u.id} onClick={() => setSellFor(u)}
+                                    style={linkBtn({ color: "#64748B" })}>Mark sold</button>
+                                : <span title="Send this building as an estimate to the buyer first — every sale records which estimate bought it."
+                                    style={{ color: "#CBD5E1", fontWeight: 700, marginRight: 10 }}>Mark sold</span>)}
+                            <button type="button" disabled={busyId === u.id} onClick={() => setOverride({ unit: u, to: u.lifecycle })}
+                              style={linkBtn({ color: "#64748B" })}>Set status by hand</button>
+                            {stage === "accepted" && (
+                              <button type="button" disabled={busyId === u.id}
+                                onClick={() => invoke({ action: "accept_inventory", unitId: u.id, accepted: false }, `#${u.serial} is a request again.`).then(load)}
+                                style={linkBtn({ color: "#64748B" })}>Un-accept</button>
+                            )}
+                            <button type="button" disabled={busyId === u.id} onClick={() => del(u)}
+                              style={linkBtn({ color: "#CBD5E1", marginRight: 0 })}>Delete</button>
+                          </div>
                         )}
-                        {u.imageUrl && ssSafeUrl(u.imageUrl) && <a href={u.imageUrl} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginRight: 10 }}>PDF</a>}
-                        {/* Not yet built → queue it. Already on the board → say where it is. */}
-                        {schedOn && (
-                          schedLinks && schedLinks.byUnit && schedLinks.byUnit[u.id]
-                            ? <span style={{ ...schedChip("#F1F5F9", "#334155"), marginRight: 10 }}>
-                                <span style={{ width: 8, height: 8, borderRadius: "50%", background: schedLinks.byUnit[u.id].color || "#94A3B8", display: "inline-block" }}></span>
-                                {schedLinks.byUnit[u.id].stage || "On the board"}
-                              </span>
-                            : <button type="button" disabled={schedBusy === u.id} onClick={() => queueBuild(u)}
-                                title="Put this spec unit on the Build Schedule"
-                                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>
-                                {schedBusy === u.id ? "Queueing…" : "Queue build"}
-                              </button>
-                        )}
-                        {/* Sold and not already riding a load → it needs hauling to the buyer.
-                            The pool on the Delivery Schedule is where the load gets built, so
-                            this points there rather than duplicating the load picker here. */}
-                        {deliverOn && st === "sold" && schedLinks && (schedLinks.unitsOnLoad || []).indexOf(u.id) === -1 && (
-                          <span style={{ ...schedChip("#FFF7ED", "#9A3412"), marginRight: 10 }}>Needs a load</span>
-                        )}
-                        {isAdmin && (u.status === "sold"
-                          ? <button type="button" disabled={busyId === u.id} onClick={() => markStatus(u, "available")}
-                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#64748B", fontWeight: 700, marginRight: 10 }}>Mark available</button>
-                          : (st !== "sold" && <button type="button" disabled={busyId === u.id} onClick={() => markStatus(u, "sold")}
-                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#64748B", fontWeight: 700, marginRight: 10 }}>Mark sold</button>))}
-                        {isAdmin && <button type="button" disabled={busyId === u.id} onClick={() => del(u)}
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#CBD5E1", fontWeight: 700 }}>Delete</button>}
                       </td>
                     </tr>
                     {isOpen && ests.length > 0 && (
@@ -5611,10 +5863,23 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
                                 <strong>{e.name || "—"}</strong>
                                 <span style={{ color: "#94A3B8", fontSize: 12 }}>{e.estimateNumber ? `EST-${e.estimateNumber} · ` : ""}{fmtDate(e.createdAt)}</span>
                                 <span style={{ background: c.bg, color: c.fg, borderRadius: 14, padding: "2.5px 10px", fontSize: 11, fontWeight: 700 }}>
-                                  {STATUS_LABELS[es]}{isWinner && st === "sold" ? " — buyer" : ""}
+                                  {STATUS_LABELS[es]}{isWinner ? " — buyer" : ""}
                                 </span>
-                                {st === "sold" && !isWinner && !INV_SOLD_EST.has(es) && (
-                                  <span style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 12, fontSize: 11, fontWeight: 700, padding: "3px 10px" }}>⚠ Building sold — offer a new build?</span>
+                                {/* This used to be a lone span asking "offer a new build?" with
+                                    no way to do it. The customer who lost the building is the
+                                    one worth saving, so the prompt now carries the action:
+                                    it reopens their design in the Designer untied from this
+                                    unit, so the next submit is a fresh build for them. */}
+                                {sold && !isWinner && (
+                                  <>
+                                    <span style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 12, fontSize: 11, fontWeight: 700, padding: "3px 10px" }}>⚠ Building sold</span>
+                                    {onQuoteNewBuild && (
+                                      <button type="button" onClick={() => onQuoteNewBuild(e)}
+                                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: ACCENT, fontWeight: 700 }}>
+                                        Quote a new build for this customer →
+                                      </button>
+                                    )}
+                                  </>
                                 )}
                                 <button type="button" onClick={() => onOpenDesign && onOpenDesign(e.shortCode, null, null)}
                                   style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open</button>
@@ -5629,6 +5894,91 @@ function InventoryTable({ clientId, refreshKey = 0, isAdmin = false, onOpenDesig
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* ── Who bought it ──────────────────────────────────────────────────────────────
+          Marking a building sold is no longer a bare button. Every sale names the estimate
+          that bought it — the database rejects one that does not — because "which customer
+          has this building" was precisely the question the old model could never answer, and
+          it is what the delivery and the buyer's own paperwork key on. */}
+      {sellFor && (
+        <div onClick={() => setSellFor(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex",
+            alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: 460, width: "100%", boxShadow: "0 18px 50px rgba(15,23,42,0.25)" }}>
+            <h3 style={{ margin: "0 0 6px", fontSize: 16, fontWeight: 800, color: "#1E293B" }}>
+              Who bought building #{sellFor.serial}?
+            </h3>
+            <p style={{ margin: "0 0 14px", fontSize: 13, color: "#64748B", lineHeight: 1.5 }}>
+              Pick the estimate that closed. The building stops being available to quote, and its
+              delivery goes to that customer.
+            </p>
+            {(sellFor.estimates || []).map((e) => (
+              <button key={e.shortCode} type="button" onClick={() => sellTo(sellFor, e.shortCode)}
+                style={{ display: "block", width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+                  background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px",
+                  marginBottom: 8, fontSize: 13 }}>
+                <strong>{e.name || "—"}</strong>
+                <span style={{ color: "#94A3B8" }}>
+                  {" "}{e.estimateNumber ? `EST-${e.estimateNumber} · ` : ""}{STATUS_LABELS[normStatus(e.status)]}
+                </span>
+              </button>
+            ))}
+            <button type="button" onClick={() => setSellFor(null)} style={{ ...S.btn("#F1F5F9", "#334155"), marginTop: 4 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Set status by hand ─────────────────────────────────────────────────────────
+          For facts the schedule cannot express — the crew built it on the lot, so there is no
+          haul stop and it would never reach "Available to sell at Location" on its own. The
+          note and the "Back to automatic" button are load-bearing: an override with no visible
+          way out is how a building ends up pinned to a wrong status forever. */}
+      {override && (
+        <div onClick={() => setOverride(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex",
+            alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: 480, width: "100%", boxShadow: "0 18px 50px rgba(15,23,42,0.25)" }}>
+            <h3 style={{ margin: "0 0 6px", fontSize: 16, fontWeight: 800, color: "#1E293B" }}>
+              Set status by hand — building #{override.unit.serial}
+            </h3>
+            <p style={{ margin: "0 0 12px", fontSize: 13, color: "#64748B", lineHeight: 1.5 }}>
+              Setting this by hand stops the build and delivery schedules from moving this
+              building. You can switch it back any time.
+            </p>
+            <div style={{ marginBottom: 14 }}>
+              {Object.keys(INV_STAGES).map((k) => {
+                const locked = k === "requested" || k === "accepted";
+                return (
+                  <label key={k} style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 2px",
+                    fontSize: 13, color: locked ? "#94A3B8" : "#1E293B", cursor: locked ? "default" : "pointer" }}>
+                    <input type="radio" name="inv-lifecycle" value={k} disabled={locked}
+                      checked={override.to === k}
+                      onChange={() => setOverride((o) => ({ ...o, to: k }))} />
+                    {INV_STAGE_LONG[k]}
+                    {k === override.unit.lifecycleDerived && (
+                      <span style={{ color: "#94A3B8", fontSize: 12 }}>— where the schedule says it is</span>
+                    )}
+                    {locked && <span style={{ fontSize: 12 }}>— use Accept / Un-accept</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" disabled={busyId === override.unit.id}
+                onClick={() => setLifecycle(override.unit, override.to)}
+                style={S.btn(ACCENT, "#FFF")}>Set status</button>
+              {override.unit.lifecycleSource === "manual" && (
+                <button type="button" disabled={busyId === override.unit.id}
+                  onClick={() => setLifecycle(override.unit, null)}
+                  style={S.btn("#F1F5F9", "#334155")}>Back to automatic</button>
+              )}
+              <button type="button" onClick={() => setOverride(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -6208,8 +6558,12 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             {tray.orders.map((o) => trayItem("o" + o.designShortCode, SCHED_SRC_CHIP.order,
               o.buildingLabel || o.designShortCode, o.customerName,
               { source: "order", designShortCode: o.designShortCode }, o.customerName || "Order"))}
+            {/* A SOLD spec build still belongs here — selling a building does not build it,
+                and dropping sold units out of the tray would quietly stop them being made.
+                The shop just needs to know it is already spoken for. */}
             {tray.inventory.map((u) => trayItem("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory,
-              u.buildingLabel || "#" + u.serial, "#" + u.serial + " · Spec build for the lot",
+              u.buildingLabel || "#" + u.serial,
+              "#" + u.serial + (u.sold ? " · SOLD" + (u.soldFirstName ? " — " + u.soldFirstName : "") : " · Accepted — ready to queue"),
               { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial))}
             {tray.repairs.map((rp) => trayItem("r" + rp.repairId, SCHED_SRC_CHIP.repair,
               (rp.description || "Repair").slice(0, 50), "R-" + rp.repairNo + " · " + (rp.customerName || ""),
@@ -6977,7 +7331,7 @@ function SchedStopEditor({ stop, territories, busy, onSave, onCancel }) {
   );
 }
 
-function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
+function DeliveryScheduleTab({ clientId, canAdmin, access = null, focus = null }) {
   // delivery_schedule:'edit' (migration 100) — the Driver preset carries it, which is the
   // point: a driver plans and closes out their own loads.
   //
@@ -6988,6 +7342,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const canEdit = canAdmin || !!(access && access.delivery_schedule === "edit");
   const [data, setData] = useState(null);      // loads payload
   const [pool, setPool] = useState(null);      // pool payload
+  const [focusKey, setFocusKey] = useState(null);  // pool row to highlight, from Inventory
   const [error, setError] = useState(null);
   const [view, setView] = useState("loads");   // loads | table | calendar
   const [weekOffset, setWeekOffset] = useState(0);
@@ -7041,6 +7396,9 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const loads = (data && data.loads) || [];
   const stops = (data && data.stops) || [];
   const buildByJob = (data && data.buildByJob) || {};
+  // Where each inventory unit on these loads / in the pool actually is on the build ladder.
+  // Both responses carry it, so a stop and its pool row agree.
+  const unitLifecycle = { ...((pool && pool.unitLifecycle) || {}), ...((data && data.unitLifecycle) || {}) };
   const drivers = (data && data.drivers) || [];
   const territories = (data && data.territories) || [];
   const team = (data && data.team) || [];
@@ -7062,6 +7420,20 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const poolRepairs = (pool && pool.repairs) || [];
   const poolCount = poolJobs.length + poolInv.length + poolRepairs.length;
   const plannedLoads = loads.filter((l) => l.status === "planned");
+
+  // Arriving from Inventory's "Add to a load". The unit appears in ONE of two pool shapes —
+  // an unsold built unit is a JOB row (it has a build card), a sold one is its own inventory
+  // row — so both have to be checked or the highlight silently does nothing for half of them.
+  useEffect(() => {
+    if (!focus || focus.kind !== "inventory" || !pool) return;
+    const j = poolJobs.find((x) => x.inventoryUnitId === focus.unitId);
+    const key = j ? "j" + j.buildJobId
+      : (poolInv.some((x) => x.inventoryUnitId === focus.unitId) ? "u" + focus.unitId : null);
+    if (!key) { setMsg({ err: "That building isn't waiting to be loaded — check its build status." }); return; }
+    setFocusKey(key);
+    const t = setTimeout(() => setFocusKey(null), 4000);
+    return () => clearTimeout(t);
+  }, [focus && focus.n, pool]);
 
   // A stop conflicts when its load has a date but the linked build isn't done and is due
   // after that date (or has no due date at all).
@@ -7185,6 +7557,16 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
   const driverLabel = (p) => !p ? "No driver" : profName(p) + (p.truck_name ? " · " + p.truck_name : "");
+  // The pool's version of builtCell: same question ("is this building actually ready to
+  // haul?"), asked about a unit that has no stop yet.
+  const invReadyChip = (unitId) => {
+    const lc = unitLifecycle[unitId];
+    const meta = lc && INV_STAGES[lc.lifecycle];
+    if (!meta) return <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>;
+    if (meta.rank >= INV_STAGES.at_location.rank) return <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>;
+    if (meta.rank >= INV_STAGES.built.rank) return <span style={schedChip("#F0FDF4", "#15803D")}>{meta.label}</span>;
+    return <span style={schedChip("#FEF2F2", "#DC2626")}>Not built yet ⚠</span>;
+  };
   const builtCell = (s, l) => {
     if (s.delivered_at) return <span style={schedChip("#F0FDF4", "#15803D")}>Delivered ✓</span>;
     if (s.build_job_id) {
@@ -7195,12 +7577,28 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
         {(b && b.stage) || "In build"}{b && b.dueDate ? " · due " + fmtDate(b.dueDate) : ""}{conflict ? " ⚠" : ""}
       </span>;
     }
-    if (s.source === "inventory") return <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>;
+    // This used to hard-code "On lot — ready" for EVERY inventory stop, which is a guess: it
+    // is true for a sold building being collected from the lot and false for one that has not
+    // been built yet — reachable now that a spec build can be sold before it is finished.
+    // Read where the unit actually is. (mark_stop_delivered refuses an unbuilt one too; this
+    // is so the board does not invite the click in the first place.)
+    if (s.source === "inventory") {
+      const lc = (unitLifecycle && s.inventory_unit_id && unitLifecycle[s.inventory_unit_id]) || null;
+      const key = lc ? lc.lifecycle : null;
+      const meta = key && INV_STAGES[key];
+      if (!meta) return <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>;
+      if (meta.rank >= INV_STAGES.at_location.rank) return <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>;
+      if (meta.rank >= INV_STAGES.built.rank) return <span style={schedChip("#F0FDF4", "#15803D")}>{meta.label}</span>;
+      return <span style={schedChip("#FEF2F2", "#DC2626")}>Not built yet ⚠</span>;
+    }
     if (s.source === "repair") return <span style={schedChip("#FDF2F8", "#BE185D")}>Field work</span>;
     return <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12 }}>—</span>;
   };
   const poolRow = (key, src, serial, customer, building, size, wide, ready, extraSub, addBody, label, dest) => (
-    <tr key={key}>
+    // Reuses the drop-target treatment already used elsewhere on this tab, so the highlight
+    // that arrives from Inventory reads as "this one" rather than as a new visual idea.
+    <tr key={key} ref={focusKey === key ? (el) => el && el.scrollIntoView({ block: "center", behavior: "smooth" }) : undefined}
+      style={focusKey === key ? { outline: `2px dashed ${ACCENT}`, outlineOffset: -2 } : undefined}>
       <td style={{ ...S.td, whiteSpace: "nowrap" }}>
         <span style={{ fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{serial}</span>
         {src && <div style={{ marginTop: 3 }}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></div>}
@@ -7249,11 +7647,17 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
         j.customerName || (j.serial ? "#" + j.serial : "Building"),
         [j.destCity, j.destState].filter(Boolean).join(", ")),
     }));
+    // Was "Sold lot building" for every row — the same string for every building on the list —
+    // beside a hard-coded "On lot — ready" chip. Both are real values now: the buyer's first
+    // name, the building's own style+size, and where the unit actually is on the build ladder
+    // (a unit sold before it was finished is not on any lot, and must not look ready to haul).
     poolInv.forEach((u) => push(null, {
       key: "u" + u.inventoryUnitId,
       render: () => poolRow("u" + u.inventoryUnitId, SCHED_SRC_CHIP.inventory,
-        "#" + u.serial, u.location ? u.location.name : "Sales lot", "Sold lot building", "—", false,
-        <span style={schedChip("#ECFEFF", "#0E7490")}>On lot — ready</span>,
+        "#" + u.serial,
+        u.soldFirstName || (u.location ? u.location.name : "Sales lot"),
+        u.buildingLabel || "Lot building", "—", false,
+        invReadyChip(u.inventoryUnitId),
         "sold — deliver to the buyer", { source: "inventory", inventoryUnitId: u.inventoryUnitId }, "#" + u.serial, null),
     }));
     poolRepairs.forEach((rp) => push(null, {
@@ -7578,7 +7982,9 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
         const isoOf = (d) => d.toISOString().slice(0, 10);
         const trayItems = [
           ...poolJobs.map((j) => ({ key: "j" + j.buildJobId, building: j.buildingLabel || j.title || "Building", customer: j.customerName || (j.source === "inventory" ? "Spec build" : ""), serial: j.serial ? "#" + j.serial : "", ready: j.buildKind === "done", body: { source: j.source, buildJobId: j.buildJobId }, label: j.customerName || (j.serial ? "#" + j.serial : "Building") })),
-          ...poolInv.map((u) => ({ key: "u" + u.inventoryUnitId, building: "Sold lot building", customer: u.location ? u.location.name : "Sales lot", serial: "#" + u.serial, ready: true, body: { source: "inventory", inventoryUnitId: u.inventoryUnitId }, label: "#" + u.serial })),
+          // `ready` drives the visual affordance, so a sold-but-unbuilt unit must stop looking
+          // draggable-and-ready — it was hard-coded true alongside a generic building label.
+          ...poolInv.map((u) => ({ key: "u" + u.inventoryUnitId, building: u.buildingLabel || "Lot building", customer: u.soldFirstName || (u.location ? u.location.name : "Sales lot"), serial: "#" + u.serial, ready: (unitLifecycle[u.inventoryUnitId] && INV_STAGES[unitLifecycle[u.inventoryUnitId].lifecycle] ? INV_STAGES[unitLifecycle[u.inventoryUnitId].lifecycle].rank >= INV_STAGES.built.rank : true), body: { source: "inventory", inventoryUnitId: u.inventoryUnitId }, label: "#" + u.serial })),
           ...poolRepairs.map((rp) => ({ key: "r" + rp.id, building: (rp.description || "Repair").slice(0, 40), customer: rp.customer_name || "", serial: "R-" + rp.repair_no, ready: true, body: { source: "repair", repairId: rp.id }, label: "R-" + rp.repair_no })),
         ];
         const driverChips = [["all", "All drivers"]].concat(drivers.map((p) => [p.user_id, nameOf[p.user_id] || "Driver"]));
@@ -11318,6 +11724,9 @@ function Dashboard({ session }) {
   useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
+  // Set by Inventory's "Add to a load", consumed by the Delivery Schedule to scroll that
+  // building's pool row into view and highlight it. `n` makes a repeat click re-fire.
+  const [schedFocus, setSchedFocus] = useState(null);
   // "Open in the portal designer" request ({clientId, code, version, n}) set by the
   // Designs/Contacts Open buttons. Tenant-tagged so a stale request survives a view-as
   // switch harmlessly (filtered at the DesignerTab mount, never hydrating the wrong
@@ -11972,7 +12381,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "delivery-schedule" && (
               schedUnlocked ? (
                 <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess} />
+                  access={viewing ? null : myAccess} focus={schedFocus} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"
@@ -11989,10 +12398,21 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "inventory" && (
               <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={canAdmin}
+                // Inventory itself is NOT behind the scheduling gate — it predates it, and that
+                // gate is pay-only. Its two schedule entry points ARE, per AREA: a Crew Leader
+                // queues builds, a Driver loads them, and neither is an admin.
                 schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
                 refreshKey={designsRefreshKey}
                 onOpenDesign={openInDesigner}
-                onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial })}
+                onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial, unitLifecycle: u.lifecycle })}
+                // Reopens the losing customer's own design UNTIED from the sold building, so
+                // the next submit is a fresh build quoted to them. Same path the designer's
+                // "Design a new build instead" button already takes.
+                onQuoteNewBuild={(e) => openInDesigner(e.shortCode, null, { newBuild: true })}
+                // Hand off to the Delivery Schedule with this unit focused rather than
+                // rebuilding the load picker here — it needs loads, planned loads, createLoad
+                // and addToLoad, all of which live over there.
+                onAddToLoad={(u) => { setSchedFocus({ kind: "inventory", unitId: u.id, n: Date.now() }); navigate("delivery-schedule"); }}
                 onNew={() => openInDesigner(null, null, { blank: true })} />
             )}
             {!gateLocked && activeTab === "repairs" && (

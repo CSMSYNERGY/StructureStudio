@@ -5,6 +5,16 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
+import {
+  deriveLifecycle,
+  effectiveLifecycle,
+  isLifecycle,
+  LIFECYCLE_LABEL,
+  type Lifecycle,
+  type StageKind,
+  type UnitFacts,
+} from "../_shared/inventoryLifecycle.ts";
+import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -103,6 +113,15 @@ const GATES: GateTable = {
   list_inventory:   { area: "inventory", level: "view" },
   save_inventory:   { area: "inventory", level: "edit" },
   update_inventory: { area: "inventory", level: "edit" },
+  // The four verbs migration 102 split out of update_inventory's old `status` field. Each is
+  // gated on the AREA, never on role === 'owner'|'admin': a hard-coded role check alongside a
+  // gate is a contradiction (see resolveTenant's note) — a granted title would pass the table
+  // and then be refused anyway, which defeats per-person access. inventory:'edit' is
+  // owner/admin by preset today; every read-only title has 'view'.
+  accept_inventory: { area: "inventory", level: "edit" },
+  sell_inventory:   { area: "inventory", level: "edit" },
+  unsell_inventory: { area: "inventory", level: "edit" },
+  set_lifecycle:    { area: "inventory", level: "edit" },
   // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
   // is a Designs deletion happening under an Inventory verb, so it needs both.
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
@@ -157,6 +176,24 @@ const tooMany = (arr: unknown[], what: string): string | null =>
 // beta_email that one would refuse to SEND to, so a divergence would let a tenant save a
 // value that then blocks every submission. Change both or neither.
 const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+// Carolyn 2026-08-07: a sold display keeps its SOLD badge on the storefront for 30 days and
+// then silently falls off the list. Nothing public exists to hang that on yet, so this only
+// feeds a computed expiry on list_inventory today — but it is the ONE place the number lives,
+// so the future listing query and this agree by construction.
+const SOLD_LABEL_DAYS = 30;
+
+// The buyer's first name, for the "SOLD — Dave" label. Contact names are ONE flat field in
+// this product (there is no first/last split anywhere in storage, and contactFields[] cannot
+// gain one without breaking the designer's form and its validation), so this is the same
+// split submit-estimate already uses to title a GHL estimate. Snapshotted at the sale so the
+// label never has to join back to a customer's design row to render.
+// deno-lint-ignore no-explicit-any
+function firstNameOf(contact: any): string | null {
+  const full = String(contact?.name ?? "").trim();
+  if (!full) return null;
+  return full.split(/\s+/)[0] || null;
+}
 
 // ── floor-plans object keys ─────────────────────────────────────────────────────
 // delete_design hands object keys to a SERVICE-ROLE remove(), which bypasses storage RLS,
@@ -329,6 +366,42 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
+
+  // ── The schedule facts one inventory unit's build stage is derived from ──────────
+  // The ladder is a projection, not a stored column (see _shared/inventoryLifecycle.ts), so
+  // every place that needs a unit's stage gathers the same three facts. list_inventory does
+  // this in bulk for the whole tab; this single-unit version is for set_lifecycle, which
+  // needs to know what the schedule says at the moment somebody overrides it.
+  const unitFacts = async (
+    unitId: string,
+    acceptedAt: string | null,
+    soldDesignShortCode: string | null,
+  ): Promise<UnitFacts> => {
+    const [jobRes, stopRes] = await Promise.all([
+      admin.from("build_jobs").select("stage_id, due_date, completed_at")
+        .eq("client_id", clientId).eq("inventory_unit_id", unitId).maybeSingle(),
+      admin.from("delivery_stops").select("design_short_code, delivered_at")
+        .eq("client_id", clientId).eq("inventory_unit_id", unitId),
+    ]);
+    let stageKind: StageKind | null = null;
+    if (jobRes.data?.stage_id) {
+      // KIND, never the tenant-editable stage NAME.
+      const { data: stage } = await admin.from("schedule_stages").select("kind")
+        .eq("id", jobRes.data.stage_id).eq("client_id", clientId).maybeSingle();
+      stageKind = (stage?.kind ?? null) as StageKind | null;
+    }
+    return {
+      acceptedAt,
+      soldDesignShortCode,
+      job: jobRes.data
+        ? { stageKind, dueDate: jobRes.data.due_date ?? null, completedAt: jobRes.data.completed_at ?? null }
+        : null,
+      stops: (stopRes.data ?? []).map((s: { design_short_code: string | null; delivered_at: string | null }) => ({
+        designShortCode: s.design_short_code ?? null,
+        deliveredAt: s.delivered_at ?? null,
+      })),
+    };
+  };
 
   // ── The caller's own name and phone ─────────────────────────────────────────────
   // Keyed on userId from the verified session — NEVER on anything in the body — so this
@@ -1657,6 +1730,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const uIns = await admin.from("inventory_units").insert({
       client_id: clientId, serial, design_short_code: shortCode,
       location_id: locationId, asking_price_cents: askingPriceCents,
+      // Saving to Inventory IS the request (migration 102). accepted_at stays null until
+      // somebody approves it, which is what makes it eligible for the build queue — spelled
+      // out rather than left to the column default, because "a building nobody has said yes
+      // to is not stock on a lot" is the whole point of the ladder.
+      sale_state: "unsold", accepted_at: null,
     }).select("id").maybeSingle();
     if (uIns.error) {
       // Don't leave an orphan master behind a failed unit insert.
@@ -1668,10 +1746,23 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, unitId: uIns.data!.id, serial, shortCode });
   }
 
-  // ── Unit field edits from the Inventory tab (price, lot, sold/available) ────
+  // ── Unit field edits from the Inventory tab (price, lot) ────────────────────
+  // Selling, releasing, approving and correcting the build stage each have their OWN action
+  // below. They were one `status` field here until migration 102, and that is precisely how
+  // a building could be sold twice: a bare field write has no room for the compare-and-swap
+  // that makes a sale exclusive, or for recording who bought it.
   if (action === "update_inventory") {
     const unitId = String(payload.unitId ?? "").trim();
     if (!unitId) return json({ error: "unitId is required." }, 400);
+    // Refuse the retired field LOUDLY rather than ignoring it. A browser holding a cached
+    // portal.html would otherwise send {status:"sold"}, get a 200, and not sell the
+    // building — the worst possible outcome for this particular write.
+    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
+      return json({
+        error: "Inventory status moved to two separate fields. Use sell_inventory to record a sale, "
+          + "accept_inventory to approve a request, or set_lifecycle to correct a build stage.",
+      }, 400);
+    }
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (Object.prototype.hasOwnProperty.call(payload, "askingPriceCents")) {
       const v = payload.askingPriceCents;
@@ -1688,18 +1779,213 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
       patch.location_id = lid;
     }
-    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
-      const st = String(payload.status ?? "");
-      if (st !== "available" && st !== "sold") return json({ error: "status must be available or sold." }, 400);
-      patch.status = st;
-      if (st === "available") patch.sold_design_short_code = null;
-    }
     const { error, count } = await admin.from("inventory_units").update(patch, { count: "exact" })
       .eq("id", unitId).eq("client_id", clientId);
     if (error) return json({ error: error.message }, 500);
     if (!count) return json({ error: "Inventory unit not found." }, 404);
     await audit("portal_update_inventory", 1, `unit=${unitId}`);
     return json({ ok: true });
+  }
+
+  // ── Approve a requested building for the build queue ────────────────────────
+  // Requirement (Carolyn 2026-08-07): a new inventory building starts at REQUESTED, and one
+  // explicit approval moves it to ACCEPTED. This writes a FACT (accepted_at), never an
+  // override — if it wrote lifecycle_manual, every approved unit would wear the manual
+  // marker and stop auto-advancing, which would look exactly like the automation being
+  // broken.
+  if (action === "accept_inventory") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const accept = payload.accepted !== false;
+    const { data: unit } = await admin.from("inventory_units")
+      .select("id, serial, accepted_at").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+
+    const now = new Date().toISOString();
+    const patch: Record<string, unknown> = { updated_at: now };
+    if (accept) {
+      if (unit.accepted_at) return json({ ok: true, already: true });   // idempotent
+      patch.accepted_at = now;
+      patch.accepted_by = userId;
+    } else {
+      // Un-approving a building the shop is already building would strand its card on a
+      // board the unit is no longer eligible for.
+      const { data: job } = await admin.from("build_jobs").select("id")
+        .eq("client_id", clientId).eq("inventory_unit_id", unitId).maybeSingle();
+      if (job) {
+        return json({
+          error: `Building #${unit.serial} is already on the build schedule. Remove its build card first.`,
+        }, 409);
+      }
+      patch.accepted_at = null;
+      patch.accepted_by = null;
+      // The override vocabulary starts at in_queue, so any stored correction is meaningless
+      // once the unit drops back to requested.
+      patch.lifecycle_manual = null;
+      patch.lifecycle_manual_basis = null;
+      patch.lifecycle_manual_at = null;
+      patch.lifecycle_manual_by = null;
+    }
+    const { error } = await admin.from("inventory_units").update(patch)
+      .eq("id", unitId).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    await audit(accept ? "portal_accept_inventory" : "portal_unaccept_inventory", 1,
+      `unit=${unitId} serial=${unit.serial}`);
+    return json({ ok: true });
+  }
+
+  // ── Record a sale — the one write that must never happen twice ──────────────
+  if (action === "sell_inventory") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const code = String(payload.soldDesignShortCode ?? "").trim();
+    // Carolyn 2026-08-07: a walk-in is entered as an estimate first. So there is no
+    // "sold to nobody" path, and the CHECK in 102 agrees — this returns a sentence rather
+    // than letting the caller hit a constraint-violation string.
+    if (!code) {
+      return json({ error: "Pick which estimate bought this building." }, 400);
+    }
+    const { data: buyer } = await admin.from("designs")
+      .select("short_code, status, inventory_unit_id, contact")
+      .eq("client_id", clientId).eq("short_code", code).maybeSingle();
+    if (!buyer) return json({ error: "That estimate isn't in your account." }, 404);
+    if (buyer.status === "inventory") {
+      return json({ error: "That's the building's own design, not a customer's estimate." }, 400);
+    }
+    if (buyer.inventory_unit_id !== unitId) {
+      return json({
+        error: "That estimate wasn't quoted from this building. Send the estimate from the building first.",
+      }, 409);
+    }
+
+    const now = new Date().toISOString();
+    // ═══ THE GUARD ═══
+    // PostgREST emits: UPDATE inventory_units SET … WHERE id=$1 AND client_id=$2
+    //                  AND sale_state='unsold' RETURNING …
+    // Under READ COMMITTED two concurrent claims serialize on the row lock; the loser
+    // re-evaluates its WHERE against the WINNER'S COMMITTED row, sees sale_state='sold', and
+    // matches ZERO rows. Exactly one caller ever gets a row back — no advisory lock, no
+    // serializable transaction, no unique index needed for this property.
+    // `won === null` IS the test: it means somebody else already has it (or it isn't ours),
+    // never "it worked".
+    const { data: won, error } = await admin.from("inventory_units").update({
+      sale_state: "sold",
+      sold_design_short_code: code,
+      sold_at: now,
+      sold_by: userId,
+      sold_first_name: firstNameOf(buyer.contact),
+      updated_at: now,
+    })
+      .eq("id", unitId).eq("client_id", clientId)
+      .eq("sale_state", "unsold")
+      .select("id, serial").maybeSingle();
+
+    if (error) {
+      // inventory_units_one_sale_per_design: this estimate is already the buyer of a
+      // DIFFERENT building.
+      if ((error as { code?: string }).code === "23505") {
+        return json({ error: "That estimate is already recorded as the buyer of another building." }, 409);
+      }
+      return json({ error: error.message }, 500);
+    }
+    if (!won) {
+      const { data: cur } = await admin.from("inventory_units")
+        .select("serial, sale_state, sold_design_short_code, sold_first_name")
+        .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+      if (!cur) return json({ error: "Inventory unit not found." }, 404);
+      // The same buyer re-submitting (a double-click, a retried sync) is not an error.
+      if (cur.sold_design_short_code === code) return json({ ok: true, already: true });
+      const who = cur.sold_first_name ?? cur.sold_design_short_code ?? "another customer";
+      return json({
+        error: `Building #${cur.serial} is already sold to ${who}. Design a new build for this customer instead.`,
+      }, 409);
+    }
+    // auditStrict, not best-effort audit: a sale is the one inventory write where an
+    // unattributable success is worse than a failure.
+    await auditStrict("portal_sell_inventory", 1, `unit=${unitId} serial=${won.serial} buyer=${code}`);
+    return json({ ok: true, serial: won.serial });
+  }
+
+  // ── Release a sold building back onto the market ────────────────────────────
+  if (action === "unsell_inventory") {
+    const unitId = String(payload.unitId ?? "").trim();
+    const reason = String(payload.reason ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    if (!reason) return json({ error: "Releasing a sold building needs a reason." }, 400);
+    const { data: unit } = await admin.from("inventory_units")
+      .select("id, serial, sale_state, sold_design_short_code")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    if (unit.sale_state !== "sold") return json({ ok: true, already: true });
+    // A delivered SALE stop means the building is standing in the customer's yard. That is
+    // history, the same way a delivered load is.
+    if (unit.sold_design_short_code) {
+      const { data: gone } = await admin.from("delivery_stops").select("id")
+        .eq("client_id", clientId).eq("inventory_unit_id", unitId)
+        .eq("design_short_code", unit.sold_design_short_code)
+        .not("delivered_at", "is", null).limit(1);
+      if (gone?.length) {
+        return json({
+          error: `Building #${unit.serial} has already been delivered to its buyer — that can't be undone here.`,
+        }, 409);
+      }
+    }
+    // inventory_units_unsold_is_clean forces every one of these to null, so a partial clear
+    // is rejected by the database rather than leaving a stale buyer the pool query and the
+    // delivered write-back would keep acting on.
+    const { error } = await admin.from("inventory_units").update({
+      sale_state: "unsold", sold_design_short_code: null, sold_at: null,
+      sold_by: null, sold_first_name: null, updated_at: new Date().toISOString(),
+    }).eq("id", unitId).eq("client_id", clientId).eq("sale_state", "sold");
+    if (error) return json({ error: error.message }, 500);
+    await auditStrict("portal_unsell_inventory", 1,
+      `unit=${unitId} serial=${unit.serial} was=${unit.sold_design_short_code} reason=${reason.slice(0, 500)}`);
+    return json({ ok: true });
+  }
+
+  // ── Correct a build stage by hand ───────────────────────────────────────────
+  // For facts the schedule cannot express — the crew built it on the lot, so there is no haul
+  // stop and it would never derive at_location on its own. House rule for everything else:
+  // a wrong stage should be fixed ON THE SCHEDULE, because that is where the shop looks.
+  if (action === "set_lifecycle") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const raw = payload.lifecycle;
+    // null clears the override and hands the unit back to the schedule.
+    const to = raw == null || raw === "" ? null : String(raw);
+    if (to !== null && !isLifecycle(to)) return json({ error: "Unknown build stage." }, 400);
+    if (to === "requested" || to === "accepted") {
+      return json({
+        error: "Use Approve to move a building between Requested and Accepted.",
+      }, 400);
+    }
+    const { data: unit } = await admin.from("inventory_units")
+      .select("id, serial, accepted_at, sold_design_short_code")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    if (to !== null && !unit.accepted_at) {
+      return json({ error: `Building #${unit.serial} hasn't been approved yet — approve it first.` }, 409);
+    }
+
+    const derived = deriveLifecycle(await unitFacts(unitId, unit.accepted_at, unit.sold_design_short_code));
+    const now = new Date().toISOString();
+    // Setting it to what the schedule ALREADY says clears the override instead of storing it,
+    // so there is no way to create a permanent no-op pin.
+    const patch = (to === null || to === derived)
+      ? {
+        lifecycle_manual: null, lifecycle_manual_basis: null,
+        lifecycle_manual_at: null, lifecycle_manual_by: null, updated_at: now,
+      }
+      : {
+        lifecycle_manual: to, lifecycle_manual_basis: derived,
+        lifecycle_manual_at: now, lifecycle_manual_by: userId, updated_at: now,
+      };
+    const { error } = await admin.from("inventory_units").update(patch)
+      .eq("id", unitId).eq("client_id", clientId);
+    if (error) return json({ error: error.message }, 500);
+    await audit("portal_set_inventory_lifecycle", 1,
+      `unit=${unitId} to=${to ?? "auto"} schedule_said=${derived}`);
+    return json({ ok: true, lifecycle: to ?? derived, derived });
   }
 
   // ── Remove a unit (the master design is deleted by a follow-up delete_design) ─
@@ -1755,7 +2041,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "list_inventory") {
     const [unitsRes, locsRes] = await Promise.all([
       admin.from("inventory_units")
-        .select("id, serial, design_short_code, location_id, asking_price_cents, status, sold_design_short_code, created_at, updated_at")
+        .select("id, serial, design_short_code, location_id, asking_price_cents, "
+          + "sale_state, sold_design_short_code, sold_at, sold_first_name, accepted_at, "
+          + "lifecycle_manual, lifecycle_manual_basis, created_at, updated_at")
         .eq("client_id", clientId).order("created_at", { ascending: false }),
       admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
     ]);
@@ -1807,6 +2095,53 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       });
       estsByUnit.set(d.inventory_unit_id, list);
     }
+    // ── Build-stage facts for every unit, in three queries rather than three per unit ──
+    // The ladder is derived (see _shared/inventoryLifecycle.ts), so the tab needs each unit's
+    // build job, that job's stage KIND (never its tenant-editable name) and its delivery
+    // stops. Fetched in bulk here; unitFacts() above is the single-unit equivalent.
+    const [jobsRes, stopsRes] = await Promise.all([
+      unitIds.length
+        ? admin.from("build_jobs").select("id, inventory_unit_id, stage_id, due_date, completed_at")
+          .eq("client_id", clientId).in("inventory_unit_id", unitIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      unitIds.length
+        ? admin.from("delivery_stops")
+          .select("id, inventory_unit_id, design_short_code, delivered_at, load_id")
+          .eq("client_id", clientId).in("inventory_unit_id", unitIds)
+        : Promise.resolve({ data: [], error: null } as any),
+    ]);
+    interface JobRow {
+      id: string;
+      inventory_unit_id: string;
+      stage_id: string | null;
+      due_date: string | null;
+      completed_at: string | null;
+    }
+    interface StopRow {
+      id: string;
+      inventory_unit_id: string;
+      design_short_code: string | null;
+      delivered_at: string | null;
+      load_id: string | null;
+    }
+    const jobRows = (jobsRes.data ?? []) as JobRow[];
+    const stopRows = (stopsRes.data ?? []) as StopRow[];
+    const stageIds = [...new Set(jobRows.map((j) => j.stage_id).filter(Boolean))] as string[];
+    const { data: stageRows } = stageIds.length
+      ? await admin.from("schedule_stages").select("id, name, kind").eq("client_id", clientId).in("id", stageIds)
+      : { data: [] };
+    const stageById = new Map<string, { name: string; kind: StageKind }>(
+      ((stageRows ?? []) as { id: string; name: string; kind: StageKind }[])
+        .map((s): [string, { name: string; kind: StageKind }] => [s.id, { name: s.name, kind: s.kind }]),
+    );
+    const jobByUnit = new Map<string, JobRow>(jobRows.map((j): [string, JobRow] => [j.inventory_unit_id, j]));
+    const stopsByUnit = new Map<string, StopRow[]>();
+    for (const s of stopRows) {
+      const list = stopsByUnit.get(s.inventory_unit_id) ?? [];
+      list.push(s);
+      stopsByUnit.set(s.inventory_unit_id, list);
+    }
+
     const out = units.map((u: any) => {
       const m = masterByCode.get(u.design_short_code);
       // Annotated, not inferred: without it the `|| {}` fallback puts a bare `{}` into the
@@ -1815,11 +2150,44 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const sel: MasterSelections = (m && m.selections) || {};
       const paint: MasterPaint = (m && m.paint_colors) || {};
       const loc = u.location_id ? locById.get(u.location_id) : null;
+
+      const job = jobByUnit.get(u.id) ?? null;
+      const stage = job?.stage_id ? stageById.get(job.stage_id) ?? null : null;
+      const stops = stopsByUnit.get(u.id) ?? [];
+      const derived = deriveLifecycle({
+        acceptedAt: u.accepted_at ?? null,
+        soldDesignShortCode: u.sold_design_short_code ?? null,
+        job: job
+          ? { stageKind: stage?.kind ?? null, dueDate: job.due_date ?? null, completedAt: job.completed_at ?? null }
+          : null,
+        stops: stops.map((s) => ({ designShortCode: s.design_short_code, deliveredAt: s.delivered_at })),
+      });
+      const eff = effectiveLifecycle(u, derived);
+      const openStop = stops.find((s) => !s.delivered_at) ?? null;
+
       return {
         id: u.id, serial: u.serial, shortCode: u.design_short_code,
         locationId: u.location_id, locationName: loc?.name ?? null, locationCity: loc?.city ?? null,
-        askingPriceCents: u.asking_price_cents, status: u.status,
-        soldDesignShortCode: u.sold_design_short_code,
+        askingPriceCents: u.asking_price_cents,
+        // ── Axis 1: where it is on the build ladder ──
+        lifecycle: eff.lifecycle,
+        lifecycleLabel: LIFECYCLE_LABEL[eff.lifecycle],
+        // What the SCHEDULE says, always — the tab shows this beneath a hand-set status when
+        // the two disagree, so an override never reads as the automation being broken.
+        lifecycleDerived: eff.derived,
+        lifecycleDerivedLabel: LIFECYCLE_LABEL[eff.derived],
+        lifecycleSource: eff.source,
+        accepted: !!u.accepted_at, acceptedAt: u.accepted_at ?? null,
+        buildJobId: job?.id ?? null, buildStageName: stage?.name ?? null,
+        openStopId: openStop?.id ?? null, openStopLoadId: openStop?.load_id ?? null,
+        // ── Axis 2: whether it is still for sale ──
+        saleState: u.sale_state, soldDesignShortCode: u.sold_design_short_code,
+        soldFirstName: u.sold_first_name ?? null, soldAt: u.sold_at ?? null,
+        // For the ecommerce listing Carolyn plans: a sold display keeps its SOLD badge for 30
+        // days and then falls off the list. Computed here so the 30 lives in ONE place.
+        soldLabelExpiresAt: u.sold_at
+          ? new Date(Date.parse(u.sold_at) + SOLD_LABEL_DAYS * 86400000).toISOString()
+          : null,
         style: sel.style ?? null, size: sel.size ?? null, imageUrl: m?.image_url ?? null,
         roofType: sel.roofType ?? null, roofColor: sel.roofColor ?? null,
         bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
@@ -1827,7 +2195,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         estimates: estsByUnit.get(u.id) ?? [],
       };
     });
-    return json({ ok: true, units: out, locations: locsRes.data ?? [] });
+    return json({ ok: true, units: out, locations: locsRes.data ?? [], soldLabelDays: SOLD_LABEL_DAYS });
   }
 
   // ── After a submit from "Send estimate": tie the new design to its unit ─────
@@ -1841,8 +2209,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
     if (unitId) {
       const { data: unit } = await admin.from("inventory_units")
-        .select("id").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+        .select("id, serial, sale_state, sold_design_short_code, sold_first_name")
+        .eq("id", unitId).eq("client_id", clientId).maybeSingle();
       if (!unit) return json({ error: "Inventory unit not found." }, 404);
+      // "Once Inventory is sold it must become unavailable to sell" (Carolyn 2026-08-07),
+      // enforced HERE because this is the single door every quote goes through to become an
+      // estimate on a building. Until migration 102 this branch only checked the unit
+      // existed, so a sold building could be quoted to a second customer and both could
+      // reach accepted with nothing anywhere reporting a problem — the portal's only
+      // handling was a warning span with no action attached.
+      //
+      // Two exemptions, both deliberate:
+      //   * unitId === null is the UNTIE path ("Design a new build instead"). It must keep
+      //     working on a sold unit — it is the remedy this error points people at.
+      //   * the winning buyer re-linking their OWN design is not a second sale (a resubmit
+      //     re-runs this call with the same code).
+      if (unit.sale_state === "sold" && unit.sold_design_short_code !== shortCode) {
+        const who = unit.sold_first_name ? ` to ${unit.sold_first_name}` : "";
+        return json({
+          error: `Building #${unit.serial} is already sold${who}. Design a new build for this customer instead.`,
+        }, 409);
+      }
     }
     // Never relabel the master itself, and never touch another tenant's design.
     const { error, count } = await admin.from("designs").update({ inventory_unit_id: unitId }, { count: "exact" })
@@ -2351,7 +2738,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // becomes an accidental log line.
     const { data: design, error: desErr } = await admin
       .from("designs")
-      .select("short_code, ghl_estimate_id")
+      // inventory_unit_id is the invoice TYPE (new_build vs inventory) and nothing more —
+      // deliberately NOT re-adding contact/status here, which the 2026-08-07 trim above
+      // removed as a dead PII read on the invoice path.
+      .select("short_code, ghl_estimate_id, inventory_unit_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (desErr) return json({ error: desErr.message }, 500);
     if (!design) return json({ error: "Design not found." }, 404);
@@ -2402,6 +2792,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       client_id: clientId, short_code: shortCode,
       ghl_estimate_id: String(design.ghl_estimate_id), status: "claimed", attempts: 1,
       sent_by_operator: operator ? operator.email : null,
+      // Carolyn 2026-08-07: "EVERY INVOICE needs a TYPE." Stamped at the claim, which is the
+      // moment the invoice is raised — a SNAPSHOT, not a lookup. Untying this design from its
+      // unit later must not retroactively change the type of an invoice that has already gone
+      // to a customer and into their books. An `inventory` invoice is also what tells the
+      // schedule to skip the build board: the building already exists, so the buyer's order
+      // must never spawn a second, new-build job.
+      invoice_type: invoiceTypeFor(design),
     });
     if (claimIns.error) {
       // 23505 = the row exists → inspect it instead of converting again.
