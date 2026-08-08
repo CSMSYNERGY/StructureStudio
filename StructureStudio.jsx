@@ -231,6 +231,164 @@ function checkLoftAttached(l, r, t, b, bldgW, bldgH, otherLoftEdges) {
   return false;
 }
 
+// ─── Page geometry, as a pure function of the building size ───────────────────
+// The component derives scale/mgX/mgY from bldgW/bldgH on every render. Reflowing
+// a layout after a size change needs the SAME derivation for the OLD size, to turn
+// stored page-pixels back into feet — so the formula lives here, called twice
+// (old, new), instead of being inlined once in the render body.
+const SS_PAGE = { W: 850, H: 1100, TEXT_AREA_H: 340, TOP_LABEL_PAD: 30, BOT_LABEL_PAD: 30, RAMP_SPACE_FT: 2 };
+function pageGeom(bldgW, bldgH) {
+  const visibleH = SS_PAGE.H - SS_PAGE.TEXT_AREA_H;
+  const scale = Math.min(
+    (SS_PAGE.W * 0.70) / bldgW,
+    (visibleH * 0.70) / bldgH,
+    (visibleH - SS_PAGE.TOP_LABEL_PAD - SS_PAGE.BOT_LABEL_PAD) / (bldgH + 2 * SS_PAGE.RAMP_SPACE_FT)
+  );
+  const pW = bldgW * scale, pH = bldgH * scale;
+  return { scale, pW, pH, mgX: (SS_PAGE.W - pW) / 2, mgY: SS_PAGE.RAMP_SPACE_FT * scale + SS_PAGE.TOP_LABEL_PAD };
+}
+
+// Where a ramp sits for a given door position — the ramp is derived, never placed.
+// Uses the ramp's OWN depth (heightFt) rather than the 2 ft default, so a catalog
+// ramp with a longer run stays where it was drawn.
+function rampPosFor(rmp, sn, g) {
+  const depthPx = ((rmp && rmp.heightFt) || SS_PAGE.RAMP_SPACE_FT) * g.scale;
+  if (sn.wall === "north") return { x: sn.x, y: g.mgY - depthPx / 2, rotation: 0, wall: "north" };
+  if (sn.wall === "south") return { x: sn.x, y: g.mgY + g.pH + depthPx / 2, rotation: 0, wall: "south" };
+  if (sn.wall === "west") return { x: g.mgX - depthPx / 2, y: sn.y, rotation: 90, wall: "west" };
+  if (sn.wall === "east") return { x: g.mgX + g.pW + depthPx / 2, y: sn.y, rotation: 90, wall: "east" };
+  return null;
+}
+
+// Items the customer sizes themselves, so shrinking one to fit a smaller building
+// preserves their intent. A DOOR is not in this list on purpose: a 6 ft double door
+// quietly becoming 4 ft would change what they are buying.
+const SS_SHRINKABLE = { workbench: true, roughOpening: true, loft: true };
+const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east", "west"], east: ["west", "north", "south"], west: ["east", "north", "south"] };
+
+/**
+ * Move every placed item into the equivalent legal position for a new building size.
+ *
+ * PURE — returns { items, events } and mutates nothing, so the caller can inspect the
+ * events and decide whether to commit. That is what makes "revert the size change when
+ * something cannot be placed" possible without ever leaving a half-reflowed layout.
+ *
+ * events: { id, type, label, kind } where kind is "movedWall" | "resized" | "blocked".
+ * Sliding along the SAME wall is deliberately not an event — it is what the customer
+ * expects when a building grows or shrinks, and reporting it would bury the two things
+ * they do need to know.
+ */
+function reflowItems(items, prev, next, ITEMS) {
+  const A = pageGeom(prev.w, prev.h), B = pageGeom(next.w, next.h);
+  const events = [];
+  const byId = new Map();
+  const placed = [];                       // already-reflowed items, for collision tests
+  const labelOf = (it) => (ITEMS[it.type] && ITEMS[it.type].label) || it.type;
+
+  // Try to seat a wall item at `wantFt` along `wall`, sliding to the nearest clear spot.
+  // Returns the snap result, or null when the wall has no room.
+  const seat = (it, cfg, wall, wantFt, wFt, hFt) => {
+    const isH = wall === "north" || wall === "south";
+    const wallLen = isH ? next.w : next.h;
+    const half = wFt / 2;
+    if (wFt > wallLen) return null;
+    const lo = half, hi = wallLen - half;
+    const start = Math.max(lo, Math.min(wantFt, hi));
+    // Search outward from the wanted spot in 0.25 ft steps, nearest first.
+    for (let d = 0; d <= (hi - lo) + 0.25; d += 0.25) {
+      for (const c of (d === 0 ? [start] : [start - d, start + d])) {
+        if (c < lo - 0.001 || c > hi + 0.001) continue;
+        const px = (isH ? B.mgX : B.mgY) + c * B.scale;
+        const sn = cfg.wallSnap
+          ? snapToWallInterior(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY)
+          : snapToWall(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY);
+        const cand = { ...it, ...sn, widthFt: wFt, heightFt: hFt };
+        if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale)) continue;
+        if (checkWorkbenchOverlap(sn, wFt * B.scale, placed, ITEMS, B.scale)) continue;
+        return sn;
+      }
+    }
+    return null;
+  };
+
+  // ── Pass 1: everything except ramps (which are derived from their door) ──
+  for (const it of items) {
+    const cfg = ITEMS[it.type];
+    // Annotations live in PAGE space, deliberately independent of the building —
+    // moving them with the plan would be a regression, not a completion.
+    if (!cfg || cfg.lineType || it.type === "textNote" || it.type === "line") { byId.set(it.id, it); continue; }
+    if (cfg.doorSnap) continue;            // pass 2
+
+    const isWall = (cfg.wallOnly || cfg.wallSnap) && it.wall;
+    if (isWall) {
+      const isH = it.wall === "north" || it.wall === "south";
+      const wantFt = isH ? (it.x - A.mgX) / A.scale : (it.y - A.mgY) / A.scale;
+      const hFt = it.heightFt || cfg.height;
+      let wFt = it.widthFt || cfg.width;
+      const wallLen = isH ? next.w : next.h;
+      if (wFt > wallLen && SS_SHRINKABLE[it.type]) {
+        const shrunk = Math.max(it.type === "roughOpening" ? 0.5 : 2, wallLen);
+        if (shrunk !== wFt) { wFt = shrunk; events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "resized", to: wFt }); }
+      }
+      let sn = seat(it, cfg, it.wall, wantFt, wFt, hFt);
+      let movedWall = false;
+      if (!sn) {
+        for (const w2 of (SS_WALL_ORDER[it.wall] || [])) {
+          const isH2 = w2 === "north" || w2 === "south";
+          sn = seat(it, cfg, w2, (isH2 ? next.w : next.h) / 2, wFt, hFt);
+          if (sn) { movedWall = true; break; }
+        }
+      }
+      if (!sn) { events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "blocked" }); byId.set(it.id, it); continue; }
+      if (movedWall) events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "movedWall", to: sn.wall });
+      const nit = { ...it, ...sn, widthFt: wFt };
+      byId.set(it.id, nit); placed.push(nit);
+      continue;
+    }
+
+    if (it.type === "loft") {
+      let wFt = it.widthFt || cfg.width, hFt = it.heightFt || cfg.height;
+      let cxFt = (it.x - A.mgX) / A.scale, cyFt = (it.y - A.mgY) / A.scale;
+      // A loft placed by clicking is seeded widthFt = bldgW (a snapshot of the building
+      // width). If it spanned wall to wall, it should still span wall to wall.
+      if (Math.abs(wFt - prev.w) < 0.35) { wFt = next.w; cxFt = next.w / 2; }
+      else cxFt = cxFt * (next.w / prev.w);
+      cyFt = cyFt * (next.h / prev.h);
+      const wasW = wFt, wasH = hFt;
+      wFt = Math.max(2, Math.min(wFt, next.w));
+      hFt = Math.max(2, Math.min(hFt, next.h));
+      if (wFt > next.w || hFt > next.h) { events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "blocked" }); byId.set(it.id, it); continue; }
+      if (wFt !== wasW || hFt !== wasH) events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "resized", to: wFt });
+      cxFt = Math.max(wFt / 2, Math.min(cxFt, next.w - wFt / 2));
+      cyFt = Math.max(hFt / 2, Math.min(cyFt, next.h - hFt / 2));
+      const nit = { ...it, x: B.mgX + cxFt * B.scale, y: B.mgY + cyFt * B.scale, widthFt: wFt, heightFt: hFt };
+      byId.set(it.id, nit); placed.push(nit);
+      continue;
+    }
+
+    // Free-floating: keep it inside the new box.
+    const wFt = it.widthFt || cfg.width, hFt = it.heightFt || cfg.height;
+    let cxFt = ((it.x - A.mgX) / A.scale) * (next.w / prev.w);
+    let cyFt = ((it.y - A.mgY) / A.scale) * (next.h / prev.h);
+    cxFt = Math.max(wFt / 2, Math.min(cxFt, next.w - wFt / 2));
+    cyFt = Math.max(hFt / 2, Math.min(cyFt, next.h - hFt / 2));
+    const nit = { ...it, x: B.mgX + cxFt * B.scale, y: B.mgY + cyFt * B.scale };
+    byId.set(it.id, nit); placed.push(nit);
+  }
+
+  // ── Pass 2: ramps follow their door, or go with it ──
+  for (const it of items) {
+    const cfg = ITEMS[it.type];
+    if (!cfg || !cfg.doorSnap) continue;
+    const door = byId.get(it.snapDoorId);
+    const pos = door && door.wall ? rampPosFor(it, door, B) : null;
+    if (!pos) continue;                    // orphaned ramp is dropped, as when its door is deleted
+    byId.set(it.id, { ...it, ...pos });
+  }
+
+  return { items: items.map((it) => byId.get(it.id)).filter(Boolean), events };
+}
+
 // Point on a note box's border in the direction of a target — where the note's
 // leader (pointer) line starts, so the dashed line begins at the pill's edge
 // instead of its center. If the target is inside the box, returns the target
@@ -489,6 +647,14 @@ function getDisplayLabel(positionalWall, frontWall) {
   return map[frontWall][positionalWall];
 }
 
+// How to name a wall in a sentence to the customer. getDisplayLabel is relative to the
+// FRONT, and there is no front until a door is placed — it returns null, which rendered as
+// "moved to the null wall". Naming a direction we cannot actually derive would be worse
+// than not naming one, so say "another wall" until a door defines the front.
+function wallPhrase(positionalWall, frontWall) {
+  const d = getDisplayLabel(positionalWall, frontWall);
+  return d ? "the " + d.toLowerCase() + " wall" : "another wall";
+}
 // ─── Layout add-on pricing (browser mirror of submit-estimate's pushItem) ─────────
 // Compute one display row per priceable placed item type, applying the SAME 7
 // pricing_method formulas the edge function uses so the prices shown on the plan match
@@ -1754,6 +1920,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
+  // Outcomes of a size-change reflow. `reflowNote` is advisory (items moved wall or were
+  // shortened); `sizeBlock` is the refusal — { from, to, items } — shown when something
+  // could not be placed at all, with the size already reverted.
+  const [reflowNote, setReflowNote] = useState(null);
+  const [sizeBlock, setSizeBlock] = useState(null);
+
 
   // Google Places "search for address" widget that auto-fills the four address
   // fields below it. Uses google.maps.places.PlaceAutocompleteElement (Places API
@@ -1828,18 +2000,52 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     });
   }, [C.googleMapsApiKey]);
 
-  // Auto-update building size. Only clear items when the user *changes* the
-  // size (not on first set, and not when loading a saved design).
+  // Auto-update building size, REFLOWING the layout instead of destroying it.
+  //
+  // This used to `setItems([])` on any size change — the customer lost their whole plan
+  // with no warning. Worse, it missed a case: changing the STYLE blanks the size, which
+  // recorded a blank into prevSizeRef, so the next size pick saw a falsy previous value
+  // and skipped the wipe. The items survived carrying page-pixels computed from the OLD
+  // scale/mgX/mgY, which left doors floating off their walls — and, because they then
+  // failed their own wallOnly rule, unable to be dragged back. That is the bug Carolyn
+  // reported. Comparing parsed DIMENSIONS rather than label strings closes it: a blank
+  // size parses to null and is skipped without poisoning the ref.
+  //
+  // reflowItems is pure, so the result is inspected BEFORE committing: if anything cannot
+  // be placed at all, the size change is reverted and the customer is told what to remove.
   useEffect(() => {
     const p = parseSize(sel.size);
-    if (p) {
-      setShedW(p.w); setShedH(p.h);
-      if (prevSizeRef.current && prevSizeRef.current !== sel.size) {
-        setItems([]); setSelectedId(null);
+    if (!p) { prevSizeRef.current = sel.size; return; }
+    const prev = parseSize(prevSizeRef.current);
+    if (prev && (prev.w !== p.w || prev.h !== p.h) && items.length) {
+      const { items: nextItems, events } = reflowItems(items, prev, p, ITEMS);
+      const blocked = events.filter((e) => e.kind === "blocked");
+      if (blocked.length) {
+        // Nothing has changed yet — put the size back and let them decide.
+        setSizeBlock({ from: prevSizeRef.current, to: sel.size, items: blocked });
+        setSel((s) => ({ ...s, size: prevSizeRef.current }));
+        return;                       // prevSizeRef stays put; the revert re-runs this effect
       }
+      setItems(nextItems);
+      setSelectedId(null);
+      const notable = events.filter((e) => e.kind === "movedWall" || e.kind === "resized");
+      if (notable.length) setReflowNote(notable);
     }
+    setShedW(p.w); setShedH(p.h);
     prevSizeRef.current = sel.size;
   }, [sel.size]);
+
+  // Snap a loaded layout back onto legal positions. Designs saved before the size-change
+  // reflow existed can carry items stranded off their walls by an old style-then-size
+  // change — they render floating and, failing their own placement rule, cannot be dragged
+  // back. Passing the SAME dimensions in and out makes the geometry conversion an identity,
+  // so nothing moves that was already legal; the clamps and collision checks do the repair.
+  // Silent by design: someone opening a link did not do anything to be told about.
+  const repairLoaded = (loaded, sizeLabel) => {
+    const d = parseSize(sizeLabel);
+    if (!d || !loaded.length) return loaded;
+    try { return reflowItems(loaded, d, d, ITEMS).items; } catch (_e) { return loaded; }
+  };
 
   // ─── Load a saved design by short code ───
   // Shared by the public ?id= URL path and the portal's openDesign prop below — the two
@@ -1932,7 +2138,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setRoDimensions(design.ro_dimensions || {});
     // Items must be set after sel.size has propagated; the prevSizeRef guard
     // above keeps the size effect from wiping them.
-    const loadedItems = Array.isArray(design.items) ? design.items : [];
+    const loadedItems = repairLoaded(Array.isArray(design.items) ? design.items : [], (design.selections || {}).size);
     setItems(loadedItems);
     // The persistent portal mount can carry a selection/note-edit from the PREVIOUS
     // design; item ids are small integers that collide across designs, so a stale
@@ -2105,7 +2311,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setPaintCustom({ body: false, trim: false });
     setCustomOptions(vrow.custom_options || []);
     setRoDimensions(vrow.ro_dimensions || {});
-    const loadedItems = Array.isArray(vrow.items) ? vrow.items : [];
+    const loadedItems = repairLoaded(Array.isArray(vrow.items) ? vrow.items : [], (vrow.selections || {}).size);
     setItems(loadedItems);
     setSelectedId(null);
     idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
@@ -2120,29 +2326,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
   // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
   // so wherever they sit on screen is exactly where they print.
-  const PAGE_W = 850, PAGE_H = 1100;
-  const TEXT_AREA_H = 340;          // bottom band reserved for auto customer info
-  const TOP_LABEL_PAD = 30;         // space for size + FRONT labels above plan
-  const BOT_LABEL_PAD = 30;         // space for size + BACK labels below plan
-  const RAMP_SPACE_FT = 2;          // a ramp shows 2 ft past its wall (visual)
+  const PAGE_W = SS_PAGE.W, PAGE_H = SS_PAGE.H;
+  const TEXT_AREA_H = SS_PAGE.TEXT_AREA_H;  // bottom band reserved for auto customer info
+  const TOP_LABEL_PAD = SS_PAGE.TOP_LABEL_PAD; // space for size + FRONT labels above plan
+  const BOT_LABEL_PAD = SS_PAGE.BOT_LABEL_PAD; // space for size + BACK labels below plan
+  const RAMP_SPACE_FT = SS_PAGE.RAMP_SPACE_FT; // a ramp shows 2 ft past its wall (visual)
   const visibleH = PAGE_H - TEXT_AREA_H;
   // Plan dynamically scales: caps in three directions ensure a ramp fits
   // both north and south plus 70% target sizing.
   //   1) width ≤ 70% of page (so the plan never spans the full sheet)
   //   2) height ≤ 70% of the visible top area
   //   3) plan + 2 ramps + 2 label pads ≤ visibleH (so south + north ramps fit)
-  const scale = Math.min(
-    (PAGE_W * 0.70) / bldgW,
-    (visibleH * 0.70) / bldgH,
-    (visibleH - TOP_LABEL_PAD - BOT_LABEL_PAD) / (bldgH + 2 * RAMP_SPACE_FT)
-  );
-  const pW = bldgW * scale, pH = bldgH * scale;
-  const mgX = (PAGE_W - pW) / 2;
-  // Top-bias: plan sits idealRoom from the top so a north ramp + labels fit.
-  // The third scale constraint guarantees there's also enough room for a south
-  // ramp + label below the plan.
-  const idealRoom = RAMP_SPACE_FT * scale + TOP_LABEL_PAD;
-  const mgY = idealRoom;
+  // Top-bias: the plan sits RAMP_SPACE_FT*scale + TOP_LABEL_PAD from the top so a north
+  // ramp + labels fit; the third scale constraint guarantees room for a south ramp below.
+  // Derived by pageGeom() so the reflow can compute the OLD page geometry the same way.
+  const { scale, pW, pH, mgX, mgY } = pageGeom(bldgW, bldgH);
   const cW = PAGE_W, cH = PAGE_H;
   const TEXT_BAND_TOP = PAGE_H - TEXT_AREA_H;
 
@@ -3983,6 +4181,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
       {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {/* Size change refused: something on the plan has nowhere to go in the smaller
+          building. The size is ALREADY back to what it was (the reflow is computed before
+          anything is committed), so this only has to explain and get out of the way. */}
+      {sizeBlock && createPortal(
+        <div onClick={() => setSizeBlock(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(520px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>
+              {sizeBlock.items.length === 1 ? "One item won't fit" : `${sizeBlock.items.length} items won't fit`} in a {sizeBlock.to}
+            </div>
+            <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, marginBottom: 14 }}>
+              Everything else would have moved across fine, but there's nowhere to put:
+            </div>
+            <ul style={{ margin: "0 0 16px", paddingLeft: 20, fontSize: 13.5, color: "#1E293B", lineHeight: 1.7 }}>
+              {sizeBlock.items.map((e) => <li key={e.id}><b>{e.label}</b></li>)}
+            </ul>
+            <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, marginBottom: 16 }}>
+              Your building is still <b>{sizeBlock.from}</b> and nothing on the plan has changed.
+              Delete {sizeBlock.items.length === 1 ? "it" : "them"} — or make room by removing something
+              else — then pick the size again.
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" onClick={() => setSizeBlock(null)} style={{ background: accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Got it</button>
+            </div>
+          </div>
+        </div>, document.body)}
       {/* Header — suppressed when embedded (the portal supplies its own topbar). The
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
@@ -4194,6 +4417,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div style={{ background: "#FEF3C7", borderBottom: "1px solid #FCD34D", padding: "10px 16px", fontSize: 12, color: "#92400E" }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ Loft support warning — {unattachedLofts.length} loft{unattachedLofts.length > 1 ? "s" : ""} not properly supported</div>
           <div style={{ fontWeight: 500 }}>Each loft must have <b>both ends</b> of at least one axis (left+right OR top+bottom) resting on a wall or another loft. Adjust position or size to fix.</div>
+        </div>
+      )}
+
+      {/* What the size change did to the layout. A strip rather than the toast, because
+          the toast's headline is hard-coded to "Can't place here" (wrong here) and it
+          self-dismisses in 4s — this is something the customer needs to still be able to
+          read after they look back at the plan. Sliding along the same wall is deliberately
+          NOT reported: it is what anyone expects when a building grows or shrinks, and
+          listing it would bury the two changes that actually matter. */}
+      {reflowNote && reflowNote.length > 0 && (
+        <div style={{ background: "#EFF6FF", borderBottom: "1px solid #BFDBFE", padding: "10px 16px", fontSize: 12, color: "#1E3A8A", display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <span style={{ flexShrink: 0 }}>📐</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>Your layout moved to fit the new size</div>
+            <div style={{ fontWeight: 500 }}>
+              {reflowNote.map((e, i) => (
+                <span key={e.id}>
+                  {i > 0 ? "; " : ""}
+                  <b>{e.label}</b>{e.kind === "movedWall"
+                    ? ` moved to ${wallPhrase(e.to, frontWall)}`
+                    : ` was shortened to ${e.to} ft`}
+                </span>
+              ))}
+              . Everything else kept its place.
+            </div>
+          </div>
+          <button type="button" onClick={() => setReflowNote(null)}
+            style={{ background: "none", border: "none", color: "#1E3A8A", cursor: "pointer", fontSize: 15, fontWeight: 800, lineHeight: 1, flexShrink: 0 }}>✕</button>
         </div>
       )}
 
