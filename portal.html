@@ -4830,13 +4830,39 @@ function ReleasesView({ submissionsKey }) {
   );
 }
 
+// ─── QuickBooks Sync: the not-switched-on card ───
+// One component for BOTH mounts of QuickBooks (the top-level tab and Settings → QuickBooks),
+// so the two can never drift into saying different things. Same shape as the scheduling
+// teasers: the tab stays visible, this explains what they'd get, and an owner/admin gets a
+// button straight to Billing. A non-admin gets no button — they cannot buy it.
+function QuickBooksLocked({ canAdmin, onSeeBilling }) {
+  return (
+    <ComingSoon
+      title="QuickBooks Sync"
+      icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 8.5A2.5 2.5 0 0 0 9.5 15H12M14.5 15.5a2.5 2.5 0 0 0 0-6H12"/></svg>}
+      blurb="Send your accepted quotes to QuickBooks Online as invoices, without typing them twice. Map each building style and add-on to the right QuickBooks item once, and every invoice lands in your books the way your accountant expects."
+      bullets={[
+        "Push an invoice to QuickBooks straight from a design",
+        "Map styles, sizes and add-ons to your own QuickBooks items",
+        "Keep your books matching your quotes, with no re-keying",
+      ]}
+      cta={canAdmin ? { label: "Turn on QuickBooks Sync — see Billing", onClick: onSeeBilling } : null}
+      available
+    />
+  );
+}
+
 // ─── Coming-soon teaser panel ───
 // Placeholder for features that aren't built yet, shown to every logged-in user so
 // they can see what's on the way. Pure presentation — no data, no side effects.
 // `cta` (optional, { label, onClick }) turns the teaser into an AVAILABLE-NOW card: the
 // badge flips from "Coming soon" to "Available now" and the footer becomes the button —
 // used by billable features that have launched but this tenant hasn't switched on yet.
-function ComingSoon({ icon, title, blurb, bullets, cta }) {
+// `available` says the feature HAS SHIPPED and is simply not switched on for this tenant.
+// It has to be separate from `cta`, because only an owner/admin gets a cta — so deriving
+// "is it live?" from the button meant a sales rep was told a shipped feature was "Coming
+// soon" and that we were still building it. They would repeat that to a customer.
+function ComingSoon({ icon, title, blurb, bullets, cta, available = false }) {
   return (
     <div style={{ ...S.card, padding: 0, overflow: "hidden", maxWidth: 720 }}>
       <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", padding: "34px 28px", color: "#FFF", display: "flex", alignItems: "center", gap: 20 }}>
@@ -4844,7 +4870,7 @@ function ComingSoon({ icon, title, blurb, bullets, cta }) {
           {icon}
         </div>
         <div style={{ minWidth: 0 }}>
-          <span style={{ display: "inline-block", background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px", marginBottom: 9 }}>{cta ? "Available now" : "Coming soon"}</span>
+          <span style={{ display: "inline-block", background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px", marginBottom: 9 }}>{(cta || available) ? "Available now" : "Coming soon"}</span>
           <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>{title}</div>
         </div>
       </div>
@@ -4866,7 +4892,9 @@ function ComingSoon({ icon, title, blurb, bullets, cta }) {
           </div>
         ) : (
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #F1F5F9", fontSize: 12.5, color: "#94A3B8", fontWeight: 600 }}>
-            We're actively building this — it'll appear right here when it's ready, with nothing for you to set up.
+            {available
+              ? "This is ready to go — ask an owner or admin on your account to switch it on."
+              : "We're actively building this — it'll appear right here when it's ready, with nothing for you to set up."}
           </div>
         )}
       </div>
@@ -11493,7 +11521,7 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, access = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, access = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -11564,7 +11592,11 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
-      {sub === "quickbooks" && <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
+          open, and /portal/settings/quickbooks is a link people actually have. */}
+      {sub === "quickbooks" && (qboUnlocked
+        ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
+        : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
           schedule tabs (operator, or the tenant's schedule_builds subscription). */}
@@ -11923,7 +11955,21 @@ function Dashboard({ session }) {
   // requires a real active/grace subscription for this feature — the exempt and
   // free-period blankets deliberately do NOT cover it, so grandfathered tenants see
   // the teaser like everyone else until they subscribe.
-  const schedUnlocked = isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features.schedule_builds));
+  // Is a PAID ADD-ON switched on for this tenant? The one rule for every billable
+  // feature — nothing reads entitlement.features directly any more.
+  //
+  //   * Operators are never gated (their own tenant or view-as), because the entitlement
+  //     loaded here is the OPERATOR's, not the viewed tenant's.
+  //   * entitlement === null means "still loading" and must NOT read as off, or every page
+  //     load would flash an upgrade card at a paying customer (same reason gateLocked
+  //     tolerates null).
+  const featureOn = (key) => isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]));
+  const schedUnlocked = featureOn("schedule_builds");
+  // QuickBooks Sync is a paid add-on ($75/mo) that was SOLD BUT NEVER ENFORCED — the tab was
+  // gated on canAdmin alone, so any admin used it free and buying it changed nothing. Gated
+  // the same way as scheduling (Carolyn 2026-08-08), and PAY-ONLY on the server, so the
+  // exempt/free-period blankets don't hand it to grandfathered tenants either.
+  const qboUnlocked = featureOn("quickbooks_sync");
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -12241,8 +12287,12 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
             {!gateLocked && activeTab === "quickbooks" && canAdmin && (
-              <QuickBooksView key={"t-" + effClientId} clientId={effClientId}
-                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
+              qboUnlocked ? (
+                <QuickBooksView key={"t-" + effClientId} clientId={effClientId}
+                  viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
+              ) : (
+                <QuickBooksLocked canAdmin={canAdmin} onSeeBilling={() => navigate("settings", "billing")} />
+              )
             )}
             {!gateLocked && activeTab === "settings" && canAdmin && (
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
@@ -12251,6 +12301,7 @@ function Dashboard({ session }) {
                 isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
                 access={viewing ? null : myAccess}
                 schedUnlocked={schedUnlocked}
+                qboUnlocked={qboUnlocked}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {!gateLocked && activeTab === "on-demand-pricing" && (
@@ -12284,6 +12335,7 @@ function Dashboard({ session }) {
                   "Keep the shop floor and the office on the same page",
                 ]}
                 cta={canAdmin ? { label: "Turn on scheduling — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                available
               />
               )
             )}
@@ -12302,6 +12354,7 @@ function Dashboard({ session }) {
                   "The schedule won't let a building go out before it's built",
                 ]}
                 cta={canAdmin ? { label: "Turn on scheduling — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                available
               />
               )
             )}
@@ -12334,6 +12387,7 @@ function Dashboard({ session }) {
                   "Service history tied to each building and customer",
                 ]}
                 cta={canAdmin ? { label: "Turn on scheduling — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                available
               />
               )
             )}

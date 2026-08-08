@@ -315,7 +315,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // ONLY with a real subscription, for every tenant: grandfathered, internal, and
   // free-period accounts included. Operators still see the tabs via the portal's own
   // isOperator branch, which never consults this map.
-  const PAID_ONLY_FEATURES = new Set(["schedule_builds"]);
+  //
+  // quickbooks_sync joined it 2026-08-08, same call. Without it the new QuickBooks gate
+  // would be decorative: every tenant that predates the billing gate is `exempt`, so the
+  // blanket below would hand them the feature free and only brand-new tenants would ever
+  // pay for a plan that has been on sale since migration 092. Checked before making the
+  // change — exactly one tenant had a live QuickBooks connection (structure-studio, CSM
+  // Synergy's own account), and operators are never gated, so no builder lost a working
+  // integration.
+  const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync"]);
   const features: Record<string, boolean> = {};
   for (const p of plans) {
     features[p.feature] = PAID_ONLY_FEATURES.has(p.feature)

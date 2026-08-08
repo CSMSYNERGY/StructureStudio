@@ -286,6 +286,37 @@ Each entry in `options[]` may optionally declare `buildingStyles: ["Urban", "Nor
 5. Insert a `client_settings` row (or let the owner fill it via the portal): business details + GHL Location ID/API key/pipeline/stage. To verify the new tenant safely, set **beta mode + a test inbox you own** (Settings → Branding → Testing) *before* the first submit — since 2026-08-07 that genuinely redirects the estimate email, and refuses to submit at all if the inbox is missing rather than mailing the customer (see the `submit-estimate` note above). Belt and braces: still submit with a contact email you control, then delete the artifact design and clean up the GHL-side estimate. **Turn beta mode back off before handing the tenant over** — while it is on, *every* estimate goes to the test inbox and their real customers receive nothing.
 6. Send the owner: `https://<site>/portal.html` + credentials (tell them to use "Forgot password" to set their own) and their public designer link `https://<site>/?client=<client_id>`.
 
+**How a PAID ADD-ON is gated (one rule, 2026-08-08).** The billing gate above is the *base*
+gate — no Simple Layout, no portal. Individual paid features are gated separately and all the
+same way, modelled on scheduling:
+
+- `featureOn(key)` in `portal.html` is the ONLY reader of `entitlement.features`. It is
+  `isOperator || (!viewing && !!entitlement && !!entitlement.features[key])` — operators are
+  never gated (the entitlement loaded in the portal is the OPERATOR's, not the viewed
+  tenant's), and a null entitlement means *still loading*, never *off*, or every page load
+  would flash an upgrade card at a paying customer. `schedUnlocked` is now just
+  `featureOn("schedule_builds")`.
+- The nav tab **stays visible and clickable**. Clicking renders `<ComingSoon>` with a `cta`
+  that deep-links to `navigate("settings", "billing")` — the **billing sub-tab** specifically,
+  because `navigate("settings")` alone lands on the Structures catalog editor. The real
+  component never mounts, so no data is fetched.
+- `ComingSoon` takes **`available`** separately from `cta`. Only owners/admins get a `cta`, so
+  deriving "has this shipped?" from the button told a sales rep a *live* feature was "Coming
+  soon" and that we were still building it — which they would repeat to a customer. Pass
+  `available` for anything that has actually shipped.
+- ⚠️ **QuickBooks is mounted TWICE** — the top-level tab and Settings → QuickBooks. Both are
+  gated; gating only the tab leaves `/portal/settings/quickbooks` open, and that is a link
+  people have.
+- **PAY-ONLY set** (`portal-billing`'s `PAID_ONLY_FEATURES`): `schedule_builds` and, since
+  2026-08-08, `quickbooks_sync`. Everything else is granted free to `exempt` and free-period
+  tenants by the blanket, so a gate on a non-pay-only feature is decorative — every tenant
+  predating the billing gate is exempt. QuickBooks had been **sold but never enforced** since
+  migration 092: the tab checked `canAdmin` only, so any admin used it free and buying it
+  changed nothing. Before flipping it, exactly one tenant had a live QuickBooks connection
+  (`structure-studio`, CSM Synergy's own), so no builder lost a working integration.
+- **Rent to Own and Reports are part of Base** (Carolyn 2026-08-08) — deliberately NO
+  `billing_plans` rows and no `featureOn` branch. Do not "tidy up" by inventing plans for them.
+
 **The billing gate (live 2026-07-28).** A new tenant with no active *required* subscription (Simple Layout) lands on Billing instead of a working portal. Nav stays fully visible with padlocks — they can see the whole product, and clicking anything lands on the gate, which embeds the plan picker for an owner/admin so paying happens where it's explained. A **failed** payment gets a 7-day grace period (warning banner + countdown, access continues) rather than locking a paying customer out over an expired card; a **cancellation** locks immediately. The customer-facing designer link is deliberately **never** gated — a tenant's own shoppers must not see a billing wall.
 
 Two things that are easy to get wrong:
