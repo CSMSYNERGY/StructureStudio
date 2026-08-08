@@ -1866,17 +1866,25 @@ function SettingsView({ section }) {
     r.onload = () => { setLogoDataUrl(r.result); setLogoCt(f.type || "image/png"); setBrandMsg(null); };
     r.readAsDataURL(f);
   };
+  // `clearLogo` is a THIRD state, distinct from "no new file picked". save_branding only
+  // touches logo_url when the payload carries logoBase64 or logoUrl, so an ordinary save
+  // leaves the saved logo alone — which is right, and is also why there was no way to get
+  // rid of one: a logo could be replaced forever but never removed. An explicit empty
+  // `logoUrl` is the server's own clear path (see its `else if ("logoUrl" in payload)`).
+  const [clearLogo, setClearLogo] = useState(false);
   const saveBranding = async () => {
     setBrandBusy(true); setBrandMsg(null);
     const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
       accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
     if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
+    else if (clearLogo) { body.logoUrl = ""; }
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBrandBusy(false);
     if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
-    setBrandMsg({ ok: "Branding saved — your designer link now reflects it." });
+    setBrandMsg({ ok: clearLogo && !logoDataUrl ? "Branding saved — your logo was removed, so the designer shows your company initials." : "Branding saved — your designer link now reflects it." });
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
-    setLogoDataUrl(""); setLogoCt("");
+    if (clearLogo && !logoDataUrl) setCurrentLogo(null);
+    setLogoDataUrl(""); setLogoCt(""); setClearLogo(false);
   };
   // Business-logo (estimates) upload → uploads to the branding bucket and fills
   // the Logo URL field with the public URL; persisted by the normal Save action.
@@ -2157,12 +2165,30 @@ function SettingsView({ section }) {
           <span style={S.lbl}>Logo</span>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <div style={{ width: 96, height: 64, borderRadius: 8, border: "1px solid #E2E8F0", background: form.brandHeaderBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-              {(logoDataUrl || currentLogo)
+              {(logoDataUrl || (currentLogo && !clearLogo))
                 ? <img src={logoDataUrl || currentLogo} alt="logo" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
                 : <span style={{ color: "#94A3B8", fontSize: 11 }}>no logo</span>}
             </div>
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoFile} style={{ fontSize: 12 }} />
+            <input key={clearLogo ? "cleared" : "picker"} type="file" accept="image/png,image/jpeg,image/webp"
+              onChange={(e) => { setClearLogo(false); onLogoFile(e); }} style={{ fontSize: 12 }} />
+            {/* Removal is staged, not immediate: it shares the Save Branding button with the
+                rest of the card, so the preview shows what saving will do and the owner can
+                back out. Picking a file cancels a pending removal (the `key` also resets the
+                input so re-picking the same file still fires onChange). */}
+            {(logoDataUrl || (currentLogo && !clearLogo)) && (
+              <button type="button" onClick={() => { setLogoDataUrl(""); setLogoCt(""); if (currentLogo) setClearLogo(true); }}
+                style={{ ...S.btn("#FEF2F2", "#DC2626"), whiteSpace: "nowrap" }}>Remove</button>
+            )}
+            {clearLogo && !logoDataUrl && (
+              <button type="button" onClick={() => setClearLogo(false)}
+                style={{ ...S.btn("#F1F5F9", "#334155"), whiteSpace: "nowrap" }}>Undo</button>
+            )}
           </div>
+          {clearLogo && !logoDataUrl && (
+            <div style={{ fontSize: 11.5, color: "#B45309", background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "7px 11px", marginTop: 6, lineHeight: 1.45 }}>
+              Logo will be removed when you click <b>Save Branding</b> — your designer will show your company initials instead.
+            </div>
+          )}
           {/* No SVG: the upload actions in portal-settings deliberately allowlist raster
               types only (an SVG is a script-capable document, and this one is served from
               a public bucket onto the tenant's own designer page). The text used to offer
@@ -3714,7 +3740,15 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0, border: "1px solid #E2E8F0" };
   const chip = (label, bg, fg, title) => <span title={title} style={{ fontSize: 10, fontWeight: 800, color: fg, background: bg, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap", flexShrink: 0 }}>{label}</span>;
-  const star = (on, onClick) => <span onClick={onClick} title="Default the customer sees first" style={{ cursor: "pointer", color: on ? "#F59E0B" : "#CBD5E1", fontSize: 15 }}>★</span>;
+  // A button, not a clickable span: this picks what the customer sees selected first, and a
+  // span has no role, no focus stop and no Enter/Space handling — readable but not operable
+  // without a mouse. `aria-pressed` because it is a toggle within a small set, and the label
+  // is spelled out since "★" alone tells a screen reader nothing.
+  const star = (on, onClick) => (
+    <button type="button" aria-pressed={!!on} aria-label={on ? "Default the customer sees first (currently the default)" : "Make this the default the customer sees first"}
+      onClick={onClick} title="Default the customer sees first"
+      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: on ? "#F59E0B" : "#CBD5E1", fontSize: 15, lineHeight: 1 }}>★</button>
+  );
   const fldLbl = { fontSize: 12, color: "#64748B", fontWeight: 600, marginBottom: 5 };
   const dCbx = (field, label, title) => (
     <label title={title} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -8294,7 +8328,14 @@ function DriversTerritoriesCard() {
   const saveCrew = async () => {
     if (!cDraft || !cDraft.name.trim()) { setMsg({ err: "Give the crew a name." }); return; }
     setBusy(true); setMsg(null);
-    const r = await call({ action: "save_crew", id: cDraft.id, name: cDraft.name, color: cDraft.color, memberUserIds: cDraft.memberUserIds }, "Crew saved.");
+    // sortOrder + active go up on EDITS too. save_crew builds a FULL row —
+    // `sort_order: num(payload?.sortOrder) ?? 0` and `active: payload?.active !== false` —
+    // so omitting them was not "leave unchanged", it was "reset to 0" and "set active".
+    // Renaming a crew therefore knocked it to the front of the order, and editing an
+    // ARCHIVED crew silently un-archived it. The archive path already sent both; only the
+    // edit path did not. Undefined for a new crew, which is exactly when the server's
+    // defaults are the right answer.
+    const r = await call({ action: "save_crew", id: cDraft.id, name: cDraft.name, color: cDraft.color, memberUserIds: cDraft.memberUserIds, sortOrder: cDraft.sortOrder, active: cDraft.active }, "Crew saved.");
     setBusy(false); if (r) { setCDraft(null); load(); }
   };
   const archiveCrew = async (c) => {
@@ -8306,7 +8347,8 @@ function DriversTerritoriesCard() {
   const saveTerritory = async () => {
     if (!tDraft || !tDraft.name.trim()) { setMsg({ err: "Give the territory a name." }); return; }
     setBusy(true); setMsg(null);
-    const r = await call({ action: "save_territory", id: tDraft.id, name: tDraft.name, description: tDraft.description }, "Territory saved.");
+    // Same full-row overwrite as save_crew above — see that comment.
+    const r = await call({ action: "save_territory", id: tDraft.id, name: tDraft.name, description: tDraft.description, sortOrder: tDraft.sortOrder, active: tDraft.active }, "Territory saved.");
     setBusy(false); if (r) { setTDraft(null); load(); }
   };
   const archiveTerritory = async (t) => {
@@ -8354,7 +8396,7 @@ function DriversTerritoriesCard() {
                 {(c.member_user_ids || []).length ? (c.member_user_ids || []).map((u) => nameOfU[u]).filter(Boolean).join(", ") : "no linked logins"}
               </span>
               <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "4px 9px", fontSize: 11 }}
-                onClick={() => setCDraft({ id: c.id, name: c.name, color: c.color || "#3D3672", memberUserIds: c.member_user_ids || [] })}>Edit</button>
+                onClick={() => setCDraft({ id: c.id, name: c.name, color: c.color || "#3D3672", memberUserIds: c.member_user_ids || [], sortOrder: c.sort_order, active: c.active !== false })}>Edit</button>
               <button type="button" style={{ ...S.btn(c.active === false ? "#F0FDF4" : "#F1F5F9", c.active === false ? "#15803D" : "#64748B"), padding: "4px 9px", fontSize: 11 }} onClick={() => archiveCrew(c)}>{c.active === false ? "Restore" : "Archive"}</button>
             </div>
           )
@@ -8410,7 +8452,7 @@ function DriversTerritoriesCard() {
             <div key={t.id} style={{ display: "flex", gap: 10, alignItems: "center", border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", marginBottom: 7, opacity: t.active === false ? 0.55 : 1 }}>
               <span style={schedChip("#EEF2FF", "#3D3672")}>{t.name}</span>
               <span style={{ fontSize: 12.5, fontWeight: 600, color: "#334155", flex: 1 }}>{t.description || <em style={{ color: "#94A3B8" }}>no description</em>}</span>
-              <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "4px 9px", fontSize: 11 }} onClick={() => setTDraft({ id: t.id, name: t.name, description: t.description || "" })}>Edit</button>
+              <button type="button" style={{ ...S.btn("#F1F5F9", "#475569"), padding: "4px 9px", fontSize: 11 }} onClick={() => setTDraft({ id: t.id, name: t.name, description: t.description || "", sortOrder: t.sort_order, active: t.active !== false })}>Edit</button>
               <button type="button" style={{ ...S.btn(t.active === false ? "#F0FDF4" : "#F1F5F9", t.active === false ? "#15803D" : "#64748B"), padding: "4px 9px", fontSize: 11 }} onClick={() => archiveTerritory(t)}>{t.active === false ? "Restore" : "Archive"}</button>
             </div>
           )
@@ -11178,8 +11220,13 @@ function CommissionTeamInner() {
                   {m.deactivated ? <span style={{ color: "#DC2626", fontWeight: 700 }}>deactivated</span>
                     : ssRelTime(m.lastActive) || <span title="They haven't set a password yet">invite pending</span>}
                 </td>
-                {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <span onClick={() => !busy && setGrant(m, "seesAllPayouts", !m.seesAllPayouts)} style={{ cursor: "pointer" }} title="Let this person see everyone's payouts">{sw(!!m.seesAllPayouts)}</span>}</td>}
-                {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <span onClick={() => !busy && setGrant(m, "fullAccess", !m.fullAccess)} style={{ cursor: "pointer" }} title="Let this person see and edit commission rates">{sw(!!m.fullAccess)}</span>}</td>}
+                {/* Buttons with role="switch", not clickable spans. These two GRANT ACCESS to
+                    other people's pay — the last controls on the page that should be
+                    mouse-only. A span carries no role, no focus and no Enter/Space handling,
+                    so a keyboard or screen-reader user could read the state and never change
+                    it. `sw()` still draws the switch; only the element around it changed. */}
+                {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <button type="button" role="switch" aria-checked={!!m.seesAllPayouts} aria-label={`Let ${m.fullName || m.email || "this person"} see everyone's payouts`} disabled={busy} onClick={() => !busy && setGrant(m, "seesAllPayouts", !m.seesAllPayouts)} style={{ background: "none", border: "none", padding: 0, cursor: busy ? "default" : "pointer", font: "inherit", lineHeight: 0 }} title="Let this person see everyone's payouts">{sw(!!m.seesAllPayouts)}</button>}</td>}
+                {isOwner && <td style={td}>{m.role === "owner" ? <span style={{ fontSize: 11, color: "#94A3B8" }}>Always</span> : <button type="button" role="switch" aria-checked={!!m.fullAccess} aria-label={`Let ${m.fullName || m.email || "this person"} see and edit commission rates`} disabled={busy} onClick={() => !busy && setGrant(m, "fullAccess", !m.fullAccess)} style={{ background: "none", border: "none", padding: 0, cursor: busy ? "default" : "pointer", font: "inherit", lineHeight: 0 }} title="Let this person see and edit commission rates">{sw(!!m.fullAccess)}</button>}</td>}
                 <td style={{ ...td, whiteSpace: "nowrap", textAlign: "right" }}>
                   {m.role === "owner"
                     ? <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{m.isSelf ? "Own account" : "Owner"}</span>
