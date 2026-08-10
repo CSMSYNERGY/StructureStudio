@@ -8,17 +8,22 @@ Settings → Team + the sync-design-status delivered fence (deployed). Phase 5 =
 calendar + the entitlement gate (`schedUnlocked` = operator OR
 `entitlement.features.schedule_builds`) + available-now teaser CTAs.
 
-⚠️ **TWO LAUNCH SWITCHES REMAIN, deliberately human-thrown** (the billing_plans update was
-blocked by tooling permissions — correctly; it's a money switch):
-1. `update public.billing_plans set availability='available', updated_at=now()
-   where feature='schedule_builds';` — until this runs, no tenant can subscribe, so only
-   operators see the live tabs. **PAY-ONLY (Carolyn 2026-08-04: "No one gets grandfathered
-   into this"):** portal-billing's `PAID_ONLY_FEATURES` excludes `schedule_builds` from the
-   exempt/transition blankets — grandfathered, internal, and free-period tenants all need a
-   real subscription like everyone else (deployed + diff-verified same day).
-2. The What's New entry (hand-authored INSERT into release_notes; drafted in the launch
-   notes, NO pricing per CLAUDE.md) — publish together with switch 1.
-`price_visible` stays false on both plans (055 decision; presentation-only).
+**LAUNCH SWITCH 1 — ✅ THROWN.** `billing_plans.availability = 'available'` for
+`schedule_builds` (migration `094_scheduler_available`), repriced to **$195/mo · $1,950/yr**
+with `price_visible = true` — verified live 2026-08-07. The $250/mo and "price_visible stays
+false" written elsewhere in this document are the pre-launch plan, not the current state.
+**PAY-ONLY (Carolyn 2026-08-04: "No one gets grandfathered into this"):** portal-billing's
+`PAID_ONLY_FEATURES` excludes `schedule_builds` from the exempt/transition blankets —
+grandfathered, internal, and free-period tenants all need a real subscription like everyone
+else (deployed + diff-verified same day).
+
+⚠️ **LAUNCH SWITCH 2 — STILL PENDING.** The What's New entries (hand-authored INSERT into
+`release_notes`; NO pricing per CLAUDE.md). Switch 1 is live *without* it, so tenants can
+subscribe today and nothing in the product announces the feature. Drafted as migration
+`104_scheduling_release_notes.sql` — it is a publication to every tenant, so a human runs it.
+The entries publish as **status='beta'** ("On beta for testing", migration 103) and the
+Monday merge workflow flips them to Live — see CLAUDE.md's release-notes section for the
+process.
 
 ## Post-launch refinements from beta testing (2026-08-04 → 08-05)
 
@@ -39,7 +44,11 @@ The decisions below supersede parts of the original spec. Migrations 092–095.
     month, weekends on/off, **one build date per job** (dropping on a day is the
     reschedule), and exactly ONE Unscheduled tray above the calendar — it holds undated
     jobs *and* intake items, and dropping an intake item on a day creates it scheduled.
-17. **Drivers are name-first** (095): typed `display_name`, portal login optional, loads
+17. **Drivers are name-first** (095): typed `display_name`, ~~portal login optional~~
+    **— CORRECTED by migration 101 (Carolyn, 2026-08-06): every driver is a team member with
+    a login.** A driver signs in to see their loads and mark a delivery done, and per-person
+    access (100) can only attach to something you can sign in as. `display_name` survives as
+    an optional label on top of their real name. Loads
     reference the driver *profile*. Settings → Team shows drivers (and crews, and
     territories) as one-liners that expand on Edit, matching Sales Locations.
 This is the planning doc for the "Schedule Builds and Delivery" feature (billing key
@@ -320,9 +329,17 @@ accepted. The build board shows an "Unscheduled" tray and the load planner shows
 avoids clutter for tenants who ignore the feature, and matches "two independent lists …
 added deliberately".
 
-Entry points elsewhere in the portal (small additions):
-- Designs/Orders row (status ≥ accepted): **"Add to build schedule"** (hidden if a job exists; shows the job's stage chip instead).
-- Inventory row: **"Queue build"** (available, no job) / **"Add to a load"** (sold).
+Entry points elsewhere in the portal — **ORDERS ONLY** (Carolyn 2026-08-08, superseding the
+original "Designs/Orders row + Inventory row" plan, which shipped and was pulled the same
+week). "Orders is actually all SALES. Even an inventory building will need delivery so it is
+an ORDER." Designs and Inventory are **report** pages: they state status and never schedule.
+A single `Schedule` column on the Orders row, gated on the design being **invoiced** —
+SOLD = INVOICED, an accepted quote is not a sale:
+- **Lot sale** (the order's design is some unit's `sold_design_short_code`): already built,
+  so **"Schedule delivery →"** — never a build. Shows "On a load" once it has a stop.
+- **Custom build**: **"Add to build schedule"**, replaced by the job's stage chip once on
+  the board. It reaches delivery on its own via the pool after it is built.
+- Not invoiced yet: "Invoice first", no action.
 - Repair detail: **"Schedule shop work"** (build board) / **"Site visit — add to a load"**.
 
 ## Portal UI

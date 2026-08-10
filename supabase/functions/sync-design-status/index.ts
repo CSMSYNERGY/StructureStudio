@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
-import { withErrorLog } from "../_shared/logError.ts";
+import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 
 // This function exposes a single implicit action; everything it does is a read.
 // WHAT THIS FUNCTION REQUIRES (migration 100) — see _shared/access.ts.
@@ -155,7 +155,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   // 3. Load the tenant's designs for these codes (service role, tenant-scoped).
   const { data: designs, error: dErr } = await admin
     .from("designs")
-    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at")
+    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact")
     .eq("client_id", clientId)
     .in("short_code", shortCodes);
   if (dErr) return json({ error: dErr.message }, 500);
@@ -306,6 +306,71 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
       }
     }
   } catch (e) { console.warn("order total sync failed:", (e as Error)?.message); }
+
+  // 9. A lot building whose estimate has been INVOICED is sold.
+  //
+  //    This is the safety net, not the main path. `send_invoice` claims the unit the moment it
+  //    raises the invoice, so a portal-driven sale is already recorded before anyone gets here.
+  //    What this catches is an invoice raised SOMEWHERE ELSE: the tenant billed the customer
+  //    directly in GoHighLevel, or GHL reports the estimate as paid (mapEstimateStatus maps
+  //    both `invoiced` and `paid` to invoiced), or they dragged the opportunity into their
+  //    configured invoiced pipeline stage. This function is the only place that learns any of
+  //    that, and the Inventory tab already calls it — so this finishes a round trip that
+  //    existed rather than adding one.
+  //
+  //    INVOICED, NOT ACCEPTED. Carolyn 2026-08-08: "we should never be able to mark it sold.
+  //    Always needs an invoice." Claiming at `accepted` — which is what this did until
+  //    migration 105 — took a building off the market on a handshake, before anything had been
+  //    billed, and before the customer had committed to anything we could hold them to.
+  //
+  //    CLAIM ONLY, NEVER RELEASE: this promotes unsold → sold and does nothing else. A unit
+  //    already sold to a DIFFERENT design is left alone — first-committed-wins. And a unit
+  //    deliberately RELEASED from this design is skipped, because otherwise unsell_inventory
+  //    would be theatre: the design is still `invoiced`, so this would re-sell it seconds later.
+  //
+  //    Deliberately OUTSIDE the per-design loop above: the delivered fence `continue`s, so a
+  //    buyer whose estimate is already delivered would never be reached from inside it.
+  try {
+    const claimable = (designs ?? []).filter((d) =>
+      d.inventory_unit_id &&
+      STAGE_RANK[(statuses[d.short_code] ?? "") as keyof typeof STAGE_RANK] >= STAGE_RANK.invoiced
+    );
+    for (const d of claimable) {
+      const now = new Date().toISOString();
+      // The buyer's first name for the "SOLD — Dave" label. contact.name is one flat field in
+      // this product; this is the same split submit-estimate uses to title an estimate.
+      const full = String((d.contact as Record<string, unknown>)?.name ?? "").trim();
+      const firstName = full ? full.split(/\s+/)[0] || null : null;
+      // The same compare-and-swap the other two claim paths use: the `sale_state` predicate is
+      // re-evaluated against the committed row, so of two concurrent claims exactly one matches
+      // a row. `won === null` means somebody else already owns this sale, or it was released —
+      // a no-op, not an error.
+      const { data: won, error: cErr } = await admin.from("inventory_units").update({
+        sale_state: "sold",
+        sold_design_short_code: d.short_code,
+        sold_first_name: firstName,
+        sold_at: now,
+        updated_at: now,
+        // sold_by stays null on purpose: nobody clicked anything, the CRM did.
+      })
+        .eq("id", d.inventory_unit_id).eq("client_id", clientId)
+        .eq("sale_state", "unsold")
+        .or(`sale_released_from.is.null,sale_released_from.neq.${d.short_code}`)
+        .select("id, serial").maybeSingle();
+      if (cErr) {
+        // 23505 = inventory_units_one_sale_per_design: this estimate is already recorded as
+        // the buyer of another building. Real data confusion and worth a durable trace —
+        // app_errors, not the console, because this project's runtime log stream is not
+        // reliably queryable. Shapes only, never customer data.
+        await logEdgeError({
+          fn: "sync-design-status", req, clientId, code: "inventory_sale_conflict",
+          message: `auto-sale claim failed for unit ${d.inventory_unit_id}: ${(cErr as { code?: string }).code ?? ""}`,
+        });
+        continue;
+      }
+      if (won) console.log(`inventory #${won.serial} auto-sold from ${d.short_code}`);
+    }
+  } catch (e) { console.warn("inventory auto-sale failed:", (e as Error)?.message); }
 
   return json({ ok: true, statuses, synced: true, changed: updates.length });
 }));

@@ -5,6 +5,8 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
+import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
+import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -53,11 +55,11 @@ const GATES: GateTable = {
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   save_ramp_settings:             { area: "settings_options", level: "edit" },
-  // Legacy full-replace writers. The portal no longer calls these, but they are live
-  // endpoints and a live endpoint needs a gate whether or not anything drives it.
-  save_doors:   { area: "settings_options", level: "edit" },
-  save_ramps:   { area: "settings_options", level: "edit" },
-  save_windows: { area: "settings_options", level: "edit" },
+  // (save_doors / save_ramps / save_windows were here until 2026-08-07. They were legacy
+  // full-replace writers with no caller anywhere, each of which DELETED every fixture_items
+  // row of its category absent from the payload — so the endpoints, and these gates with
+  // them, were removed rather than left gated. Deleting a live endpoint means deleting its
+  // gate: the preflight cross-checks this table against the branches below.)
 
   // ── Branding, business details, lots ─────────────────────────────────────
   // `save` writes CRM credentials AND business identity/quote terms in one call, so it
@@ -103,6 +105,15 @@ const GATES: GateTable = {
   list_inventory:   { area: "inventory", level: "view" },
   save_inventory:   { area: "inventory", level: "edit" },
   update_inventory: { area: "inventory", level: "edit" },
+  // The four verbs migration 102 split out of update_inventory's old `status` field. Each is
+  // gated on the AREA, never on role === 'owner'|'admin': a hard-coded role check alongside a
+  // gate is a contradiction (see resolveTenant's note) — a granted title would pass the table
+  // and then be refused anyway, which defeats per-person access. inventory:'edit' is
+  // owner/admin by preset today; every read-only title has 'view'.
+  // Releasing a wrongly-sold building. There is deliberately no sell_inventory to match it:
+  // a sale is a consequence of an invoice or a payment, never a button (Carolyn 2026-08-08).
+  // See claimUnitSale below for the three places a sale is actually recorded.
+  unsell_inventory: { area: "inventory", level: "edit" },
   // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
   // is a Designs deletion happening under an Inventory verb, so it needs both.
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
@@ -138,9 +149,85 @@ function json(body: unknown, status = 200) {
   });
 }
 
+/**
+ * A database or storage call failed. Log the real reason server-side; tell the caller
+ * something they can act on.
+ *
+ * WHY (2026-08-07): ~40 handlers returned PostgREST's `error.message` verbatim, which is
+ * written for whoever wrote the schema — "null value in column \"label\" of relation
+ * \"colors\" violates not-null constraint" names tables, columns and constraints, and it
+ * lands on a builder's settings screen where none of that is actionable. It is also not
+ * ours to publish: the wording changes with the Postgres version.
+ *
+ * This is NOT a return to swallowing errors — the failure c38b5aa fixed. That change was
+ * about the portal hiding the reasons THIS FUNCTION writes behind supabase-js's generic
+ * "non-2xx", and every one of those authored messages ("Not signed in.", "invalid width",
+ * "That user is not in this account.") still reaches the browser untouched. What changes
+ * here is only the text we did not write. Nothing is lost either: the raw message goes to
+ * `app_errors` with the same `where` label the caller is shown, so a support question
+ * ("it says it couldn't save my colors") maps to one row.
+ *
+ * `where` completes "Couldn't …" and is the correlation key — keep it short, specific and
+ * stable, because it is both user-facing text and the thing you grep app_errors for.
+ */
+function dbFail(
+  req: Request,
+  clientId: string | null,
+  where: string,
+  // deno-lint-ignore no-explicit-any
+  err: any,
+  status = 500,
+) {
+  logEdgeError({
+    fn: "portal-settings",
+    req,
+    clientId,
+    code: err?.code ?? status,
+    message: `${where}: ${err?.message ?? "unknown database error"}`,
+    context: { where, pgCode: err?.code ?? null, details: err?.details ?? null, hint: err?.hint ?? null },
+  }).catch(() => {});
+  return json({
+    error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
+    ref: where,
+  }, status);
+}
+
 function maskId(v: string | null): string | null {
   if (!v) return null;
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
+}
+
+// Upper bound on any caller-supplied bulk array. Not a business limit — it is far above
+// the largest real catalog (the biggest tenant runs ~424 sizes) — but these actions loop
+// per element issuing DB round trips, and several DELETE whatever is absent from the list,
+// so an unbounded array is both a long-running request and a large blast radius. Only
+// import_fixtures (500) had a cap before; the rest took whatever arrived.
+const MAX_BULK_ROWS = 2000;
+const tooMany = (arr: unknown[], what: string): string | null =>
+  arr.length > MAX_BULK_ROWS ? `Too many ${what} in one request (${arr.length}; limit ${MAX_BULK_ROWS}). Split it into smaller batches.` : null;
+
+// Deliberately permissive — an "obviously not an address" check, not an RFC 5322 parser.
+// Kept byte-identical to submit-estimate's copy on purpose: this one refuses to STORE a
+// beta_email that one would refuse to SEND to, so a divergence would let a tenant save a
+// value that then blocks every submission. Change both or neither.
+const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+// Carolyn 2026-08-07: a sold display keeps its SOLD badge on the storefront for 30 days and
+// then silently falls off the list. Nothing public exists to hang that on yet, so this only
+// feeds a computed expiry on list_inventory today — but it is the ONE place the number lives,
+// so the future listing query and this agree by construction.
+const SOLD_LABEL_DAYS = 30;
+
+// The buyer's first name, for the "SOLD — Dave" label. Contact names are ONE flat field in
+// this product (there is no first/last split anywhere in storage, and contactFields[] cannot
+// gain one without breaking the designer's form and its validation), so this is the same
+// split submit-estimate already uses to title a GHL estimate. Snapshotted at the sale so the
+// label never has to join back to a customer's design row to render.
+// deno-lint-ignore no-explicit-any
+function firstNameOf(contact: any): string | null {
+  const full = String(contact?.name ?? "").trim();
+  if (!full) return null;
+  return full.split(/\s+/)[0] || null;
 }
 
 // ── floor-plans object keys ─────────────────────────────────────────────────────
@@ -315,6 +402,59 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
 
+  // ── Record that a building has been sold ────────────────────────────────────────
+  // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
+  // There is no button and no action behind this — a sale is a CONSEQUENCE, recorded in
+  // exactly three places, all server-side:
+  //
+  //   1. HERE, from send_invoice, the moment the customer's invoice is raised.
+  //   2. sync-design-status, when a design reaches `invoiced` some other way — the tenant
+  //      raised the invoice directly in GoHighLevel, or GHL reports the estimate as paid.
+  //   3. The payments_claim_inventory trigger (migration 105), when money is recorded against
+  //      the order. Payments are inserted straight from the browser under RLS, so a database
+  //      trigger is the only choke point that cannot be bypassed.
+  //
+  // CLAIM ONLY, NEVER RELEASE, and always a compare-and-swap on `sale_state = 'unsold'`: of
+  // two concurrent claims exactly one matches a row, so a building cannot be sold twice. A
+  // deliberate release (unsell_inventory) records the design it was released from, and this
+  // skips that design — otherwise releasing a wrongly-sold building would be pointless,
+  // because the buyer's design is still `invoiced` and the next sync would re-sell it.
+  //
+  // Best-effort by contract: the invoice has already gone to the customer by the time this
+  // runs, so a failure here must never fail that. It is logged, not thrown.
+  const claimUnitSale = async (unitId: string, buyerCode: string, why: string) => {
+    try {
+      const { data: buyer } = await admin.from("designs").select("contact")
+        .eq("client_id", clientId).eq("short_code", buyerCode).maybeSingle();
+      const now = new Date().toISOString();
+      const { data: won, error } = await admin.from("inventory_units").update({
+        sale_state: "sold",
+        sold_design_short_code: buyerCode,
+        sold_first_name: firstNameOf(buyer?.contact),
+        sold_at: now,
+        sold_by: userId,
+        updated_at: now,
+      })
+        .eq("id", unitId).eq("client_id", clientId)
+        .eq("sale_state", "unsold")
+        .or(`sale_released_from.is.null,sale_released_from.neq.${buyerCode}`)
+        .select("id, serial").maybeSingle();
+      if (error) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "inventory_sale_claim_failed",
+          message: `claim via ${why} failed for unit ${unitId}: ${(error as { code?: string }).code ?? ""}`,
+        });
+        return;
+      }
+      if (won) await auditStrict("portal_inventory_sold", 1, `unit=${unitId} serial=${won.serial} via=${why} buyer=${buyerCode}`);
+    } catch (e) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "inventory_sale_claim_failed",
+        message: `claim via ${why} threw for unit ${unitId}: ${(e as Error)?.message ?? ""}`,
+      });
+    }
+  };
+
   // ── The caller's own name and phone ─────────────────────────────────────────────
   // Keyed on userId from the verified session — NEVER on anything in the body — so this
   // cannot be pointed at another person's row whatever the caller sends. Any role may use
@@ -322,7 +462,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "get_profile") {
     const { data, error } = await admin
       .from("client_users").select("full_name, phone, role").eq("user_id", userId).maybeSingle();
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your profile", error);
     return json({
       fullName: data?.full_name ?? "",
       phone: data?.phone ?? "",
@@ -340,7 +480,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("client_users")
       .update({ full_name: fullName, phone: phone || null })
       .eq("user_id", userId);        // own row only
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save your name and phone", error);
     return json({ ok: true, fullName, phone });
   }
 
@@ -350,7 +490,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your settings", error);
     // Designer branding lives in client_configs (drives the public ?client= link).
     const { data: cfg } = await admin
       .from("client_configs")
@@ -410,8 +550,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   if (action === "save") {
     const updates: Record<string, unknown> = {};
-    const trimOrNull = (v: unknown) => {
-      const s = String(v ?? "").trim();
+    // Capped, because every one of these is rendered onto a customer-facing estimate or
+    // used as a credential. Uncapped, a single save could park an unbounded blob in a
+    // service-role table that submit-estimate then tries to put on a PDF. Limits are
+    // generous enough that no legitimate value is near them — quote_terms is the only
+    // long-form field and 8k is several screens of terms.
+    const trimOrNull = (v: unknown, max = 300) => {
+      const s = String(v ?? "").trim().slice(0, max);
       return s ? s : null;
     };
     // Text fields: present in body → written (empty string clears to null).
@@ -421,17 +566,61 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if ("ghlStageAcceptedId" in payload) updates.ghl_stage_accepted_id = trimOrNull(payload.ghlStageAcceptedId);
     if ("ghlStageInvoicedId" in payload) updates.ghl_stage_invoiced_id = trimOrNull(payload.ghlStageInvoicedId);
     if ("ghlStageDeliveredId" in payload) updates.ghl_stage_delivered_id = trimOrNull(payload.ghlStageDeliveredId);
-    if ("businessName" in payload) updates.business_name = trimOrNull(payload.businessName);
-    if ("businessPhone" in payload) updates.business_phone = trimOrNull(payload.businessPhone);
-    if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite);
-    if ("businessLogoUrl" in payload) updates.business_logo_url = trimOrNull(payload.businessLogoUrl);
-    if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms);
-    if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail);
+    if ("businessName" in payload) updates.business_name = trimOrNull(payload.businessName, 200);
+    if ("businessPhone" in payload) updates.business_phone = trimOrNull(payload.businessPhone, 40);
+    if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite, 300);
+    if ("businessLogoUrl" in payload) updates.business_logo_url = trimOrNull(payload.businessLogoUrl, 1000);
+    if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms, 8000);
+    if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
+
+    // Beta mode has a CONSEQUENCE now (submit-estimate redirects the estimate email to
+    // beta_email instead of the customer), so the pair is validated as a pair. Refusing the
+    // save is the only place this can be caught before a tenant believes they are protected
+    // — submit-estimate's matching guard fires at submit time, which is later and louder
+    // than it needs to be. This save is presence-based and the two fields arrive from
+    // different cards, so the check is against the MERGED state, not just the payload.
+    if ("betaMode" in payload || "betaEmail" in payload) {
+      const { data: curBeta } = await admin
+        .from("client_settings").select("beta_mode, beta_email").eq("client_id", clientId).maybeSingle();
+      const nextMode = "betaMode" in payload ? Boolean(payload.betaMode) : Boolean(curBeta?.beta_mode);
+      const nextEmail = String(
+        ("betaEmail" in payload ? updates.beta_email : curBeta?.beta_email) ?? "",
+      ).trim();
+      if (nextEmail && !isEmail(nextEmail)) {
+        return json({ error: "That test inbox is not a valid email address." }, 400);
+      }
+      if (nextMode && !nextEmail) {
+        return json({
+          error: "Beta mode needs a test inbox — that is the address estimates go to instead of your customers. Add one, or leave beta mode off.",
+        }, 400);
+      }
+    }
+    // Allowlisted, not passed through. This jsonb lands in submit-estimate's
+    // `businessDetails.address` and is rendered onto the customer's estimate, so whatever
+    // is stored here leaves the system on a branded document. The previous version wrote
+    // any object verbatim — no key list, no caps, no size limit (and `typeof [] === "object"`,
+    // so an array passed too). Same `str(v, max)` shape as save_location below, which had
+    // it right; these are the only five keys the portal sends and the only ones GHL reads.
     if ("businessAddress" in payload) {
       const a = payload.businessAddress;
-      updates.business_address = a && typeof a === "object" ? a : null;
+      if (a && typeof a === "object" && !Array.isArray(a)) {
+        const str = (v: unknown, max: number) => { const s = String(v ?? "").trim().slice(0, max); return s || null; };
+        const addr = {
+          addressLine1: str((a as any).addressLine1, 200),
+          city: str((a as any).city, 100),
+          state: str((a as any).state, 60),
+          postalCode: str((a as any).postalCode, 12),
+          countryCode: str((a as any).countryCode, 2) ?? "US",
+        };
+        // An address of nothing but a country code is not an address — store null so the
+        // estimate omits the block entirely rather than printing a stray "US".
+        const hasAny = addr.addressLine1 || addr.city || addr.state || addr.postalCode;
+        updates.business_address = hasAny ? addr : null;
+      } else {
+        updates.business_address = null;
+      }
     }
     // Write-only secret: only overwritten when a non-empty value is sent.
     if (typeof payload.ghlApiKey === "string" && payload.ghlApiKey.trim()) {
@@ -445,19 +634,42 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error: upErr } = await admin
       .from("client_settings")
       .upsert(updates, { onConflict: "client_id" });
-    if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
+    if (upErr) return dbFail(req, clientId, "save your settings", upErr);
     return json({ ok: true });
   }
 
   // Designer branding save → writes client_configs (the public ?client= link).
   // Optionally uploads a logo image (base64) to the public 'branding' bucket.
   if (action === "save_branding") {
-    const trimOrNull = (v: unknown) => { const s = String(v ?? "").trim(); return s ? s : null; };
+    const trimOrNull = (v: unknown, max = 300) => { const s = String(v ?? "").trim().slice(0, max); return s ? s : null; };
+    // These two are applied as COLOURS on the tenant's public designer page (served via the
+    // anon-callable get_config RPC), so they are the branding fields that actually reach a
+    // stylesheet — and they were the only ones accepting an arbitrary string.
+    //
+    // NOT hex-only, deliberately: header_bg legitimately holds gradients today
+    // (demo-sheds is on `linear-gradient(135deg, #1E293B 0%, #334155 100%)`), so a
+    // `^#[0-9a-fA-F]{3,8}$` check — the one save_colors uses for swatches — would reject a
+    // value already in production the next time that tenant saved. Instead this bounds the
+    // CHARACTER SET to what a colour or gradient needs and refuses the characters that turn
+    // a value into an injection: `;` (extra declarations), `{}` and `<>` (breaking out of a
+    // style block), and url()/expression() (fetches and legacy script execution).
+    const cssColorOrNull = (v: unknown): string | null | false => {
+      const s = String(v ?? "").trim();
+      if (!s) return null;
+      if (s.length > 200) return false;
+      if (!/^[#a-zA-Z0-9%.,()\s-]+$/.test(s)) return false;      // charset gate
+      if (/url\s*\(|expression\s*\(|\/\*|@import/i.test(s)) return false;
+      return s;
+    };
     const updates: Record<string, unknown> = {};
-    if ("companyName" in payload) updates.company_name = trimOrNull(payload.companyName);
-    if ("tagline" in payload)     updates.tagline      = trimOrNull(payload.tagline);
-    if ("accentColor" in payload) updates.accent_color = trimOrNull(payload.accentColor);
-    if ("headerBg" in payload)    updates.header_bg    = trimOrNull(payload.headerBg);
+    if ("companyName" in payload) updates.company_name = trimOrNull(payload.companyName, 200);
+    if ("tagline" in payload)     updates.tagline      = trimOrNull(payload.tagline, 300);
+    for (const [key, col] of [["accentColor", "accent_color"], ["headerBg", "header_bg"]] as const) {
+      if (!(key in payload)) continue;
+      const val = cssColorOrNull((payload as any)[key]);
+      if (val === false) return json({ error: `${key === "accentColor" ? "Accent color" : "Header background"} must be a color like #D97706 or a gradient — it can't contain punctuation such as ; { } < >.` }, 400);
+      updates[col] = val;
+    }
 
     if (typeof payload.logoBase64 === "string" && payload.logoBase64.trim()) {
       const raw = payload.logoBase64.replace(/^data:[^;]+;base64,/, "");
@@ -471,7 +683,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
       const path = `${clientId}/logo-${Date.now()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-      if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
+      if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
       updates.logo_url = pub.publicUrl;
     } else if ("logoUrl" in payload) {
@@ -480,7 +692,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
     if (Object.keys(updates).length === 0) return json({ error: "Nothing to save." }, 400);
     const { error: upErr } = await admin.from("client_configs").update(updates).eq("client_id", clientId);
-    if (upErr) return json({ error: `Save failed: ${upErr.message}` }, 500);
+    if (upErr) return dbFail(req, clientId, "save your branding", upErr);
     return json({ ok: true, logoUrl: updates.logo_url ?? null });
   }
 
@@ -501,7 +713,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const prefix = payload.kind === "business" ? "biz-logo" : "logo";
     const path = `${clientId}/${prefix}-${Date.now()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Logo upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -524,7 +736,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
     ]);
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes]) if (r.error) return json({ error: r.error.message }, 500);
+    // csRamp is in this list. It used to be the one query of the nine whose error was not
+    // checked, and its defaults are not neutral: `rs` would come back undefined and the
+    // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
+    // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
+    // Failing the request is right for a settings read; a half-true catalog is not.
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
@@ -538,10 +755,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // never from the body, so an owner can only ever import into their own tenant.
   if (action === "import_pricing_csv") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     try {
       const r = await importPricingRows(admin, clientId, payload.rows);
       return json({ ok: true, ...r });
-    } catch (e) { return json({ error: (e as Error).message || String(e) }, 500); }
+    } catch (e) { return dbFail(req, clientId, "import that pricing sheet", e); }
   }
 
   // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
@@ -551,12 +769,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // inferred by the upsert API. clientId is JWT-resolved, never trusted from the body.
   if (action === "save_layout_pricing") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
-    if (itemsRes.error) return json({ error: itemsRes.error.message }, 500);
+    if (itemsRes.error) return dbFail(req, clientId, "load your option list", itemsRes.error);
     const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
     const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "load your current option prices", exRes.error);
     const idByKey = new Map<string, string>();
     for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
     let saved = 0; const skipped: string[] = [];
@@ -596,7 +815,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("ghl_location_id, ghl_api_key")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (curErr) return json({ error: curErr.message }, 500);
+    if (curErr) return dbFail(req, clientId, "read your saved CRM credentials", curErr);
 
     const locationId = trim(payload.ghlLocationId) || (cur?.ghl_location_id ?? "");
     const apiKey = trim(payload.ghlApiKey) || (cur?.ghl_api_key ?? "");
@@ -622,9 +841,25 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: `Couldn't reach GoHighLevel to verify: ${(e as Error).message}` }, 502);
     }
     if (!prodOk) {
+      // An authored hint, never GoHighLevel's raw body. This used to paste 600 characters
+      // of a third party's response straight into the browser — arbitrary text we neither
+      // author nor control, on a screen a builder is looking at. The body is still captured
+      // for diagnosis, it just goes to app_errors (server-side) instead of the response.
+      // This is not a step back from c38b5aa: that change was about surfacing the reasons
+      // THIS function writes rather than swallowing them behind "non-2xx", and a sentence we
+      // wrote is more actionable to a builder than GHL's JSON either way.
       const hint = prodStatus === 401 || prodStatus === 403
         ? "The API key is wrong, expired, or not authorized for this Location ID."
-        : `GoHighLevel responded: ${prodBody}`;
+        : prodStatus === 404
+          ? "That Location ID doesn't exist on this GoHighLevel account."
+          : prodStatus >= 500
+            ? "GoHighLevel is having trouble right now — try again in a few minutes."
+            : "GoHighLevel rejected the request. Check the Location ID and API key are from the same sub-account.";
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: prodStatus,
+        message: `verify_save_ghl: GoHighLevel rejected the products probe (HTTP ${prodStatus})`,
+        context: { action: "verify_save_ghl", body: prodBody.slice(0, 600) },
+      }).catch(() => {});
       return json({ error: `Verification failed (HTTP ${prodStatus}). ${hint}` }, 400);
     }
 
@@ -649,7 +884,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if ("ghlStageInvoicedId" in payload) updates.ghl_stage_invoiced_id = trim(payload.ghlStageInvoicedId) || null;
     if ("ghlStageDeliveredId" in payload) updates.ghl_stage_delivered_id = trim(payload.ghlStageDeliveredId) || null;
     const { error: upErr } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
-    if (upErr) return json({ error: `Verified, but the save failed: ${upErr.message}` }, 500);
+    // "verified, but the save failed" is a state worth naming: the credentials the owner
+    // just typed are GOOD, so re-entering them is not the fix and they should not go hunting
+    // for a wrong key. dbFail's stock sentence would have lost that, so this one keeps its
+    // own wording while still logging through the same path.
+    if (upErr) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: upErr.code ?? 500,
+        message: `save your CRM connection: ${upErr.message}`, context: { where: "save your CRM connection" } }).catch(() => {});
+      return json({ error: 'Your CRM credentials are correct, but saving them failed. Please try again — if it keeps happening, tell CSM Synergy and mention "save your CRM connection".', ref: "save your CRM connection" }, 500);
+    }
 
     // Pricing comes from the per-tenant CSV catalog (building_sizes), not GHL products, so a
     // missing product catalog is no longer worth warning about. A missing USER still blocks
@@ -670,7 +913,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("ghl_location_id, ghl_api_key")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (curErr) return json({ error: curErr.message }, 500);
+    if (curErr) return dbFail(req, clientId, "read your saved CRM credentials", curErr);
     const locationId = cur?.ghl_location_id ?? "";
     const apiKey = cur?.ghl_api_key ?? "";
     if (!locationId || !apiKey) {
@@ -688,10 +931,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: `Couldn't reach GoHighLevel: ${(e as Error).message}` }, 502);
     }
     if (!r.ok) {
+      // Authored hint, not GoHighLevel's raw body — same reasoning as verify_save_ghl above.
       const body = (await r.text()).slice(0, 300);
       const hint = (r.status === 401 || r.status === 403)
         ? "The saved API key may be wrong or expired — re-verify the connection above."
-        : body;
+        : r.status >= 500
+          ? "GoHighLevel is having trouble right now — try Refresh again shortly."
+          : "GoHighLevel rejected the request — re-verify the connection above.";
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: r.status,
+        message: `list_ghl_pipelines: GoHighLevel rejected the pipelines fetch (HTTP ${r.status})`,
+        context: { action: "list_ghl_pipelines", body },
+      }).catch(() => {});
       return json({ error: `Couldn't load pipelines (HTTP ${r.status}). ${hint}` }, 400);
     }
     const data = await r.json().catch(() => ({}));
@@ -723,7 +974,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
       const path = `${clientId}/style-${Date.now()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
       imageUrl = pub.publicUrl;
     }
@@ -736,7 +987,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
         .select("id, key").maybeSingle();
       if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
-      if (ins.error.code !== "23505") return json({ error: ins.error.message }, 500);
+      if (ins.error.code !== "23505") return dbFail(req, clientId, "create that building style", ins.error);
       key = `${base}-${++n}`;
     }
     return json({ error: "Could not allocate a unique style key." }, 500);
@@ -750,7 +1001,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("building_styles")
       .update({ active: payload.active !== false })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "show or hide that style", error);
     return json({ ok: true });
   }
 
@@ -762,7 +1013,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("building_styles")
       .update({ show_image_on_estimate: payload.show !== false })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "update that style's estimate image", error);
     return json({ ok: true });
   }
 
@@ -782,7 +1033,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
     const path = `${clientId}/layout-${Date.now()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -803,18 +1054,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
     const path = `${clientId}/door-${Date.now()}.${ext}`;
     const up = await admin.storage.from("fixtures").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("fixtures").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
 
-  // Permanently delete one of this tenant's styles. The FK cascade removes the style's
-  // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
-  // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
-  // Irreversible — prefer set_style_active(false) to merely hide a style. Scoped to clientId
-  // so an owner can only delete their own styles. Past designs that used this style keep their
-  // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
-  // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
   // ── Delete one design, its version history, and its PDFs ────────────────────
   // Carolyn, 2026-06-24: deletions had to be done directly in Supabase. This is that control.
   //
@@ -851,7 +1095,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { data: design, error: findErr } = await admin.from("designs")
       .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-    if (findErr) return json({ error: findErr.message }, 500);
+    if (findErr) return dbFail(req, clientId, "find that design", findErr);
     if (!design) return json({ error: "Design not found (or not yours)." }, 404);
 
     const st = design.status && ["sent", "accepted", "invoiced", "delivered"].includes(design.status)
@@ -877,7 +1121,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     //    strictly better than an orphan nobody can trace.
     const { data: versions, error: verErr } = await admin.from("design_versions")
       .select("id, image_url").eq("client_id", clientId).eq("short_code", shortCode);
-    if (verErr) return json({ error: verErr.message }, 500);
+    if (verErr) return dbFail(req, clientId, "read that design's version history", verErr);
 
     // 2. Storage. Every candidate key must be one THIS design could have produced — under
     //    this tenant's prefix and carrying this design's globally-unique short_code. That
@@ -985,10 +1229,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     //    action is idempotent, so a retry finishes the job.
     const { error: verDelErr, count: versionsDeleted } = await admin.from("design_versions")
       .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
-    if (verDelErr) return json({ error: verDelErr.message }, 500);
+    if (verDelErr) return dbFail(req, clientId, "delete that design's version history", verDelErr);
     const { error: delErr, count } = await admin.from("designs")
       .delete({ count: "exact" }).eq("client_id", clientId).eq("short_code", shortCode);
-    if (delErr) return json({ error: delErr.message }, 500);
+    if (delErr) return dbFail(req, clientId, "delete that design", delErr);
     if (!count) return json({ error: "Design not found (or not yours)." }, 404);
 
     // Durable: deleting a customer's design is not something we accept losing the record of.
@@ -1024,13 +1268,22 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     });
   }
 
+  // Permanently delete one of this tenant's styles. The FK cascade removes the style's
+  // building_sizes (and their size-inclusions) and its style-specific layout_item_pricing
+  // overrides; default (style_id IS NULL) pricing, colors, and options are untouched.
+  // Irreversible — prefer set_style_active(false) to merely hide a style. Scoped to clientId
+  // so an owner can only delete their own styles. Past designs that used this style keep their
+  // saved geometry/PDF/estimate, but can no longer be re-priced (submit-estimate will report
+  // "No price is set" on resubmit), since the style/sizes are gone from the catalog.
+  // (This comment sat above delete_design until 2026-08-07 — a truncated edit had stranded
+  // it ~200 lines from the action it describes, which had none of its own.)
   if (action === "delete_style") {
     const styleId = String(payload.styleId ?? "").trim();
     if (!styleId) return json({ error: "styleId is required." }, 400);
     const { error, count } = await admin.from("building_styles")
       .delete({ count: "exact" })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true });
   }
@@ -1058,7 +1311,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
       const path = `${clientId}/style-${Date.now()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-      if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+      if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
       updates.image_url = pub.publicUrl;
     }
@@ -1067,7 +1320,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error, count } = await admin.from("building_styles")
       .update(updates, { count: "exact" })
       .eq("client_id", clientId).eq("id", styleId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
   }
@@ -1077,6 +1330,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // by (so the first id becomes the first style shown on the design page). Scoped to clientId.
   if (action === "reorder_styles") {
     if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    { const e = tooMany(payload.orderedIds, "items to reorder"); if (e) return json({ error: e }, 400); }
     let i = 0;
     for (const styleId of payload.orderedIds) {
       const sid = String(styleId ?? "").trim();
@@ -1084,7 +1338,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const { error } = await admin.from("building_styles")
         .update({ sort_order: i })
         .eq("client_id", clientId).eq("id", sid);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "reorder your styles", error);
       i++;
     }
     return json({ ok: true });
@@ -1097,9 +1351,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // never a price); rate/pricing_method are persisted here for a later paint-pricing pass.
   if (action === "save_colors") {
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
+    { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "read your current colors", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
     const keptIds = new Set<string>();
     let saved = 0; const skipped: string[] = [];
@@ -1143,182 +1398,22 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let deleted = 0;
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
-      deleted = toDelete.length;
-    }
-    return json({ ok: true, saved, deleted, skipped });
-  }
-
-  // LEGACY (2026-08-03): the portal's catalog editors moved to per-line saves (save_fixture /
-  // delete_fixture below) and spreadsheet upsert (import_fixtures) — nothing in the current
-  // portal calls save_doors/save_ramps/save_windows anymore. Kept only so an older cached
-  // portal.html can still save; do not extend these.
-  //
-  // Full-replace this tenant's DOORS (Options tab → Doors section, fixture_items). Takes the
-  // COMPLETE desired door list: rows with an id update, rows without insert, and any existing
-  // door absent from the list is deleted. Scoped to category='door' so windows/ramps (same
-  // table, later) are never touched. clientId is JWT-resolved (own tenant only). A swing/op
-  // "default" is only persisted when BOTH opposite options are allowed (else null), matching
-  // the editor. Mirrors save_colors.
-  if (action === "save_doors") {
-    if (!Array.isArray(payload.doors)) return json({ error: "doors[] required" }, 400);
-    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "door");
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
-    const keptIds = new Set<string>();
-    // "" → null (blank), otherwise a finite number, else NaN (invalid → skipped).
-    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
-    let saved = 0; const skipped: string[] = [];
-    let i = 0;
-    for (const row of payload.doors) {
-      const name = String(row?.name ?? "").trim();
-      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
-      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
-      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
-      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid height`); i++; continue; }
-      const price = numOrNull(row?.price);           // null = not-yet-priced (hidden by NULL-price contract)
-      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
-      const swingIn = row?.swingIn === true, swingOut = row?.swingOut === true;
-      const opRight = row?.opRight === true, opLeft = row?.opLeft === true;
-      const opDouble = row?.opDouble === true, opSlideUp = row?.opSlideUp === true;
-      const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
-      const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
-      const rec: Record<string, unknown> = {
-        client_id: clientId, category: "door", name,
-        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-        show_image_on_estimate: row?.showImageOnEstimate !== false,
-        width_in: w, height_in: h, price,
-        swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
-        op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
-        active: row?.active !== false,
-        archived: row?.archived === true,
-        internal_only: row?.internalOnly === true,
-        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
-        updated_at: new Date().toISOString(),
-      };
-      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
-        : await admin.from("fixture_items").insert(rec);
-      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
-      saved++; i++;
-    }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
-    let deleted = 0;
-    if (toDelete.length) {
-      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
-      deleted = toDelete.length;
-    }
-    return json({ ok: true, saved, deleted, skipped });
-  }
-
-  // Full-replace this tenant's RAMP styles (Options → Ramps, custom mode). Same shape as
-  // save_doors but category='ramp' and no swing/operation (ramps don't swing); height_in holds
-  // the ramp LENGTH. Scoped to category='ramp' so doors are never touched.
-  if (action === "save_ramps") {
-    if (!Array.isArray(payload.ramps)) return json({ error: "ramps[] required" }, 400);
-    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "ramp");
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
-    const keptIds = new Set<string>();
-    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
-    let saved = 0; const skipped: string[] = [];
-    let i = 0;
-    for (const row of payload.ramps) {
-      const name = String(row?.name ?? "").trim();
-      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
-      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
-      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
-      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid length`); i++; continue; }
-      const price = numOrNull(row?.price);
-      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
-      const rec: Record<string, unknown> = {
-        client_id: clientId, category: "ramp", name,
-        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-        show_image_on_estimate: row?.showImageOnEstimate !== false,
-        width_in: w, height_in: h, price,
-        swing_in: false, swing_out: false, swing_default: null,
-        op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
-        active: row?.active !== false,
-        archived: row?.archived === true,
-        internal_only: row?.internalOnly === true,
-        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
-        updated_at: new Date().toISOString(),
-      };
-      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
-        : await admin.from("fixture_items").insert(rec);
-      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
-      saved++; i++;
-    }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
-    let deleted = 0;
-    if (toDelete.length) {
-      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
-      deleted = toDelete.length;
-    }
-    return json({ ok: true, saved, deleted, skipped });
-  }
-
-  // save_windows — like save_ramps but category='window'; height_in holds the window HEIGHT.
-  // No swing/operation (windows don't swing). Scoped to category='window' so doors/ramps are
-  // never touched. Full-list replace (delete rows the editor dropped), matching save_doors.
-  if (action === "save_windows") {
-    if (!Array.isArray(payload.windows)) return json({ error: "windows[] required" }, 400);
-    const exRes = await admin.from("fixture_items").select("id").eq("client_id", clientId).eq("category", "window");
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
-    const keptIds = new Set<string>();
-    const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
-    let saved = 0; const skipped: string[] = [];
-    let i = 0;
-    for (const row of payload.windows) {
-      const name = String(row?.name ?? "").trim();
-      if (!name) { skipped.push(`row ${i}: blank name`); i++; continue; }
-      const w = numOrNull(row?.widthIn), h = numOrNull(row?.heightIn);
-      if (w === null || Number.isNaN(w) || (w as number) <= 0) { skipped.push(`${name}: invalid width`); i++; continue; }
-      if (h === null || Number.isNaN(h) || (h as number) <= 0) { skipped.push(`${name}: invalid height`); i++; continue; }
-      const price = numOrNull(row?.price);
-      if (Number.isNaN(price)) { skipped.push(`${name}: invalid price`); i++; continue; }
-      const rec: Record<string, unknown> = {
-        client_id: clientId, category: "window", name,
-        plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-        show_image_on_estimate: row?.showImageOnEstimate !== false,
-        width_in: w, height_in: h, price,
-        swing_in: false, swing_out: false, swing_default: null,
-        op_right: false, op_left: false, op_double: false, op_slideup: false, op_default: null,
-        active: row?.active !== false,
-        archived: row?.archived === true,
-        internal_only: row?.internalOnly === true,
-        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
-        updated_at: new Date().toISOString(),
-      };
-      if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("fixture_items").update(rec).eq("client_id", clientId).eq("id", rid))
-        : await admin.from("fixture_items").insert(rec);
-      if (res.error) { skipped.push(`${name}: ${res.error.message}`); i++; continue; }
-      saved++; i++;
-    }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
-    let deleted = 0;
-    if (toDelete.length) {
-      const del = await admin.from("fixture_items").delete().eq("client_id", clientId).in("id", toDelete);
-      if (del.error) return json({ error: del.error.message }, 500);
+      if (del.error) return dbFail(req, clientId, "remove the colors you deleted", del.error);
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
   }
 
   // ═══ Per-line fixture editing (2026-08-03) ════════════════════════════════════
-  // The catalog editors save one line at a time now. One validation source shared by
-  // save_fixture and import_fixtures, mirroring the legacy full-replace rules above exactly.
+  // The catalog editors save one line at a time. One validation source shared by
+  // save_fixture and import_fixtures.
+  //
+  // (The full-replace save_doors/save_ramps/save_windows this superseded were deleted
+  // 2026-08-07. They had no caller anywhere in the repo and were kept only for a cached
+  // portal.html window that closed at the 2026-08-03 promotion — but each one DELETED every
+  // fixture_items row of its category absent from the payload, so three unreachable
+  // bulk-delete endpoints were sitting on a live table. They had also already drifted from
+  // the rules below: the legacy copies lacked the op-exclusivity normalization.)
   // Ramps/windows force swing/op false/null; ramp height_in holds LENGTH (error wording).
   // price NULL is legal (NULL-price contract: not-yet-priced = not offered) — never coerce
   // blank to 0. Op exclusivity (Double / Slide up are standalone) is normalized HERE because
@@ -1372,7 +1467,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "save that line", error);
       // Name the three ways this can match nothing, because "Item not found." sent a builder
       // round in circles on 2026-08-05: the row can be gone, or belong to another builder,
       // or — the one nobody guesses — be filed under a different category than the tab it is
@@ -1387,7 +1482,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .order("sort_order", { ascending: false }).limit(1).maybeSingle();
     v.rec!.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
     const ins = await admin.from("fixture_items").insert(v.rec!).select("id").maybeSingle();
-    if (ins.error) return json({ error: ins.error.message }, 500);
+    if (ins.error) return dbFail(req, clientId, "add that line", ins.error);
     return json({ ok: true, id: ins.data!.id });
   }
 
@@ -1402,7 +1497,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!id) return json({ error: "That line was never saved, so there is nothing to delete — reload the page to clear it." }, 400);
     const { error, count } = await admin.from("fixture_items").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that line", error);
     // Already gone is the common case and is harmless — say so rather than implying failure.
     if (!count) return json({ error: `That item is not in ${clientId}'s catalog any more — it was probably already deleted. Reload the page.` }, 404);
     return json({ ok: true });
@@ -1414,13 +1509,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const category = String(payload?.category ?? "").trim();
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
     if (!Array.isArray(payload.orderedIds) || payload.orderedIds.length === 0) return json({ error: "orderedIds[] required" }, 400);
+    { const e = tooMany(payload.orderedIds, "items to reorder"); if (e) return json({ error: e }, 400); }
     let i = 0;
     for (const fid of payload.orderedIds) {
       const sid = String(fid ?? "").trim();
       if (!sid) continue;
       const { error } = await admin.from("fixture_items").update({ sort_order: i })
         .eq("client_id", clientId).eq("category", category).eq("id", sid);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "reorder those lines", error);
       i++;
     }
     return json({ ok: true });
@@ -1435,9 +1531,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const category = String(payload?.category ?? "").trim();
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
-    if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);
+    if (payload.rows.length > 500) return json({ error: "too many rows (max 500)" }, 400);   // stricter than MAX_BULK_ROWS on purpose
     const exRes = await admin.from("fixture_items").select("id, sort_order").eq("client_id", clientId).eq("category", category);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "read your current catalog lines", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
     let nextSort = (exRes.data ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.sort_order) || 0), -1) + 1;
     let saved = 0, added = 0; const skipped: string[] = [];
@@ -1471,7 +1567,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const archived = payload?.archived === true;
     const { error } = await admin.from("client_layout_items")
       .update({ archived }).eq("client_id", clientId).eq("item_key", key);
-    if (error) return json({ error: `Archive failed: ${error.message}` }, 500);
+    if (error) return dbFail(req, clientId, "archive that option", error);
     return json({ ok: true });
   }
 
@@ -1485,7 +1581,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const internalOnly = payload?.internalOnly === true;
     const { error } = await admin.from("client_layout_items")
       .update({ internal_only: internalOnly }).eq("client_id", clientId).eq("item_key", key);
-    if (error) return json({ error: `Save failed: ${error.message}` }, 500);
+    if (error) return dbFail(req, clientId, "update that option", error);
     return json({ ok: true });
   }
 
@@ -1510,7 +1606,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (Object.prototype.hasOwnProperty.call(p, "enabled")) updates.ramp_enabled = p.enabled === true;
     if (Object.prototype.hasOwnProperty.call(p, "imageUrl")) updates.ramp_image_url = String(p.imageUrl ?? "").trim() || null;
     const { error } = await admin.from("client_settings").upsert(updates, { onConflict: "client_id" });
-    if (error) return json({ error: `Save failed: ${error.message}` }, 500);
+    if (error) return dbFail(req, clientId, "save your ramp settings", error);
     return json({ ok: true });
   }
 
@@ -1527,7 +1623,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .eq("client_id", clientId).eq("active", true).order("sort_order").order("created_at"),
       admin.from("inventory_units").select("location_id").eq("client_id", clientId),
     ]);
-    if (locs.error) return json({ error: locs.error.message }, 500);
+    if (locs.error) return dbFail(req, clientId, "load your locations", locs.error);
     const counts: Record<string, number> = {};
     for (const u of units.data ?? []) { if (u.location_id) counts[u.location_id] = (counts[u.location_id] || 0) + 1; }
     const locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
@@ -1551,7 +1647,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Scoped by BOTH id and client_id — an id from another tenant matches nothing.
       const { error, count } = await admin.from("builder_locations").update(row, { count: "exact" })
         .eq("id", id).eq("client_id", clientId);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return dbFail(req, clientId, "save that location", error);
       if (!count) return json({ error: "Location not found." }, 404);
       return json({ ok: true, id });
     }
@@ -1559,7 +1655,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).order("sort_order", { ascending: false }).limit(1).maybeSingle();
     row.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
     const ins = await admin.from("builder_locations").insert(row).select("id").maybeSingle();
-    if (ins.error) return json({ error: ins.error.message }, 500);
+    if (ins.error) return dbFail(req, clientId, "add that location", ins.error);
     return json({ ok: true, id: ins.data!.id });
   }
 
@@ -1570,7 +1666,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // so they show "no location" rather than blocking the delete or vanishing.
     const { error, count } = await admin.from("builder_locations").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that location", error);
     if (!count) return json({ error: "Location not found." }, 404);
     return json({ ok: true });
   }
@@ -1602,7 +1698,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { error } = await admin.from("client_settings").upsert(
       { client_id: clientId, next_serial: n, updated_at: new Date().toISOString() },
       { onConflict: "client_id" });
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save your next serial number", error);
     await audit("portal_save_serial_start", 1, `next_serial=${n}`);
     return json({ ok: true, nextSerial: n });
   }
@@ -1653,7 +1749,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (imageUrl) dPatch.image_url = imageUrl;   // null never blanks an existing PDF
       const dUp = await admin.from("designs").update(dPatch)
         .eq("client_id", clientId).eq("short_code", unit.design_short_code).eq("status", "inventory");
-      if (dUp.error) return json({ error: dUp.error.message }, 500);
+      if (dUp.error) return dbFail(req, clientId, "save that building", dUp.error);
       // Version append mirrors save_design's history contract.
       const { data: vMax } = await admin.from("design_versions").select("version")
         .eq("short_code", unit.design_short_code).order("version", { ascending: false }).limit(1).maybeSingle();
@@ -1666,7 +1762,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (Object.prototype.hasOwnProperty.call(payload, "askingPriceCents")) uPatch.asking_price_cents = askingPriceCents;
       if (Object.prototype.hasOwnProperty.call(payload, "locationId")) uPatch.location_id = locationId;
       const uUp = await admin.from("inventory_units").update(uPatch).eq("id", unitId).eq("client_id", clientId);
-      if (uUp.error) return json({ error: uUp.error.message }, 500);
+      if (uUp.error) return dbFail(req, clientId, "save that inventory unit", uUp.error);
       await audit("portal_update_inventory", 1, `unit=${unitId}`);
       return json({ ok: true, unitId, shortCode: unit.design_short_code });
     }
@@ -1680,13 +1776,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
     // Serial LAST among the validations — a rejected payload must not burn a number.
     const { data: serial, error: serErr } = await admin.rpc("take_next_serial", { p_client_id: clientId });
-    if (serErr || serial == null) return json({ error: serErr?.message || "Could not assign a serial number." }, 500);
+    // `serial == null` with no error is not a database failure — take_next_serial simply
+    // returned nothing — so it keeps its own sentence rather than being folded into dbFail.
+    if (serErr) return dbFail(req, clientId, "get the next serial number", serErr);
+    if (serial == null) return json({ error: "Could not assign a serial number." }, 500);
 
     const dIns = await admin.from("designs").insert({
       short_code: shortCode, client_id: clientId, status: "inventory",
       contact: {}, ...design, image_url: imageUrl,
     });
-    if (dIns.error) return json({ error: dIns.error.message }, 500);
+    if (dIns.error) return dbFail(req, clientId, "create that building", dIns.error);
     await admin.from("design_versions").insert({
       short_code: shortCode, client_id: clientId, version: 1, contact: {},
       ...design, image_url: imageUrl,
@@ -1694,21 +1793,37 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const uIns = await admin.from("inventory_units").insert({
       client_id: clientId, serial, design_short_code: shortCode,
       location_id: locationId, asking_price_cents: askingPriceCents,
+      // Saving to Inventory IS the request. It reads `requested` until somebody puts it on
+      // the Build Schedule — that act is the approval (migration 105), so there is no flag
+      // here to fall out of step with the board.
+      sale_state: "unsold",
     }).select("id").maybeSingle();
     if (uIns.error) {
       // Don't leave an orphan master behind a failed unit insert.
       await admin.from("design_versions").delete().eq("short_code", shortCode).eq("client_id", clientId);
       await admin.from("designs").delete().eq("short_code", shortCode).eq("client_id", clientId);
-      return json({ error: uIns.error.message }, 500);
+      return dbFail(req, clientId, "create that inventory unit", uIns.error);
     }
     await audit("portal_save_inventory", 1, `unit=${uIns.data!.id} serial=${serial}`);
     return json({ ok: true, unitId: uIns.data!.id, serial, shortCode });
   }
 
-  // ── Unit field edits from the Inventory tab (price, lot, sold/available) ────
+  // ── Unit field edits from the Inventory tab (price, lot) ────────────────────
+  // The ONLY things a person edits on a building directly. Its build status comes from the
+  // Build and Delivery schedules, and its sale comes from an invoice or a payment — neither
+  // is settable here, or anywhere else by hand.
   if (action === "update_inventory") {
     const unitId = String(payload.unitId ?? "").trim();
     if (!unitId) return json({ error: "unitId is required." }, 400);
+    // Refuse the retired field LOUDLY rather than ignoring it. A browser holding a cached
+    // portal.html would otherwise send {status:"sold"}, get a 200, and not sell the
+    // building — the worst possible outcome for this particular write.
+    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
+      return json({
+        error: "A building's status can't be set by hand. It follows your Build and Delivery "
+          + "schedules, and it sells when you invoice it.",
+      }, 400);
+    }
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (Object.prototype.hasOwnProperty.call(payload, "askingPriceCents")) {
       const v = payload.askingPriceCents;
@@ -1725,17 +1840,61 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
       patch.location_id = lid;
     }
-    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
-      const st = String(payload.status ?? "");
-      if (st !== "available" && st !== "sold") return json({ error: "status must be available or sold." }, 400);
-      patch.status = st;
-      if (st === "available") patch.sold_design_short_code = null;
-    }
     const { error, count } = await admin.from("inventory_units").update(patch, { count: "exact" })
       .eq("id", unitId).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that building", error);
     if (!count) return json({ error: "Inventory unit not found." }, 404);
     await audit("portal_update_inventory", 1, `unit=${unitId}`);
+    return json({ ok: true });
+  }
+
+  // ── Release a sold building back onto the market ────────────────────────────
+  // The ONE correction path for a sale, and the only reason it exists: there is no way to void
+  // a customer invoice anywhere in this product — no action, no button, no inbound GHL
+  // webhook — so a CRM-side void is invisible to us. Without this, one mis-clicked invoice
+  // would take a building out of sellable stock permanently.
+  //
+  // It records WHICH design it was released from, and every automatic claim skips that design.
+  // Without that marker this action would be theatre: the buyer's design is still `invoiced`,
+  // so the very next sync would re-sell the building. A different estimate can still sell it,
+  // which is the real case — a re-sale after a cancelled one comes with a new estimate anyway.
+  if (action === "unsell_inventory") {
+    const unitId = String(payload.unitId ?? "").trim();
+    const reason = String(payload.reason ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    if (!reason) return json({ error: "Releasing a sold building needs a reason." }, 400);
+    const { data: unit } = await admin.from("inventory_units")
+      .select("id, serial, sale_state, sold_design_short_code")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    if (unit.sale_state !== "sold") return json({ ok: true, already: true });
+    // A delivered SALE stop means the building is standing in the customer's yard. That is
+    // history, the same way a delivered load is.
+    if (unit.sold_design_short_code) {
+      const { data: gone } = await admin.from("delivery_stops").select("id")
+        .eq("client_id", clientId).eq("inventory_unit_id", unitId)
+        .eq("design_short_code", unit.sold_design_short_code)
+        .not("delivered_at", "is", null).limit(1);
+      if (gone?.length) {
+        return json({
+          error: `Building #${unit.serial} has already been delivered to its buyer — that can't be undone here.`,
+        }, 409);
+      }
+    }
+    // inventory_units_unsold_is_clean forces every one of these to null, so a partial clear
+    // is rejected by the database rather than leaving a stale buyer the pool query and the
+    // delivered write-back would keep acting on.
+    const now = new Date().toISOString();
+    const { error } = await admin.from("inventory_units").update({
+      sale_state: "unsold", sold_design_short_code: null, sold_at: null,
+      sold_by: null, sold_first_name: null, updated_at: now,
+      // The suppression marker. Keep it OUT of the CHECK's "must be clean when unsold" set —
+      // it is a record of what happened, not sale residue.
+      sale_released_at: now, sale_released_from: unit.sold_design_short_code,
+    }).eq("id", unitId).eq("client_id", clientId).eq("sale_state", "sold");
+    if (error) return dbFail(req, clientId, "put that building back on the lot", error);
+    await auditStrict("portal_unsell_inventory", 1,
+      `unit=${unitId} serial=${unit.serial} was=${unit.sold_design_short_code} reason=${reason.slice(0, 500)}`);
     return json({ ok: true });
   }
 
@@ -1750,7 +1909,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // FK nulls out. Only the unit row goes here; the portal then calls delete_design
     // for the master (reusing its storage/version cascade unchanged).
     const { error } = await admin.from("inventory_units").delete().eq("id", unitId).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "delete that building", error);
 
     // The master design goes with it, HERE rather than in a second call from the browser.
     // Split across two requests, a failed/abandoned second call left a status='inventory'
@@ -1792,11 +1951,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "list_inventory") {
     const [unitsRes, locsRes] = await Promise.all([
       admin.from("inventory_units")
-        .select("id, serial, design_short_code, location_id, asking_price_cents, status, sold_design_short_code, created_at, updated_at")
+        .select("id, serial, design_short_code, location_id, asking_price_cents, "
+          + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at")
         .eq("client_id", clientId).order("created_at", { ascending: false }),
       admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
     ]);
-    if (unitsRes.error) return json({ error: unitsRes.error.message }, 500);
+    if (unitsRes.error) return dbFail(req, clientId, "load your inventory", unitsRes.error);
     const units = unitsRes.data ?? [];
     const locById = new Map((locsRes.data ?? []).map((l: any) => [l.id, l]));
     const codes = units.map((u: any) => u.design_short_code);
@@ -1811,7 +1971,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
           .eq("client_id", clientId).in("inventory_unit_id", unitIds).order("created_at", { ascending: false })
         : Promise.resolve({ data: [], error: null } as any),
     ]);
-    if (mastersRes.error) return json({ error: mastersRes.error.message }, 500);
+    if (mastersRes.error) return dbFail(req, clientId, "load your inventory buildings", mastersRes.error);
     // Spell out the master rows' shape. The empty-input branch above is `as any`, so
     // `mastersRes.data` is `any` and a bare `new Map(rows.map(...))` has nothing to infer
     // K/V from — it quietly becomes Map<unknown, unknown>, `.get()` returns `unknown`, and
@@ -1844,6 +2004,53 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       });
       estsByUnit.set(d.inventory_unit_id, list);
     }
+    // ── Build-stage facts for every unit, in three queries rather than three per unit ──
+    // The ladder is derived (see _shared/inventoryLifecycle.ts), so the tab needs each unit's
+    // build job, that job's stage KIND (never its tenant-editable name) and its delivery
+    // stops. Fetched in bulk for the whole tab in one round trip per table.
+    const [jobsRes, stopsRes] = await Promise.all([
+      unitIds.length
+        ? admin.from("build_jobs").select("id, inventory_unit_id, stage_id, due_date, completed_at")
+          .eq("client_id", clientId).in("inventory_unit_id", unitIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      unitIds.length
+        ? admin.from("delivery_stops")
+          .select("id, inventory_unit_id, design_short_code, delivered_at, load_id")
+          .eq("client_id", clientId).in("inventory_unit_id", unitIds)
+        : Promise.resolve({ data: [], error: null } as any),
+    ]);
+    interface JobRow {
+      id: string;
+      inventory_unit_id: string;
+      stage_id: string | null;
+      due_date: string | null;
+      completed_at: string | null;
+    }
+    interface StopRow {
+      id: string;
+      inventory_unit_id: string;
+      design_short_code: string | null;
+      delivered_at: string | null;
+      load_id: string | null;
+    }
+    const jobRows = (jobsRes.data ?? []) as JobRow[];
+    const stopRows = (stopsRes.data ?? []) as StopRow[];
+    const stageIds = [...new Set(jobRows.map((j) => j.stage_id).filter(Boolean))] as string[];
+    const { data: stageRows } = stageIds.length
+      ? await admin.from("schedule_stages").select("id, name, kind").eq("client_id", clientId).in("id", stageIds)
+      : { data: [] };
+    const stageById = new Map<string, { name: string; kind: StageKind }>(
+      ((stageRows ?? []) as { id: string; name: string; kind: StageKind }[])
+        .map((s): [string, { name: string; kind: StageKind }] => [s.id, { name: s.name, kind: s.kind }]),
+    );
+    const jobByUnit = new Map<string, JobRow>(jobRows.map((j): [string, JobRow] => [j.inventory_unit_id, j]));
+    const stopsByUnit = new Map<string, StopRow[]>();
+    for (const s of stopRows) {
+      const list = stopsByUnit.get(s.inventory_unit_id) ?? [];
+      list.push(s);
+      stopsByUnit.set(s.inventory_unit_id, list);
+    }
+
     const out = units.map((u: any) => {
       const m = masterByCode.get(u.design_short_code);
       // Annotated, not inferred: without it the `|| {}` fallback puts a bare `{}` into the
@@ -1852,11 +2059,36 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const sel: MasterSelections = (m && m.selections) || {};
       const paint: MasterPaint = (m && m.paint_colors) || {};
       const loc = u.location_id ? locById.get(u.location_id) : null;
+
+      const job = jobByUnit.get(u.id) ?? null;
+      const stage = job?.stage_id ? stageById.get(job.stage_id) ?? null : null;
+      const stops = stopsByUnit.get(u.id) ?? [];
+      // Purely a function of the schedule rows above — there is nothing stored to fold in and
+      // nothing hand-set to respect. The status this returns and the Build/Delivery boards
+      // cannot disagree, because they are the same facts read twice.
+      const lifecycle = deriveLifecycle({
+        soldDesignShortCode: u.sold_design_short_code ?? null,
+        job: job
+          ? { stageKind: stage?.kind ?? null, dueDate: job.due_date ?? null, completedAt: job.completed_at ?? null }
+          : null,
+        stops: stops.map((s) => ({ designShortCode: s.design_short_code, deliveredAt: s.delivered_at })),
+      });
+
       return {
         id: u.id, serial: u.serial, shortCode: u.design_short_code,
         locationId: u.location_id, locationName: loc?.name ?? null, locationCity: loc?.city ?? null,
-        askingPriceCents: u.asking_price_cents, status: u.status,
-        soldDesignShortCode: u.sold_design_short_code,
+        askingPriceCents: u.asking_price_cents,
+        // ── Axis 1: where it is on the build ladder ──
+        lifecycle,
+        lifecycleLabel: LIFECYCLE_LABEL[lifecycle],
+        // ── Axis 2: whether it is still for sale ──
+        saleState: u.sale_state, soldDesignShortCode: u.sold_design_short_code,
+        soldFirstName: u.sold_first_name ?? null, soldAt: u.sold_at ?? null,
+        // For the ecommerce listing Carolyn plans: a sold display keeps its SOLD badge for 30
+        // days and then falls off the list. Computed here so the 30 lives in ONE place.
+        soldLabelExpiresAt: u.sold_at
+          ? new Date(Date.parse(u.sold_at) + SOLD_LABEL_DAYS * 86400000).toISOString()
+          : null,
         style: sel.style ?? null, size: sel.size ?? null, imageUrl: m?.image_url ?? null,
         roofType: sel.roofType ?? null, roofColor: sel.roofColor ?? null,
         bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
@@ -1864,7 +2096,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         estimates: estsByUnit.get(u.id) ?? [],
       };
     });
-    return json({ ok: true, units: out, locations: locsRes.data ?? [] });
+    return json({ ok: true, units: out, locations: locsRes.data ?? [], soldLabelDays: SOLD_LABEL_DAYS });
   }
 
   // ── After a submit from "Send estimate": tie the new design to its unit ─────
@@ -1878,13 +2110,32 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
     if (unitId) {
       const { data: unit } = await admin.from("inventory_units")
-        .select("id").eq("id", unitId).eq("client_id", clientId).maybeSingle();
+        .select("id, serial, sale_state, sold_design_short_code, sold_first_name")
+        .eq("id", unitId).eq("client_id", clientId).maybeSingle();
       if (!unit) return json({ error: "Inventory unit not found." }, 404);
+      // "Once Inventory is sold it must become unavailable to sell" (Carolyn 2026-08-07),
+      // enforced HERE because this is the single door every quote goes through to become an
+      // estimate on a building. Until migration 102 this branch only checked the unit
+      // existed, so a sold building could be quoted to a second customer and both could
+      // reach accepted with nothing anywhere reporting a problem — the portal's only
+      // handling was a warning span with no action attached.
+      //
+      // Two exemptions, both deliberate:
+      //   * unitId === null is the UNTIE path ("Design a new build instead"). It must keep
+      //     working on a sold unit — it is the remedy this error points people at.
+      //   * the winning buyer re-linking their OWN design is not a second sale (a resubmit
+      //     re-runs this call with the same code).
+      if (unit.sale_state === "sold" && unit.sold_design_short_code !== shortCode) {
+        const who = unit.sold_first_name ? ` to ${unit.sold_first_name}` : "";
+        return json({
+          error: `Building #${unit.serial} is already sold${who}. Design a new build for this customer instead.`,
+        }, 409);
+      }
     }
     // Never relabel the master itself, and never touch another tenant's design.
     const { error, count } = await admin.from("designs").update({ inventory_unit_id: unitId }, { count: "exact" })
       .eq("client_id", clientId).eq("short_code", shortCode).neq("status", "inventory");
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "link that design to the building", error);
     if (!count) return json({ error: "Design not found (or it is an inventory master)." }, 404);
 
     // Stamp the NEWEST version row (migration 080) so the Designs tab can label each
@@ -1936,8 +2187,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .eq("client_id", clientId).in("short_code", codes)
         .order("version", { ascending: true }),
     ]);
-    if (dRes.error) return json({ error: dRes.error.message }, 500);
-    if (vRes.error) return json({ error: vRes.error.message }, 500);
+    if (dRes.error) return dbFail(req, clientId, "load this contact's designs", dRes.error);
+    if (vRes.error) return dbFail(req, clientId, "load this contact's design history", vRes.error);
 
     // GHL estimate events for these designs' estimates (best-effort — timeline still
     // renders from DB data if GHL is unreachable/unconfigured).
@@ -1993,18 +2244,6 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
   }
 
-  // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
-  // mutation, so the role gate above already applies). Converts the design's GHL
-  // estimate to an invoice (marking the estimate invoiced) and emails it to the
-  // customer — verified live against the LeadConnector API 2026-07-25.
-  //
-  // The convert is IRREVERSIBLE and the email is a separate call that can fail, so the
-  // whole action is serialised through the `invoice_sends` ledger (migration 052):
-  //   * the PK insert is the concurrency claim — a racing request cannot convert twice;
-  //   * a 'created' row means the invoice exists but was never emailed, so a retry
-  //     RE-SENDS the stored invoice id instead of converting again (no orphaned invoice);
-  //   * the userId the send endpoint requires is resolved BEFORE converting, so a missing
-  //     user fails fast instead of after the estimate has already been flipped.
   // ── QuickBooks Online ─────────────────────────────────────────────────────────────
   // Connection status + item-mapping grid. Deliberately its OWN select rather than a
   // widening of the "status" action's hand-enumerated list — QuickBooks state changes on
@@ -2023,7 +2262,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).eq("status", "sent")
       .is("qbo_invoice_id", null).not("qbo_error", "is", null)
       .order("updated_at", { ascending: false }).limit(50);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your pending QuickBooks pushes", error);
     return json({
       ok: true, clientId,
       pending: (data ?? []).map((r: any) => ({
@@ -2044,7 +2283,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("qbo_realm_id, qbo_company_name, qbo_connected_at, qbo_refresh_error, qbo_refresh_token_expires_at, qbo_disconnect_reason")
       .eq("client_id", clientId)
       .maybeSingle();
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "load your QuickBooks connection", error);
 
     const connected = !!data?.qbo_realm_id && !!data?.qbo_connected_at;
     const { count } = await admin
@@ -2095,12 +2334,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // `roughOpening` key. Same three-step fallback the `catalog` action above already uses.
       admin.from("layout_item_types").select("item_key, label"),
     ]);
-    if (maps.error) return json({ error: maps.error.message }, 500);
+    if (maps.error) return dbFail(req, clientId, "load your QuickBooks mappings", maps.error);
     // Checked, not `?? []`-swallowed: an empty layoutItems list is indistinguishable from a
     // tenant with none, which is exactly how the bug above stayed invisible. Same for styles —
     // a silent empty there hides every per-style building override.
-    if (styles.error) return json({ error: styles.error.message }, 500);
-    if (items.error) return json({ error: items.error.message }, 500);
+    if (styles.error) return dbFail(req, clientId, "load your building styles", styles.error);
+    if (items.error) return dbFail(req, clientId, "load your option list", items.error);
     // types is presentation-only: a failure here costs nicer labels, not correctness, so it
     // degrades to the item_key instead of failing the whole grid.
     const labelByKey: Record<string, string> = {};
@@ -2125,6 +2364,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // the table's uniqueness lives in two partial indexes, which onConflict cannot
     // infer (same documented reason as save_layout_pricing above).
     if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "mappings"); if (e) return json({ error: e }, 400); }
 
     const KINDS = new Set(["building", "paint", "roof", "door", "window", "ramp", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
 
@@ -2135,7 +2375,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       admin.from("building_styles").select("id").eq("client_id", clientId),
       admin.from("qbo_item_map").select("id, line_kind, item_key, style_id").eq("client_id", clientId),
     ]);
-    if (exRes.error) return json({ error: exRes.error.message }, 500);
+    if (exRes.error) return dbFail(req, clientId, "read your current QuickBooks mappings", exRes.error);
     const validKeys = new Set((itemsRes.data ?? []).map((i: any) => i.item_key));
     const validStyles = new Set((stylesRes.data ?? []).map((s: any) => s.id));
     const keyOf = (k: string, ik: string, sid: string | null) => `${k}|${ik}|${sid ?? ""}`;
@@ -2348,12 +2588,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // an earlier displacement is now stale and must not sit on the card explaining THIS one.
       qbo_disconnect_reason: null,
     }).eq("client_id", clientId);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "disconnect QuickBooks", error);
 
     await auditStrict("qbo_disconnect", 1, `realm kept as tombstone`);
     return json({ ok: true, clientId });
   }
 
+  // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
+  // mutation, so the role gate above already applies). Converts the design's GHL
+  // estimate to an invoice (marking the estimate invoiced) and emails it to the
+  // customer — verified live against the LeadConnector API 2026-07-25.
+  //
+  // The convert is IRREVERSIBLE and the email is a separate call that can fail, so the
+  // whole action is serialised through the `invoice_sends` ledger (migration 052):
+  //   * the PK insert is the concurrency claim — a racing request cannot convert twice;
+  //   * a 'created' row means the invoice exists but was never emailed, so a retry
+  //     RE-SENDS the stored invoice id instead of converting again (no orphaned invoice);
+  //   * the userId the send endpoint requires is resolved BEFORE converting, so a missing
+  //     user fails fast instead of after the estimate has already been flipped.
+  // (Restored here 2026-08-07: this note had been stranded ~330 lines up, above the
+  // unrelated qbo_pending action — the file's most consequential invariant documented
+  // nowhere near the code that implements it.)
   if (action === "send_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
@@ -2377,11 +2632,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
     }
 
+    // Only ghl_estimate_id is used. `contact` (the customer's name/email/phone/address) and
+    // `status` were selected and never read — status is checked against the LIVE GHL
+    // estimate further down, not this row. Dropped 2026-08-07: pulling a customer's PII
+    // into memory on the invoice path for nothing is the kind of dead read that later
+    // becomes an accidental log line.
     const { data: design, error: desErr } = await admin
       .from("designs")
-      .select("short_code, status, ghl_estimate_id, contact")
+      // inventory_unit_id is the invoice TYPE (new_build vs inventory) and nothing more —
+      // deliberately NOT re-adding contact/status here, which the 2026-08-07 trim above
+      // removed as a dead PII read on the invoice path.
+      .select("short_code, ghl_estimate_id, inventory_unit_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-    if (desErr) return json({ error: desErr.message }, 500);
+    if (desErr) return dbFail(req, clientId, "find that design", desErr);
     if (!design) return json({ error: "Design not found." }, 404);
     if (!design.ghl_estimate_id) return json({ error: "This design has no estimate yet." }, 400);
 
@@ -2389,7 +2652,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .from("client_settings")
       .select("ghl_location_id, ghl_api_key")
       .eq("client_id", clientId).maybeSingle();
-    if (curErr) return json({ error: curErr.message }, 500);
+    if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
     if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
       return json({ error: "Connect your CRM first (Settings → CRM Connection)." }, 400);
     }
@@ -2430,13 +2693,20 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       client_id: clientId, short_code: shortCode,
       ghl_estimate_id: String(design.ghl_estimate_id), status: "claimed", attempts: 1,
       sent_by_operator: operator ? operator.email : null,
+      // Carolyn 2026-08-07: "EVERY INVOICE needs a TYPE." Stamped at the claim, which is the
+      // moment the invoice is raised — a SNAPSHOT, not a lookup. Untying this design from its
+      // unit later must not retroactively change the type of an invoice that has already gone
+      // to a customer and into their books. An `inventory` invoice is also what tells the
+      // schedule to skip the build board: the building already exists, so the buyer's order
+      // must never spawn a second, new-build job.
+      invoice_type: invoiceTypeFor(design),
     });
     if (claimIns.error) {
       // 23505 = the row exists → inspect it instead of converting again.
       const { data: prior } = await admin.from("invoice_sends")
         .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-      if (!prior) return json({ error: claimIns.error.message }, 500);
+      if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
       const st = String(prior.status || "");
       if (st === "sent") {
         return json({ error: `Invoice ${prior.invoice_number ?? ""} was already sent for this design.` }, 400);
@@ -2561,6 +2831,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     await admin.from("designs")
       .update({ status: "invoiced", updated_at: nowIso() })
       .eq("client_id", clientId).eq("short_code", shortCode);
+
+    // ── 6b. If this estimate was quoted from a lot building, that building is now SOLD. ──
+    // THIS is what makes "invoice it and the row reads SOLD — Dave" true, and true AT THIS
+    // MOMENT. Before this, the sale was only noticed by sync-design-status on somebody's next
+    // page load — and it fired at `accepted`, a rung too early, so a building went off the
+    // market on a handshake rather than an invoice.
+    if (design.inventory_unit_id) {
+      await claimUnitSale(design.inventory_unit_id, shortCode, "invoice");
+    }
     // Result row closes the attempt row written before the convert. Best-effort here —
     // the money has already moved, so failing the response now would only mislead.
     if (operator) audit("operator_send_invoice_result", null, `short_code=${shortCode} invoice=${invoiceNumber ?? invoiceId}`);

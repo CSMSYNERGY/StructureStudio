@@ -2,6 +2,17 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+// The delivery address the customer already typed into the designer, plus the v1 territory
+// rule. Shared + unit-tested because a miss here is silent: it yields a stop with no
+// destination, which is the state every stop was in before add_stop started reading it.
+import { addressFrom, territoryFor } from "../_shared/contactAddress.ts";
+import {
+  deriveLifecycle,
+  type Lifecycle,
+  LIFECYCLE_LABEL,
+  LIFECYCLE_RANK,
+  type StageKind,
+} from "../_shared/inventoryLifecycle.ts";
 import type { GateTable } from "../_shared/access.ts";
 
 // Build Schedule + Delivery Schedule (Load Planner) + Repairs backend.
@@ -10,16 +21,18 @@ import type { GateTable } from "../_shared/access.ts";
 // Auth: resolveTenant — JWT → auth.getUser() → client_users; clientId is NEVER read from
 // the body (operators use targetClientId + app_operators, with can_write gating).
 //
-// Action gating (three tiers, enforced by resolveTenant):
-//   READ  (any linked role): build_board, loads, pool, list_repairs, list_drivers, repair_photos
-//   STAFF (any linked role — the shop floor keeps the board live, every move logged):
-//         move_job, add_note, mark_stop_delivered
-//   ADMIN (owner/admin; operator needs can_write): everything else.
+// Action gating: the GATES table below, enforced by resolveTenant BEFORE dispatch. (This
+// used to be three role tiers — READ/STAFF/ADMIN — which migration 100 replaced; see the
+// table's own comment for why a table beats a check per branch.)
 //
 // Invariants owned here (not the browser):
 //   * A load cannot go out/delivered while any stop's build job stage isn't kind='done' —
-//     unless an admin overrides with a required reason (audit-logged, stamped on the load,
-//     rendered as a permanent chip). Staff single-stop delivery has NO override path.
+//     unless an OWNER/ADMIN overrides with a required reason (audit-logged, stamped on the
+//     load, rendered as a permanent chip). Staff single-stop delivery has NO override path.
+//     ⚠️ That admin check is made HERE, explicitly (see mark_load_out), and must stay: the
+//     gate only requires delivery_schedule:'edit', which the DRIVER preset grants. Before
+//     migration 100 the ADMIN tier made this true for free; it no longer does, and decision
+//     11 of SCHEDULING_SCOPE.md is that crew cannot override the built-before-delivered rule.
 //   * A building physically wider than the load's max_width_ft is REJECTED — no override;
 //     the remedy is a different truck or fixed specs.
 //   * Order build jobs mint their shop serial via take_next_serial() LAST, after all
@@ -38,6 +51,13 @@ import type { GateTable } from "../_shared/access.ts";
 const GATES: GateTable = {
   // ── Build schedule ───────────────────────────────────────────────────────
   build_board:  { area: "build_schedule", level: "view" },
+  // The history line on an expanded card. A read of who did what to one job — no wider
+  // than the board itself, which already names assignees and crews.
+  job_activity: { area: "build_schedule", level: "view" },
+  // "Is this building already scheduled?" — what the Designs and Inventory rows need to
+  // decide between offering "Add to build schedule" and showing the stage it's already in.
+  // Deliberately its own tiny action rather than making those tabs fetch the whole board.
+  schedule_links: { area: "build_schedule", level: "view" },
   move_job:     { area: "build_schedule", level: "edit" },
   add_note:     { area: "build_schedule", level: "edit" },
   save_stages:  { area: "build_schedule", level: "edit" },
@@ -173,7 +193,12 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     defaultAction: "build_board",
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, payload, action, userId, audit } = r.ctx;
+  const { clientId, payload, action, userId, audit, role } = r.ctx;
+  // Owner/admin — or an operator, whose write capability resolveTenant already checked
+  // against app_operators.can_write. The ONE thing this is used for is the
+  // built-before-delivered override (decision 11): the per-area gate cannot express it,
+  // because delivery_schedule:'edit' is exactly what a Driver is meant to have.
+  const isAdminRole = role === "owner" || role === "admin" || role === "operator";
   if (r.ctx.operator) audit(`operator_schedule_${action}`).catch(() => {});
 
   // ── Shared helpers (all scoped to the resolved tenant) ─────────────────────
@@ -203,6 +228,55 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     if (error) throw error;
     if (!data) throw new Error(`${label} not found.`);
     return data;
+  };
+
+  // Where a set of inventory units are on the build ladder. The ladder is a PROJECTION of
+  // this function's own rows (see _shared/inventoryLifecycle.ts for why), gathered the same
+  // way everywhere: the unit's one build job, that job's stage KIND — never the
+  // tenant-editable stage NAME — and its delivery stops. Nothing is stored and nothing is
+  // hand-set, so this and the boards cannot disagree.
+  const lifecycleByUnit = async (unitIds: string[]) => {
+    if (!unitIds.length) return {} as Record<string, { lifecycle: Lifecycle }>;
+    const [uRes, jRes, sRes] = await Promise.all([
+      admin.from("inventory_units")
+        .select("id, sold_design_short_code")
+        .eq("client_id", clientId).in("id", unitIds),
+      admin.from("build_jobs").select("inventory_unit_id, stage_id, due_date, completed_at")
+        .eq("client_id", clientId).in("inventory_unit_id", unitIds),
+      admin.from("delivery_stops").select("inventory_unit_id, design_short_code, delivered_at")
+        .eq("client_id", clientId).in("inventory_unit_id", unitIds),
+    ]);
+    const stageIds = [...new Set((jRes.data ?? []).map((j) => j.stage_id).filter(Boolean))];
+    const { data: stageRows } = stageIds.length
+      ? await admin.from("schedule_stages").select("id, kind").eq("client_id", clientId).in("id", stageIds)
+      : { data: [] };
+    const kindById = Object.fromEntries((stageRows ?? []).map((s) => [s.id, s.kind]));
+    const jobByUnit = Object.fromEntries((jRes.data ?? []).map((j) => [j.inventory_unit_id, j]));
+    const stopsByUnit: Record<string, { designShortCode: string | null; deliveredAt: string | null }[]> = {};
+    for (const s of sRes.data ?? []) {
+      (stopsByUnit[s.inventory_unit_id] ??= []).push({
+        designShortCode: s.design_short_code ?? null,
+        deliveredAt: s.delivered_at ?? null,
+      });
+    }
+    const out: Record<string, { lifecycle: Lifecycle }> = {};
+    for (const u of uRes.data ?? []) {
+      const j = jobByUnit[u.id];
+      out[u.id] = {
+        lifecycle: deriveLifecycle({
+          soldDesignShortCode: u.sold_design_short_code ?? null,
+          job: j
+            ? {
+              stageKind: (kindById[j.stage_id] ?? null) as StageKind | null,
+              dueDate: j.due_date ?? null,
+              completedAt: j.completed_at ?? null,
+            }
+            : null,
+          stops: stopsByUnit[u.id] ?? [],
+        }),
+      };
+    }
+    return out;
   };
 
   const getStages = async () => {
@@ -251,25 +325,36 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     return data ?? [];
   };
 
-  // Stops whose linked build job is not in a kind='done' stage (the built check).
+  // Stops whose building is not built yet (the built-before-delivered check).
+  //
+  // TWO ways a stop can be unbuilt, and it used to catch only the first:
+  //   * its linked build job is not in a kind='done' stage;
+  //   * it has NO build job but its inventory unit is below `built` on the ladder. That case
+  //     sailed straight through, because the query filtered to stops with a build_job_id. It
+  //     matters more now than it did: a unit can be sold before it is finished, and the
+  //     buyer's delivery can be scheduled the same day — so "not built yet" is a live state
+  //     for a stop with no job, not a theoretical one.
   // deno-lint-ignore no-explicit-any
   const unbuiltStops = async (loadId: string): Promise<any[]> => {
-    const { data: stops, error } = await admin
-      .from("delivery_stops").select("id, stop_order, serial, customer_name, build_job_id")
-      .eq("client_id", clientId).eq("load_id", loadId).not("build_job_id", "is", null);
+    const { data: allStops, error } = await admin
+      .from("delivery_stops").select("id, stop_order, serial, customer_name, build_job_id, inventory_unit_id")
+      .eq("client_id", clientId).eq("load_id", loadId);
     if (error) throw error;
-    if (!stops?.length) return [];
+    if (!allStops?.length) return [];
+    const stops = allStops.filter((s) => s.build_job_id);
     const jobIds = stops.map((s) => s.build_job_id);
-    const { data: jobs, error: jErr } = await admin
-      .from("build_jobs").select("id, stage_id, due_date").in("id", jobIds);
+    const { data: jobs, error: jErr } = jobIds.length
+      ? await admin.from("build_jobs").select("id, stage_id, due_date").in("id", jobIds)
+      : { data: [], error: null };
     if (jErr) throw jErr;
     const stageIds = [...new Set((jobs ?? []).map((j) => j.stage_id))];
-    const { data: stages, error: sErr } = await admin
-      .from("schedule_stages").select("id, kind, name").in("id", stageIds);
+    const { data: stages, error: sErr } = stageIds.length
+      ? await admin.from("schedule_stages").select("id, kind, name").in("id", stageIds)
+      : { data: [], error: null };
     if (sErr) throw sErr;
     const kindOf = Object.fromEntries((stages ?? []).map((s) => [s.id, s]));
     const jobById = Object.fromEntries((jobs ?? []).map((j) => [j.id, j]));
-    return stops.filter((s) => {
+    const out = stops.filter((s) => {
       const j = jobById[s.build_job_id];
       return !j || kindOf[j.stage_id]?.kind !== "done";
     }).map((s) => ({
@@ -281,14 +366,38 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       buildStage: kindOf[jobById[s.build_job_id]?.stage_id]?.name ?? null,
       buildDue: jobById[s.build_job_id]?.due_date ?? null,
     }));
+
+    const jobless = allStops.filter((s) => !s.build_job_id && s.inventory_unit_id);
+    if (jobless.length) {
+      const byUnit = await lifecycleByUnit([...new Set(jobless.map((s) => s.inventory_unit_id))] as string[]);
+      for (const s of jobless) {
+        const lc = byUnit[s.inventory_unit_id]?.lifecycle;
+        if (lc && LIFECYCLE_RANK[lc] < LIFECYCLE_RANK.built) {
+          out.push({
+            stopId: s.id, stopOrder: s.stop_order, serial: s.serial,
+            customerName: s.customer_name, buildJobId: null,
+            buildStage: LIFECYCLE_LABEL[lc], buildDue: null,
+          });
+        }
+      }
+    }
+    return out;
   };
 
   const recomputeWide = async (loadId: string) => {
     const { data: stops } = await admin
       .from("delivery_stops").select("width_ft").eq("client_id", clientId).eq("load_id", loadId);
     const isWide = (stops ?? []).some((s) => Number(s.width_ft) > WIDE_FT);
-    await admin.from("delivery_loads").update({ is_wide: isWide, updated_at: new Date().toISOString() })
-      .eq("id", loadId).eq("client_id", clientId);
+    const patch: Record<string, unknown> = { is_wide: isWide, updated_at: new Date().toISOString() };
+    // The permit follows the load. Decision 7: wide-load state is COMPUTED from real
+    // dimensions, never hand-entered — so the permit requirement it implies shouldn't be
+    // hand-entered either. Only ever nudges the default: a permit already on file is never
+    // downgraded, and an operator who set it deliberately keeps their value.
+    const { data: cur } = await admin.from("delivery_loads").select("permit_status")
+      .eq("id", loadId).eq("client_id", clientId).maybeSingle();
+    if (isWide && cur?.permit_status === "not_needed") patch.permit_status = "needed";
+    if (!isWide && cur?.permit_status === "needed") patch.permit_status = "not_needed";
+    await admin.from("delivery_loads").update(patch).eq("id", loadId).eq("client_id", clientId);
     return isWide;
   };
 
@@ -331,17 +440,30 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         }]));
       }
 
-      // Unscheduled tray: sold orders / available units / open repairs with no job yet.
+      // Unscheduled tray: sold orders / APPROVED units / open repairs with no job yet.
       const haveDesign = new Set((jobs ?? []).map((j) => j.design_short_code).filter(Boolean));
       const haveUnit = new Set((jobs ?? []).map((j) => j.inventory_unit_id).filter(Boolean));
       const haveRepair = new Set((jobs ?? []).map((j) => j.repair_id).filter(Boolean));
+      // `.is("inventory_unit_id", null)` is the ROUTING RULE, not a tidy-up: an estimate
+      // quoted from a lot building must never appear here as a new build to schedule. The
+      // building already exists (or is already being built as a spec unit), so a second job
+      // would have the shop make it twice. create_job enforces the same rule server-side.
       const { data: soldDesigns } = await admin
         .from("designs").select("short_code, contact, selections, status")
-        .eq("client_id", clientId).in("status", ["accepted", "invoiced"]).is("inventory_unit_id", null)
+        // SOLD = INVOICED (Carolyn 2026-08-08) — an accepted quote is not a sale yet, and
+        // the shop never starts a build before the invoice exists. Widening this back to
+        // include "accepted" puts unsold buildings in the tray.
+        .eq("client_id", clientId).eq("status", "invoiced").is("inventory_unit_id", null)
         .limit(500);
+      // EVERY unit without a build job belongs here — this tray IS the approval step
+      // (migration 105). There is no accepted_at flag any more: a requested building sits in
+      // this tray, and dragging it onto the board is the one human decision that moves it to
+      // In Queue. Sale state is deliberately NOT filtered either: a building can be sold
+      // before it is built, and selling it does not build it — dropping sold units out of the
+      // tray would quietly stop them being made.
       const { data: units } = await admin
-        .from("inventory_units").select("id, serial, design_short_code, status")
-        .eq("client_id", clientId).eq("status", "available").limit(500);
+        .from("inventory_units").select("id, serial, design_short_code, sale_state, sold_first_name")
+        .eq("client_id", clientId).limit(500);
       // Tray items read building-first like the cards, so inventory units need their
       // master design's style+size label.
       const masterCodes = [...new Set((units ?? []).map((u) => u.design_short_code).filter(Boolean))];
@@ -362,6 +484,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         inventory: (units ?? []).filter((u) => !haveUnit.has(u.id)).map((u) => ({
           inventoryUnitId: u.id, serial: u.serial, designShortCode: u.design_short_code,
           buildingLabel: masterLabel[u.design_short_code ?? ""] ?? "",
+          // The shop needs to know a spec build is already spoken for — it is still theirs to
+          // build, but it is not stock any more.
+          sold: u.sale_state === "sold", soldFirstName: u.sold_first_name ?? null,
         })),
         repairs: (openRepairs ?? []).filter((rp) => !haveRepair.has(rp.id)).map((rp) => ({
           repairId: rp.id, repairNo: rp.repair_no, customerName: rp.customer_name,
@@ -397,10 +522,19 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         dueDate: j.due_date,
         completedAt: j.completed_at,
       }]));
+      // Where each inventory unit on these loads actually IS. The board used to hard-code
+      // "On lot — ready" for every inventory stop, which was a guess: it is true for a sold
+      // building being collected from the lot and false for one that has not been built yet.
+      // A stop whose unit is below `built` must not look ready to load.
+      const unitIds = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
+      const unitLifecycle = unitIds.length
+        ? await lifecycleByUnit(unitIds as string[])
+        : {};
       return json({
         loads: loads ?? [],
         stops: stops ?? [],
         buildByJob,
+        unitLifecycle,
         drivers: await getDrivers(),
         territories: await getTerritories(),
         team: await getTeam(),
@@ -417,38 +551,98 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // shop → lot while available, lot → customer once sold; the sale stop is the one
       // carrying the buyer's design code), and open repairs without a stop.
       const { data: stops } = await admin
-        .from("delivery_stops").select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at")
+        .from("delivery_stops").select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip")
         .eq("client_id", clientId);
       const stopJob = new Set((stops ?? []).map((s) => s.build_job_id).filter(Boolean));
       const stopRepair = new Set((stops ?? []).map((s) => s.repair_id).filter(Boolean));
+      // ALSO exclude by design code. `delivery_stops_one_per_design` is a unique index, so
+      // a design that already has a stop can never get a second one — but a stop created
+      // from a bare design code (the path for tenants who skip the build board) carries no
+      // build_job_id, so filtering on that alone left the building sitting in the pool with
+      // an "Add to load…" control that 409'd every single time it was used.
+      const stopDesign = new Set((stops ?? []).map((s) => s.design_short_code).filter(Boolean));
+
+      // Where this tenant has delivered before, so a pool row can be grouped by corridor
+      // BEFORE it becomes a stop. Same rule add_stop applies on insert — kept in step by
+      // being the same two lookups, so the group a building sits in is the territory it
+      // will actually get.
+      const terrByZip: Record<string, string> = {};
+      const terrByCity: Record<string, string> = {};
+      for (const s of stops ?? []) {
+        if (!s.territory_id) continue;
+        if (s.dest_zip && !terrByZip[s.dest_zip]) terrByZip[s.dest_zip] = s.territory_id;
+        const c = s.dest_city ? String(s.dest_city).trim().toLowerCase() : "";
+        if (c && !terrByCity[c]) terrByCity[c] = s.territory_id;
+      }
 
       const stagesAll = await getStages();
       const stageById = Object.fromEntries(stagesAll.map((s) => [s.id, s]));
       const { data: jobsAll } = await admin
         .from("build_jobs").select("*").eq("client_id", clientId).neq("source", "repair").limit(500);
-      const jobs = (jobsAll ?? []).filter((j) => !stopJob.has(j.id)).map((j) => ({
-        buildJobId: j.id, source: j.source, serial: j.serial, customerName: j.customer_name,
-        title: j.title, buildingLabel: j.building_label, widthFt: j.width_ft, lengthFt: j.length_ft,
-        designShortCode: j.design_short_code, inventoryUnitId: j.inventory_unit_id,
-        buildStage: stageById[j.stage_id]?.name ?? null,
-        buildKind: stageById[j.stage_id]?.kind ?? null,
-        dueDate: j.due_date, completedAt: j.completed_at,
-        wide: Number(j.width_ft) > WIDE_FT,
-      }));
+      const poolJobRows = (jobsAll ?? []).filter((j) =>
+        !stopJob.has(j.id) && !(j.design_short_code && stopDesign.has(j.design_short_code)));
+      // One query for every destination, not one per row.
+      const poolCodes = [...new Set(poolJobRows.map((j) => j.design_short_code).filter(Boolean))];
+      const { data: poolDesigns } = poolCodes.length
+        ? await admin.from("designs").select("short_code, contact").eq("client_id", clientId).in("short_code", poolCodes)
+        : { data: [] };
+      const contactByCode = Object.fromEntries((poolDesigns ?? []).map((d) => [d.short_code, d.contact]));
+      const jobs = poolJobRows.map((j) => {
+        const addr = addressFrom(contactByCode[j.design_short_code ?? ""]);
+        const territoryId = territoryFor(addr, terrByZip, terrByCity);
+        return {
+          buildJobId: j.id, source: j.source, serial: j.serial, customerName: j.customer_name,
+          title: j.title, buildingLabel: j.building_label, widthFt: j.width_ft, lengthFt: j.length_ft,
+          designShortCode: j.design_short_code, inventoryUnitId: j.inventory_unit_id,
+          buildStage: stageById[j.stage_id]?.name ?? null,
+          buildKind: stageById[j.stage_id]?.kind ?? null,
+          dueDate: j.due_date, completedAt: j.completed_at,
+          wide: Number(j.width_ft) > WIDE_FT,
+          destCity: addr.city, destState: addr.state, destZip: addr.zip,
+          territoryId,
+          // What the pool is SORTED by, and what the "Ready" column shows: a finished
+          // building is ready now, an unfinished one is ready on its build date.
+          readyDate: j.completed_at ? String(j.completed_at).slice(0, 10) : (j.due_date ?? null),
+        };
+      });
+      // The header has always claimed "sorted by when each building is ready" and nothing
+      // sorted it. Undated rows last — they cannot be planned around.
+      jobs.sort((a, b) => String(a.readyDate ?? "9999-12-31").localeCompare(String(b.readyDate ?? "9999-12-31")));
 
       const { data: sold } = await admin
-        .from("inventory_units").select("id, serial, design_short_code, sold_design_short_code, location_id, status")
-        .eq("client_id", clientId).eq("status", "sold").limit(500);
+        .from("inventory_units")
+        .select("id, serial, design_short_code, sold_design_short_code, sold_first_name, location_id, sale_state")
+        .eq("client_id", clientId).eq("sale_state", "sold").limit(500);
       const { data: locs } = await admin
         .from("builder_locations").select("id, name, city").eq("client_id", clientId);
       const locById = Object.fromEntries((locs ?? []).map((l) => [l.id, l]));
+      // The pool row used to label every sold unit "Sold lot building" — the same generic
+      // string for every building on the list. Read the real style+size off the unit's master
+      // design, the way the build tray already does.
+      const soldMasterCodes = [...new Set((sold ?? []).map((u) => u.design_short_code).filter(Boolean))];
+      const { data: soldMasters } = soldMasterCodes.length
+        ? await admin.from("designs").select("short_code, selections")
+          .eq("client_id", clientId).in("short_code", soldMasterCodes)
+        : { data: [] };
+      const masterLabel = Object.fromEntries(
+        (soldMasters ?? []).map((m) => [m.short_code, buildingLabelFrom(m.selections as Record<string, unknown>)]),
+      );
       // A sold unit needs its SALE delivery unless one already exists (the stop carrying
       // the buyer's design code) or the unit is actively on a load right now.
+      //
+      // The second disjunct was DEAD until migration 102: sold_design_short_code was declared
+      // but nothing ever wrote it a value, so it was always null and the test collapsed to
+      // "any undelivered stop excludes the unit". The visible symptom was that once a sold
+      // building's sale stop was marked delivered it had no undelivered stop left, matched
+      // nothing, and reappeared in "To be loaded" FOREVER. It works now because
+      // inventory_units_sold_needs_buyer makes a sold row without a buyer unrepresentable.
       const inventory = (sold ?? []).filter((u) => !(stops ?? []).some((s) =>
         s.inventory_unit_id === u.id &&
         (!s.delivered_at || (u.sold_design_short_code && s.design_short_code === u.sold_design_short_code))
       )).map((u) => ({
         inventoryUnitId: u.id, serial: u.serial, designShortCode: u.design_short_code,
+        soldFirstName: u.sold_first_name ?? null,
+        buildingLabel: masterLabel[u.design_short_code ?? ""] ?? "",
         location: locById[u.location_id ?? ""] ?? null,
       }));
 
@@ -457,9 +651,90 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500);
       const repairs = (openRepairs ?? []).filter((rp) => !stopRepair.has(rp.id));
 
+      // Whether each pooled building is actually ready to haul. A sold unit's row used to
+      // claim "On lot — ready" unconditionally, which is a guess: a unit sold before it was
+      // built is not on any lot yet.
+      const poolUnitIds = [
+        ...new Set([
+          ...inventory.map((i) => i.inventoryUnitId),
+          ...jobs.map((j) => j.inventoryUnitId).filter(Boolean),
+        ]),
+      ] as string[];
+
       // `orders` kept as an alias of `jobs` for one deploy cycle (the page may be older
       // than this function); remove after the next beta→main promotion.
-      return json({ jobs, orders: jobs, inventory, repairs, territories: await getTerritories(), drivers: await getDrivers() });
+      return json({
+        jobs, orders: jobs, inventory, repairs,
+        unitLifecycle: await lifecycleByUnit(poolUnitIds),
+        territories: await getTerritories(), drivers: await getDrivers(),
+      });
+    }
+
+    if (action === "job_activity") {
+      const job = await requireRow("build_jobs", payload?.jobId, "Job");
+      const { data: rows, error } = await admin
+        .from("schedule_activity").select("*")
+        .eq("client_id", clientId).eq("subject", "build_job").eq("subject_id", job.id)
+        .order("created_at", { ascending: false }).limit(50);
+      if (error) throw error;
+      // Stage names for the "moved to X" line, and people's names — both resolved here so
+      // the browser never has to hold a second copy of either lookup.
+      const stageIds = [...new Set((rows ?? []).flatMap((a) => [a.from_stage_id, a.to_stage_id]).filter(Boolean))];
+      const { data: stages } = stageIds.length
+        ? await admin.from("schedule_stages").select("id, name").in("id", stageIds)
+        : { data: [] };
+      const stageName = Object.fromEntries((stages ?? []).map((s) => [s.id, s.name]));
+      const team = await getTeam();
+      const nameOf = Object.fromEntries(team.map((m) => [m.userId, m.name]));
+      return json({
+        activity: (rows ?? []).map((a) => ({
+          id: a.id,
+          action: a.action,
+          detail: a.detail,
+          userName: a.user_id ? (nameOf[a.user_id] || "") : "",
+          fromStage: a.from_stage_id ? (stageName[a.from_stage_id] ?? null) : null,
+          toStage: a.to_stage_id ? (stageName[a.to_stage_id] ?? null) : null,
+          createdAt: a.created_at,
+        })),
+      });
+    }
+
+    if (action === "schedule_links") {
+      const { data: jobs, error } = await admin
+        .from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
+        .eq("client_id", clientId).limit(2000);
+      if (error) throw error;
+      const stages = await getStages();
+      const stageById = Object.fromEntries(stages.map((s) => [s.id, s]));
+      const byDesign: Record<string, unknown> = {};
+      const byUnit: Record<string, unknown> = {};
+      for (const j of jobs ?? []) {
+        const chip = {
+          jobId: j.id,
+          stage: stageById[j.stage_id]?.name ?? null,
+          kind: stageById[j.stage_id]?.kind ?? null,
+          color: stageById[j.stage_id]?.color ?? null,
+        };
+        if (j.design_short_code) byDesign[j.design_short_code] = chip;
+        if (j.inventory_unit_id) byUnit[j.inventory_unit_id] = chip;
+      }
+      // Which units already ride a load, so a row offers "Schedule delivery" only when
+      // there isn't one open already (add_stop would 409).
+      const { data: stops } = await admin
+        .from("delivery_stops").select("inventory_unit_id").eq("client_id", clientId).is("delivered_at", null);
+      const onLoad = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
+      // A LOT SALE looks like any other order on the Orders page — it has its own sale
+      // design and its own orders row — but the building already exists, so it goes
+      // straight to delivery and must never be offered a build. This map is how Orders
+      // tells the two apart: sale design code -> the unit being sold.
+      const { data: soldUnits } = await admin
+        .from("inventory_units").select("id, serial, sold_design_short_code")
+        .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null).limit(2000);
+      const saleDesigns: Record<string, unknown> = {};
+      for (const u of soldUnits ?? []) {
+        saleDesigns[u.sold_design_short_code] = { unitId: u.id, serial: u.serial, onLoad: onLoad.includes(u.id) };
+      }
+      return json({ byDesign, byUnit, unitsOnLoad: onLoad, saleDesigns });
     }
 
     if (action === "list_drivers") {
@@ -519,7 +794,11 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     if (action === "mark_stop_delivered") {
       const stop = await requireRow("delivery_stops", payload?.stopId, "Stop");
       if (stop.delivered_at) return json({ ok: true, already: true });
-      if (stop.build_job_id) {
+      // No longer gated on build_job_id: unbuiltStops now also catches a jobless stop whose
+      // inventory unit is below `built`, which is reachable the moment a spec build is sold
+      // before it is finished. An unbuilt building must not be markable as delivered whether
+      // or not somebody made a build card for it.
+      if (stop.build_job_id || stop.inventory_unit_id) {
         const unbuilt = await unbuiltStops(stop.load_id);
         if (unbuilt.some((u) => u.stopId === stop.id)) {
           // Staff has no override path — that's an admin call (decision 11).
@@ -613,10 +892,31 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const code = str(payload?.designShortCode);
         if (!code) return json({ error: "designShortCode is required for an order job." }, 400);
         const { data: design, error } = await admin
-          .from("designs").select("short_code, contact, selections, paint_colors, status")
+          .from("designs").select("short_code, contact, selections, paint_colors, status, inventory_unit_id")
           .eq("client_id", clientId).eq("short_code", code).maybeSingle();
         if (error) throw error;
         if (!design) return json({ error: "That design isn't in your account." }, 404);
+        // SOLD = INVOICED (Carolyn 2026-08-08): the shop schedules sold buildings, and a
+        // sale exists when the invoice does — an accepted quote can still be walked away
+        // from. Enforced here, not just in the tray/Orders gating, because create_job is
+        // callable directly. `delivered` passes too: re-scheduling an already-delivered
+        // building (warranty rebuild) is deliberate, not an accident this guard should stop.
+        if (design.status !== "invoiced" && design.status !== "delivered") {
+          return json({ error: "That building isn't invoiced yet — send the invoice first, then schedule the build from Orders." }, 409);
+        }
+        // THE ROUTING RULE (Carolyn 2026-08-07): an INVENTORY sale skips the build schedule.
+        // The building is already on a lot, or already being built as a spec unit under its
+        // OWN source='inventory' job — either way the buyer's order must not create a second
+        // one, or the shop builds the same building twice. The Unscheduled tray already
+        // filters these out; this is the rule the tray was standing in for.
+        if (design.inventory_unit_id) {
+          const { data: u } = await admin.from("inventory_units").select("serial")
+            .eq("id", design.inventory_unit_id).eq("client_id", clientId).maybeSingle();
+          return json({
+            error: `That estimate is for building #${u?.serial ?? "?"}, which is already on your lot or in the `
+              + `build queue. Schedule its delivery instead.`,
+          }, 409);
+        }
         row.design_short_code = design.short_code;
         row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
         row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
@@ -627,6 +927,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         mintSerial = true;
       } else if (source === "inventory") {
         const unit = await requireRow("inventory_units", payload?.inventoryUnitId, "Inventory unit");
+        // Creating this job IS the approval (migration 105) — a requested building becomes
+        // In Queue right here, by a person's decision on the production page. Deliberately NO
+        // sale check: a unit sold before it was finished still has to be finished.
         row.inventory_unit_id = unit.id;
         row.serial = unit.serial;
         row.design_short_code = null; // the unit's master design is reachable via the unit
@@ -703,6 +1006,20 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .eq("id", job.id).eq("client_id", clientId);
       if (error) throw error;
       await act("build_job", job.id, "completed", { from: job.stage_id, to: done.id });
+      // Finishing the last shop job for a repair PROMPTS closing the repair — it does not
+      // close it (SCHEDULING_SCOPE.md: "prompts, not forces"). The repair's own status is
+      // the customer-facing truth and may still be waiting on a part or a payment.
+      if (job.repair_id) {
+        const repair = await admin.from("repairs").select("id, repair_no, status")
+          .eq("client_id", clientId).eq("id", job.repair_id).maybeSingle();
+        const rp = repair.data;
+        if (rp && rp.status !== "completed" && rp.status !== "declined") {
+          const { data: others } = await admin.from("build_jobs").select("id, completed_at")
+            .eq("client_id", clientId).eq("repair_id", job.repair_id).neq("id", job.id);
+          const anyOpen = (others ?? []).some((o) => !o.completed_at);
+          if (!anyOpen) return json({ ok: true, repairPrompt: { repairId: rp.id, repairNo: rp.repair_no } });
+        }
+      }
       return json({ ok: true });
     }
 
@@ -917,6 +1234,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
             const tooWide = (stops ?? []).find((s) => Number(s.width_ft) > Number(prof.max_width_ft));
             if (tooWide) return json({ error: `Building #${tooWide.serial ?? "?"} is ${tooWide.width_ft}' wide — too wide for that truck (max ${prof.max_width_ft}').` }, 400);
           }
+          // ...and they must be able to run wide at all if anything on the load is wide.
+          if (prof.wide_load_capable === false) {
+            const { data: stops } = await admin.from("delivery_stops").select("width_ft, serial")
+              .eq("client_id", clientId).eq("load_id", load.id);
+            const wide = (stops ?? []).find((s) => Number(s.width_ft) > WIDE_FT);
+            if (wide) return json({ error: `Building #${wide.serial ?? "?"} is a wide load and ${prof.display_name || "that driver"} isn't set up to run wide.` }, 400);
+          }
           patch.driver_id = prof.id;
           patch.driver_user_id = prof.user_id;
           patch.deck_length_ft = prof.deck_length_ft;
@@ -995,7 +1319,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         // The SALE delivery of a sold unit carries the buyer's design code — that's how
         // the pool knows the sale is scheduled, and how delivered writes back to the
         // buyer's estimate.
-        if (unit.status === "sold" && unit.sold_design_short_code) {
+        if (unit.sale_state === "sold" && unit.sold_design_short_code) {
           row.design_short_code = unit.sold_design_short_code;
           if (!row.customer_name) {
             const { data: buyer } = await admin.from("designs").select("contact")
@@ -1023,6 +1347,69 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         return json({ error: "A manual stop needs a customer or description." }, 400);
       }
 
+      // A sold unit's delivery IS the sale delivery, HOWEVER the stop was created. The
+      // build-job path above copies job.design_short_code, which is hard-coded null for an
+      // inventory job — so without this the sale stop is indistinguishable from the shop → lot
+      // haul, and two things break silently: writeBackDelivered returns early on
+      // `!stop.design_short_code` so the buyer's estimate is never marked delivered, and the
+      // lifecycle derivation counts the sale stop as a haul and reports a building standing in
+      // the customer's yard as "Available to sell at Location".
+      //
+      // MUST run before the destination defaulting below, which keys on design_short_code to
+      // find the address the customer typed: without the buyer's code here, a sold building's
+      // delivery would be created with no destination at all.
+      if (row.inventory_unit_id && !row.design_short_code) {
+        const { data: u } = await admin.from("inventory_units")
+          .select("sale_state, sold_design_short_code")
+          .eq("id", row.inventory_unit_id).eq("client_id", clientId).maybeSingle();
+        if (u?.sale_state === "sold" && u.sold_design_short_code) {
+          row.design_short_code = u.sold_design_short_code;
+          if (!row.customer_name) {
+            const { data: buyer } = await admin.from("designs").select("contact")
+              .eq("client_id", clientId).eq("short_code", u.sold_design_short_code).maybeSingle();
+            row.customer_name = str((buyer?.contact as Record<string, unknown>)?.name);
+            row.customer_phone = row.customer_phone ?? str((buyer?.contact as Record<string, unknown>)?.phone);
+          }
+        }
+      }
+
+      // ── Destination + territory, defaulted rather than demanded ────────────────
+      // Done once here rather than in each source branch, so the build-job path (which is
+      // how nearly every stop is actually created) gets it too. Anything the caller sent
+      // wins; this only fills blanks.
+      if (!row.dest_street && !row.dest_city && row.design_short_code) {
+        const { data: d } = await admin.from("designs").select("contact")
+          .eq("client_id", clientId).eq("short_code", row.design_short_code).maybeSingle();
+        const addr = addressFrom(d?.contact);
+        row.dest_street = addr.street;
+        row.dest_city = addr.city;
+        row.dest_state = addr.state;
+        row.dest_zip = addr.zip;
+      }
+      // Territory defaults from where this tenant has already delivered — "same city or zip
+      // as a previous stop" is the v1 rule in SCHEDULING_SCOPE.md (geocoding comes later).
+      // Without this nobody ever sets one by hand and the pool cannot group by corridor.
+      // Uses territoryFor() so the group the pool SHOWED a building in is the territory the
+      // stop actually gets — two copies of this rule would drift into a lie.
+      if (!row.territory_id && (row.dest_city || row.dest_zip)) {
+        const { data: prior } = await admin.from("delivery_stops")
+          .select("territory_id, dest_city, dest_zip")
+          .eq("client_id", clientId).not("territory_id", "is", null)
+          .order("created_at", { ascending: false }).limit(200);
+        const byZip: Record<string, string> = {};
+        const byCity: Record<string, string> = {};
+        for (const p of prior ?? []) {
+          if (p.dest_zip && !byZip[p.dest_zip]) byZip[p.dest_zip] = p.territory_id;
+          const c = p.dest_city ? String(p.dest_city).trim().toLowerCase() : "";
+          if (c && !byCity[c]) byCity[c] = p.territory_id;
+        }
+        const guess = territoryFor(
+          { street: null, city: (row.dest_city as string) ?? null, state: null, zip: (row.dest_zip as string) ?? null },
+          byZip, byCity,
+        );
+        if (guess) row.territory_id = guess;
+      }
+
       // A unit rides at most one load AT A TIME (migration 092 dropped the per-unit unique
       // index so a unit can be hauled shop → lot and later delivered to its buyer — but
       // never be on two open loads at once).
@@ -1036,6 +1423,16 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // The one rule with NO override: it physically doesn't fit on the truck.
       if (row.width_ft != null && load.max_width_ft != null && Number(row.width_ft) > Number(load.max_width_ft)) {
         return json({ error: `That building is ${row.width_ft}' wide — too wide for this truck (max ${load.max_width_ft}'). Assign a different driver or fix the truck specs in Settings → Team.` }, 400);
+      }
+      // Same family of rule, and the reason wide_load_capable exists: a driver who can't
+      // run wide can't take a wide building, whatever their deck says.
+      if (row.width_ft != null && Number(row.width_ft) > WIDE_FT && (load.driver_id || load.driver_user_id)) {
+        const { data: prof } = load.driver_id
+          ? await admin.from("driver_profiles").select("display_name, wide_load_capable").eq("id", load.driver_id).eq("client_id", clientId).maybeSingle()
+          : await admin.from("driver_profiles").select("display_name, wide_load_capable").eq("user_id", load.driver_user_id).eq("client_id", clientId).maybeSingle();
+        if (prof && prof.wide_load_capable === false) {
+          return json({ error: `That building is ${row.width_ft}' wide, and ${prof.display_name || "this driver"} isn't set up to run wide loads. Assign a different driver, or update their truck in Settings → Team.` }, 400);
+        }
       }
 
       const { count } = await admin.from("delivery_stops")
@@ -1121,6 +1518,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
             unbuilt,
           }, 409);
         }
+        // Decision 11: crew cannot override. Checked here rather than in GATES because the
+        // gate for this action is delivery_schedule:'edit' — precisely what the Driver
+        // preset grants, so the table cannot separate "may dispatch" from "may overrule the
+        // built check". mark_stop_delivered refuses staff the same way (see above).
+        if (!isAdminRole) {
+          return json({ error: "Only an owner or admin can send out a load that isn't built." }, 403);
+        }
         const reason = str(payload?.overrideReason);
         if (!reason) return json({ error: "An override needs a reason." }, 400);
         // Attributability before the irreversible-ish act: the activity row must land.
@@ -1189,6 +1593,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         description,
         serial: num(payload?.serial),
         design_short_code: str(payload?.designShortCode),
+        // `buildingRef` is what intake actually sends: one field the shop can type either a
+        // serial or a design code into. Resolved below — a repair logged against a code used
+        // to store nothing linkable, so service history (which matches on serial) missed it.
         quote_cents: num(payload?.quoteCents),
         notes: str(payload?.notes),
         created_by: userId,
@@ -1197,6 +1604,31 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const unit = await requireRow("inventory_units", payload.inventoryUnitId, "Inventory unit");
         row.inventory_unit_id = unit.id;
         row.serial = row.serial ?? unit.serial;
+      }
+      // One field, either kind of reference — "not one of ours" stays legal, so an
+      // unresolvable value is kept as typed rather than rejected: builders repair
+      // competitors' sheds and must still be able to log the job.
+      const ref = str(payload?.buildingRef);
+      if (ref) {
+        if (/^SS-/i.test(ref)) {
+          const code = ref.toUpperCase();
+          const { data: design } = await admin.from("designs").select("short_code")
+            .eq("client_id", clientId).eq("short_code", code).maybeSingle();
+          if (design) row.design_short_code = design.short_code;
+        } else {
+          const n = Number(ref.replace(/[^0-9]/g, ""));
+          if (Number.isFinite(n) && n > 0) {
+            row.serial = n;
+            // A serial belongs to an inventory unit; the unit knows its design, which is
+            // what ties the repair to the actual building.
+            const { data: unit } = await admin.from("inventory_units")
+              .select("id, design_short_code").eq("client_id", clientId).eq("serial", n).maybeSingle();
+            if (unit) {
+              row.inventory_unit_id = row.inventory_unit_id ?? unit.id;
+              row.design_short_code = row.design_short_code ?? unit.design_short_code;
+            }
+          }
+        }
       }
       const { data: repair, error } = await admin.from("repairs").insert(row).select("*").single();
       if (error) throw error;

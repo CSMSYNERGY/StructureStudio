@@ -59,13 +59,14 @@ The browser **never reads/writes the `designs` table directly** (legacy direct a
 Tables: `designs` (per-design row, `client_id` column), `client_settings` (**service-role only** — GHL creds + business identity + quote terms + beta switch + `show_pricing`; never browser-readable), `client_configs` (per-tenant white-label config; read via the `get_config` RPC with owner-scoped RLS — **not** anon public-read after cutover), `client_users` (auth user → tenant mapping), and the per-tenant **catalog/pricing** tables `building_styles` / `building_sizes` / `colors` / `layout_item_pricing` (private-by-default, owner-scoped RLS; the public designer reads them via the `get_catalog` RPC, which **omits all price fields unless the tenant's `show_pricing` is on**). NULL-base-price contract: `base_price IS NULL` = not-yet-priced ⇒ the size is `active=false` and not offered; `0` = included/free; `>0` = priced.
 
 Edge functions (sources mirrored in `supabase/functions/`, deployed via Supabase MCP — **redeploy after editing the checked-in source**):
-- `submit-estimate` — creates/updates the GHL contact, opportunity, estimate, and emails it. Business identity (name/phone/website/address/logo/terms) comes from `client_settings.business_*`. ⚠️ **`beta_mode` does NOT redirect the estimate email, and has not since the QA-inbox redirect was removed** — the estimate always goes to the submitted contact, in every environment, beta included (`recipients = [contact?.email]`). `beta_mode` / request `betaMode` survive as **telemetry only**, and `beta_email` is selected but never used (a dead read). This paragraph previously claimed the redirect existed; believing it is dangerous, because it means submitting a verification estimate with a real lead's details **emails that real customer a live branded quote**. To test safely, submit with a contact address you control, or use a test tenant. Restoring a real redirect would need a verified *deliverable* QA inbox — the previous one pointed at a non-deliverable address and estimates silently failed to send, which is why it was removed.
-- `portal-settings` — owner-facing settings read/save. JWT-authenticated: `verify_jwt` alone is NOT auth (the anon key passes the gateway) — the function resolves a real user via `auth.getUser()` and maps it through `client_users`; `client_id` is never trusted from the body. The GHL API key is write-only (masked status, absent/empty never blanks it).
+- `submit-estimate` — creates/updates the GHL contact, opportunity, estimate, and emails it. Business identity (name/phone/website/address/logo/terms) comes from `client_settings.business_*`. **The beta-mode redirect was restored 2026-08-07** (Carolyn's call) after an audit found the portal's Testing card had been promising it while it did nothing — which meant a verification submit carrying a real lead's details emailed that customer a live branded quote. Two rules make it safe this time, and both are load-bearing: (1) the recipient is the **tenant's own** `beta_email`, set by them in Settings → Branding → Testing and validated as an email in three places (portal UI, `portal-settings` save, `submit-estimate` pre-flight) — not one hard-coded global address, which is how the first version died (it pointed somewhere non-deliverable and estimates silently failed to send); (2) beta mode with **no usable test inbox refuses the submission** — before any GHL contact/opportunity/estimate is created — rather than falling back to the customer. A silent fallback is the exact hazard, and a silent no-send is the exact prior failure. ⚠️ **Only the tenant's `client_settings.beta_mode` redirects.** The request's `betaMode` flag is derived from the deploy host (`beta.*`, `beta--*`) and stays **telemetry only** — nobody opts into a hostname, so coupling it would divert every beta-host estimate and hard-fail every tenant without a test inbox. The response reports `betaRedirected` / `betaRedirectedTo` so a tester can see where it actually went. On a tenant with beta mode **off**, the estimate still goes to the submitted contact — submit with an address you control.
+- `portal-settings` — owner-facing settings read/save. JWT-authenticated: `verify_jwt` alone is NOT auth (the anon key passes the gateway) — the function resolves a real user via `auth.getUser()` and maps it through `client_users`; `client_id` is never trusted from the body. The GHL API key is write-only (masked status, absent/empty never blanks it). **Error contract (2026-08-08, `dbFail`):** a database/storage failure returns an authored sentence + a `ref` label ("save that style") and logs the raw Postgres message — with `pgCode`/`details`/`hint`, the fields that can carry row values — to `app_errors` under that same label, so a support report maps to one log row. Messages the function itself authors still go to the browser verbatim (that half is c38b5aa and must not regress); only text we didn't write is redirected — this includes third-party response bodies (GHL's raw body was once pasted 600 chars at a time into the settings screen). Validation posture from the 2026-08-07 audit: `business_address` is key-allowlisted with per-field caps (it renders on the customer's estimate), every `save` string is length-capped, `accent_color`/`header_bg` pass a CSS charset gate (NOT hex-only — production holds gradients) and bulk arrays are capped at `MAX_BULK_ROWS`. The legacy full-replace `save_doors`/`save_ramps`/`save_windows` were **deleted** (no caller; each bulk-deleted a fixture category) — the preflight cross-checks the GATES table against the action branches, so removing an action means removing its gate in the same commit.
 - `admin-save-settings` — operator bootstrap tool behind the shared `ADMIN_PASSWORD` secret (used by the designer's `?admin=1` panel).
 - `portal-feedback` — bug / feature-request intake from the portal. Same JWT→`client_users` auth as `portal-settings`; tenant and submitter are resolved server-side and never read from the body. Records the row in `feedback_submissions` FIRST, then creates the Monday item, so a Monday outage can't lose a submission (the failure lands in `monday_error` and `action:"retry_push"` re-attempts). Also serves `action:"refresh"` — an on-demand pull of status + `/client` updates, the safety net for a missed webhook.
 - `feedback-monday-webhook` — the return leg (`verify_jwt=false`; Monday can't send a Supabase JWT). Subscribed to `change_column_value` + `create_update` on both boards. Auth is a shared secret in the URL (`?key=` ⇄ `FEEDBACK_SYNC_SECRET`) compared in constant time, because Monday does **not** sign board-level webhooks created via the API. **Rotating the secret means re-creating all four webhooks.**
-- `portal-billing` — the platform billing endpoint (per-feature subscriptions via Deposyt/NMI) **and** the server-side source of truth for the billing gate's entitlement. Entitlement is computed here, never in the browser, because `client_settings` (which holds `billing_exempt`) is service-role only — a tenant can neither read the flag nor self-grant. It fails **open**: if the entitlement call errors the portal does not lock, so a transient blip can never paywall a paying customer. The initial `subscribe` writes the `billing_subscriptions` row itself; the webhook below owns every state change after that.
+- `portal-billing` — the platform billing endpoint (per-feature subscriptions via Deposyt/NMI) **and** the server-side source of truth for the billing gate's entitlement. Entitlement is computed here, never in the browser, because `client_settings` (which holds `billing_exempt`) is service-role only — a tenant can neither read the flag nor self-grant. It fails **open**: if the entitlement call errors the portal does not lock, so a transient blip can never paywall a paying customer. The initial `subscribe` writes the `billing_subscriptions` row itself; the webhook below owns every state change after that. **`price_visible = false` genuinely hides the number since 2026-08-07** (audit finding): migration `102` revoked the browser's direct `billing_plans` read (it had `using (true)` + `grant select to authenticated`, so any tenant could query unpublished `price_cents` off the table — the leak 055 documented and only half-closed), and the `status` action now returns `price_cents`/`charge_cents` as **null** when the flag is off. Both halves are load-bearing: the projection alone leaves the table readable, the revoke alone leaves the API serving the number. `subscribe` re-reads prices server-side, so redaction can't affect a charge. Verified: a direct anon/authenticated table read returns `permission denied`, and the Billing tab shows "Pricing announced at launch" with `null` on the wire.
 - `billing-webhook` — Deposyt/NMI subscription-lifecycle events → `billing_subscriptions`, the mirror the Billing tab and the gate read (never the gateway live). **`verify_jwt` MUST stay `false`.** Deposyt cannot send a Supabase JWT, so with verification on, the gateway 401s every delivery *before the function runs*: the HMAC is never checked, `billing_webhook_events` stays empty, and even `withErrorLog` records nothing — the failure is completely invisible from inside the database, which is exactly how it went unnoticed. That silently broke the whole billing lifecycle (renewal failures and cancellations never arriving, so a lapsed tenant would keep full access forever) until 2026-07-28. Auth is HMAC-SHA256 over `` `${nonce}.${rawBody}` ``, **hex**, from the `Webhook-Signature: t=<nonce>,s=<hex>` header — NMI's documented format, verified against docs.nmi.com and unit-checked against a PHP-equivalent signature. Rotating `DEPOSYT_WEBHOOK_SIGNING_KEY` needs a **redeploy** to take effect, since the module reads it at cold start.
+- `portal-commissions` — commission team, rates, and payouts (Settings → Commissions/Team). Same JWT→`client_users` auth; `commission_members` is service-role only so every rate/grant read goes through here, and it distinguishes owner from admin (grants are owner-only). ⛔ **It REFUSES a `targetClientId` with a 403 — operators cannot act on a builder's commissions** (Carolyn 2026-08-07: "Operators should not be able to change commissions in builders pages"). This pairs with its deliberate absence from portal.html's `SS_TENANT_SCOPED_FNS` allow-list: adding it there would inject the override and break every operator call loudly rather than quietly widening access. Do not "complete" the list, and do not soften the 403 to a silent ignore — a body field honoured for some callers and dropped for others is how a refactor opens a cross-tenant hole. Before 2026-08-07 the only enforcement was the UI hiding the tabs in view-as, which is a courtesy, not a control.
 
 **Verifying a deploy — the "Deployed" message is not proof.** A deploy uploads whatever the local tree holds, so a session working from a copy without your edits silently reverts them, and the CLI reports success either way. This happened three times in one evening on 2026-07-28 with two sessions on the repo (each clobbering the other's `portal-billing` / `billing-webhook` / `admin-catalog`), and the billing gate appeared broken with no error anywhere. After every deploy: **download the live function and diff it against the source** (`supabase functions download <fn> --project-ref jzeamjbhdrsbygdnphbm`), and check `list_edge_functions` for `verify_jwt`.
 
@@ -84,6 +85,24 @@ Two rules that are easy to break and expensive to get wrong:
 1. **`/client` is the publication marker.** A Monday update reaches the tenant's portal ONLY if its text starts with `/client`. Unmarked updates are discarded by the webhook and never written to our database at all — so internal triage stays internal even if a later RLS or UI change goes wrong. Do **not** "simplify" this into storing everything with a `visible_to_client` flag; the whole safety property is that there is nothing there to leak.
 2. **Tenants never see Monday's raw status labels.** `bug_status` / `color_mm502bcj` are mapped down to a client-facing ladder (`submitted → in_review → planned → in_progress → shipped`, plus `needs_info`, `declined`, `duplicate`) so internal vocabulary like "Move to 'Sprints'" or "Known Bug" never surfaces. An **unmapped** label deliberately leaves the tenant's status untouched rather than inventing one — so adding a new Monday label is safe, but it won't move the client's view until you add it to `STATUS_BY_ID` in **both** functions (the functions log `UNMAPPED Monday status …` when this happens; check `get_logs edge-function-runtime` if a status looks stuck).
 
+**Monday's SUBSCRIPTION NAME is not the payload's `event.type`.** We subscribe to
+`change_column_value`; Monday delivers `type: "update_column_value"` (their webhook
+reference says so plainly). The handler tested only for the subscription spellings, matched
+nothing, and returned a silent `200 {ignored}` — so **every status change was dropped
+between 2026-07-27 and 2026-08-08** while comments kept arriving, because `create_update`
+does match its own name. That asymmetry made it look like a status-MAPPING problem when the
+map was fine. `COLUMN_EVENT_TYPES` now accepts every spelling, and an unhandled event on a
+portal-sourced item writes an `app_errors` row (still a 200 — a non-2xx makes Monday retry
+and eventually disable a healthy webhook).
+
+⚠️ **There is NO scheduled reconcile.** `sync_all` carries the comment "Run by pg_cron every
+10 minutes"; **pg_cron is not installed on this project** (verified 2026-08-08 — extension
+and `cron` schema both absent), so it has never run. It was written after a 2026-07-26
+incident where an API-driven status change produced no webhook at all, precisely to
+guarantee convergence — and its absence is why the routing bug above stayed invisible for
+twelve days. The only paths today are the webhook and the portal's "Check for updates"
+button. Do not assume statuses self-heal.
+
 **The map is keyed on Monday's label ID, never its text.** Label text is editable in the Monday UI and the team does rename it — "Shipped" became "Completed" on 2026-07-27, which silently stalled every feature-request sync until the map was re-keyed. IDs survive renames. They are also **per-board and collide across the two boards with different meanings** (id `2` is "Missing Info" on the bug board and "Declined" on the feature board), so every lookup must be `(board, id)` — which is why the reconcile query asks for `board { id }` and `column_values { value }` rather than just `text`.
 
 The widget is **portal-only** (`portal.html`: `FeedbackForm`, `FeedbackWidget`, `MySubmissions`; surfaced under What's New → My Submissions). It was removed from the public designer on 2026-07-26 — submissions must be attributable to a signed-in user and tenant, and the designer's visitors are anonymous shed-shoppers who should never see a "Report a bug" button on a tenant's customer-facing page. `FeedbackWidget.jsx` is now an empty signpost file; nothing imports it. The widget is also hidden while an operator is viewing another tenant's account, since the submission would be attributed to the operator's own tenant.
@@ -97,9 +116,63 @@ older shape. Tables: `schedule_stages`, `build_jobs`, `schedule_activity`,
 `delivery_territories`, `driver_profiles` (service-role only, like `commission_members`),
 `delivery_loads`, `delivery_stops`, `repairs` (+ private `repair-photos` bucket),
 `build_crews`, and `designs.delivered_at`. One edge function owns every read/write:
-**`portal-schedule`** (resolveTenant; READ = any role, STAFF = move_job/add_note/
-mark_stop_delivered, everything else owner/admin). UI is portal-only: `BuildScheduleTab`,
-`RepairsTab`, `DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+**`portal-schedule`**. UI is portal-only: `BuildScheduleTab`, `RepairsTab`,
+`DeliveryScheduleTab`, `DriversTerritoriesCard` (Settings → Team).
+
+**Access is per-area, not per-role (migration 100).** The old READ/STAFF/ADMIN tiers are
+gone: the function declares a `GATES` table (`build_schedule` / `delivery_schedule` /
+`repairs` × `view|edit`) that `resolveTenant` checks before dispatch, and preflight refuses
+a push where an action and its gate disagree. The **Crew Leader** preset carries
+`build_schedule:edit` + `repairs:edit`; the **Driver** preset carries
+`delivery_schedule:edit`. Two consequences worth knowing before touching this:
+- **The tabs gate on the AREA, not on `canAdmin`.** Each of the three takes an `access` prop
+  and derives its own `canEdit`. Gating on `canAdmin` locks out exactly the people those two
+  titles exist for — which is what it did between migration 100 and 2026-08-07, while the
+  server was already letting them through. The Orders page's Schedule column keys on the
+  same flags (`schedCanEdit` / `deliverCanEdit`), AND on `schedUnlocked` for billing.
+- **Scheduling is reachable from the three schedule pages and from ORDERS — nowhere else**
+  (Carolyn 2026-08-08). "Orders is actually all SALES. Even an inventory building will need
+  delivery so it is an ORDER." Designs and Inventory **report** status and carry no schedule
+  actions; both briefly had them (`48c4012`) and both were stripped within two days. The
+  Orders row routes by what was sold: a lot sale (its design is a unit's
+  `sold_design_short_code`, from `schedule_links.saleDesigns`) goes straight to **delivery**
+  because the building exists; a custom build goes to the **build board** and reaches
+  delivery on its own via the pool. **SOLD = INVOICED** — the tray, the Orders column, and
+  `create_job` all require `status='invoiced'`; an accepted quote is not a sale.
+- **`canAdmin` still guards exactly ONE thing:** the built-before-delivered override. The
+  gate for `mark_load_out` is `delivery_schedule:'edit'` — precisely what a Driver holds — so
+  the explicit role check inside that branch is the only thing keeping decision 11 ("crew
+  cannot override") true. It is checked in the edge function and mirrored in the UI. Do not
+  fold it into the gate table; the table cannot express it.
+
+**Owner vs admin — settled 2026-08-08.** Two instructions from Carolyn had to be reconciled:
+her audit answer *"yes, admin should be able to as well"* (about sending invoices, the GHL
+API key, deleting designs, QuickBooks — all of which admins already hold, since those areas
+are `edit` in the admin preset) and the shipped model's *"Billing stays with owners."* The
+resolution is a **third area flag, `ownerGranted`** (`_shared/access.ts`), which now carries
+`settings_billing` — `ownerOnly` no longer exists:
+- Default for every admin is still **`none`**. Nobody gains Billing by being an admin.
+- **Only an OWNER may set the switch**, and **only an ADMIN may hold it.** An owner grants
+  the one admin they trust with the card, per person, on the Team screen.
+- **Holding it is not the right to pass it on** — `mayGrant` refuses `ownerGranted` for
+  every non-owner *including a granted holder*, so "one trusted admin" cannot quietly
+  become several. Tested at all three holding levels, because the generic "you may pass on
+  what you hold" rule would otherwise wave the granted-admin case straight through.
+- **A demotion revokes it structurally.** The title check lives in `effectiveAccess`, not
+  just at the `set_access` door, so a stored grant on a non-admin row resolves to `none`
+  even if the override survives in the database — verified live: after demoting a granted
+  admin to Sales Rep the row still read `{settings_billing:"edit"}` and effective access
+  read `none`. Nobody has to remember to also clear the switch.
+- `set_access` refuses a billing grant on a non-admin **loudly** (400, "Billing can only be
+  granted to an Admin") rather than letting `sanitizeAccess` drop it silently — the Team
+  grid re-renders from that response, so a silent drop looks like a broken save.
+
+`sanitizeAccess(raw, title?)` is title-aware for the same reason; **calling it without a
+title drops owner-granted keys**, which is the safe direction for a caller that doesn't know
+whose map it is holding. `access.ts` is bundled per function, so a change here means
+redeploying **every** consumer (`portal-billing`, `portal-commissions`, `portal-schedule`,
+`portal-settings`, `qbo-oauth-connect`, `sync-design-status`) — leaving one behind means two
+copies of the permission model disagreeing, which is unobservable until it matters.
 
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
@@ -115,10 +188,15 @@ Post-launch shape changes (092–095), each from real use:
   Crews are the build scheduling unit: the calendar flips between per-crew calendars and a
   drop on one assigns that crew. Crews do NOT require logins — most shop crews never sign in.
 - **095** — drivers are **name-first**: `driver_profiles` gained its own `id` (new PK) and
-  `display_name`; `user_id` is nullable (one profile per login, partial unique index).
-  `delivery_loads.driver_id` → the profile, with `driver_user_id` kept for legacy rows and
-  for a driver's own field access. Resolve a load's driver by profile id first, then the
-  legacy user link.
+  `display_name`. `delivery_loads.driver_id` → the profile, with `driver_user_id` kept for
+  legacy rows and for a driver's own field access. Resolve a load's driver by profile id
+  first, then the legacy user link.
+- **101 corrects 095's optional-login half** — **every driver is a team member with a
+  login** (`user_id NOT NULL`). 095 inferred that a name should be able to stand alone; it
+  can't, because a driver signs in to see their loads and per-person access (100) can only
+  attach to something you can sign in as. `display_name` survives as an optional label on
+  top of their real name. `save_driver` refuses to create or unlink a login-less driver, and
+  `save_crew` requires every crew member to be on this tenant's team.
 - **The Build Schedule calendar is the DEFAULT view** (Calendar | Board | Table). Real
   dates, Sunday-first, week + month, a weekends on/off toggle (localStorage), and **ONE
   build date per job** — `due_date` is canonical, `scheduled_start` kept equal for
@@ -148,16 +226,19 @@ Rules that are easy to break and expensive to get wrong:
    a rejected payload must not burn a number. Testing "add order to board" on a real tenant
    consumes a real serial.
 4. **Built-before-delivered:** loads can't go out/delivered with an unbuilt stop; the 409
-   carries `{blocked, unbuilt}` and the admin override (required reason) is audit-logged and
-   stamped on the load. The width rule (building wider than the driver's `max_width_ft`) has
-   NO override anywhere — keep it that way.
+   carries `{blocked, unbuilt}` and the **owner/admin-only** override (required reason) is
+   audit-logged and stamped on the load — see the per-area note above for why that role check
+   is explicit rather than expressed in `GATES`. The width rules have NO override anywhere:
+   a building wider than the driver's `max_width_ft`, or a wide load (>8'6") assigned to a
+   driver whose `wide_load_capable` is off. Keep it that way.
 5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` = operator OR
    `entitlement.features.schedule_builds`. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
    grandfathered into this."** portal-billing's `PAID_ONLY_FEATURES` set excludes
    `schedule_builds` from the exempt/transition blankets — a real subscription is the only
    tenant path in; do not "fix" that back to the blanket. The plans' `availability` flip
-   (coming_soon → available) is a HUMAN-run data change — see SCHEDULING_SCOPE.md's launch
-   switches.
+   (coming_soon → available) **has been thrown** — migration `094_scheduler_available`, live
+   and verified 2026-08-07 at $195/mo · $1,950/yr with `price_visible = true`. The second
+   launch switch, the hand-authored What's New entry, is still pending.
 6. The "to be loaded" pool is a QUERY, not a table — don't invent an "unassigned stops" row.
    It covers **every non-repair build job without a stop** (Carolyn 2026-08-04: "every
    building that is in the build schedule should also show in the delivery schedule" — an
@@ -182,6 +263,14 @@ Rules that are easy to break and expensive to get wrong:
 **Commercial and internal-posture changes are not release notes.** Specifically, never log an entry for: pricing changes or pricing *visibility* (e.g. `billing_plans.price_visible`, migration `055`), plan/catalog cost edits, margin or packaging decisions, or anything describing how we present money to tenants. Announcing "prices are now hidden" tells every tenant to go look at what changed and anchors them to whatever they last saw — the exact harm hiding the number was meant to avoid. This was an explicit instruction from the project owner on 2026-07-26.
 
 Log a release note when a tenant gains something they can *use* — a feature, a fix, a roadmap item. If the change is about what we charge or what we're willing to reveal about what we charge, it ships silently.
+
+**Publish as the work lands on beta, as `status='beta'` — never wait for Monday, and never hand-set `'shipped'`** (Carolyn 2026-08-08; migration 103 added the status). The lifecycle:
+
+1. When a feature/fix lands on `beta`, INSERT its note with `status='beta'`. The portal renders it with an **"On beta for testing"** badge (orange, `ReleasesView`'s `statusBadge`) so tenants can see what's coming and try it on beta before release. Badge only — no beta URL in the note; tell individual customers where beta is if you want them testing.
+2. On Monday, `.github/workflows/merge-beta-to-main.yml` promotes beta → main and its **"Flip beta release notes to Live"** step PATCHes every `status='beta'` row to `'shipped'` — keyed to the merge *succeeding*, not to the clock, so a failed/skipped promotion can never label unshipped work as Live. The outcome ("N note(s) now Live" / "skipped" / "FAILED") is included in the run's monday.com report.
+3. The step needs the **`SUPABASE_SERVICE_ROLE_KEY` repo secret** (GitHub → Settings → Secrets → Actions). If it's missing the step skips with a warning and notes stay on "On beta for testing" — the merge itself is never blocked by it.
+
+Consequences: a note written *after* the Monday flip for work already on main should be `'shipped'` directly (nothing will flip it); and if something must ship mid-week via `workflow_dispatch`, the flip rides along automatically.
 
 SQL migrations live in `supabase/migrations/`. `000`–`027` are **all applied to live** (the post-`004` ones were hand-applied via MCP `execute_sql` / `supabase db query --linked`, NOT via `db push`). **The migration ledger was reconciled on 2026-06-19**: every repo file-version (`000`–`027`) is now recorded in `supabase_migrations.schema_migrations` (marked applied via `version`+`name`, no re-execution), so `supabase db push` sees **zero pending** migrations and can no longer re-run `008`–`011`'s `DROP TABLE … recreate` and wipe the catalog. Note: the ledger also still carries 15 legacy **timestamp-versioned** rows (`20260504…`–`20260613…`) for the pre-tenancy schema + the originally-recorded `001`–`011`; these have no matching repo file, so `migration list` shows them as remote-only — harmless (push never deletes remote-only rows). **Going forward, add new migrations with the next `NNN_` prefix and record them in the ledger as you apply them; still hand-apply via the SQL Editor / MCP rather than `db push` until the team verifies a clean `migration list`.**
 
@@ -212,8 +301,39 @@ Each entry in `options[]` may optionally declare `buildingStyles: ["Urban", "Nor
 2. Insert a `client_configs` row: **clone junior-barns' config jsonb and swap branding/styles/images.** The row must be COMPLETE (`branding`, `contactFields`, `buildingStyles`, `defaultSizes`, `options`, `layoutItems`) — there is no in-source default to inherit from; a partial row shows the error screen.
 3. Supabase Dashboard → Authentication → Add user (email + temp password, auto-confirm).
 4. `insert into client_users (user_id, client_id) values ('<auth uid>', '<client_id>');`
-5. Insert a `client_settings` row (or let the owner fill it via the portal): business details + GHL Location ID/API key/pipeline/stage. ⚠️ **Do NOT rely on `beta_mode` to protect a verification submit — it does not redirect the estimate email** (see the `submit-estimate` note above; this step used to recommend it, which was wrong and is exactly how a real customer gets emailed a test quote). To verify a new tenant safely, submit the test estimate with **a contact email you control**, then delete the artifact design and clean up the GHL-side estimate.
+5. Insert a `client_settings` row (or let the owner fill it via the portal): business details + GHL Location ID/API key/pipeline/stage. To verify the new tenant safely, set **beta mode + a test inbox you own** (Settings → Branding → Testing) *before* the first submit — since 2026-08-07 that genuinely redirects the estimate email, and refuses to submit at all if the inbox is missing rather than mailing the customer (see the `submit-estimate` note above). Belt and braces: still submit with a contact email you control, then delete the artifact design and clean up the GHL-side estimate. **Turn beta mode back off before handing the tenant over** — while it is on, *every* estimate goes to the test inbox and their real customers receive nothing.
 6. Send the owner: `https://<site>/portal.html` + credentials (tell them to use "Forgot password" to set their own) and their public designer link `https://<site>/?client=<client_id>`.
+
+**How a PAID ADD-ON is gated (one rule, 2026-08-08).** The billing gate above is the *base*
+gate — no Simple Layout, no portal. Individual paid features are gated separately and all the
+same way, modelled on scheduling:
+
+- `featureOn(key)` in `portal.html` is the ONLY reader of `entitlement.features`. It is
+  `isOperator || (!viewing && !!entitlement && !!entitlement.features[key])` — operators are
+  never gated (the entitlement loaded in the portal is the OPERATOR's, not the viewed
+  tenant's), and a null entitlement means *still loading*, never *off*, or every page load
+  would flash an upgrade card at a paying customer. `schedUnlocked` is now just
+  `featureOn("schedule_builds")`.
+- The nav tab **stays visible and clickable**. Clicking renders `<ComingSoon>` with a `cta`
+  that deep-links to `navigate("settings", "billing")` — the **billing sub-tab** specifically,
+  because `navigate("settings")` alone lands on the Structures catalog editor. The real
+  component never mounts, so no data is fetched.
+- `ComingSoon` takes **`available`** separately from `cta`. Only owners/admins get a `cta`, so
+  deriving "has this shipped?" from the button told a sales rep a *live* feature was "Coming
+  soon" and that we were still building it — which they would repeat to a customer. Pass
+  `available` for anything that has actually shipped.
+- ⚠️ **QuickBooks is mounted TWICE** — the top-level tab and Settings → QuickBooks. Both are
+  gated; gating only the tab leaves `/portal/settings/quickbooks` open, and that is a link
+  people have.
+- **PAY-ONLY set** (`portal-billing`'s `PAID_ONLY_FEATURES`): `schedule_builds` and, since
+  2026-08-08, `quickbooks_sync`. Everything else is granted free to `exempt` and free-period
+  tenants by the blanket, so a gate on a non-pay-only feature is decorative — every tenant
+  predating the billing gate is exempt. QuickBooks had been **sold but never enforced** since
+  migration 092: the tab checked `canAdmin` only, so any admin used it free and buying it
+  changed nothing. Before flipping it, exactly one tenant had a live QuickBooks connection
+  (`structure-studio`, CSM Synergy's own), so no builder lost a working integration.
+- **Rent to Own and Reports are part of Base** (Carolyn 2026-08-08) — deliberately NO
+  `billing_plans` rows and no `featureOn` branch. Do not "tidy up" by inventing plans for them.
 
 **The billing gate (live 2026-07-28).** A new tenant with no active *required* subscription (Simple Layout) lands on Billing instead of a working portal. Nav stays fully visible with padlocks — they can see the whole product, and clicking anything lands on the gate, which embeds the plan picker for an owner/admin so paying happens where it's explained. A **failed** payment gets a 7-day grace period (warning banner + countdown, access continues) rather than locking a paying customer out over an expired card; a **cancellation** locks immediately. The customer-facing designer link is deliberately **never** gated — a tenant's own shoppers must not see a billing wall.
 

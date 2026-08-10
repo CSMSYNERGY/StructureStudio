@@ -69,16 +69,37 @@ Deno.test("overrides layer on top of the preset, and only where valid", () => {
   assertFalse("made_up_area" in acc, "unknown areas must not enter the resolved map");
 });
 
-Deno.test("billing is owner-only through every door", () => {
-  // preset
+Deno.test("billing is owner-GRANTED: default off, owner grants it, only admins hold it", () => {
+  // (Was "owner-only through every door" until 2026-08-08 — Carolyn's audit decision made
+  // it grantable per admin. The doors this test guards changed meaning, not owners.)
+  // Default: no admin has it until an owner acts.
   assertEquals(PRESETS.admin.settings_billing, "none");
-  // stored override — even a hand-edited database row cannot grant it
-  const admin = effectiveAccess("admin", "admin", { settings_billing: "edit" });
-  assertEquals(admin.settings_billing, "none");
-  // grant — not even by an admin who somehow shows edit on it
-  assertFalse(mayGrant("admin", { settings_billing: "edit" } as Record<string, Level>, "settings_billing", "view"));
-  // ...but an owner may
+  // The grant now WORKS on an admin — this is the feature.
+  const granted = effectiveAccess("admin", "admin", { settings_billing: "edit" });
+  assertEquals(granted.settings_billing, "edit");
+  // ...and resolves to nothing on every other title, so a demotion revokes it structurally
+  // and a hand-edited row cannot put Billing on a driver.
+  for (const t of ["sales_rep", "crew_leader", "driver", "wizard"]) {
+    assertEquals(effectiveAccess("user", t, { settings_billing: "edit" }).settings_billing, "none", t);
+  }
+  // Holding it is not the right to pass it on: a granted admin cannot give Billing away —
+  // not even 'view', not even (via the self-door mayGrant also guards) to themselves.
+  assertFalse(mayGrant("admin", granted, "settings_billing", "view"));
+  assertFalse(mayGrant("admin", granted, "settings_billing", "edit"));
+  // Owners grant it.
   assert(mayGrant("owner", {} as Record<string, Level>, "settings_billing", "edit"));
+  // And the gate itself opens for a granted admin — the point of the whole change.
+  assertEquals(checkGate({ area: "settings_billing", level: "edit" }, granted), null);
+});
+
+Deno.test("sanitizeAccess stores a billing grant only on an admin row", () => {
+  // Title-aware: the same submitted map keeps Billing for an admin, drops it for a rep.
+  assertEquals(sanitizeAccess({ settings_billing: "edit" }, "admin").settings_billing, "edit");
+  assertFalse("settings_billing" in sanitizeAccess({ settings_billing: "edit" }, "sales_rep"));
+  // Caller that doesn't say who the map is for gets the safe direction: dropped.
+  assertFalse("settings_billing" in sanitizeAccess({ settings_billing: "edit" }));
+  // Team stays by-title for everyone, admin included.
+  assertFalse("settings_team" in sanitizeAccess({ settings_team: "edit" }, "admin"));
 });
 
 Deno.test("nobody grants above their own level", () => {
@@ -248,13 +269,22 @@ Deno.test("taking access away is always allowed", () => {
   assertEquals(mayGrantMap("admin", admin, stripped), null);
 });
 
-Deno.test("billing cannot be granted to anyone by anyone but an owner", () => {
-  const admin = effectiveAccess("admin", "admin", null);
-  // sanitizeAccess drops it at the door...
-  assertFalse("settings_billing" in sanitizeAccess({ settings_billing: "view" }));
-  // ...and even if it reached the resolver, effectiveAccess ignores it for a non-owner.
-  assertEquals(effectiveAccess("user", "admin", { settings_billing: "edit" }).settings_billing, "none");
-  assertFalse(mayGrant("admin", admin, "settings_billing", "view"));
+Deno.test("billing is granted by owners and nobody else, whatever the granter holds", () => {
+  // The granter door, specifically. mayGrant's generic rule is "you may pass on what you
+  // hold" — billing is the exception, so test it at every holding level a non-owner can
+  // reach, not just the default. A granted admin (edit) is the tempting case: they HOLD
+  // edit, and the generic rule would wave the grant through.
+  for (const holding of ["none", "view", "edit"] as Level[]) {
+    const granter = { settings_billing: holding } as Record<string, Level>;
+    assertFalse(mayGrant("admin", granter, "settings_billing", "view"), `admin holding ${holding}`);
+    assertFalse(mayGrant("user", granter, "settings_billing", "view"), `user holding ${holding}`);
+  }
+  assert(mayGrant("owner", {} as Record<string, Level>, "settings_billing", "edit"));
+  // And mayGrantMap (the whole-map door set_access actually calls) refuses an admin
+  // producing a billing-bearing map, while an owner's same map passes.
+  const withBilling = effectiveAccess("admin", "admin", { settings_billing: "edit" });
+  assertEquals(mayGrantMap("owner", effectiveAccess("owner", "owner", null), withBilling), null);
+  assertEquals(mayGrantMap("admin", withBilling, withBilling), "Billing");
 });
 
 Deno.test("Team comes with the title and can never be granted as a switch", () => {

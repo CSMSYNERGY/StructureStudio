@@ -8,10 +8,30 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// The estimate email always goes to the customer — in every environment, beta included.
-// `betaMode` (request flag or the client's beta_mode setting) is still surfaced for
-// telemetry, but it no longer redirects the recipient: a previous QA-inbox redirect sent
-// beta estimates to a non-deliverable address and they silently failed to send.
+// BETA MODE REDIRECT (restored 2026-08-07, Carolyn's call).
+//
+// When the tenant's own `beta_mode` switch is on, the estimate email goes to that
+// tenant's OWN `beta_email` test inbox instead of the customer. This
+// is what the portal's Testing card has always claimed; between the removal of the first
+// redirect and this change it was a false promise, and testing with a real lead's details
+// emailed that lead a live branded quote.
+//
+// The first redirect was removed because it pointed at a single hard-coded QA address
+// that was NOT deliverable, so beta estimates silently failed to send. Two rules keep
+// this version from repeating that:
+//
+//   1. The address is the TENANT'S OWN, set by them in Settings — not a global constant
+//      nobody owns. It is validated as an email on save and again here.
+//   2. Beta mode with no usable test inbox REFUSES the submission (before any GHL contact,
+//      opportunity, or estimate is created) rather than falling back to the customer.
+//      A silent fallback is precisely the hazard this exists to remove, and a silent
+//      no-send is how the first version failed. Loud beats either.
+//
+// The request's `betaMode` flag is NOT part of this. It is derived from the deploy host
+// and remains telemetry — see `redirectToTestInbox` below for why coupling them would
+// break every beta-host submission for tenants who never opted in.
+//
+// `sendDebug.sentTo` and the response's `betaRedirected` report where it actually went.
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -19,6 +39,12 @@ function json(body: unknown, status = 200) {
     headers: { ...cors, "Content-Type": "application/json" },
   });
 }
+
+// Deliberately permissive: this is a "did someone paste something that is obviously not
+// an address" check, not an RFC 5322 parser. It exists so beta mode cannot be armed with
+// a value that GHL will silently drop — the same failure mode that killed the first
+// redirect. Kept in step with portal-settings' save-side check.
+const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -70,6 +96,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const businessLogoUrl: string = settings.business_logo_url || "";
   const quoteTerms: string = settings.quote_terms || "";
   const effectiveBetaMode: boolean = Boolean(betaMode) || Boolean(settings.beta_mode);
+
+  // ⚠️ ONLY the tenant's own `beta_mode` switch redirects. The request's `betaMode` flag is
+  // derived from the deploy HOST (`beta.*` on either apex, a `beta--*` preview) and stays
+  // telemetry, exactly as it was: nobody opted into it, so letting it divert mail would
+  // silently stop every beta-host estimate for every tenant — including ones with no test
+  // inbox, who would get a hard failure instead of a working quote. `effectiveBetaMode`
+  // keeps its old meaning for the response; this is a deliberately narrower flag.
+  const redirectToTestInbox: boolean = Boolean(settings.beta_mode);
+
+  // Resolved NOW, before anything is created in GHL. Beta mode with no usable address is a
+  // configuration error, not a reason to email the customer — see rule 2 in the header.
+  // Failing here means a rejected test leaves no contact, opportunity, or estimate behind.
+  const betaEmail: string = String(settings.beta_email ?? "").trim();
+  if (redirectToTestInbox && !isEmail(betaEmail)) {
+    return json({
+      error: betaEmail
+        ? `Beta mode is on for "${clientId}" but its test inbox is not a valid email address. Fix it in Settings → Branding → Testing, or turn beta mode off.`
+        : `Beta mode is on for "${clientId}" but no test inbox is set. Add one in Settings → Branding → Testing, or turn beta mode off. (Nothing was sent — beta mode never falls back to emailing the customer.)`,
+      betaMode: true,
+    }, 400);
+  }
 
   const ghlHeaders: Record<string, string> = {
     "Version": "2021-07-28",
@@ -1202,10 +1249,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
   }
 
-  // 10. Send (re-emails on update, per requirements). The estimate email always goes to the
-  //     customer's own email — beta deploys included. We capture the GHL response
-  //     (status + body) and return it as `sendDebug` so failures don't hide behind a generic
-  //     200 — the React app or curl caller can inspect what GHL rejected.
+  // 10. Send (re-emails on update, per requirements). Recipient is the tenant's test inbox
+  //     when beta mode is on, otherwise the customer — see the header. `betaEmail` was
+  //     already validated above, so by here beta mode implies a usable address. We capture
+  //     the GHL response (status + body) and return it as `sendDebug` so failures don't
+  //     hide behind a generic 200 — the React app or curl caller can inspect what GHL
+  //     rejected, and `sentTo` says who actually received it.
   let sendDebug: { status: number | null; ok: boolean; body: string; sentTo: string[] } = {
     status: null,
     ok: false,
@@ -1214,7 +1263,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   };
   try {
     if (estimateId) {
-      const recipients = [contact?.email].filter(Boolean);
+      // Beta mode redirects to the tenant's own test inbox. Not a filter over the
+      // customer's address — a REPLACEMENT, so the customer is never a recipient of a
+      // test estimate even if their address is also on the design.
+      const recipients = redirectToTestInbox ? [betaEmail] : [contact?.email].filter(Boolean);
       sendDebug.sentTo = recipients;
       const sendBody = {
         altId: dynamicLocationId,
@@ -1293,6 +1345,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     updated: Boolean(existingEstimateId) && !recreatedFromStale,
     recreatedFromStale,
     betaMode: effectiveBetaMode,
+    // Where the email actually went. `betaMode` alone used to be pure telemetry; now it
+    // has a consequence, so the caller is told the consequence rather than being left to
+    // infer it. The designer surfaces this so a tester can see the redirect happened.
+    betaRedirected: redirectToTestInbox,
+    betaRedirectedTo: redirectToTestInbox ? betaEmail : null,
     lineImagesStripped,
     sendDebug,
   });
