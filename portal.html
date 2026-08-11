@@ -10272,25 +10272,12 @@ function Dashboard({ session }) {
 
   const signOut = () => sb.auth.signOut();
 
-  if (tenant === null) {
-    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
-  }
-  if (tenant === "none") {
-    return (
-      <div style={{ maxWidth: 420, margin: "60px auto", padding: "0 16px" }}>
-        <div style={{ ...S.card, textAlign: "center" }}>
-          <div style={{ ...S.h2, fontSize: 16 }}>No business linked to this account</div>
-          <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Your login works, but it isn't connected to a business yet. Contact CSM Synergy to finish your setup.</p>
-          <button onClick={signOut} style={S.btn("#1E293B", "#FFF")}>Sign Out</button>
-        </div>
-      </div>
-    );
-  }
-
   // Only owners/admins manage Pricing + Settings; regular team members see only
   // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
   // can't reach the other views even by forcing the tab state).
-  const isAdmin = tenant.role === "owner" || tenant.role === "admin";
+  // Null-safe on purpose: the loading/no-tenant early returns sit BELOW setup3d (the
+  // last hook), so this line also runs while tenant is still null / "none".
+  const isAdmin = !!tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin");
   // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
 
@@ -10300,13 +10287,20 @@ function Dashboard({ session }) {
   // which is exactly the "only two tabs" symptom Carolyn reported.
   const canAdmin = viewing ? isOperator : isAdmin;
   // The tenant every surface should read and write. Feeds the clientId props and the
-  // remount keys; the invoke wrapper handles the edge functions.
-  const effClientId = viewing ? viewing.clientId : tenant.clientId;
+  // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
+  // resolves — every real read happens below the early returns.
+  const effClientId = viewing ? viewing.clientId : (tenant && tenant !== "none" ? tenant.clientId : null);
   // 3D setup contract handed to the embedded designer's calibration editor. The editor
   // itself lives in the designer component (it needs the live 3D preview); the I/O lives
   // here because THIS is where the signed-in session is — the component's own supabase
   // client is the anon one and would 401 at resolveTenant. Null unless the user may
   // administer the tenant, which is what keeps a role-"user" salesperson out of it.
+  //
+  // This is a HOOK, so it must run on EVERY render — same constraint as the replaceState
+  // effect above. It used to sit below the tenant-loading early returns: the first render
+  // returned before reaching it, the render after the tenant resolved called one hook
+  // more, and React threw #310 — a blank portal for everyone (app_errors bb53f026,
+  // bcfc2007). The early returns now sit below this memo; keep every hook above them.
   const setup3d = useMemo(() => (!canAdmin ? null : {
     onSaveSpec: async (styleValue, d3, d3Photos) => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_d3", styleValue, d3, d3Photos } });
@@ -10373,7 +10367,23 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
       return data.url;
     },
-  }), [canAdmin]);
+  }), [canAdmin, effClientId]);
+
+  if (tenant === null) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
+  }
+  if (tenant === "none") {
+    return (
+      <div style={{ maxWidth: 420, margin: "60px auto", padding: "0 16px" }}>
+        <div style={{ ...S.card, textAlign: "center" }}>
+          <div style={{ ...S.h2, fontSize: 16 }}>No business linked to this account</div>
+          <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Your login works, but it isn't connected to a business yet. Contact CSM Synergy to finish your setup.</p>
+          <button onClick={signOut} style={S.btn("#1E293B", "#FFF")}>Sign Out</button>
+        </div>
+      </div>
+    );
+  }
+
   // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
