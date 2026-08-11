@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta name="robots" content="noindex"/>
+<title>Your quotes</title>
+<link rel="icon" type="image/png" href="/assets/favicon.png"/>
+<style>
+/* Customer quote portal — deliberately PLAIN JS + inline CSS. No React, no Babel, no
+   /vendor/ scripts: shed shoppers open this from a text message on a phone, and the only
+   network dependency is the Supabase functions endpoint. White-label: the page never says
+   the product's name — the header shows the BUILDER's business name once known. */
+*{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none !important}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC;color:#0F172A;-webkit-font-smoothing:antialiased}
+.biz-header{background:#FFF;border-bottom:1px solid #E2E8F0;padding:14px 16px;text-align:center;font-weight:600;font-size:15px;color:#1E293B;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{max-width:560px;margin:0 auto;padding:24px 16px 56px}
+h1{font-size:22px;line-height:1.3;margin:0 0 6px}
+.sub{font-size:14px;color:#475569;line-height:1.5;margin:0 0 20px}
+.card{background:#FFF;border:1px solid #E2E8F0;border-radius:12px;padding:16px}
+.field{margin-bottom:14px}
+.field:last-of-type{margin-bottom:18px}
+.label{display:block;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:#64748B;margin-bottom:6px}
+input{width:100%;font:inherit;font-size:16px;padding:11px 12px;border:1px solid #CBD5E1;border-radius:8px;background:#FFF;color:#0F172A}
+input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,114,.18)}
+#code-input{text-align:center;font-size:24px;letter-spacing:.3em}
+.btn{display:inline-flex;align-items:center;justify-content:center;font:inherit;font-size:15px;font-weight:600;padding:12px 18px;border-radius:8px;border:1px solid transparent;cursor:pointer;text-decoration:none;text-align:center}
+.btn-primary{background:#3D3672;color:#FFF;width:100%}
+.btn-primary:disabled{opacity:.55;cursor:default}
+.btn-secondary{background:#FFF;color:#3D3672;border-color:#E2E8F0}
+.linkish{background:none;border:none;font:inherit;font-size:14px;color:#3D3672;cursor:pointer;padding:0;text-decoration:underline}
+.linkish:disabled{color:#94A3B8;cursor:default;text-decoration:none}
+.error{margin-top:12px;font-size:14px;line-height:1.45;color:#B91C1C;background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;padding:10px 12px}
+.hint{margin-top:16px;font-size:13px;color:#64748B;line-height:1.5;text-align:center}
+.status-line{font-size:14px;color:#475569;margin:0 0 16px}
+.quote-card{background:#FFF;border:1px solid #E2E8F0;border-radius:12px;padding:16px;margin-bottom:12px}
+.qc-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.qc-num{font-size:15px;font-weight:600}
+.chip{font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;white-space:nowrap}
+.qc-line{font-size:14px;color:#334155;margin-top:6px}
+.qc-meta{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:6px}
+.qc-date{font-size:12px;color:#64748B}
+.qc-total{font-size:15px;font-weight:700}
+.qc-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.qc-actions .btn{flex:1 1 auto;font-size:14px;padding:10px 14px}
+.footer-row{margin-top:20px;text-align:center}
+</style>
+</head>
+<body>
+
+<header id="biz-header" class="biz-header" hidden></header>
+
+<main>
+
+  <!-- No tenant in the URL and no tenant subdomain: nothing to look quotes up against. -->
+  <section id="screen-notenant" hidden>
+    <div class="card">
+      <h1>Hmm, something's missing</h1>
+      <p class="sub" style="margin-bottom:0">This link is missing its builder &mdash; use the link your builder sent you.</p>
+    </div>
+  </section>
+
+  <!-- Step 1: phone number -->
+  <section id="screen-phone" hidden>
+    <h1>View your quotes</h1>
+    <p class="sub">Enter the mobile number you gave your builder and we'll text you a sign-in code.</p>
+    <div class="card">
+      <div class="field">
+        <label class="label" for="name-input">Your name</label>
+        <input id="name-input" type="text" autocomplete="name" maxlength="80" placeholder="Optional"/>
+      </div>
+      <div class="field">
+        <label class="label" for="phone-input">Mobile number</label>
+        <input id="phone-input" type="tel" inputmode="numeric" autocomplete="tel" placeholder="(555) 123-4567"/>
+      </div>
+      <button id="send-btn" class="btn btn-primary" type="button">Text me a code</button>
+      <div id="phone-error" class="error" role="alert" hidden></div>
+    </div>
+    <p class="hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
+  </section>
+
+  <!-- Step 2: the 6-digit code -->
+  <section id="screen-code" hidden>
+    <h1>Enter your code</h1>
+    <p class="sub" id="code-sub">We texted a 6-digit code to your phone.</p>
+    <div class="card">
+      <div class="field">
+        <label class="label" for="code-input">Verification code</label>
+        <input id="code-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="123456"/>
+      </div>
+      <button id="verify-btn" class="btn btn-primary" type="button">Verify</button>
+      <div id="code-error" class="error" role="alert" hidden></div>
+    </div>
+    <p class="hint">
+      Didn't get it? <button id="resend-btn" class="linkish" type="button">Send again</button>
+      &nbsp;&middot;&nbsp;
+      <button id="change-number-btn" class="linkish" type="button">Use a different number</button>
+    </p>
+  </section>
+
+  <!-- Step 3: the quotes -->
+  <section id="screen-quotes" hidden>
+    <h1 id="quotes-heading">Your quotes</h1>
+    <p class="sub" id="quotes-sub" hidden></p>
+    <p class="status-line" id="quotes-status" hidden></p>
+    <div id="quotes-error" class="error" role="alert" hidden></div>
+    <div id="quotes-list"></div>
+    <div class="footer-row">
+      <button id="signout-btn" class="linkish" type="button">Sign out</button>
+    </div>
+  </section>
+
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // Baked-in data connection — identical constants to index.html. The anon key is
+  // deliberately public (browser-safe by design); the only endpoint this page ever
+  // calls is the Supabase functions endpoint below.
+  var SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+  var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+
+  // ── Tenant resolution — mirrors the designer's rules: ?client= wins; else a single-label
+  // subdomain of either apex we serve; deploy/env labels are never a tenant.
+  var TENANT_APEXES = ["structurestudiosuite.com", "structurestudio.app"];
+  var RESERVED_SUBS = { www: 1, beta: 1, dev: 1, staging: 1, app: 1 };
+  function resolveTenant() {
+    try {
+      var p = new URLSearchParams(location.search).get("client");
+      if (p && p.trim()) return p.trim();
+    } catch (e) { /* very old browser; fall through to hostname */ }
+    var host = (location.hostname || "").toLowerCase();
+    for (var i = 0; i < TENANT_APEXES.length; i++) {
+      var apex = TENANT_APEXES[i];
+      if (host === apex) return null;
+      if (host.slice(-(apex.length + 1)) === "." + apex) {
+        var sub = host.slice(0, host.length - apex.length - 1);
+        if (sub.indexOf(".") !== -1) return null;   // multi-label = deploy host, not a tenant
+        if (RESERVED_SUBS[sub]) return null;
+        return sub;
+      }
+    }
+    return null;
+  }
+
+  // ── localStorage, guarded (Safari private mode throws on setItem) ──
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+  // ── Backend ──
+  function callFn(fn, body) {
+    return fetch(SUPABASE_URL + "/functions/v1/" + fn, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+        "apikey": SUPABASE_ANON_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        try { data = JSON.parse(text); } catch (e) { /* non-JSON body */ }
+        return { status: res.status, ok: res.ok, data: data };
+      });
+    });
+  }
+  // The server's own sentence wins when it sent one; otherwise an honest fallback.
+  function errText(r, fallback) {
+    if (r && r.data && typeof r.data.error === "string" && r.data.error) return r.data.error;
+    if (r && r.status === 429) {
+      return "You've requested several codes in a short time. To prevent abuse, please wait a few minutes and try again.";
+    }
+    return fallback;
+  }
+
+  // ── DOM handles ──
+  function $(id) { return document.getElementById(id); }
+  var screens = {
+    notenant: $("screen-notenant"),
+    phone: $("screen-phone"),
+    code: $("screen-code"),
+    quotes: $("screen-quotes")
+  };
+  function show(name) {
+    for (var k in screens) screens[k].hidden = (k !== name);
+  }
+  function setError(el, msg) {
+    if (msg) { el.textContent = msg; el.hidden = false; }
+    else { el.textContent = ""; el.hidden = true; }
+  }
+
+  // ── State ──
+  var clientId = resolveTenant();
+  var tokenKey = clientId ? "ssq_token_" + clientId : null;
+  var nameKey = clientId ? "ssq_name_" + clientId : null;
+  var bizKey = clientId ? "ssq_biz_" + clientId : null;
+  var token = clientId ? lsGet(tokenKey) : null;
+  var custName = (clientId && lsGet(nameKey)) || "";
+  var phoneDigits = "";      // the 10 digits, no formatting
+  var busy = false;
+  var resendReadyAt = 0;     // client-side resend throttle (30s)
+  var resendTimer = null;
+
+  function setBizName(name) {
+    if (!name) return;
+    var h = $("biz-header");
+    h.textContent = name;      // textContent — server-supplied strings are never innerHTML'd
+    h.hidden = false;
+    document.title = name + " · Your quotes";
+    lsSet(bizKey, name);
+  }
+
+  // ── Phone formatting: live US format to (NNN) NNN-NNNN ──
+  function digitsOf(v) {
+    var d = String(v || "").replace(/\D/g, "");
+    if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);   // pasted +1 numbers
+    return d.slice(0, 10);
+  }
+  function fmtPhone(d) {
+    if (d.length > 6) return "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
+    if (d.length > 3) return "(" + d.slice(0, 3) + ") " + d.slice(3);
+    if (d.length > 0) return "(" + d;
+    return "";
+  }
+  $("phone-input").addEventListener("input", function () {
+    phoneDigits = digitsOf(this.value);
+    this.value = fmtPhone(phoneDigits);
+  });
+  $("phone-input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") requestCode(false);
+  });
+
+  // ASSUMPTION (functions built in parallel): the phone is sent in E.164 (+1XXXXXXXXXX).
+  // Both request_code and verify_code send the same canonical form, so the server sees one
+  // consistent shape either way.
+  function phoneE164() { return "+1" + phoneDigits; }
+
+  // ── Step 1 → request a code ──
+  function requestCode(isResend) {
+    if (busy) return;
+    if (isResend && Date.now() < resendReadyAt) return;
+    var errEl = isResend ? $("code-error") : $("phone-error");
+    setError(errEl, "");
+    if (phoneDigits.length !== 10) {
+      setError($("phone-error"), "Enter your 10-digit mobile number.");
+      show("phone");
+      return;
+    }
+    custName = $("name-input").value.trim().slice(0, 80) || custName;
+    busy = true;
+    var sendBtn = $("send-btn");
+    var resendBtn = $("resend-btn");
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Sending…";
+    resendBtn.disabled = true;
+    callFn("customer-auth", { action: "request_code", clientId: clientId, phone: phoneE164(), name: custName || undefined })
+      .then(function (r) {
+        if (r.ok && r.data && !r.data.error) {
+          $("code-sub").textContent = "We texted a 6-digit code to " + fmtPhone(phoneDigits) + ".";
+          $("code-input").value = "";
+          setError($("code-error"), "");
+          show("code");
+          $("code-input").focus();
+          startResendThrottle();
+        } else {
+          setError(errEl, errText(r, "Something went wrong sending your code. Please try again."));
+          if (isResend) startResendThrottle();   // a failed resend still counts against the throttle
+        }
+      })
+      .catch(function () {
+        setError(errEl, "Couldn't reach the server. Check your connection and try again.");
+      })
+      .then(function () {
+        busy = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = "Text me a code";
+        updateResendUi();
+      });
+  }
+  $("send-btn").addEventListener("click", function () { requestCode(false); });
+
+  // Client-side resend throttle: 30 seconds, with a visible countdown.
+  function startResendThrottle() {
+    resendReadyAt = Date.now() + 30000;
+    updateResendUi();
+    if (resendTimer) clearInterval(resendTimer);
+    resendTimer = setInterval(function () {
+      updateResendUi();
+      if (Date.now() >= resendReadyAt) { clearInterval(resendTimer); resendTimer = null; }
+    }, 500);
+  }
+  function updateResendUi() {
+    var btn = $("resend-btn");
+    var left = Math.ceil((resendReadyAt - Date.now()) / 1000);
+    if (left > 0) {
+      btn.disabled = true;
+      btn.textContent = "Send again (" + left + "s)";
+    } else {
+      btn.disabled = busy;
+      btn.textContent = "Send again";
+    }
+  }
+  $("resend-btn").addEventListener("click", function () { requestCode(true); });
+  $("change-number-btn").addEventListener("click", function () {
+    setError($("code-error"), "");
+    setError($("phone-error"), "");
+    show("phone");
+    $("phone-input").focus();
+  });
+
+  // ── Step 2 → verify the code ──
+  $("code-input").addEventListener("input", function () {
+    this.value = this.value.replace(/\D/g, "").slice(0, 6);
+    if (this.value.length === 6) verifyCode();   // auto-submit on a full code
+  });
+  $("code-input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") verifyCode();
+  });
+  function verifyCode() {
+    if (busy) return;
+    var code = $("code-input").value.replace(/\D/g, "");
+    if (code.length !== 6) {
+      setError($("code-error"), "Enter the 6-digit code from the text message.");
+      return;
+    }
+    setError($("code-error"), "");
+    busy = true;
+    var btn = $("verify-btn");
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    callFn("customer-auth", { action: "verify_code", clientId: clientId, phone: phoneE164(), code: code })
+      .then(function (r) {
+        if (r.ok && r.data && r.data.token) {
+          token = r.data.token;
+          lsSet(tokenKey, token);
+          if (r.data.name) { custName = String(r.data.name); lsSet(nameKey, custName); }
+          loadQuotes();
+        } else {
+          setError($("code-error"), errText(r, "That code didn't work. Check it and try again."));
+        }
+      })
+      .catch(function () {
+        setError($("code-error"), "Couldn't reach the server. Check your connection and try again.");
+      })
+      .then(function () {
+        busy = false;
+        btn.disabled = false;
+        btn.textContent = "Verify";
+        updateResendUi();
+      });
+  }
+  $("verify-btn").addEventListener("click", verifyCode);
+
+  // ── Step 3 → the quotes list ──
+  var STATUS_STYLES = {
+    draft:     { bg: "#F1F5F9", fg: "#475569", label: "Draft" },
+    sent:      { bg: "#EEF2FF", fg: "#3D3672", label: "Sent" },
+    accepted:  { bg: "#F0FDF4", fg: "#15803D", label: "Accepted" },
+    invoiced:  { bg: "#FFFBEB", fg: "#B45309", label: "Invoiced" },
+    delivered: { bg: "#ECFEFF", fg: "#0E7490", label: "Delivered" }
+  };
+  function fmtMoney(v) {
+    var n = typeof v === "number" ? v : parseFloat(v);
+    if (!isFinite(n)) return null;
+    try {
+      return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+    } catch (e) {
+      return "$" + n.toFixed(2);
+    }
+  }
+  function fmtDate(v) {
+    if (!v) return null;
+    var d = new Date(v);
+    if (isNaN(d.getTime())) return null;
+    try {
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    } catch (e) {
+      return d.toDateString();
+    }
+  }
+  function safeUrl(v) {
+    return (typeof v === "string" && /^https?:\/\//i.test(v)) ? v : null;
+  }
+  function firstName(full) {
+    var f = String(full || "").trim().split(/\s+/)[0];
+    return f || null;
+  }
+
+  function invalidSession(r) {
+    // 401 (and 403) mean the customer token is no longer good; a 200 whose error text
+    // talks about the token/session means the same thing from a function that prefers
+    // soft errors. Anything else is a transient failure, NOT a reason to sign out.
+    if (r.status === 401 || r.status === 403) return true;
+    if (r.data && typeof r.data.error === "string" && /token|session|expired|sign.?in/i.test(r.data.error)) return true;
+    return false;
+  }
+
+  function loadQuotes() {
+    show("quotes");
+    setError($("quotes-error"), "");
+    $("quotes-list").textContent = "";
+    var st = $("quotes-status");
+    st.textContent = "Loading your quotes…";
+    st.hidden = false;
+    callFn("customer-quotes", { action: "list", token: token })
+      .then(function (r) {
+        st.hidden = true;
+        if (invalidSession(r)) {
+          token = null;
+          lsDel(tokenKey);
+          show("phone");
+          setError($("phone-error"), "Your session expired. Enter your number and we'll text you a new code.");
+          return;
+        }
+        if (!r.ok || !r.data || r.data.error) {
+          renderQuotesError(errText(r, "Couldn't load your quotes. Please try again."));
+          return;
+        }
+        // ASSUMPTION: the list payload is { quotes: [...], businessName, name? }. Accept
+        // a couple of plausible sibling spellings so a rename in the parallel-built
+        // function doesn't blank the page.
+        var quotes = r.data.quotes || r.data.designs || r.data.items;
+        if (!Array.isArray(quotes)) quotes = [];
+        var biz = r.data.businessName || r.data.business_name;
+        if (biz) setBizName(String(biz));
+        if (r.data.name) { custName = String(r.data.name); lsSet(nameKey, custName); }
+        renderQuotes(quotes);
+      })
+      .catch(function () {
+        st.hidden = true;
+        renderQuotesError("Couldn't reach the server. Check your connection and try again.");
+      });
+  }
+
+  function renderQuotesError(msg) {
+    setError($("quotes-error"), msg);
+    var list = $("quotes-list");
+    list.textContent = "";
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "btn btn-secondary";
+    retry.textContent = "Try again";
+    retry.addEventListener("click", loadQuotes);
+    list.appendChild(retry);
+  }
+
+  function renderQuotes(quotes) {
+    var fn = firstName(custName);
+    $("quotes-heading").textContent = fn ? "Hi " + fn + "," : "Your quotes";
+    var sub = $("quotes-sub");
+    sub.textContent = fn ? "Here are the quotes we have for your number." : "";
+    sub.hidden = !fn;
+
+    var list = $("quotes-list");
+    list.textContent = "";
+
+    if (!quotes.length) {
+      var empty = document.createElement("div");
+      empty.className = "card";
+      empty.style.textAlign = "center";
+      empty.style.color = "#475569";
+      empty.style.fontSize = "14px";
+      empty.textContent = "No quotes yet for this number.";
+      list.appendChild(empty);
+      return;
+    }
+
+    for (var i = 0; i < quotes.length; i++) {
+      list.appendChild(quoteCard(quotes[i] || {}));
+    }
+  }
+
+  function quoteCard(q) {
+    var card = document.createElement("div");
+    card.className = "quote-card";
+
+    // Top row: estimate number + status chip
+    var top = document.createElement("div");
+    top.className = "qc-top";
+    var num = document.createElement("div");
+    num.className = "qc-num";
+    var rawNum = q.estimateNumber != null ? q.estimateNumber : q.estimate_number;
+    if (rawNum != null && String(rawNum).trim() !== "") {
+      var s = String(rawNum).trim();
+      num.textContent = /^est/i.test(s) ? s : "EST-" + s;
+    } else {
+      num.textContent = "Quote";
+    }
+    top.appendChild(num);
+    var statusKey = String(q.status || "").toLowerCase();
+    var style = STATUS_STYLES[statusKey];
+    if (statusKey) {
+      var chip = document.createElement("span");
+      chip.className = "chip";
+      chip.style.background = style ? style.bg : "#F1F5F9";
+      chip.style.color = style ? style.fg : "#475569";
+      chip.textContent = style ? style.label : statusKey.charAt(0).toUpperCase() + statusKey.slice(1);
+      top.appendChild(chip);
+    }
+    card.appendChild(top);
+
+    // Style + size line
+    var styleName = q.style || q.buildingStyle;
+    var sizeName = q.size || q.buildingSize;
+    var lineParts = [];
+    if (styleName) lineParts.push(String(styleName));
+    if (sizeName) lineParts.push(String(sizeName));
+    if (lineParts.length) {
+      var line = document.createElement("div");
+      line.className = "qc-line";
+      line.textContent = lineParts.join(" · ");
+      card.appendChild(line);
+    }
+
+    // Date + total
+    var dateStr = fmtDate(q.date || q.createdAt || q.created_at || q.updatedAt || q.updated_at);
+    var totalStr = fmtMoney(q.total != null ? q.total : (q.totalAmount != null ? q.totalAmount : q.total_amount));
+    if (dateStr || totalStr) {
+      var meta = document.createElement("div");
+      meta.className = "qc-meta";
+      var dateEl = document.createElement("div");
+      dateEl.className = "qc-date";
+      dateEl.textContent = dateStr || "";
+      meta.appendChild(dateEl);
+      if (totalStr) {
+        var totalEl = document.createElement("div");
+        totalEl.className = "qc-total";
+        totalEl.textContent = totalStr;
+        meta.appendChild(totalEl);
+      }
+      card.appendChild(meta);
+    }
+
+    // Actions — only when the URLs are present (and look like URLs)
+    var acceptUrl = safeUrl(q.acceptUrl || q.accept_url);
+    var pdfUrl = safeUrl(q.pdfUrl || q.pdf_url);
+    if (acceptUrl || pdfUrl) {
+      var actions = document.createElement("div");
+      actions.className = "qc-actions";
+      if (acceptUrl) {
+        var accept = document.createElement("a");
+        accept.className = "btn btn-primary";
+        accept.style.width = "auto";
+        accept.href = acceptUrl;
+        accept.target = "_blank";
+        accept.rel = "noopener";
+        accept.textContent = "View & Accept";
+        actions.appendChild(accept);
+      }
+      if (pdfUrl) {
+        var pdf = document.createElement("a");
+        pdf.className = "btn btn-secondary";
+        pdf.href = pdfUrl;
+        pdf.target = "_blank";
+        pdf.rel = "noopener";
+        pdf.textContent = "Floor plan (PDF)";
+        actions.appendChild(pdf);
+      }
+      card.appendChild(actions);
+    }
+
+    return card;
+  }
+
+  // ── Sign out ──
+  $("signout-btn").addEventListener("click", function () {
+    var t = token;
+    token = null;
+    lsDel(tokenKey);
+    lsDel(nameKey);
+    if (t) callFn("customer-auth", { action: "logout", token: t }).catch(function () {});
+    custName = "";
+    $("code-input").value = "";
+    setError($("phone-error"), "");
+    show("phone");
+  });
+
+  // ── Boot ──
+  if (!clientId) {
+    show("notenant");
+  } else {
+    var cachedBiz = lsGet(bizKey);
+    if (cachedBiz) setBizName(cachedBiz);
+    if (token) {
+      loadQuotes();   // stored session: try the list first; invalid → PHONE
+    } else {
+      show("phone");
+    }
+  }
+})();
+</script>
+</body>
+</html>

@@ -100,6 +100,20 @@ verify_jwt = true
 # added 2026-07-30. Kept true so a bare unauthenticated request is still refused early.
 verify_jwt = true
 
+[functions.customer-auth]
+# Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
+# protections are the Twilio Verify OTP (the caller proves control of the phone), the
+# per-phone + per-IP throttle buckets with lockout (customer_otp_throttle), a tenant
+# existence check, and US-only numbers. Kept true so a bare unauthenticated request is
+# still refused early.
+verify_jwt = true
+
+[functions.customer-quotes]
+# Session-token auth inside (customer_sessions, hash-at-rest): the function resolves the
+# presented bearer token and returns ONLY the verified phone's rows for the named tenant.
+# The anon key passes the gateway here too — the token check is the real gate.
+verify_jwt = true
+
 [functions.qbo-oauth-connect]
 # Starting an OAuth flow attaches a QuickBooks company to a tenant — an owner/admin action.
 verify_jwt = true
