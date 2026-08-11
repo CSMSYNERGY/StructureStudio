@@ -51,15 +51,37 @@ function accountSid(): string | null {
 function authToken(): string | null {
   return Deno.env.get("TWILIO_AUTH_TOKEN") || null;
 }
+function apiKey(): string | null {
+  return Deno.env.get("TWILIO_API_KEY") || null;
+}
+function apiSecret(): string | null {
+  return Deno.env.get("TWILIO_API_SECRET") || null;
+}
 function verifyServiceSid(): string | null {
   return Deno.env.get("TWILIO_VERIFY_SERVICE_SID") || null;
 }
 
-/** All three secrets present — the ONE test for "may the verification path run at all".
- *  Callers gate on this before offering SMS verification; requireCreds below is the
+/** Twilio's REST API accepts Basic auth as EITHER AccountSid:AuthToken OR
+ *  ApiKeySid:ApiKeySecret ("SK…" keys — rotatable, revocable, and what the Twilio CLI's
+ *  env-var profile uses). The API-key pair wins when both are present: keys are the
+ *  better practice, and on 2026-08-11 the deployment's TWILIO_AUTH_TOKEN landed as an
+ *  EMPTY STRING precisely because the operator's shell only had the key pair — auth-token
+ *  auth must not be the only door. */
+function basicAuthPair(): { user: string; pass: string } | null {
+  const key = apiKey();
+  const secret = apiSecret();
+  if (key && secret) return { user: key, pass: secret };
+  const sid = accountSid();
+  const token = authToken();
+  if (sid && token) return { user: sid, pass: token };
+  return null;
+}
+
+/** Credentials + service SID present — the ONE test for "may the verification path run at
+ *  all". Callers gate on this before offering SMS verification; requireCreds below is the
  *  belt-and-braces for anyone reaching an API call directly. */
 export function twilioConfigured(): boolean {
-  return accountSid() !== null && authToken() !== null && verifyServiceSid() !== null;
+  return basicAuthPair() !== null && verifyServiceSid() !== null;
 }
 
 export class TwilioNotConfigured extends Error {
@@ -114,21 +136,19 @@ function codeOf(body: string): number {
   }
 }
 
-type TwCreds = { sid: string; token: string; verifySid: string };
+type TwCreds = { user: string; pass: string; verifySid: string };
 
 function requireCreds(): TwCreds {
-  const sid = accountSid();
-  const token = authToken();
+  const pair = basicAuthPair();
   const verifySid = verifyServiceSid();
-  if (!sid || !token || !verifySid) {
+  if (!pair || !verifySid) {
     const missing = [
-      sid ? null : "TWILIO_ACCOUNT_SID",
-      token ? null : "TWILIO_AUTH_TOKEN",
+      pair ? null : "TWILIO_API_KEY+TWILIO_API_SECRET (or TWILIO_ACCOUNT_SID+TWILIO_AUTH_TOKEN)",
       verifySid ? null : "TWILIO_VERIFY_SERVICE_SID",
     ].filter((name): name is string => name !== null).join(", ");
     throw new TwilioNotConfigured(`${missing} is not set.`);
   }
-  return { sid, token, verifySid };
+  return { user: pair.user, pass: pair.pass, verifySid };
 }
 
 /** One authenticated form-encoded POST round trip. Failures throw TwilioApiError with the
@@ -144,7 +164,7 @@ async function twFetch(
       method: "POST",
       headers: {
         Accept: "application/json",
-        Authorization: `Basic ${btoa(`${creds.sid}:${creds.token}`)}`,
+        Authorization: `Basic ${btoa(`${creds.user}:${creds.pass}`)}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams(form).toString(),

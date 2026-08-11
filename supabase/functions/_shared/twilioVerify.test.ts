@@ -104,8 +104,16 @@ function teardown() {
   globalThis.fetch = realFetch;
   Deno.env.delete("TWILIO_ACCOUNT_SID");
   Deno.env.delete("TWILIO_AUTH_TOKEN");
+  Deno.env.delete("TWILIO_API_KEY");
+  Deno.env.delete("TWILIO_API_SECRET");
   Deno.env.delete("TWILIO_VERIFY_SERVICE_SID");
 }
+
+// API-key pair (the Twilio CLI's env-var profile shape; landed 2026-08-12 after the
+// deployment's TWILIO_AUTH_TOKEN arrived as an EMPTY string because the operator's shell
+// only held the key pair).
+const API_KEY = "SKtestapikeysid";
+const API_SECRET = "test-api-secret";
 
 // Twilio's success shapes, trimmed to the fields the module reads plus a few it must ignore.
 const PENDING_VERIFICATION = {
@@ -381,6 +389,44 @@ Deno.test("the raw provider body is NEVER surfaced — Twilio echoes the phone n
 });
 
 // ── toE164US ───────────────────────────────────────────────────────────────────────────────
+
+Deno.test("API-key pair configures WITHOUT an auth token, and wins the Basic header when both exist", async () => {
+  teardown();
+  try {
+    // Key pair + verify SID, NO auth token: configured.
+    Deno.env.set("TWILIO_API_KEY", API_KEY);
+    Deno.env.set("TWILIO_API_SECRET", API_SECRET);
+    Deno.env.set("TWILIO_VERIFY_SERVICE_SID", VERIFY_SID);
+    assertEquals(twilioConfigured(), true, "key pair alone must satisfy the guard");
+
+    // The Basic header carries the KEY pair — and keeps carrying it when SID+TOKEN also
+    // exist, because keys are the preferred credential.
+    Deno.env.set("TWILIO_ACCOUNT_SID", ACCOUNT_SID);
+    Deno.env.set("TWILIO_AUTH_TOKEN", AUTH_TOKEN);
+    const calls = stub(() => jsonResponse(PENDING_VERIFICATION, 201));
+    await twStartVerification(PHONE_E164);
+    assertEquals(calls.length, 1);
+    assertEquals(
+      calls[0].headers.get("Authorization"),
+      `Basic ${btoa(`${API_KEY}:${API_SECRET}`)}`,
+      "API key pair must win over SID:token",
+    );
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("empty-string TWILIO_AUTH_TOKEN does not configure (the 2026-08-11 incident shape)", () => {
+  teardown();
+  try {
+    Deno.env.set("TWILIO_ACCOUNT_SID", ACCOUNT_SID);
+    Deno.env.set("TWILIO_AUTH_TOKEN", "");
+    Deno.env.set("TWILIO_VERIFY_SERVICE_SID", VERIFY_SID);
+    assertEquals(twilioConfigured(), false, "an empty token is absent, not present");
+  } finally {
+    teardown();
+  }
+});
 
 Deno.test("toE164US: exactly 10 digits gains +1", () => {
   assertEquals(toE164US(PHONE_DIGITS), PHONE_E164);
