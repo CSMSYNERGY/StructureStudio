@@ -9,7 +9,14 @@ ridge runs along X so the roof planes face +Z/-Z (pitch 7.5:12, 32.005 deg).
 
 Variants: A shed alone; B shed + 30 ft ground plane fused into the same
 primitive (bbox 30x30 > building); C shed under a node translation (5,0,-3) m
-plus 30 deg Y rotation (accessor min/max alone gives the wrong answer).
+plus 30 deg Y rotation (accessor min/max alone gives the wrong answer);
+D the same shed with a 1 ft roof overhang on every side (footprint and eave
+must come from the WALLS, not the sweep box); E a 12x8 gambrel barn (knee at
++/-2 ft, knee y 9.5 ft, peak 10.5 ft: lower pitch 1.5, upper 0.5); F a
+mono-pitch shed (low wall 6.5 ft, high wall 8.5 ft: rise 2 ft over the full
+8 ft depth = renderer shed pitch 0.25); G variant D as seeded noisy triangle
+soup with a bumpy ground, a 6 ft fence 1.5 m off one wall and a truck-sized
+box 2 m off another - the component isolation must drop both.
 
     python make_scan_fixture.py [--write] [--verify] [--html] [--outdir D]
 """
@@ -19,6 +26,7 @@ import base64
 import json
 import math
 import os
+import random
 import struct
 import sys
 
@@ -116,12 +124,37 @@ class MeshBuilder(object):
         for k in range(1, len(verts) - 1):        # fan triangulation
             self.idx.extend([base, base + k, base + k + 1])
 
+    def add_tri_raw(self, a, b, c):
+        """Append one triangle without the winding assert.
+
+        The noisy variant jitters vertices, which can flip a near-degenerate
+        winding; the material is doubleSided, so orientation is cosmetic
+        there. Degenerate (zero-area) triangles are skipped.
+        """
+        geo = cross(sub(b, a), sub(c, a))
+        if dot(geo, geo) < 1e-18:
+            return
+        n = normalize(geo)
+        base = len(self.pos)
+        for v in (a, b, c):
+            self.pos.append(v)
+            self.nrm.append(n)
+        self.idx.extend([base, base + 1, base + 2])
+
     def counts(self):
         return len(self.pos), len(self.idx) // 3
 
 
-def build_shed(mb):
-    """The 12x8 shed: 5 box faces + 2 gable triangles + 2 roof planes."""
+def build_shed(mb, ov_ft=0.0):
+    """The 12x8 shed: 5 box faces + 2 gable triangles + 2 roof planes.
+
+    `ov_ft` extends the roof planes past the walls on every side (the plane
+    keeps its slope, so the outer edge drops below the eave). Zero adds 0.0
+    to every coordinate, so the original variants stay byte-identical.
+    """
+    ov = ft2m(ov_ft)
+    pitch = (PEAK - EAVE) / HD
+    y_edge = EAVE - ov * pitch
     # floor (y=0), outward = down
     mb.add_poly([(-HW, 0.0, -HD), (HW, 0.0, -HD), (HW, 0.0, HD), (-HW, 0.0, HD)],
                 (0.0, -1.0, 0.0))
@@ -143,12 +176,163 @@ def build_shed(mb):
     # -X gable triangle
     mb.add_poly([(-HW, EAVE, -HD), (-HW, EAVE, HD), (-HW, PEAK, 0.0)],
                 (-1.0, 0.0, 0.0))
-    # +Z roof plane (eave edge at z=+HD up to the ridge at z=0)
-    mb.add_poly([(-HW, EAVE, HD), (HW, EAVE, HD), (HW, PEAK, 0.0), (-HW, PEAK, 0.0)],
+    # +Z roof plane (outer edge at z=+HD+ov down at y_edge, up to the ridge)
+    mb.add_poly([(-HW - ov, y_edge, HD + ov), (HW + ov, y_edge, HD + ov),
+                 (HW + ov, PEAK, 0.0), (-HW - ov, PEAK, 0.0)],
                 (0.0, 1.0, 1.0))
     # -Z roof plane
-    mb.add_poly([(HW, EAVE, -HD), (-HW, EAVE, -HD), (-HW, PEAK, 0.0), (HW, PEAK, 0.0)],
+    mb.add_poly([(HW + ov, y_edge, -HD - ov), (-HW - ov, y_edge, -HD - ov),
+                 (-HW - ov, PEAK, 0.0), (HW + ov, PEAK, 0.0)],
                 (0.0, 1.0, -1.0))
+
+
+# gambrel profile, in FEET then metres: knee at +/-2 ft, knee y 9.5, peak 10.5
+G_KZ = ft2m(2.0)
+G_KNEE_Y = ft2m(9.5)
+G_PEAK = ft2m(10.5)
+
+
+def build_gambrel(mb):
+    """A 12x8 gambrel barn: box walls, pentagon ends, four roof planes.
+
+    Lower pitch (9.5-6.5)/(4-2) = 1.5, upper (10.5-9.5)/2 = 0.5 - a 3x slope
+    ratio the two-segment fit must find. Zero overhang keeps it exact.
+    """
+    # floor + four walls to the eave (same as the shed body)
+    mb.add_poly([(-HW, 0.0, -HD), (HW, 0.0, -HD), (HW, 0.0, HD), (-HW, 0.0, HD)],
+                (0.0, -1.0, 0.0))
+    mb.add_poly([(-HW, 0.0, HD), (HW, 0.0, HD), (HW, EAVE, HD), (-HW, EAVE, HD)],
+                (0.0, 0.0, 1.0))
+    mb.add_poly([(HW, 0.0, -HD), (-HW, 0.0, -HD), (-HW, EAVE, -HD), (HW, EAVE, -HD)],
+                (0.0, 0.0, -1.0))
+    mb.add_poly([(HW, 0.0, HD), (HW, 0.0, -HD), (HW, EAVE, -HD), (HW, EAVE, HD)],
+                (1.0, 0.0, 0.0))
+    mb.add_poly([(-HW, 0.0, -HD), (-HW, 0.0, HD), (-HW, EAVE, HD), (-HW, EAVE, -HD)],
+                (-1.0, 0.0, 0.0))
+    # +X pentagon end (CCW seen from +X)
+    mb.add_poly([(HW, EAVE, HD), (HW, EAVE, -HD), (HW, G_KNEE_Y, -G_KZ),
+                 (HW, G_PEAK, 0.0), (HW, G_KNEE_Y, G_KZ)],
+                (1.0, 0.0, 0.0))
+    # -X pentagon end
+    mb.add_poly([(-HW, EAVE, -HD), (-HW, EAVE, HD), (-HW, G_KNEE_Y, G_KZ),
+                 (-HW, G_PEAK, 0.0), (-HW, G_KNEE_Y, -G_KZ)],
+                (-1.0, 0.0, 0.0))
+    # +Z lower roof plane (steep)
+    mb.add_poly([(-HW, EAVE, HD), (HW, EAVE, HD), (HW, G_KNEE_Y, G_KZ), (-HW, G_KNEE_Y, G_KZ)],
+                (0.0, HD - G_KZ, G_KNEE_Y - EAVE))
+    # +Z upper roof plane (shallow)
+    mb.add_poly([(-HW, G_KNEE_Y, G_KZ), (HW, G_KNEE_Y, G_KZ), (HW, G_PEAK, 0.0), (-HW, G_PEAK, 0.0)],
+                (0.0, G_KZ, G_PEAK - G_KNEE_Y))
+    # -Z lower roof plane
+    mb.add_poly([(HW, EAVE, -HD), (-HW, EAVE, -HD), (-HW, G_KNEE_Y, -G_KZ), (HW, G_KNEE_Y, -G_KZ)],
+                (0.0, HD - G_KZ, -(G_KNEE_Y - EAVE)))
+    # -Z upper roof plane
+    mb.add_poly([(HW, G_KNEE_Y, -G_KZ), (-HW, G_KNEE_Y, -G_KZ), (-HW, G_PEAK, 0.0), (HW, G_PEAK, 0.0)],
+                (0.0, G_KZ, -(G_PEAK - G_KNEE_Y)))
+
+
+# mono-pitch shed: low wall 6.5 ft at +Z, high wall 8.5 ft at -Z
+M_HIGH = ft2m(8.5)
+
+
+def build_mono(mb):
+    """A 12x8 mono-pitch (single-slope) shed: rise 2 ft over the 8 ft depth,
+    i.e. the renderer's shed pitch 0.25. The across-midpoint drifts at half
+    the taper rate, which is the shed signature the classifier reads."""
+    mb.add_poly([(-HW, 0.0, -HD), (HW, 0.0, -HD), (HW, 0.0, HD), (-HW, 0.0, HD)],
+                (0.0, -1.0, 0.0))
+    # +Z (low) wall
+    mb.add_poly([(-HW, 0.0, HD), (HW, 0.0, HD), (HW, EAVE, HD), (-HW, EAVE, HD)],
+                (0.0, 0.0, 1.0))
+    # -Z (high) wall
+    mb.add_poly([(HW, 0.0, -HD), (-HW, 0.0, -HD), (-HW, M_HIGH, -HD), (HW, M_HIGH, -HD)],
+                (0.0, 0.0, -1.0))
+    # +X trapezoid wall
+    mb.add_poly([(HW, 0.0, HD), (HW, 0.0, -HD), (HW, M_HIGH, -HD), (HW, EAVE, HD)],
+                (1.0, 0.0, 0.0))
+    # -X trapezoid wall
+    mb.add_poly([(-HW, 0.0, -HD), (-HW, 0.0, HD), (-HW, EAVE, HD), (-HW, M_HIGH, -HD)],
+                (-1.0, 0.0, 0.0))
+    # single roof plane, low edge at +Z
+    mb.add_poly([(-HW, EAVE, HD), (HW, EAVE, HD), (HW, M_HIGH, -HD), (-HW, M_HIGH, -HD)],
+                (0.0, 1.0, 0.3))
+
+
+def _jit(v, rng, amp):
+    return (v[0] + rng.uniform(-amp, amp),
+            v[1] + rng.uniform(-amp, amp),
+            v[2] + rng.uniform(-amp, amp))
+
+
+def _soup_quad(mb, rng, a, b, c, d, step, amp):
+    """Subdivide quad a-b-c-d (a->b is one edge direction, a->d the other)
+    into ~`step`-sized cells and emit jittered raw triangles."""
+    ab = sub(b, a)
+    ad = sub(d, a)
+    nu = max(1, int(math.ceil(math.sqrt(dot(ab, ab)) / step)))
+    nv = max(1, int(math.ceil(math.sqrt(dot(ad, ad)) / step)))
+    def at(iu, iv):
+        fu = iu / float(nu)
+        fv = iv / float(nv)
+        return (a[0] + ab[0] * fu + ad[0] * fv,
+                a[1] + ab[1] * fu + ad[1] * fv,
+                a[2] + ab[2] * fu + ad[2] * fv)
+    for iu in range(nu):
+        for iv in range(nv):
+            p00 = _jit(at(iu, iv), rng, amp)
+            p10 = _jit(at(iu + 1, iv), rng, amp)
+            p11 = _jit(at(iu + 1, iv + 1), rng, amp)
+            p01 = _jit(at(iu, iv + 1), rng, amp)
+            mb.add_tri_raw(p00, p10, p11)
+            mb.add_tri_raw(p00, p11, p01)
+
+
+def build_noisy(mb, rng):
+    """Variant D as scan-like triangle soup: every surface subdivided to
+    ~15 cm and jittered +/-1.5 cm, on a 30 ft bumpy ground (+/-4 cm), with a
+    6 ft fence panel 1.5 m off the +Z wall and a truck-sized box 2 m off the
+    -X wall. Ground bumps stay under the waist; the isolation must drop the
+    fence and the truck."""
+    STEP = 0.15
+    AMP = 0.015
+    ov = ft2m(1.0)
+    pitch = (PEAK - EAVE) / HD
+    y_edge = EAVE - ov * pitch
+    # shed walls
+    _soup_quad(mb, rng, (-HW, 0.0, HD), (HW, 0.0, HD), (HW, EAVE, HD), (-HW, EAVE, HD), STEP, AMP)
+    _soup_quad(mb, rng, (HW, 0.0, -HD), (-HW, 0.0, -HD), (-HW, EAVE, -HD), (HW, EAVE, -HD), STEP, AMP)
+    _soup_quad(mb, rng, (HW, 0.0, HD), (HW, 0.0, -HD), (HW, EAVE, -HD), (HW, EAVE, HD), STEP, AMP)
+    _soup_quad(mb, rng, (-HW, 0.0, -HD), (-HW, 0.0, HD), (-HW, EAVE, HD), (-HW, EAVE, -HD), STEP, AMP)
+    # gable triangles (raw, lightly jittered corners)
+    mb.add_tri_raw(_jit((HW, EAVE, HD), rng, AMP), _jit((HW, EAVE, -HD), rng, AMP), _jit((HW, PEAK, 0.0), rng, AMP))
+    mb.add_tri_raw(_jit((-HW, EAVE, -HD), rng, AMP), _jit((-HW, EAVE, HD), rng, AMP), _jit((-HW, PEAK, 0.0), rng, AMP))
+    # overhanging roof planes
+    _soup_quad(mb, rng, (-HW - ov, y_edge, HD + ov), (HW + ov, y_edge, HD + ov),
+               (HW + ov, PEAK, 0.0), (-HW - ov, PEAK, 0.0), STEP, AMP)
+    _soup_quad(mb, rng, (HW + ov, y_edge, -HD - ov), (-HW - ov, y_edge, -HD - ov),
+               (-HW - ov, PEAK, 0.0), (HW + ov, PEAK, 0.0), STEP, AMP)
+    # bumpy ground: 0.5 m cells, +/-4 cm vertical only
+    ng = int(math.ceil((2 * HG) / 0.5))
+    for iu in range(ng):
+        for iv in range(ng):
+            def gp(du, dv):
+                x = -HG + (iu + du) * (2 * HG / ng)
+                z = -HG + (iv + dv) * (2 * HG / ng)
+                return (x, rng.uniform(-0.04, 0.04), z)
+            p00, p10, p11, p01 = gp(0, 0), gp(1, 0), gp(1, 1), gp(0, 1)
+            mb.add_tri_raw(p00, p10, p11)
+            mb.add_tri_raw(p00, p11, p01)
+    # fence: 10 ft long x 6 ft tall, 1.5 m off the +Z wall
+    fz = HD + 1.5
+    _soup_quad(mb, rng, (-ft2m(5.0), 0.0, fz), (ft2m(5.0), 0.0, fz),
+               (ft2m(5.0), ft2m(6.0), fz), (-ft2m(5.0), ft2m(6.0), fz), STEP, AMP)
+    # truck-sized box: 6 ft (X) x 1.6 m (Y) x 4 ft (Z), 2 m off the -X wall
+    tx1 = -HW - 2.0
+    tx0 = tx1 - ft2m(6.0)
+    tz = ft2m(2.0)
+    _soup_quad(mb, rng, (tx0, 0.0, tz), (tx1, 0.0, tz), (tx1, 1.6, tz), (tx0, 1.6, tz), STEP, AMP)
+    _soup_quad(mb, rng, (tx1, 0.0, -tz), (tx0, 0.0, -tz), (tx0, 1.6, -tz), (tx1, 1.6, -tz), STEP, AMP)
+    _soup_quad(mb, rng, (tx0, 1.6, tz), (tx1, 1.6, tz), (tx1, 1.6, -tz), (tx0, 1.6, -tz), STEP, AMP)
 
 
 def build_ground(mb):
@@ -314,6 +498,18 @@ def variants():
     c = MeshBuilder()
     build_shed(c)
 
+    d = MeshBuilder()
+    build_shed(d, ov_ft=1.0)
+
+    e = MeshBuilder()
+    build_gambrel(e)
+
+    f = MeshBuilder()
+    build_mono(f)
+
+    g = MeshBuilder()
+    build_noisy(g, random.Random(20260812))
+
     return [
         ('shed_12x8_gable.glb', a, 'shed', 'shed_node', None,
          'A: shed alone, world bbox == building'),
@@ -322,6 +518,14 @@ def variants():
         ('shed_12x8_gable_offset_rot.glb', c, 'shed', 'shed_node_placed',
          {'translation': [5.0, 0.0, -3.0], 'rotation': quat_y(30.0)},
          'C: shed offset (5,0,-3) m and rotated 30 deg about Y'),
+        ('shed_12x8_gable_ov1.glb', d, 'shed_ov', 'shed_ov_node', None,
+         'D: shed with a 1 ft roof overhang on every side'),
+        ('barn_12x8_gambrel.glb', e, 'barn', 'barn_node', None,
+         'E: gambrel barn, knee +/-2 ft at 9.5 ft, peak 10.5 ft'),
+        ('shed_12x8_mono.glb', f, 'mono', 'mono_node', None,
+         'F: mono-pitch shed, walls 6.5/8.5 ft (shed pitch 0.25)'),
+        ('scanlike_12x8_noisy.glb', g, 'noisy', 'noisy_node', None,
+         'G: D as seeded noisy soup + bumpy ground + fence + truck'),
     ]
 
 

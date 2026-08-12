@@ -1171,21 +1171,94 @@ function scanMeasure(sample) {
     const k = Math.floor((y - minY) / BIN);
     bins.set(k, (bins.get(k) || 0) + 1);
   }
+  // Best 3-bin WINDOW, not single bin: a real lawn undulates a few centimetres,
+  // spreading the ground across neighbouring bins; a flat synthetic ground
+  // dominates any window with one bin, so fixtures measure identically.
   let bestBin = -1, bestN = 0;
-  bins.forEach((n, k) => { if (n > bestN) { bestN = n; bestBin = k; } });
+  bins.forEach((n, k) => {
+    const w3 = n + (bins.get(k - 1) || 0) + (bins.get(k + 1) || 0);
+    if (w3 > bestN) { bestN = w3; bestBin = k; }
+  });
   const ground = bestBin >= 0 ? minY + (bestBin + 0.5) * BIN : minY;
 
   // WAIST CUT kills most junk for free: ground, grass, driveway, low clutter, the operator's
   // feet. What is left is the building (plus anything tall next to it, which is why the
   // builder confirms the numbers rather than us trusting them).
   const waist = ground + 1.2;
-  const wall = [];
+  let wall = [];
   for (let i = 0; i < count; i++) {
     const y = pts[i * 3 + 1];
     if (y >= waist) wall.push(pts[i * 3], y, pts[i * 3 + 2]);
   }
-  const wn = wall.length / 3;
+  let wn = wall.length / 3;
   if (wn < 50) return { err: "That scan does not have enough of a building above ground level to measure." };
+  const warnFlags = [];
+
+  // COMPONENT ISOLATION: a fence, parked truck or tree clears the waist cut
+  // but does not touch the building. Rasterise the waist-up points onto a
+  // 15 cm plan grid, flood-fill 8-connected occupied cells, keep the biggest
+  // island. If that island holds under 60% of the points the scan is probably
+  // sparse/hole-riddled rather than cluttered — measure everything and warn,
+  // instead of silently measuring a fragment.
+  {
+    const CELL = 0.15;
+    let mnx = Infinity, mnz = Infinity, mxx = -Infinity, mxz = -Infinity;
+    for (let i = 0; i < wn; i++) {
+      const x = wall[i * 3], z = wall[i * 3 + 2];
+      if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+      if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+    }
+    const gw = Math.max(1, Math.min(4096, Math.ceil((mxx - mnx) / CELL) + 1));
+    const gh = Math.max(1, Math.min(4096, Math.ceil((mxz - mnz) / CELL) + 1));
+    if (gw * gh <= 2000000) {
+      const counts = new Int32Array(gw * gh);
+      const cellIdx = new Int32Array(wn);
+      for (let i = 0; i < wn; i++) {
+        const cx = Math.min(gw - 1, Math.max(0, Math.floor((wall[i * 3] - mnx) / CELL)));
+        const cz = Math.min(gh - 1, Math.max(0, Math.floor((wall[i * 3 + 2] - mnz) / CELL)));
+        const idx = cz * gw + cx;
+        cellIdx[i] = idx;
+        counts[idx]++;
+      }
+      const label = new Int32Array(gw * gh);          // 0 = unvisited/empty
+      const occupied = (idx) => counts[idx] >= 3;
+      let nextLabel = 0;
+      const labelPts = [];                             // points per label (1-based)
+      const stack = [];
+      for (let seed = 0; seed < gw * gh; seed++) {
+        if (label[seed] || !occupied(seed)) continue;
+        nextLabel++;
+        let acc = 0;
+        stack.length = 0;
+        stack.push(seed);
+        label[seed] = nextLabel;
+        while (stack.length) {
+          const c = stack.pop();
+          acc += counts[c];
+          const cx = c % gw, cz = (c / gw) | 0;
+          for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dz) continue;
+            const nx = cx + dx, nz = cz + dz;
+            if (nx < 0 || nz < 0 || nx >= gw || nz >= gh) continue;
+            const nIdx = nz * gw + nx;
+            if (!label[nIdx] && occupied(nIdx)) { label[nIdx] = nextLabel; stack.push(nIdx); }
+          }
+        }
+        labelPts[nextLabel] = acc;
+      }
+      let bestLabel = 0, bestPts = 0;
+      for (let l = 1; l <= nextLabel; l++) { if (labelPts[l] > bestPts) { bestPts = labelPts[l]; bestLabel = l; } }
+      if (bestLabel && bestPts >= wn * 0.6) {
+        const keep = [];
+        for (let i = 0; i < wn; i++) {
+          if (label[cellIdx[i]] === bestLabel) keep.push(wall[i * 3], wall[i * 3 + 1], wall[i * 3 + 2]);
+        }
+        if (keep.length >= 150) { wall = keep; wn = keep.length / 3; }
+      } else if (bestLabel && bestPts < wn * 0.6) {
+        warnFlags.push("scattered");
+      }
+    }
+  }
 
   // ORIENTED footprint. A phone's X/Z axes are wherever the AR session happened to start, so a
   // building at an angle to them has an axis-aligned box up to 41% too big in BOTH directions.
@@ -1213,69 +1286,216 @@ function scanMeasure(sample) {
   const peak = maxY;
   const BAND = 0.05;
   const nb = Math.max(1, Math.ceil((peak - waist) / BAND));
-  const su = new Float64Array(nb), sv = new Float64Array(nb), cnt = new Float64Array(nb);
-  const loU = new Float64Array(nb).fill(Infinity), hiU = new Float64Array(nb).fill(-Infinity);
-  const loV = new Float64Array(nb).fill(Infinity), hiV = new Float64Array(nb).fill(-Infinity);
+  // PERCENTILE band spans (P98-P2), not min/max: doubled shells, stray tracking
+  // points and speckle otherwise widen every band, and the widened bands are
+  // exactly what the wall/eave/overhang separations below have to read.
+  const cnt = new Int32Array(nb);
+  const bandOf = new Int32Array(wn);
   for (let i = 0; i < wn; i++) {
-    const x = wall[i * 3], y = wall[i * 3 + 1], z = wall[i * 3 + 2];
-    const bi = Math.min(nb - 1, Math.max(0, Math.floor((y - waist) / BAND)));
-    const u = x * cs + z * sn, v = -x * sn + z * cs;
-    if (u < loU[bi]) loU[bi] = u; if (u > hiU[bi]) hiU[bi] = u;
-    if (v < loV[bi]) loV[bi] = v; if (v > hiV[bi]) hiV[bi] = v;
-    cnt[bi]++;
+    const bi = Math.min(nb - 1, Math.max(0, Math.floor((wall[i * 3 + 1] - waist) / BAND)));
+    bandOf[i] = bi; cnt[bi]++;
   }
-  for (let i = 0; i < nb; i++) { su[i] = cnt[i] ? hiU[i] - loU[i] : 0; sv[i] = cnt[i] ? hiV[i] - loV[i] : 0; }
-  // Eave = the highest band where BOTH spans still hold most of the full footprint.
-  const KEEP = 0.92;
-  let eaveBand = -1;
-  for (let i = 0; i < nb; i++) {
-    if (cnt[i] < 5) continue;
-    if (su[i] >= bestW * KEEP && sv[i] >= bestD * KEEP) eaveBand = i;
+  const bu = new Array(nb), bv = new Array(nb), fill = new Int32Array(nb);
+  for (let b = 0; b < nb; b++) { if (cnt[b]) { bu[b] = new Float64Array(cnt[b]); bv[b] = new Float64Array(cnt[b]); } }
+  for (let i = 0; i < wn; i++) {
+    const b = bandOf[i];
+    const x = wall[i * 3], z = wall[i * 3 + 2];
+    bu[b][fill[b]] = x * cs + z * sn;
+    bv[b][fill[b]] = -x * sn + z * cs;
+    fill[b]++;
   }
-  const eaveY = eaveBand >= 0 ? waist + (eaveBand + 1) * BAND : peak;
-  const eave = Math.max(0.3, eaveY - ground);
-  const peakH = peak - ground;
+  const su = new Float64Array(nb), sv = new Float64Array(nb);
+  const suWide = new Float64Array(nb), svWide = new Float64Array(nb);
+  const uMid = new Float64Array(nb), vMid = new Float64Array(nb);
+  for (let b = 0; b < nb; b++) {
+    if (cnt[b] < 5) continue;
+    bu[b].sort(); bv[b].sort();
+    const p2 = Math.floor(0.02 * (cnt[b] - 1)), p98 = Math.ceil(0.98 * (cnt[b] - 1));
+    su[b] = bu[b][p98] - bu[b][p2]; uMid[b] = (bu[b][p98] + bu[b][p2]) / 2;
+    sv[b] = bv[b][p98] - bv[b][p2]; vMid[b] = (bv[b][p98] + bv[b][p2]) / 2;
+    // A wider read (P99.9) for the OVERHANG bands only: the roof's outer rim
+    // is by construction the extreme of its band, and the 2% trim shaved a
+    // real 6 cm off it. Everything structural stays on the trimmed spans.
+    const p01 = Math.floor(0.001 * (cnt[b] - 1)), p999 = Math.ceil(0.999 * (cnt[b] - 1));
+    suWide[b] = bu[b][p999] - bu[b][p01];
+    svWide[b] = bv[b][p999] - bv[b][p01];
+  }
 
-  // Which span collapses above the eave names the ridge axis, and the rise over the half-span
-  // across the ridge is the pitch.
+  // WALL FOOTPRINT from the lowest wall bands, NOT the all-points sweep box:
+  // on any real building the roof overhangs the walls, so the sweep rectangle
+  // is the ROOF footprint - width and depth came out 2x the overhang too big,
+  // and the customer's building grew a size. The waist sits at 1.2m, safely
+  // under the overhang shadow of any wall a person can stand next to.
+  const lowBands = [];
+  for (let b = 0; b < nb && lowBands.length < 6; b++) { if (cnt[b] >= 5) lowBands.push(b); }
+  if (!lowBands.length) return { err: "That scan does not have enough of a building above ground level to measure." };
+  const med = (arr) => { const s = arr.slice().sort((a, q) => a - q); return s[(s.length - 1) >> 1]; };
+  const wallU = med(lowBands.map((b) => su[b]));
+  const wallV = med(lowBands.map((b) => sv[b]));
+
+  // WALL TOP band walk with an UPPER bound too: near the eave the overhanging
+  // roof edge widens the band past the wall span, and the old ">= 92% only"
+  // rule happily called those roof bands "wall".
+  let wallTopBand = lowBands[0];
+  for (let b = 0; b < nb; b++) {
+    if (cnt[b] < 5) continue;
+    if (su[b] >= wallU * 0.92 && su[b] <= wallU * 1.06 && sv[b] >= wallV * 0.92 && sv[b] <= wallV * 1.06) wallTopBand = b;
+  }
+  let eaveY = waist + (wallTopBand + 1) * BAND;      // band-walk estimate; refined below
+
+  // Ridge axis: the axis that KEEPS its span above the wall top holds the ridge.
   let uTop = 0, vTop = 0, tn = 0;
-  for (let i = Math.max(0, eaveBand); i < nb; i++) { if (cnt[i] < 5) continue; uTop += su[i]; vTop += sv[i]; tn++; }
+  for (let b = wallTopBand + 1; b < nb; b++) { if (cnt[b] < 5) continue; uTop += su[b]; vTop += sv[b]; tn++; }
   if (tn) { uTop /= tn; vTop /= tn; }
-  const ridgeAlongU = uTop >= vTop;                 // the axis that KEEPS its span holds the ridge
-  const acrossSpan = ridgeAlongU ? bestD : bestW;
-  const rise = Math.max(0, peak - eaveY);
-  // PITCH comes from the roof's TAPER, not from the eave. Deriving it as rise/(span/2) inherits
-  // the eave estimate's bias, and that bias is systematic: with little or no overhang the span is
-  // still ~full a few centimetres ABOVE the eave, so any "span is still 92% of the footprint"
-  // rule sits high by about (1 - KEEP) * rise and the pitch comes out low. Across a gable the
-  // span instead shrinks linearly with height -- s(h) = span - 2h/pitch -- so a least-squares fit
-  // of across-span against height over the roof bands gives pitch = -2 / slope with no dependence
-  // on where the eave was judged to be. Found by a fixture whose true pitch (7.5:12) sits exactly
-  // on a rounding boundary, which is precisely where the old estimator flipped a whole step.
-  let pitch = acrossSpan > 0.2 ? rise / (acrossSpan / 2) : 0;
-  {
+  const ridgeAlongU = uTop >= vTop;
+  const wallAcross = ridgeAlongU ? wallV : wallU;
+  const wallAlong = ridgeAlongU ? wallU : wallV;
+
+  // Roof bands: everything clearly above the wall top.
+  const roofY = [], roofS = [], roofAlong = [], roofMid = [];
+  for (let b = wallTopBand + 2; b < nb; b++) {
+    if (cnt[b] < 5) continue;
+    const sp = ridgeAlongU ? sv[b] : su[b];
+    if (!(sp > 0)) continue;
+    roofY.push(waist + (b + 0.5) * BAND);
+    roofS.push(sp);
+    roofAlong.push(ridgeAlongU ? su[b] : sv[b]);
+    roofMid.push(ridgeAlongU ? vMid[b] : uMid[b]);
+  }
+  const lsFit = (xs, ys, i0, i1) => {   // least squares over [i0, i1)
     let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (let i = 0; i < nb; i++) {
-      if (cnt[i] < 5) continue;
-      const y = waist + (i + 0.5) * BAND;
-      if (y <= eaveY + BAND) continue;                       // roof bands only
-      const sp = ridgeAlongU ? sv[i] : su[i];
-      if (!(sp > 0)) continue;
-      n++; sx += y; sy += sp; sxx += y * y; sxy += y * sp;
-    }
+    for (let i = i0; i < i1; i++) { n++; sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
     const denom = n * sxx - sx * sx;
-    if (n >= 3 && Math.abs(denom) > 1e-9) {
-      const slope = (n * sxy - sx * sy) / denom;              // span lost per metre of height
-      if (slope < -1e-6) pitch = -2 / slope;
+    if (n < 2 || Math.abs(denom) < 1e-9) return null;
+    const slope = (n * sxy - sx * sy) / denom;
+    const icept = (sy - slope * sx) / n;
+    let sse = 0;
+    for (let i = i0; i < i1; i++) { const e = ys[i] - (icept + slope * xs[i]); sse += e * e; }
+    return { slope, icept, sse, n };
+  };
+
+  // PITCH from the roof's TAPER (see the fixture story in git history: a
+  // threshold eave biased the pitch a whole 1/12 step), and the TRUE EAVE from
+  // where the fitted roof line crosses the wall span - the roof plane passes
+  // through the wall-top corner whether or not it overhangs, so this crossing
+  // is overhang-immune where any band threshold is not.
+  const rise0 = Math.max(0, peak - eaveY);
+  let pitch = wallAcross > 0.2 ? rise0 / (wallAcross / 2) : 0;
+  const roofFit = lsFit(roofY, roofS, 0, roofS.length);
+  if (roofFit && roofFit.slope < -1e-6 && roofFit.n >= 3) {
+    pitch = -2 / roofFit.slope;
+    const cross = (wallAcross - roofFit.icept) / roofFit.slope;
+    if (cross > waist && cross < peak) eaveY = cross;
+  }
+
+  // OVERHANG. Across the ridge: bands just BELOW the eave hold the roof's
+  // overhanging edge, wider than the wall span - the widest of them names the
+  // edge. Along the ridge: a gable roof clears the end walls by the overhang
+  // at every roof height, so the mean along-span excess reads it directly.
+  let overhangM = 0;
+  {
+    let maxBelow = wallAcross;
+    for (let b = 0; b < nb; b++) {
+      if (cnt[b] < 5) continue;
+      const y = waist + (b + 0.5) * BAND;
+      if (y < eaveY - 0.7 || y > eaveY) continue;
+      const sp = ridgeAlongU ? svWide[b] : suWide[b];
+      if (sp > maxBelow) maxBelow = sp;
+    }
+    const ovAcross = Math.max(0, (maxBelow - wallAcross) / 2);
+    let ovAlong = 0;
+    let alongN = 0, alongSum = 0;
+    for (let b = wallTopBand + 2; b < nb; b++) {
+      if (cnt[b] < 5) continue;
+      alongSum += ridgeAlongU ? suWide[b] : svWide[b];
+      alongN++;
+    }
+    if (alongN) ovAlong = Math.max(0, (alongSum / alongN - wallAlong) / 2);
+    overhangM = (ovAcross + ovAlong) / 2;
+    if (Math.abs(ovAcross - ovAlong) > 0.15) warnFlags.push("overhang");
+  }
+
+  let eave = Math.max(0.3, eaveY - ground);   // gambrel refines eaveY below and re-derives this
+  const peakH = peak - ground;
+  const rise = Math.max(0, peak - eaveY);
+
+  // Classification. Midpoint drift separates what the old "both axes taper"
+  // proxy conflated: a symmetric gable's across-midpoint holds still, a
+  // saltbox's drifts toward the ridge, a mono-pitch shed's drifts at half the
+  // taper rate (the "ridge" IS one eave). A two-segment fit whose upper leg
+  // sheds span markedly faster than the lower is a gambrel - the farmland
+  // barn profile the one-line fit used to average into a wrong gable.
+  let roofType = "gable";
+  let ridgeOffset = 0;
+  let gambrel = null;
+  if (rise < 0.15) {
+    roofType = "shed"; pitch = 0.25;
+  } else if (roofS.length >= 6) {
+    // Gambrel: best two-segment split vs the single line.
+    let best2 = null;
+    for (let k = 3; k <= roofS.length - 3; k++) {
+      const lo = lsFit(roofY, roofS, 0, k);
+      const hi = lsFit(roofY, roofS, k, roofS.length);
+      if (!lo || !hi) continue;
+      const sse = lo.sse + hi.sse;
+      if (!best2 || sse < best2.sse) best2 = { sse, lo, hi };
+    }
+    const drift = lsFit(roofY, roofMid, 0, roofMid.length);
+    const halfTaper = roofFit ? -roofFit.slope / 2 : 0;
+    const r = drift && halfTaper > 1e-6 ? drift.slope / halfTaper : 0;
+    if (best2 && roofFit && best2.lo.slope < -1e-6 && best2.hi.slope < -1e-6 &&
+        best2.sse < roofFit.sse * 0.5 && Math.abs(best2.hi.slope) >= Math.abs(best2.lo.slope) * 1.7) {
+      roofType = "gambrel";
+      const kneeY = (best2.hi.icept - best2.lo.icept) / (best2.lo.slope - best2.hi.slope);
+      const kneeSpan = best2.lo.icept + best2.lo.slope * kneeY;
+      const crossG = (wallAcross - best2.lo.icept) / best2.lo.slope;
+      const eaveG = crossG > waist && crossG < peak ? crossG : eaveY;
+      const half = wallAcross / 2;
+      gambrel = {
+        kneeU: Math.max(0, Math.min(1, kneeSpan / wallAcross)),
+        kneeRise: Math.max(0, Math.min(1, (kneeY - eaveG) / half)),
+        ridgeRise: Math.max(0, Math.min(1.5, (peak - eaveG) / half)),
+      };
+      eaveY = eaveG;
+      eave = Math.max(0.3, eaveY - ground);   // the single-line crossing sat above the true gambrel eave
+      pitch = -2 / best2.lo.slope;
+    } else if (Math.abs(r) > 0.8) {
+      roofType = "shed";
+      pitch = wallAcross > 0.2 ? rise / wallAcross : 0.25;   // shed rise spans the WHOLE across span
+    } else if (Math.abs(r) > 0.16 && drift) {
+      const driftTotal = drift.slope * rise;
+      ridgeOffset = Math.max(-0.35, Math.min(0.35, driftTotal / wallAcross));
+      if (Math.abs(ridgeOffset) < 0.05) ridgeOffset = 0;
+    }
+    // Both axes tapering hard above the eave reads as a hip roof - we can't
+    // build one, so say so instead of silently calling it something else.
+    if (roofType === "gable" && roofAlong.length >= 3) {
+      const alongFit = lsFit(roofY, roofAlong, 0, roofAlong.length);
+      if (alongFit && alongFit.slope < -0.5 && roofFit && alongFit.slope < roofFit.slope * 0.5) warnFlags.push("hip");
     }
   }
-  let roofType = "gable";
-  if (rise < 0.15) { roofType = "shed"; pitch = 0.25; }            // flat-ish reads as a low shed
-  else if (Math.abs(uTop - vTop) < Math.min(bestW, bestD) * 0.15) roofType = "shed";  // both taper -> not a gable
+
+  // Plan-view centre of the WALL rectangle (the calibration turntable frames
+  // the scan with it): mid of the wall-band extents, rotated back to world.
+  let centerX = 0, centerZ = 0;
+  {
+    let luo = Infinity, huo = -Infinity, lvo = Infinity, hvo = -Infinity;
+    lowBands.forEach((b) => {
+      const p2 = Math.floor(0.02 * (cnt[b] - 1)), p98 = Math.ceil(0.98 * (cnt[b] - 1));
+      if (bu[b][p2] < luo) luo = bu[b][p2]; if (bu[b][p98] > huo) huo = bu[b][p98];
+      if (bv[b][p2] < lvo) lvo = bv[b][p2]; if (bv[b][p98] > hvo) hvo = bv[b][p98];
+    });
+    const cu = (luo + huo) / 2, cvv = (lvo + hvo) / 2;
+    centerX = cu * cs - cvv * sn;
+    centerZ = cu * sn + cvv * cs;
+  }
+
   return {
-    widthM: Math.max(bestW, bestD), depthM: Math.min(bestW, bestD),
+    widthM: Math.max(wallU, wallV), depthM: Math.min(wallU, wallV),
     eaveM: eave, peakM: peakH, pitch, roofType,
+    overhangM, ridgeOffset, gambrel,
     headingDeg: bestA * 180 / Math.PI, groundY: ground, sampled: count,
+    centerX, centerZ, warnFlags,
   };
 }
 
@@ -1291,6 +1511,11 @@ function scanToFeet(m) {
     widthFt: Math.round(ft(m.widthM)), depthFt: Math.round(ft(m.depthM)),
     eaveFt: Math.round(ft(m.eaveM) * 2) / 2, peakFt: Math.round(ft(m.peakM) * 2) / 2,
     pitch: Math.max(0, Math.round(m.pitch * 100) / 100), roofType: m.roofType,
+    overhangFt: Math.max(0, Math.min(3, Math.round(ft(m.overhangM || 0) * 10) / 10)),
+    ridgeOffset: m.ridgeOffset ? Math.round(m.ridgeOffset * 100) / 100 : 0,
+    gambrel: m.gambrel
+      ? { kneeU: Math.round(m.gambrel.kneeU * 100) / 100, kneeRise: Math.round(m.gambrel.kneeRise * 100) / 100, ridgeRise: Math.round(m.gambrel.ridgeRise * 100) / 100 }
+      : null,
     headingDeg: Math.round(m.headingDeg), sampled: m.sampled,
   };
   const bad = [];
@@ -1298,9 +1523,15 @@ function scanToFeet(m) {
   if (out.depthFt < 4 || out.depthFt > 100) bad.push(`depth ${out.depthFt} ft`);
   if (out.eaveFt < 4 || out.eaveFt > 20) bad.push(`wall height ${out.eaveFt} ft`);
   if (out.peakFt < out.eaveFt) bad.push("a peak below the wall");
+  const flagText = {
+    scattered: "the scan is scattered — its pieces don't connect, so clutter may be included",
+    overhang: "the roof overhang reads differently along vs across the building — check it",
+    hip: "the roof narrows on all four sides (hip roof?) — StructureStudio builds gable/gambrel/shed roofs",
+  };
+  const flags = (m.warnFlags || []).map((f) => flagText[f] || f);
   out.warn = bad.length
     ? `These measurements look wrong (${bad.join(", ")}) — the scan may include the ground or something next to the building, or may not be to scale. Check them before saving.`
-    : null;
+    : (flags.length ? `Heads up: ${flags.join("; ")}.` : null);
   return out;
 }
 

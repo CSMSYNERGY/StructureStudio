@@ -38,11 +38,18 @@ function sliceFn(src, name) {
     // eslint-disable-next-line no-new-func
     const api = new Function(consts.join('\n') + '\n' + bodies.join('\n') + '\nreturn {' + names.join(',') + '};')();
 
-    // ── measurement, against the three synthetic captures ──
+    // ── measurement, against the seven synthetic captures ──
+    // Each numeric expectation is [value, tolerance]; tolerance 0 = exact.
+    // notRoof asserts a CLASSIFICATION the file must never get (G is a noisy
+    // gable that a loose two-segment fit could misread as a gambrel).
     const EXPECT = {
-      'shed_12x8_gable.glb':            { widthFt: 12, depthFt: 8, eaveFt: 6.5, peakFt: 9, roof: 'gable' },
-      'shed_12x8_gable_ground.glb':     { widthFt: 12, depthFt: 8, eaveFt: 6.5, peakFt: 9, roof: 'gable' },
-      'shed_12x8_gable_offset_rot.glb': { widthFt: 12, depthFt: 8, eaveFt: 6.5, peakFt: 9, roof: 'gable' },
+      'shed_12x8_gable.glb':            { widthFt: [12, 0], depthFt: [8, 0], eaveFt: [6.5, 0], peakFt: [9, 0], roof: 'gable', pitch: [0.625, 0.02], overhangFt: [0, 0.15] },
+      'shed_12x8_gable_ground.glb':     { widthFt: [12, 0], depthFt: [8, 0], eaveFt: [6.5, 0], peakFt: [9, 0], roof: 'gable', pitch: [0.625, 0.02], overhangFt: [0, 0.15] },
+      'shed_12x8_gable_offset_rot.glb': { widthFt: [12, 0], depthFt: [8, 0], eaveFt: [6.5, 0], peakFt: [9, 0], roof: 'gable', pitch: [0.625, 0.02], overhangFt: [0, 0.15] },
+      'shed_12x8_gable_ov1.glb':        { widthFt: [12, 0], depthFt: [8, 0], eaveFt: [6.5, 0], peakFt: [9, 0], roof: 'gable', pitch: [0.625, 0.02], overhangFt: [1.0, 0.15] },
+      'barn_12x8_gambrel.glb':          { widthFt: [12, 0], depthFt: [8, 0], eaveFt: [6.5, 0.25], peakFt: [10.5, 0], roof: 'gambrel', kneeU: [0.5, 0.06], kneeRise: [0.75, 0.08], ridgeRise: [1.0, 0.08] },
+      'shed_12x8_mono.glb':             { widthFt: [12, 0], depthFt: [8, 0], eaveFt: [6.5, 0.25], peakFt: [8.5, 0], roof: 'shed', pitch: [0.25, 0.03] },
+      'scanlike_12x8_noisy.glb':        { widthFt: [12, 1], depthFt: [8, 1], eaveFt: [6.5, 0.5], peakFt: [9, 0.5], roof: 'gable', notRoof: 'gambrel', pitch: [0.625, 0.06], overhangFt: [1.0, 0.3] },
     };
     const loader = new GLTFLoader();
     let allExact = true;
@@ -55,10 +62,19 @@ function sliceFn(src, name) {
       const ft = m && !m.err ? api.scanToFeet(m) : null;
       const want = EXPECT[f];
       const got = ft && !ft.err ? ft : null;
-      const exact = Boolean(got) && ['widthFt', 'depthFt', 'eaveFt', 'peakFt'].every((k) => got[k] === want[k])
-        && got.roofType === want.roof && Math.abs(got.pitch - 0.625) <= 0.02;
+      const num = (k) => {
+        if (!(k in want) || !Array.isArray(want[k])) return true;
+        const v = k === 'kneeU' || k === 'kneeRise' || k === 'ridgeRise'
+          ? (got.gambrel ? got.gambrel[k] : NaN)
+          : got[k];
+        return Number.isFinite(v) && Math.abs(v - want[k][0]) <= want[k][1];
+      };
+      const exact = Boolean(got)
+        && ['widthFt', 'depthFt', 'eaveFt', 'peakFt', 'pitch', 'overhangFt', 'kneeU', 'kneeRise', 'ridgeRise'].every(num)
+        && got.roofType === want.roof
+        && (!want.notRoof || got.roofType !== want.notRoof);
       if (!exact) allExact = false;
-      report.steps.push({ step: 'measure', file: f, inspect, got, want, pitchWant: 0.625, exact });
+      report.steps.push({ step: 'measure', file: f, inspect, got, want, exact });
     }
     report.allExact = allExact;
 
@@ -96,5 +112,49 @@ function sliceFn(src, name) {
   window.__result = report;
   window.__done = true;
   out.textContent = JSON.stringify(report, null, 1);
+
+  // ── drop panel: measure ANY .glb through the same shipped-source api ──
+  // This is the tool for a real phone capture: drop the file, read the JSON.
+  const zone = document.createElement('div');
+  zone.id = 'drop';
+  zone.textContent = 'Drop a .glb here (or click to pick) to measure it with the shipped pipeline';
+  zone.style.cssText = 'margin:16px;padding:28px;border:2px dashed #94A3B8;border-radius:12px;font:600 14px system-ui;color:#334155;cursor:pointer;';
+  const dropOut = document.createElement('pre');
+  dropOut.id = 'dropout';
+  document.body.appendChild(zone);
+  document.body.appendChild(dropOut);
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = '.glb';
+  picker.style.display = 'none';
+  document.body.appendChild(picker);
+  const src2 = await (await fetch('/structure-studio.component.js?probe=2')).text();
+  const api2 = new Function(
+    src2.split(/\r?\n/).filter((l) => /^const (SCAN_MAX_BYTES|M_TO_FT)\s*=/.test(l)).join('\n') + '\n'
+    + ['scanSamplePoints', 'scanMeasure', 'scanToFeet', 'scanInspectGlb'].map((n) => sliceFn(src2, n)).join('\n')
+    + '\nreturn {scanSamplePoints,scanMeasure,scanToFeet,scanInspectGlb};')();
+  const measureFile = async (file) => {
+    dropOut.textContent = 'measuring ' + file.name + ' (' + (file.size / 1048576).toFixed(1) + ' MB)…';
+    try {
+      const buf = await file.arrayBuffer();
+      const gate = api2.scanInspectGlb(buf);
+      if (gate && gate.err) { dropOut.textContent = JSON.stringify({ file: file.name, gate }, null, 1); return; }
+      const gltf = await new GLTFLoader().parseAsync(buf, '');
+      const sample = api2.scanSamplePoints(THREE, gltf.scene, 120000);
+      const m = api2.scanMeasure(sample);
+      const res = { file: file.name, bytes: buf.byteLength, gate, metres: m, feet: m && !m.err ? api2.scanToFeet(m) : null };
+      window.__dropResult = res;
+      dropOut.textContent = JSON.stringify(res, null, 1);
+    } catch (e) { dropOut.textContent = 'failed: ' + (e && e.stack || e); }
+  };
+  zone.addEventListener('click', () => picker.click());
+  picker.addEventListener('change', () => { if (picker.files[0]) measureFile(picker.files[0]); });
+  zone.addEventListener('dragover', (ev) => { ev.preventDefault(); zone.style.background = '#EFF6FF'; });
+  zone.addEventListener('dragleave', () => { zone.style.background = ''; });
+  zone.addEventListener('drop', (ev) => {
+    ev.preventDefault(); zone.style.background = '';
+    const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (f) measureFile(f);
+  });
 })();
 </script>
