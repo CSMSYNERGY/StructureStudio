@@ -1569,7 +1569,14 @@ function d3FixtureTexture(THREE, url) {
     } catch (_e) { entry.status = "error"; }       // painted door stays — never a black slab
     _d3FxTexSettle();
   };
-  img.onerror = () => { entry.status = "error"; _d3FxTexSettle(); };
+  img.onerror = () => {
+    entry.status = "error";
+    // The materials waiting on this photo keep their painted fallback — but
+    // the bind set must go, or it pins disposed materials forever (the load
+    // path deletes it on success; this was the missed error path).
+    _d3FxMatBinds.delete(entry);
+    _d3FxTexSettle();
+  };
   img.src = url;
   return entry;
 }
@@ -2188,6 +2195,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const [envOn, setEnvOn] = useState(true);
   const [viewsOpen, setViewsOpen] = useState(false);
   const [shotTaken, setShotTaken] = useState(false);
+  const [closing, setClosing] = useState(false);   // close-time auto-capture in progress (photo wait + readback can take ~2s)
   // Armed palette tool for placing new wall items in 3D (§10.4). Mirrored into
   // a ref so the native pointer handlers read the current value.
   const [tool3, setTool3] = useState(null);
@@ -2226,8 +2234,24 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     loadThree().then((bundle) => {
       const THREE = bundle.THREE, OrbitControls = bundle.OrbitControls;
       if (disposed || !canvasRef.current) return;
-      const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, preserveDrawingBuffer: true });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      // preserveDrawingBuffer stays OFF: it taxes every frame on tile-based
+      // mobile GPUs, and the only read-back — capture() — renders explicitly
+      // in the same task before toDataURL, which the spec guarantees is valid.
+      const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, preserveDrawingBuffer: false });
+      // DPR policy: full sharpness at rest, capped resolution while a finger
+      // is down on a coarse-pointer device. A DPR-3 phone clamped to 2 still
+      // pushes ~1.3M pixels through MSAA on this full-screen canvas; during an
+      // orbit/drag nobody can see the extra sharpness, and the release renders
+      // one crisp frame at base DPR. Desktop pointers never change.
+      const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+      const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+      const interactDpr = Math.min(baseDpr, 1.25);
+      renderer.setPixelRatio(baseDpr);
+      const setInteractDpr = (on) => {
+        if (!coarsePointer || interactDpr === baseDpr) return;
+        const want = on ? interactDpr : baseDpr;
+        if (renderer.getPixelRatio() !== want) { renderer.setPixelRatio(want); if (!on) render(); }
+      };
       renderer.shadowMap.enabled = true;                 // SmartBuild-style sun shadows
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       // The sun is a fixed directional light with a fixed ortho shadow camera,
@@ -2536,6 +2560,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         ev.preventDefault();
         controls.enabled = false;
         dragging3 = { id: it.id, moved: false };
+        setInteractDpr(true);
         lastHoverId = it.id;
         placeHighlight(it);
         highlight.visible = true;
@@ -2684,6 +2709,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const d = dragging3;
         dragging3 = null;
         controls.enabled = true;
+        setInteractDpr(false);
         canvas.style.cursor = "";
         try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* not captured */ }
         highlight.visible = false;
@@ -2737,6 +2763,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         requestAnimationFrame(() => { renderQueued = false; render(); });
       };
       controls.addEventListener("change", scheduleRender);
+      controls.addEventListener("start", () => setInteractDpr(true));
+      controls.addEventListener("end", () => setInteractDpr(false));
       const resize = () => {
         const el = wrapRef.current;
         if (!el) return;
@@ -2748,7 +2776,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
       const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
       if (ro && wrapRef.current) ro.observe(wrapRef.current);
-      window.addEventListener("resize", resize);
+      // The window listener is only the fallback for environments without
+      // ResizeObserver — wired together, every window resize ran resize()
+      // (and its render) twice.
+      if (!ro) window.addEventListener("resize", resize);
       // A fixture photo that arrives after the scene is built has already been swapped
       // into its materials by the cache (see d3FixtureTexture) — all that is left is
       // asking for a frame, since this renderer draws on demand. Deliberately a direct
@@ -2767,7 +2798,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, offFxTex, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -2812,6 +2843,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const capture = () => {
     const e = engineRef.current;
     if (!e) return null;
+    // The quote page must be sharp even if a touch interaction just lowered
+    // the DPR — restore base resolution before the frame we read back.
+    if (e.baseDpr && e.renderer.getPixelRatio() !== e.baseDpr) e.renderer.setPixelRatio(e.baseDpr);
     e.render(); // fresh buffer right before reading it back
     try {
       const c = e.renderer.domElement;
@@ -2842,9 +2876,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     setShotTaken(true);
   };
   const handleClose = async () => {
+    if (closing) return;
     // Never-captured close still contributes the last viewed angle — opening
     // the 3D view at all means the customer gets the 3D page in their quote.
+    // The photo wait (up to 1.5s) + readback + JPEG encode used to freeze the
+    // ✕ with zero feedback — the `closing` overlay owns that gap now.
     if (!capturedRef.current && phase === "ready") {
+      setClosing(true);
       await awaitFixturePhotos();
       const shot = capture();
       if (shot) onSnapshot(shot);
@@ -2859,7 +2897,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           3D Preview
           <span style={{ color: "#94A3B8", fontWeight: 600, fontSize: 12, marginLeft: 10 }}>{bldgW}×{bldgH} ft — drag to orbit · drag items to move them · scroll to zoom</span>
         </div>
-        <button onClick={handleClose} style={{ background: "none", border: "none", color: "#CBD5E1", fontSize: 22, cursor: "pointer", lineHeight: 1 }}>✕</button>
+        <button onClick={handleClose} disabled={closing} style={{ background: "none", border: "none", color: closing ? "#64748B" : "#CBD5E1", fontSize: 22, cursor: closing ? "default" : "pointer", lineHeight: 1 }}>✕</button>
       </div>
       <div ref={wrapRef} style={{ flex: 1, position: "relative", minHeight: 0 }}>
         <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }} />
@@ -2870,6 +2908,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#FCA5A5", fontWeight: 700, textAlign: "center", padding: 20 }}>
             Couldn't load the 3D viewer — check your connection, then close and try again.
           </div>
+        )}
+        {closing && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,0.45)", color: "#E2E8F0", fontWeight: 700 }}>Saving your 3D view…</div>
         )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 16px", background: "#0F172A" }}>
@@ -6698,7 +6739,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         );
       })()}
 
-      {/* SVG Canvas */}
+      {/* SVG Canvas. Unmounted while a full-screen 3D surface covers it: the
+          hundreds of SVG nodes otherwise re-render on every 3D-driven state
+          change and make every pointer-math layout read pay for the whole
+          tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
+          and the PDF export draws from state, not this DOM. */}
+      {!(show3D || adminCalPreview) && (
       <div style={{ display: "flex", justifyContent: "center", padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
           style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
@@ -7088,6 +7134,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           })}
         </svg>
       </div>
+      )}
 
       {/* Customer Information (above Submit Bar) */}
       {!submitted && (
