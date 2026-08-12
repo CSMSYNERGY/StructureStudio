@@ -2324,6 +2324,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       let dragging3 = null;      // { id, moved }
       let lastHoverId = null;
       let rebuildScope = null;   // accumulated for the next frame: { full, walls:Set, interior }
+      let canvasRect = null;     // getBoundingClientRect cache - a layout read per pointermove forces layout of the whole page (the 2D SVG included)
+      let lastSentSelect = null; // last item id reported via onItemSelect - a no-op tap shouldn't re-render the parent
       const raycaster = new THREE.Raycaster();
       const ndc = new THREE.Vector2();
       const dragPlane = new THREE.Plane();
@@ -2350,7 +2352,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         e.renderer.shadowMap.needsUpdate = true;
       };
       const setRay = (ev) => {
-        const rc = canvas.getBoundingClientRect();
+        // The modal is position:fixed inset:0, so the rect only moves on a
+        // viewport resize - resize() invalidates, pointerdown re-primes.
+        if (!canvasRect) canvasRect = canvas.getBoundingClientRect();
+        const rc = canvasRect;
         ndc.x = ((ev.clientX - rc.left) / rc.width) * 2 - 1;
         ndc.y = -((ev.clientY - rc.top) / rc.height) * 2 + 1;
         raycaster.setFromCamera(ndc, camera);
@@ -2362,8 +2367,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const e = engineRef.current;
         if (!e) return null;
         setRay(ev);
-        const targets = e.model.openingsGroup.children.concat(e.model.interiorGroup.children);
-        const hits = raycaster.intersectObjects(targets, true);
+        const hits = raycaster.intersectObjects([e.model.openingsGroup, e.model.interiorGroup], true);
         for (let h = 0; h < hits.length; h++) {
           let n = hits[h].object;
           while (n && !(n.userData && n.userData.itemId)) n = n.parent;
@@ -2376,7 +2380,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const e = engineRef.current;
         if (!e) return null;
         setRay(ev);
-        const hits = raycaster.intersectObjects(e.model.wallsGroup.children, true);
+        const hits = raycaster.intersectObjects([e.model.wallsGroup], true);
         for (let h = 0; h < hits.length; h++) {
           let n = hits[h].object;
           while (n && !(n.userData && n.userData.wall)) n = n.parent;
@@ -2494,6 +2498,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
       const onPtr3Down = (ev) => {
         if (ev.button !== undefined && ev.button !== 0) return;
+        canvasRect = canvas.getBoundingClientRect();   // re-prime the cache at gesture start
         // Armed palette tool: click a wall to place a new item (§10.4) via the
         // SAME pipeline as the 2D click — page coords → snapToWall — plus the
         // Phase 5 opening stamps. Clicking sky/roof keeps the tool armed and
@@ -2512,7 +2517,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const ni = { id: idCounter++, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height, ...d3OpeningDefaults(tool) };
             liveItems = liveItems.concat([ni]);
             if (onItemAdd) onItemAdd(ni);
-            if (onItemSelect) onItemSelect(ni.id);
+            if (onItemSelect) { lastSentSelect = ni.id; onItemSelect(ni.id); }
             capturedRef.current = false;
             setShotTaken(false);
             setTool3(null);
@@ -2521,7 +2526,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return;
         }
         const it = pickItem3(ev);
-        if (!it) return;
+        if (!it) {
+          // An orbit is starting and hover raycasts pause while a button is
+          // held - drop any hover outline so it can't ride along stale.
+          if (lastHoverId != null) { lastHoverId = null; highlight.visible = false; render(); }
+          return;
+        }
         ev.stopImmediatePropagation();
         ev.preventDefault();
         controls.enabled = false;
@@ -2654,8 +2664,11 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return;
         }
         // Hover affordance: grab cursor + amber outline over movable items
-        // (crosshair while a palette tool is armed).
+        // (crosshair while a palette tool is armed). A held button means an
+        // orbit is in progress - skip the raycast entirely; OrbitControls owns
+        // the gesture and hover feedback would be invisible anyway.
         if (tool3Ref.current) return;
+        if (ev.buttons !== 0) return;
         const hov = pickItem3(ev);
         canvas.style.cursor = hov ? "grab" : "";
         const hid = hov ? hov.id : null;
@@ -2687,8 +2700,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           setShotTaken(false);
         }
         // Selection syncs to the 2D view (§10.5) — a tap selects, a drag
-        // selects what it moved.
-        if (onItemSelect) onItemSelect(d.id);
+        // selects what it moved. Tapping the already-selected item again is a
+        // no-op and shouldn't re-render the parent (unless it moved).
+        if (onItemSelect && (d.moved || d.id !== lastSentSelect)) { lastSentSelect = d.id; onItemSelect(d.id); }
       };
       canvas.addEventListener("pointerdown", onPtr3Down, true);
       canvas.addEventListener("pointermove", onPtr3Move);
@@ -2711,10 +2725,22 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       controls.maxDistance = dist * 2.5;
       controls.update();
       const render = () => renderer.render(scene, camera);
-      controls.addEventListener("change", render);
+      // Orbit renders are rAF-coalesced: wheel and high-rate trackpads fire
+      // "change" faster than the display refreshes, and each render is a full
+      // frame. Only the orbit path goes through this - the fixture-photo
+      // settle and capture() below keep their DIRECT render calls, which must
+      // work in a backgrounded tab where rAF never fires.
+      let renderQueued = false;
+      const scheduleRender = () => {
+        if (renderQueued) return;
+        renderQueued = true;
+        requestAnimationFrame(() => { renderQueued = false; render(); });
+      };
+      controls.addEventListener("change", scheduleRender);
       const resize = () => {
         const el = wrapRef.current;
         if (!el) return;
+        canvasRect = null;   // the cached pointer-math rect is stale now
         renderer.setSize(el.clientWidth, el.clientHeight, false);
         camera.aspect = el.clientWidth / Math.max(1, el.clientHeight);
         camera.updateProjectionMatrix();
