@@ -5720,8 +5720,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const m = scan.measured;
     if (!m) return;
     calSet({ wallHeightFt: m.eaveFt });
-    calSetRoof({ type: m.roofType, pitch: m.pitch });
-    setAdminCalMsg({ ok: true, msg: `Using the scan: ${m.widthFt}×${m.depthFt} ft, ${m.eaveFt} ft walls, ${m.roofType} roof at ${m.pitch}. Preview it, then save.` });
+    const roof = { type: m.roofType, pitch: m.pitch, overhang: m.overhangFt || 0 };
+    if (m.roofType === "gambrel" && m.gambrel) {
+      roof.kneeU = m.gambrel.kneeU; roof.kneeRise = m.gambrel.kneeRise; roof.ridgeRise = m.gambrel.ridgeRise;
+    }
+    if (m.roofType === "gable" && m.ridgeOffset) roof.ridgeOffset = m.ridgeOffset;
+    calSetRoof(roof);
+    setAdminCalMsg({ ok: true, msg: `Using the scan: ${m.widthFt}×${m.depthFt} ft, ${m.eaveFt} ft walls, ${m.roofType} roof at ${m.pitch}${m.overhangFt ? `, ${m.overhangFt} ft overhang` : ""}. Preview it, then save.` });
+  };
+  // Closest sizes this style sells, orientation-agnostic; empty when nothing
+  // is within 4 ft total. The scan can SUGGEST but never create a size —
+  // sizes carry pricing (the NULL-base-price contract), so a miss is the
+  // builder's cue to add the size under Settings → Catalog first.
+  const scanSizeMatchesFor = (m) => {
+    if (!m) return [];
+    const st = ((C && C.buildingStyles) || []).find((s) => s.value === (adminCal && adminCal.styleValue));
+    const labels = st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []);
+    const out = [];
+    labels.forEach((label) => {
+      const p = parseSize(typeof label === "string" ? label : label && label.label);
+      if (!p) return;
+      const score = Math.abs(Math.max(p.w, p.h) - Math.max(m.widthFt, m.depthFt))
+        + Math.abs(Math.min(p.w, p.h) - Math.min(m.widthFt, m.depthFt));
+      out.push({ label: typeof label === "string" ? label : label.label, score });
+    });
+    out.sort((a, b) => a.score - b.score);
+    return out.filter((s) => s.score <= 4).slice(0, 3);
+  };
+  const scanApplySize = (label) => {
+    setSel((p) => ({ ...p, style: adminCal.styleValue, size: label }));
+    setAdminCalMsg({ ok: true, msg: `Canvas set to ${label} on this style — the resize cleared any placed items.` });
   };
   // Store the scan against the style so it can be re-measured later (an algorithm improvement
   // should not need the builder to walk round the building again).
@@ -6579,8 +6607,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       walls <b>{scan.measured.eaveFt} ft</b>{" · "}
                       peak <b>{scan.measured.peakFt} ft</b>{" · "}
                       <b>{scan.measured.roofType}</b> roof, pitch <b>{scan.measured.pitch}</b>
+                      {scan.measured.overhangFt ? <>{", overhang "}<b>{scan.measured.overhangFt} ft</b></> : null}
+                      {scan.measured.gambrel && (
+                        <span style={{ color: "#64748B" }}>{" "}(knee {scan.measured.gambrel.kneeU} / rise {scan.measured.gambrel.kneeRise} / ridge {scan.measured.gambrel.ridgeRise})</span>
+                      )}
                       <span style={{ color: "#64748B" }}>{" "}(from {scan.measured.sampled.toLocaleString()} surface points)</span>
                       {scan.measured.warn && <div style={{ marginTop: 4, color: "#B45309", fontWeight: 600 }}>⚠ {scan.measured.warn}</div>}
+                      {(() => {
+                        const matches = scanSizeMatchesFor(scan.measured);
+                        if (matches.length) {
+                          return (
+                            <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E" }}>Closest sizes you sell:</span>
+                              {matches.map((s) => (
+                                <button key={s.label} onClick={() => scanApplySize(s.label)}
+                                  style={{ ...S.btn("#FFF", "#0E7490"), border: "1px solid #A5F3FC", fontSize: 11.5, padding: "3px 8px" }}>
+                                  {s.label}{s.score === 0 ? " ✓" : ` (±${s.score} ft)`}
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        }
+                        return (
+                          <div style={{ marginTop: 6, fontSize: 11.5, color: "#B45309", fontWeight: 600 }}>
+                            You don't sell a {scan.measured.widthFt}×{scan.measured.depthFt} — add it under Settings → Catalog, or pick your closest size.
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
