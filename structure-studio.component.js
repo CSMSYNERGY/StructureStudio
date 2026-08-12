@@ -2230,6 +2230,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       renderer.shadowMap.enabled = true;                 // SmartBuild-style sun shadows
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      // The sun is a fixed directional light with a fixed ortho shadow camera,
+      // so the shadow map is VIEW-INDEPENDENT: orbiting re-renders the same
+      // depth map for nothing (a full 2048² PCFSoft pass per pointermove).
+      // Render it only when the scene actually changes - every mutation path
+      // funnels through queueRebuild's flush or applyShellMode, which set
+      // needsUpdate; setLiveColors doesn't (paint never moves geometry).
+      renderer.shadowMap.autoUpdate = false;
+      renderer.shadowMap.needsUpdate = true;
       const scene = new THREE.Scene();
       scene.background = new THREE.Color("#E7EEF5");
       // Per-style appearance (roof profile/pitch/overhang, siding relief,
@@ -2337,6 +2345,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         e.model.wallMat.opacity = e.interior ? 0.14 : 1;
         e.model.wallMat.depthWrite = !e.interior;
         e.model.wallMat.needsUpdate = true;
+        // Every caller changed what casts or shows shadow (rebuild flush, roof
+        // toggle, look-inside) - re-render the cached shadow map next frame.
+        e.renderer.shadowMap.needsUpdate = true;
       };
       const setRay = (ev) => {
         const rc = canvas.getBoundingClientRect();
