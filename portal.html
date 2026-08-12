@@ -10355,6 +10355,13 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Drafting failed");
       return data.d3;
     },
+    // Signed URL (10 min) for the style's stored scan — the re-measure path:
+    // an algorithm improvement should never require walking the lot again.
+    onLoadModelUrl: async (styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "style_model_url", styleValue } });
+      if (error || !data || !data.ok) return null;
+      return data.url || null;
+    },
     onUploadPhoto: async (file) => {
       const imageBase64 = await new Promise((res, rej) => {
         const fr = new FileReader();

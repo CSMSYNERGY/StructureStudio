@@ -18,11 +18,23 @@ const rec = (name) => (...a) => {
   return Promise.resolve(name === "onUploadModel" ? "junior-barns/stub-123.glb" : true);
 };
 const setup3d = {
-  onSaveSpec: rec("onSaveSpec"), onDraftFromPhotos: rec("onDraftFromPhotos"),
-  onUploadPhoto: rec("onUploadPhoto"),
+  onSaveSpec: rec("onSaveSpec"),
+  // Canned AI draft: lap siding + colours, and a WRONG roof type on purpose —
+  // the generate flow must keep the measured roof over the AI's.
+  onDraftFromPhotos: (...a) => {
+    window.__calls.push(["onDraftFromPhotos", a]);
+    return Promise.resolve({ roof: { type: "gable", pitch: 0.4, overhang: 0.5 }, siding: "lap", colors: { body: "#B45309", trim: "#FFFFFF", roof: "#334155" }, wallHeightFt: 8 });
+  },
+  // Echo a tiny data URL so the render-upload loop completes offline.
+  onUploadPhoto: (f) => {
+    window.__calls.push(["onUploadPhoto", ["File(" + f.name + "," + f.size + ")"]]);
+    return Promise.resolve("data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==");
+  },
   onUploadModel: rec("onUploadModel"), onSaveModel: rec("onSaveModel"),
   onSetModelStatus: rec("onSetModelStatus"),
-  onLoadStyle3D: () => Promise.resolve({ photos: [], modelStatus: "none", aiReady: true }),
+  onLoadStyle3D: () => Promise.resolve({ photos: [], modelStatus: "uploaded", aiReady: true }),
+  // The stored-scan fetch resolves to a fixture, so re-measure runs offline.
+  onLoadModelUrl: () => Promise.resolve("/dev/scan-fixtures/shed_12x8_gable_ov1.glb"),
 };
 window.__ready = false;
 const { useEffect } = React;

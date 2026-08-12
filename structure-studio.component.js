@@ -5710,13 +5710,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   };
   const scanPick = async (file) => {
     if (!file) return;
-    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady });
+    // Full replacement on purpose (drops renderUrls — a new file needs new
+    // renders) but the style's status, the aiReady probe and the builder's
+    // device pick survive.
+    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady, device: scan.device });
     try {
       const { scene, measured } = await scanReadGlb(file);
       scanDisposeScene(scene);
-      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady });
+      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady, device: scan.device });
     } catch (e) {
-      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady });
+      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady, device: scan.device });
     }
   };
   // Four three-quarter turntable JPEGs of the raw scan, framed off the
@@ -5859,18 +5862,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setAdminCalMsg({ ok: true, msg: `Canvas set to ${label} on this style — the resize cleared any placed items.` });
   };
   // Store the scan against the style so it can be re-measured later (an algorithm improvement
-  // should not need the builder to walk round the building again).
+  // should not need the builder to walk round the building again). The capture kind rides in
+  // the meta: LiDAR and photogrammetry meshes earn different trust later.
   const scanUpload = async () => {
     if (!scan.file || !(setup3d && setup3d.onUploadModel && setup3d.onSaveModel)) return;
     setScan((p) => ({ ...p, busy: true, step: "Uploading…", err: null }));
     try {
       const path = await setup3d.onUploadModel(scan.file, adminCal.styleValue);
       if (!path) throw new Error("Upload returned no path.");
-      await setup3d.onSaveModel(adminCal.styleValue, path, scan.measured);
+      const meta = scan.device
+        ? { ...scan.measured, capture: scan.device === "iphone-pro" ? "lidar" : "photogrammetry", device: scan.device }
+        : scan.measured;
+      await setup3d.onSaveModel(adminCal.styleValue, path, meta);
       setScan((p) => ({ ...p, busy: false, step: null, status: "uploaded" }));
       setAdminCalMsg({ ok: true, msg: "Scan saved to this style." });
     } catch (e) {
       setScan((p) => ({ ...p, busy: false, step: null, err: e.message || "Upload failed" }));
+    }
+  };
+  // Pull the stored scan back down and run it through the same read-and-measure
+  // path a fresh file takes — after which Generate works on it too.
+  const scanFetchStored = async () => {
+    if (!(setup3d && setup3d.onLoadModelUrl) || scan.busy) return;
+    setScan((p) => ({ ...p, busy: true, err: null, step: "Fetching the stored scan…" }));
+    try {
+      const url = await setup3d.onLoadModelUrl(adminCal.styleValue);
+      if (!url) throw new Error("No scan is stored for this style yet.");
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("Could not download the stored scan.");
+      const blob = await resp.blob();
+      const file = new File([blob], "stored-scan.glb", { type: "model/gltf-binary" });
+      await scanPick(file);
+    } catch (e) {
+      setScan((p) => ({ ...p, busy: false, step: null, err: e.message || "Could not fetch the stored scan." }));
     }
   };
   const scanSetStatus = async (status) => {
@@ -6693,6 +6717,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     Walk around one of your real buildings with a phone scanning app and export a <b>.glb</b>. We read its
                     size and roof shape and set the 3D up to match — the scan itself is never shown to customers.
                   </p>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E" }}>Your phone:</span>
+                    {[["iphone-pro", "iPhone Pro (LiDAR)"], ["iphone", "other iPhone"], ["android", "Android"]].map(([k, lbl]) => (
+                      <button key={k} onClick={() => setScan((p) => ({ ...p, device: p.device === k ? null : k }))}
+                        style={{ ...S.btn(scan.device === k ? "#92400E" : "#FFF", scan.device === k ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "3px 8px" }}>
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                  {scan.device && (
+                    <p style={{ margin: "0 0 8px", fontSize: 11, color: "#78350F", lineHeight: 1.5 }}>
+                      {scan.device === "iphone-pro" && <>Scaniverse (free, no account): <b>New Scan → Mesh</b>, walk slowly all the way around, process on-device, then <b>Share → Export Model → GLB</b>. LiDAR gives the cleanest mesh.</>}
+                      {scan.device === "iphone" && <>No LiDAR on this model — Scaniverse still works in photo mode: circle the building slowly in good light, expect a rougher mesh, then <b>Share → Export Model → GLB</b>.</>}
+                      {scan.device === "android" && <>Android phones scan by photos: use <b>Scaniverse</b> (free) or <b>Kiri Engine</b> (free account) — circle the building slowly in good light, then export as <b>GLB</b>.</>}
+                    </p>
+                  )}
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: scan.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
                       {scan.busy ? (scan.step || "Working…") : "Choose a .glb scan"}
@@ -6700,6 +6740,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; scanPick(f); }}
                         style={{ display: "none" }} />
                     </label>
+                    {scan.status !== "none" && !scan.measured && !scan.busy && setup3d && setup3d.onLoadModelUrl && (
+                      <button onClick={scanFetchStored} style={{ ...S.btn("#FFF", "#0E7490"), border: "1px solid #A5F3FC", fontSize: 12 }}>Re-measure the stored scan</button>
+                    )}
                     {scan.measured && !scan.busy && (
                       <>
                         <button onClick={scanGenerate} disabled={adminCalPreview}
