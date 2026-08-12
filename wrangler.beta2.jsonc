@@ -1,0 +1,22 @@
+// Cloudflare Worker config — the 3D line (branch `beta-2.0`). Production twin:
+// wrangler.jsonc (structurestudio-app, `main`); beta twin: wrangler.beta.jsonc
+// (structurestudio-beta, `beta`). Assets-only Worker: no "main" script, no
+// bindings, no vars — this repo is PUBLIC, so nothing secret may ever be added
+// here (worker name + account_id are non-secret identifiers). Stood up when the
+// old Netlify branch-deploy URL froze ahead of that site's decommission; deploys
+// are manual (`npx wrangler deploy --config wrangler.beta2.jsonc`) until the
+// branch earns a Workers Builds hookup.
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "structurestudio-beta2",
+  "compatibility_date": "2026-08-05",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+  "assets": {
+    "directory": ".",
+    // "none" is load-bearing — see wrangler.jsonc for the offline-PWA story.
+    "html_handling": "none",
+    "not_found_handling": "404-page"
+  },
+  "workers_dev": true,
+  "preview_urls": true
+}
