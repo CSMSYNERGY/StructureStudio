@@ -1651,6 +1651,18 @@ function d3MakeGroundLabel(THREE, text, hFt) {
   return m;
 }
 
+// Dev-only build timing: set window.__SS3D_DEBUG = true in the console and
+// every model build records a "ss3d:rebuild" performance measure. The flag
+// gates all work, so shipped pages pay nothing.
+function d3TimedBuild(fn) {
+  if (typeof window === "undefined" || !window.__SS3D_DEBUG || typeof performance === "undefined" || !performance.mark) return fn();
+  performance.mark("ss3d:rebuild:start");
+  const out = fn();
+  performance.mark("ss3d:rebuild:end");
+  performance.measure("ss3d:rebuild", "ss3d:rebuild:start", "ss3d:rebuild:end");
+  return out;
+}
+
 // Build the whole parametric building as one Group. World units are FEET; the
 // footprint is centered on the origin with the floor top at y=0; +x = east and
 // +z = south, matching the 2D plan (page-down = south). Returns { root, wallMat,
@@ -2149,7 +2161,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
       let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
-      const model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures });
+      const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures }));
       scene.add(model.root);
       scene.add(new THREE.HemisphereLight(0xFFFFFF, 0x8D8573, 1.8));
       // Start the camera on the FRONT side (same wall the 2D labels call FRONT),
@@ -2341,7 +2353,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           disposeShed3DModel(e.model);
           // Recompute FRONT from the live items — dragging the only door to a
           // different wall re-orients the roof exactly like the 2D labels.
-          e.model = buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY, fixtures });
+          e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY, fixtures }));
           scene.add(e.model.root);
           applyShellMode(e);
           render();
@@ -2612,6 +2624,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         onSnapshot(null);
       });
       engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, offFxTex, interior: false, roofOn: true, envOn: true };
+      // Dev-only: expose the engine for the perf-measurement protocol.
+      if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
       setPhase("ready");
     }).catch((err) => {
