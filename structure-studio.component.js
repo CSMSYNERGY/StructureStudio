@@ -1440,31 +1440,40 @@ function d3CssColor(v, fallback) {
 //   groove  → vertical groove / board-and-batten panel (the standard siding look)
 // Regenerated per build (cheap) so disposeShed3DModel frees them with the
 // material — never a shared texture left disposed under a live model.
+// Pattern canvases are rastered ONCE per session (module cache, the grass-
+// singleton pattern below): a live drag re-mints only the cheap CanvasTexture
+// wrapper per build, so dispose stays safe while the pixels — and the mipmap
+// upload cost they used to re-pay every rebuilt frame — are paid once.
+const _d3TexCanvases = {};
 function d3MakeTexture(THREE, kind) {
   if (!kind || typeof document === "undefined") return null;
-  const N = 128, cv = document.createElement("canvas"); cv.width = cv.height = N;
-  const g = cv.getContext("2d");
-  g.fillStyle = "#ffffff"; g.fillRect(0, 0, N, N);
-  if (kind === "metal") {
-    for (let x = 0; x <= N; x += 16) {
-      g.fillStyle = "rgba(0,0,0,0.30)"; g.fillRect(x, 0, 2.5, N);       // seam shadow
-      g.fillStyle = "rgba(255,255,255,0.55)"; g.fillRect(x + 2.5, 0, 2, N); // rib highlight
+  if (kind !== "metal" && kind !== "groove" && kind !== "lap" && kind !== "shingle") return null;
+  if (!_d3TexCanvases[kind]) {
+    const N = 128, cv = document.createElement("canvas"); cv.width = cv.height = N;
+    const g = cv.getContext("2d");
+    g.fillStyle = "#ffffff"; g.fillRect(0, 0, N, N);
+    if (kind === "metal") {
+      for (let x = 0; x <= N; x += 16) {
+        g.fillStyle = "rgba(0,0,0,0.30)"; g.fillRect(x, 0, 2.5, N);       // seam shadow
+        g.fillStyle = "rgba(255,255,255,0.55)"; g.fillRect(x + 2.5, 0, 2, N); // rib highlight
+      }
+    } else if (kind === "groove") {
+      for (let x = 0; x <= N; x += 21) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(x, 0, 2, N); }
+    } else if (kind === "lap") {
+      for (let y = 0; y <= N; y += 16) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(0, y, N, 3); g.fillStyle = "rgba(255,255,255,0.10)"; g.fillRect(0, y + 3, N, 2); }
+    } else {
+      const row = 20, tab = 26;
+      g.fillStyle = "#ededed"; g.fillRect(0, 0, N, N);
+      for (let y = 0, r = 0; y <= N; y += row, r++) {
+        g.fillStyle = "rgba(0,0,0,0.24)"; g.fillRect(0, y, N, 3);          // course shadow
+        g.fillStyle = "rgba(0,0,0,0.12)";
+        const off = (r % 2) * (tab / 2);
+        for (let x = -tab + off; x <= N; x += tab) g.fillRect(x, y, 1.5, row); // staggered tab gaps
+      }
     }
-  } else if (kind === "groove") {
-    for (let x = 0; x <= N; x += 21) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(x, 0, 2, N); }
-  } else if (kind === "lap") {
-    for (let y = 0; y <= N; y += 16) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(0, y, N, 3); g.fillStyle = "rgba(255,255,255,0.10)"; g.fillRect(0, y + 3, N, 2); }
-  } else if (kind === "shingle") {
-    const row = 20, tab = 26;
-    g.fillStyle = "#ededed"; g.fillRect(0, 0, N, N);
-    for (let y = 0, r = 0; y <= N; y += row, r++) {
-      g.fillStyle = "rgba(0,0,0,0.24)"; g.fillRect(0, y, N, 3);          // course shadow
-      g.fillStyle = "rgba(0,0,0,0.12)";
-      const off = (r % 2) * (tab / 2);
-      for (let x = -tab + off; x <= N; x += tab) g.fillRect(x, y, 1.5, row); // staggered tab gaps
-    }
-  } else return null;
-  const tex = new THREE.CanvasTexture(cv);
+    _d3TexCanvases[kind] = cv;
+  }
+  const tex = new THREE.CanvasTexture(_d3TexCanvases[kind]);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
@@ -1476,9 +1485,10 @@ function d3MakeTexture(THREE, kind) {
 // library to maintain on our side — the builder owns the photo.
 //
 // Three constraints drive this design:
-//  1. `queueRebuild` disposes and rebuilds the whole model EVERY animation frame
-//     during a drag, so these textures must be shared across builds and must NOT
-//     be freed by disposeShed3DModel (hence userData.ssShared, honored there).
+//  1. `queueRebuild` disposes and rebuilds the dragged item's wall (and before
+//     the scoped-rebuild work, the whole model) every animation frame during a
+//     drag, so these textures must be shared across builds and must NOT be
+//     freed by disposal (hence userData.ssShared, honored by disposeSubtree).
 //  2. The renderer draws on demand only, so a photo arriving later has to ask for
 //     a frame — d3OnFixtureTexSettle lets the viewer register that listener.
 //  3. A texture whose image hasn't loaded renders BLACK. So the cache serves a 1x1
@@ -1636,15 +1646,22 @@ function d3MakeSkyTexture(THREE) {
   return tex;
 }
 // Flat text plane for on-ground dimension labels ("FRONT - 30'") and the N compass.
+// Text canvases are cached by their text (a session sees a handful of distinct
+// labels): rebuilds skip measureText/fillText and re-mint only the texture.
+const _d3LabelCanvases = new Map();
 function d3MakeGroundLabel(THREE, text, hFt) {
   if (typeof document === "undefined") return null;
-  const probe = document.createElement("canvas").getContext("2d");
-  probe.font = "700 44px Arial";
-  const cv = document.createElement("canvas");
-  cv.width = Math.ceil(probe.measureText(text).width) + 24; cv.height = 64;
-  const g = cv.getContext("2d");
-  g.font = "700 44px Arial"; g.fillStyle = "rgba(62,48,36,0.85)";
-  g.textBaseline = "middle"; g.fillText(text, 12, 34);
+  let cv = _d3LabelCanvases.get(text);
+  if (!cv) {
+    const probe = document.createElement("canvas").getContext("2d");
+    probe.font = "700 44px Arial";
+    cv = document.createElement("canvas");
+    cv.width = Math.ceil(probe.measureText(text).width) + 24; cv.height = 64;
+    const g = cv.getContext("2d");
+    g.font = "700 44px Arial"; g.fillStyle = "rgba(62,48,36,0.85)";
+    g.textBaseline = "middle"; g.fillText(text, 12, 34);
+    _d3LabelCanvases.set(text, cv);
+  }
   const tex = new THREE.CanvasTexture(cv);
   const m = new THREE.Mesh(
     new THREE.PlaneGeometry(hFt * (cv.width / cv.height), hFt),
@@ -1792,9 +1809,13 @@ function buildShed3DModel(THREE, p) {
     return [0, Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop)];
   };
 
-  Object.keys(WALLS).forEach((wname) => {
+  // One wall's segments + opening groups, buildable in isolation: the live
+  // drag rebuilds ONLY the wall(s) an item left and landed on (rebuildWalls on
+  // the returned model) — same code as the full build, so a partial rebuild's
+  // output is identical to a full one by construction.
+  const buildOneWall = (wname, itemsNow) => {
     const wf = WALLS[wname];
-    const ops = items
+    const ops = itemsNow
       .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname; })
       .map((it) => {
         const c = itemTypes[it.type];
@@ -1858,7 +1879,7 @@ function buildShed3DModel(THREE, p) {
       ranges.forEach((rg) => { if (rg.a0 > bc + 0.01) relief(bc, rg.a0); bc = rg.a1; });
       if (bc < wf.len - 0.01) relief(bc, wf.len);
     }
-    wallsGroup.add(wg);
+    const ogs = [];
 
     // Frames + fills per opening (trim-colored casing; doors get panels,
     // windows get glass + muntins, rough openings stay empty). Each opening's
@@ -1867,7 +1888,7 @@ function buildShed3DModel(THREE, p) {
     ops.forEach((o) => {
       const f = 0.17;
       const og = new THREE.Group();
-      og.userData = { itemId: o.it.id, wallItem: true };
+      og.userData = { itemId: o.it.id, wallItem: true, wall: wname };
       og.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
       og.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
       og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
@@ -1925,8 +1946,14 @@ function buildShed3DModel(THREE, p) {
         // leaves / the panel seams, so splitting it would draw them twice.
         if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0.16);
       }
-      openingsGroup.add(og);
+      ogs.push(og);
     });
+    return { wg, ogs };
+  };
+  Object.keys(WALLS).forEach((wname) => {
+    const built = buildOneWall(wname, items);
+    wallsGroup.add(built.wg);
+    built.ogs.forEach((og) => openingsGroup.add(og));
   });
 
   // ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
@@ -2007,8 +2034,10 @@ function buildShed3DModel(THREE, p) {
   });
 
   // ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
+  // Same isolation as buildOneWall: rebuildInterior repopulates this group
+  // alone when a loft/workbench/ramp moves during a live drag.
   const interiorGroup = new THREE.Group();
-  items.forEach((it) => {
+  const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
     if (!c) return;
     if (it.type === "loft") {
@@ -2064,6 +2093,7 @@ function buildShed3DModel(THREE, p) {
     }
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
+  buildInterior(items);
 
   root.add(wallsGroup);
   root.add(openingsGroup);
@@ -2071,24 +2101,72 @@ function buildShed3DModel(THREE, p) {
   root.add(interiorGroup);
   // Sun shadows (SmartBuild's "Show Shadows"): solid building meshes cast,
   // the grass receives. Transparent fills (glass) don't cast; labels neither.
-  root.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.material && o.material.transparent); o.receiveShadow = false; } });
+  const setShadowFlags = (grp) => grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.material && o.material.transparent); o.receiveShadow = false; } });
+  setShadowFlags(root);
   envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
   ground.receiveShadow = true;
   floor.receiveShadow = true;
-  return { root, envGroup, wallMat, trimMat, roofGroup, openingsGroup, wallsGroup, interiorGroup };
+
+  // Scoped rebuilds for the live drag. sharedMats = the model-lifetime wall and
+  // trim materials that per-wall disposal must keep (their maps ride along, so
+  // the siding texture survives too). builtFrontWall lets the flush detect a
+  // FRONT flip, which needs the full path (roof + ground labels re-home).
+  const sharedMats = new Set([wallMat, trimMat]);
+  const model = { root, envGroup, wallMat, trimMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
+  model.rebuildWalls = (names, itemsNow) => {
+    names.forEach((wname) => {
+      if (!WALLS[wname]) return;
+      const oldWg = wallsGroup.children.find((g) => g.userData && g.userData.wall === wname);
+      if (oldWg) { wallsGroup.remove(oldWg); disposeSubtree(oldWg, sharedMats); }
+      openingsGroup.children
+        .filter((g) => g.userData && g.userData.wall === wname)
+        .forEach((og) => { openingsGroup.remove(og); disposeSubtree(og, sharedMats); });
+      const built = buildOneWall(wname, itemsNow);
+      setShadowFlags(built.wg);
+      wallsGroup.add(built.wg);
+      built.ogs.forEach((og) => { setShadowFlags(og); openingsGroup.add(og); });
+    });
+  };
+  model.rebuildInterior = (itemsNow) => {
+    Array.from(interiorGroup.children).forEach((g) => { interiorGroup.remove(g); disposeSubtree(g, null); });
+    buildInterior(itemsNow);
+    setShadowFlags(interiorGroup);
+  };
+  return model;
+}
+
+// Forget pending fixture-photo binds whose materials were just disposed — a
+// scoped drag rebuild otherwise leaves one dead bind per rebuilt frame while a
+// photo is still in flight, and the arriving photo would write into thousands
+// of disposed materials.
+function d3UnbindFixtureMats(mats) {
+  _d3FxMatBinds.forEach((set, entry) => {
+    set.forEach((b) => { if (mats.has(b.mat)) set.delete(b); });
+    if (set.size === 0) _d3FxMatBinds.delete(entry);
+  });
+}
+
+// Free one subtree's geometries and owned materials. `sharedMats` (a Set or
+// null) names materials owned by the model as a whole — wall/trim during a
+// per-wall rebuild — that must survive; shared fixture-photo maps are skipped
+// the same way disposeShed3DModel always has (ssShared).
+function disposeSubtree(obj, sharedMats) {
+  const mats = new Set();
+  obj.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
+  });
+  if (sharedMats) sharedMats.forEach((m) => mats.delete(m));
+  // Fixture photo textures are shared across every rebuild (see d3FixtureTexture)
+  // — disposing one here would blank every catalog door on the first drag frame.
+  mats.forEach((m) => { if (m.map && !(m.map.userData && m.map.userData.ssShared)) m.map.dispose(); m.dispose(); });
+  d3UnbindFixtureMats(mats);
 }
 
 // Free every geometry/material a buildShed3DModel() group holds — Three.js
 // doesn't GC WebGL resources, and drag-to-move rebuilds the model live.
 function disposeShed3DModel(model) {
-  const mats = new Set();
-  model.root.traverse((o) => {
-    if (o.geometry) o.geometry.dispose();
-    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => mats.add(m));
-  });
-  // Fixture photo textures are shared across every rebuild (see d3FixtureTexture)
-  // — disposing one here would blank every catalog door on the first drag frame.
-  mats.forEach((m) => { if (m.map && !(m.map.userData && m.map.userData.ssShared)) m.map.dispose(); m.dispose(); });
+  disposeSubtree(model.root, null);
 }
 
 // Full-screen orbitable 3D view of the current design. Mounted only while open:
@@ -2237,7 +2315,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       let liveItems = items;
       let dragging3 = null;      // { id, moved }
       let lastHoverId = null;
-      let rebuildQueued = false;
+      let rebuildScope = null;   // accumulated for the next frame: { full, walls:Set, interior }
       const raycaster = new THREE.Raycaster();
       const ndc = new THREE.Vector2();
       const dragPlane = new THREE.Plane();
@@ -2345,19 +2423,43 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           highlight.position.set(cx, D3.BENCH_H / 2, cz);
         }
       };
-      const queueRebuild = () => {
-        if (rebuildQueued) return;
-        rebuildQueued = true;
+      // Queue a rebuild for the next frame, coalescing scopes: a drag passes
+      // { walls: [...] } / { interior: true } and only that part of the model
+      // is torn down and rebuilt (~a tenth of the full cost, which used to run
+      // EVERY drag frame). No argument = the full path — wall height, palette
+      // placement, and anything else structural. A FRONT flip is detected at
+      // flush time and upgrades a scoped rebuild to full, because the roof and
+      // ground labels re-home with the front.
+      const queueRebuild = (scope) => {
+        const full = !scope || scope.full === true;
+        if (rebuildScope) {
+          if (full) rebuildScope.full = true;
+          else {
+            (scope.walls || []).forEach((w) => rebuildScope.walls.add(w));
+            if (scope.interior) rebuildScope.interior = true;
+          }
+          return;
+        }
+        rebuildScope = { full, walls: new Set(full ? [] : scope.walls || []), interior: !full && Boolean(scope.interior) };
         requestAnimationFrame(() => {
-          rebuildQueued = false;
+          const sc = rebuildScope;
+          rebuildScope = null;
           const e = engineRef.current;
-          if (!e) return;
-          scene.remove(e.model.root);
-          disposeShed3DModel(e.model);
+          if (!e || !sc) return;
           // Recompute FRONT from the live items — dragging the only door to a
           // different wall re-orients the roof exactly like the 2D labels.
-          e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: getFrontWall(liveItems) || frontWall, scale, mgX, mgY, fixtures }));
-          scene.add(e.model.root);
+          const nf = getFrontWall(liveItems) || frontWall;
+          if (sc.full || nf !== e.model.builtFrontWall) {
+            scene.remove(e.model.root);
+            disposeShed3DModel(e.model);
+            e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: nf, scale, mgX, mgY, fixtures }));
+            scene.add(e.model.root);
+          } else {
+            d3TimedBuild(() => {
+              if (sc.walls.size) e.model.rebuildWalls(Array.from(sc.walls), liveItems);
+              if (sc.interior) e.model.rebuildInterior(liveItems);
+            });
+          }
           applyShellMode(e);
           render();
         });
@@ -2421,12 +2523,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         render();
       };
       // Apply a live position change during a drag: update the working items,
-      // move the outline, rebuild (throttled).
-      const commitLive = (it, patch) => {
+      // move the outline, rebuild (throttled). `scope` names the wall(s)/
+      // interior the change touched so the rebuild stays scoped; omitted = full.
+      const commitLive = (it, patch, scope) => {
         liveItems = liveItems.map((i) => (i.id === it.id ? { ...i, ...patch } : i));
         dragging3.moved = true;
         placeHighlight(liveItems.find((i) => i.id === it.id));
-        queueRebuild();
+        queueRebuild(scope);
       };
       const onPtr3Move = (ev) => {
         if (dragging3) {
@@ -2459,11 +2562,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) {
               // The door's ramp follows live — same derived placement as 2D.
               const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === it.id);
+              let rampMoved = false;
               if (ramp) {
                 const rp = rampPlacementForDoor(sn, ramp.heightFt, pWpx, pHpx, mgX, mgY, scale);
-                if (rp) liveItems = liveItems.map((i) => (i.id === ramp.id ? { ...i, ...rp } : i));
+                if (rp) { liveItems = liveItems.map((i) => (i.id === ramp.id ? { ...i, ...rp } : i)); rampMoved = true; }
               }
-              commitLive(it, sn);
+              commitLive(it, sn, { walls: [it.wall, sn.wall], interior: rampMoved });
             }
           } else if (it.type === "workbench") {
             // Same rules as the 2D wallSnap drag: snap to the nearest wall's
@@ -2488,7 +2592,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               const obPos = isH ? ob.x : ob.y;
               if (Math.abs(candPos - obPos) < candHalf + obW - 2) return;
             }
-            if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) commitLive(it, sn);
+            if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) commitLive(it, sn, { interior: true });
           } else if (it.type === "loft") {
             // Same rules as the 2D free drag: integer-foot rounding, wall +
             // loft edge snapping, overlap reject; unattached positions are
@@ -2533,7 +2637,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) return;
             }
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
-            if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny });
+            if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
           }
           ev.preventDefault();
           return;
