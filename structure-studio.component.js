@@ -5680,45 +5680,147 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // ─── Building scan: read it, measure it, then drive the parametric model from the numbers ──
   // Measuring happens BEFORE any upload, on purpose: nothing is stored until we know the file
   // is a usable GLB of something building-shaped, and the builder has seen the numbers.
+  const scanDisposeScene = (scene) => {
+    scene.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+      mats.forEach((mm) => { if (mm.map) mm.map.dispose(); mm.dispose(); });
+    });
+  };
+  // Read + gate + measure. Returns the LIVE scene too — the turntable renders
+  // it — so CALLERS own disposal via scanDisposeScene; a 40MB scan must never
+  // sit in memory behind the editor.
+  const scanReadGlb = async (file) => {
+    if (file.size > SCAN_MAX_BYTES) {
+      throw new Error(`That scan is ${(file.size / 1048576).toFixed(0)}MB. Export it at Medium or High instead of Ultra — the limit is ${SCAN_MAX_BYTES / 1048576}MB.`);
+    }
+    const buf = await file.arrayBuffer();
+    // Header gate first: no three.js, no GPU, works on a phone, and refuses the whole class
+    // of files that would otherwise fail deep inside the loader with an opaque message.
+    const gate = scanInspectGlb(buf);
+    if (gate.err) throw new Error(gate.err);
+    const { THREE, GLTFLoader } = await loadGLTFLoader();
+    const gltf = await new GLTFLoader().parseAsync(buf, "");
+    if (!(gltf.scene instanceof THREE.Object3D)) throw new Error("Two copies of three.js loaded — check the version pin.");
+    const sample = scanSamplePoints(THREE, gltf.scene, 120000);
+    if (!sample) { scanDisposeScene(gltf.scene); throw new Error("That scan has no mesh in it."); }
+    const metric = scanMeasure(sample);
+    if (metric.err) { scanDisposeScene(gltf.scene); throw new Error(metric.err); }
+    return { THREE, scene: gltf.scene, metric, measured: scanToFeet(metric) };
+  };
   const scanPick = async (file) => {
     if (!file) return;
-    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status });
+    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady });
     try {
-      if (file.size > SCAN_MAX_BYTES) {
-        throw new Error(`That scan is ${(file.size / 1048576).toFixed(0)}MB. Export it at Medium or High instead of Ultra — the limit is ${SCAN_MAX_BYTES / 1048576}MB.`);
-      }
-      const buf = await file.arrayBuffer();
-      // Header gate first: no three.js, no GPU, works on a phone, and refuses the whole class
-      // of files that would otherwise fail deep inside the loader with an opaque message.
-      const gate = scanInspectGlb(buf);
-      if (gate.err) throw new Error(gate.err);
-      setScan((p) => ({ ...p, step: "Measuring the building…" }));
-      const { THREE, GLTFLoader } = await loadGLTFLoader();
-      const gltf = await new GLTFLoader().parseAsync(buf, "");
-      if (!(gltf.scene instanceof THREE.Object3D)) throw new Error("Two copies of three.js loaded — check the version pin.");
-      const sample = scanSamplePoints(THREE, gltf.scene, 120000);
-      if (!sample) throw new Error("That scan has no mesh in it.");
-      const m = scanMeasure(sample);
-      if (m.err) throw new Error(m.err);
-      const measured = scanToFeet(m);
-      // The mesh itself is not kept: it is big, and everything downstream needs only these
-      // numbers. Dispose immediately so a 40MB scan does not sit in memory behind the editor.
-      gltf.scene.traverse((o) => {
-        if (o.geometry) o.geometry.dispose();
-        const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
-        mats.forEach((mm) => { if (mm.map) mm.map.dispose(); mm.dispose(); });
-      });
-      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status });
+      const { scene, measured } = await scanReadGlb(file);
+      scanDisposeScene(scene);
+      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady });
     } catch (e) {
-      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status });
+      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady });
+    }
+  };
+  // Four three-quarter turntable JPEGs of the raw scan, framed off the
+  // measured geometry. MeshBasicMaterial swap on purpose: photogrammetry
+  // textures carry the light they were captured in — lighting them again
+  // shades them wrong, and an unlit standard material renders black.
+  const scanRenderTurntable = (THREE, scene, metric) => {
+    const W = 1024, H = 768;
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(1);
+    renderer.setClearColor("#E7EEF5", 1);
+    const swapped = [];
+    scene.traverse((o) => {
+      if (!o.isMesh) return;
+      const orig = Array.isArray(o.material) ? o.material[0] : o.material;
+      const mat = new THREE.MeshBasicMaterial({
+        map: (orig && orig.map) || null,
+        vertexColors: Boolean(o.geometry && o.geometry.getAttribute && o.geometry.getAttribute("color")),
+        side: THREE.DoubleSide,
+      });
+      if (!mat.map && !mat.vertexColors) mat.color.set("#8A857C");
+      swapped.push({ mesh: o, orig: o.material, mat });
+      o.material = mat;
+    });
+    const cam = new THREE.PerspectiveCamera(45, W / H, 0.05, 1000);
+    const target = new THREE.Vector3(metric.centerX || 0, (metric.groundY || 0) + (metric.peakM || 2) * 0.45, metric.centerZ || 0);
+    const dist = Math.max(2, 2.3 * Math.max(metric.widthM || 2, metric.peakM || 2));
+    const elev = (18 * Math.PI) / 180;
+    const shots = [];
+    for (let i = 0; i < 4; i++) {
+      const az = (((metric.headingDeg || 0) + i * 90 + 22.5) * Math.PI) / 180;
+      cam.position.set(
+        target.x + dist * Math.cos(elev) * Math.sin(az),
+        target.y + dist * Math.sin(elev),
+        target.z + dist * Math.cos(elev) * Math.cos(az)
+      );
+      cam.lookAt(target);
+      renderer.render(scene, cam);
+      shots.push(cv.toDataURL("image/jpeg", 0.85));
+    }
+    swapped.forEach((s) => { s.mesh.material = s.orig; s.mat.dispose(); });
+    renderer.dispose();
+    if (renderer.forceContextLoss) renderer.forceContextLoss();
+    return shots;
+  };
+  // One button: measure → apply → (when AI is on) render the scan from four
+  // sides → upload the renders as the style's photos → let the AI read siding
+  // and colours → merge — then re-assert the measured geometry ON TOP: the
+  // tape measure beats the vision model wherever they disagree. Renders are
+  // cached per picked file, so a retry re-spends only the AI call (10/day cap).
+  const scanGenerate = async () => {
+    const file = scan.file;
+    if (!file || scan.busy) return;
+    setScan((p) => ({ ...p, busy: true, err: null, step: "Reading the scan…" }));
+    try {
+      const { THREE, scene, metric, measured } = await scanReadGlb(file);
+      setScan((p) => ({ ...p, measured, step: "Applying measurements…" }));
+      scanApplyMeasured(measured);
+      const exact = scanSizeMatchesFor(measured).find((s) => s.score === 0);
+      if (exact) scanApplySize(exact.label);
+      const aiOn = scan.aiReady !== false && setup3d && setup3d.onDraftFromPhotos && setup3d.onUploadPhoto;
+      if (!aiOn) {
+        scanDisposeScene(scene);
+        setScan((p) => ({ ...p, busy: false, step: null }));
+        setAdminCalMsg({ ok: true, msg: "Measured and applied. AI look-drafting is off for this site — siding and colours stay as they are; tune them by hand, or ask CSM Synergy to switch AI on." });
+        return;
+      }
+      let urls = scan.renderUrls || null;
+      let shots = null;
+      if (!urls) {
+        setScan((p) => ({ ...p, step: "Rendering the scan…" }));
+        shots = scanRenderTurntable(THREE, scene, metric);
+      }
+      scanDisposeScene(scene);
+      if (!urls) {
+        urls = [];
+        for (let i = 0; i < shots.length; i++) {
+          setScan((p) => ({ ...p, step: `Uploading view ${i + 1} of 4…` }));
+          const f = new File([dataUrlToBytes(shots[i])], `scan-view-${i + 1}.jpg`, { type: "image/jpeg" });
+          const url = await setup3d.onUploadPhoto(f);
+          if (!url) throw new Error("Upload returned no URL.");
+          urls.push(url);
+          calSetPhoto(i, url);
+        }
+        setScan((p) => ({ ...p, renderUrls: urls }));
+      }
+      setScan((p) => ({ ...p, step: "Reading the look with AI…" }));
+      const d3 = await setup3d.onDraftFromPhotos(urls, adminCal.styleValue);
+      applyDraftedSpec(d3);
+      scanApplyMeasured(measured);
+      setScan((p) => ({ ...p, busy: false, step: null }));
+      const roofNote = d3 && d3.roof && d3.roof.type && d3.roof.type !== measured.roofType
+        ? ` (the AI read the roof as ${d3.roof.type}; keeping the measured ${measured.roofType})` : "";
+      setAdminCalMsg({ ok: true, msg: `Generated from the scan: measured geometry + AI siding/colours${roofNote}. Preview it, tweak, then Save.` });
+    } catch (e) {
+      setScan((p) => ({ ...p, busy: false, step: null, err: e.message || "Could not generate from that scan." }));
     }
   };
   // Push the measured numbers into the draft spec. Geometry owns dimensions; the AI photo read
   // (and the builder's eye) still own siding and colour, which a scan's phone-white-balanced
   // texture is genuinely bad at.
-  const scanApply = () => {
-    const m = scan.measured;
-    if (!m) return;
+  const scanApplyMeasured = (m) => {
     calSet({ wallHeightFt: m.eaveFt });
     const roof = { type: m.roofType, pitch: m.pitch, overhang: m.overhangFt || 0 };
     if (m.roofType === "gambrel" && m.gambrel) {
@@ -5726,6 +5828,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     if (m.roofType === "gable" && m.ridgeOffset) roof.ridgeOffset = m.ridgeOffset;
     calSetRoof(roof);
+  };
+  const scanApply = () => {
+    const m = scan.measured;
+    if (!m) return;
+    scanApplyMeasured(m);
     setAdminCalMsg({ ok: true, msg: `Using the scan: ${m.widthFt}×${m.depthFt} ft, ${m.eaveFt} ft walls, ${m.roofType} roof at ${m.pitch}${m.overhangFt ? `, ${m.overhangFt} ft overhang` : ""}. Preview it, then save.` });
   };
   // Closest sizes this style sells, orientation-agnostic; empty when nothing
@@ -6595,6 +6702,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </label>
                     {scan.measured && !scan.busy && (
                       <>
+                        <button onClick={scanGenerate} disabled={adminCalPreview}
+                          title={scan.aiReady === false
+                            ? "AI is off for this site — this applies the measurements only."
+                            : "Measure, render the scan from four sides, and let AI read the siding + colours."}
+                          style={{ ...S.btn("#7C3AED", "#FFF"), fontSize: 12, opacity: adminCalPreview ? 0.5 : 1 }}>✨ Generate 3D from this scan</button>
                         <button onClick={scanApply} style={{ ...S.btn("#0E7490", "#FFF"), fontSize: 12 }}>Use these measurements</button>
                         <button onClick={scanUpload} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Save the scan to this style</button>
                       </>
