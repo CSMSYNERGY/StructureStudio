@@ -18,5 +18,17 @@
     "not_found_handling": "404-page"
   },
   "workers_dev": true,
-  "preview_urls": true
+  "preview_urls": true,
+  // Custom domain + an EXPLICIT zone route. The route is load-bearing: the
+  // zone carries a tenant wildcard `*.structurestudiosuite.com/*` pointing at
+  // the PRODUCTION worker, and Cloudflare ranks routes above custom domains —
+  // without the explicit route this hostname serves production's assets (it
+  // did; caught by byte-parity). Same escape hatch app./beta. use. Unlike the
+  // production twin's deliberate no-routes stance, there is no dashboard-
+  // managed rollback lever here to clobber — this config IS the source of
+  // truth, re-asserted idempotently on every manual deploy.
+  "routes": [
+    { "pattern": "beta-2-0.structurestudiosuite.com", "custom_domain": true },
+    { "pattern": "beta-2-0.structurestudiosuite.com/*", "zone_name": "structurestudiosuite.com" }
+  ]
 }
