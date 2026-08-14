@@ -1,8 +1,9 @@
 {
   "name": "structurestudio-dev",
   "private": true,
-  "description": "Dev tooling only - the product itself has NO build step (babel-standalone in the browser). These devDependencies exist solely for scripts/preflight.mjs, the pre-push correctness gate.",
+  "description": "Dev tooling only - the DEPLOY has no build step (compiled artifacts are committed; `npm run compile` regenerates them from the .jsx sources using the vendored babel-standalone as the offline compiler). These devDependencies exist solely for scripts/preflight.mjs, the pre-push correctness gate.",
   "scripts": {
+    "compile": "node scripts/compile.mjs",
     "preflight": "node scripts/preflight.mjs",
     "selftest:pre-push": "node scripts/pre-push-selftest.mjs"
   },

@@ -16,3 +16,15 @@
 # no `sh` is on PATH. Node driver, no shell, no CRLF exposure. The rule stays so the next
 # .sh someone adds is born correct.
 *.sh text eol=lf
+
+# Byte-compared at push time (2026-08-13): the guard byte-identity rule compares the three
+# pages' guard bodies on the WORKING TREE, and the artifact drift gate byte-compares the
+# committed *.compiled.js against a fresh compile. A mixed-endings working tree (one file
+# LF, another CRLF — exactly what a stray sed produced once) makes those compares lie, so
+# everything they read stays LF even on Windows checkouts.
+index.html text eol=lf
+portal.html text eol=lf
+admin.html text eol=lf
+*.compiled.js text eol=lf
+*.jsx text eol=lf
+structure-studio.component.js text eol=lf
