@@ -3,146 +3,90 @@
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
 </head><body><div id="root"></div>
-<!-- SELF-HOSTED, deliberately not a CDN. These four are this page's only dependencies and there
-     is no build step, so one blocked or failed third-party request used to blank the page
+<!-- SELF-HOSTED, deliberately not a CDN. These three libraries are this page's only external
+     dependencies, and one blocked or failed third-party request used to blank the page
      entirely - twice in the wild (2026-08-04, 2026-08-05), the second time to Googlebot. Serving
      them same-origin removes that failure mode instead of reporting it, and pins supabase-js,
      which was floating on @2 and could change under us on any npm publish (it resolved to
-     2.112.1 the day these were vendored). ROOT-ABSOLUTE on purpose: portal.html is served at
-     /portal/<page>/<sub> too, where a relative src resolves against the URL depth and gets
-     swallowed by the /portal/* splat - the bug that once blanked the whole portal. Version is in
-     the filename so a bump is a visible rename, never a silent byte change. No crossorigin
-     attribute: same-origin scripts already give window.onerror full error detail, which is the
-     only thing that attribute bought us across a CDN. Keep all three pages identical and keep
-     the files present - preflight enforces both. Provenance + update recipe: vendor/README.md. -->
+     2.112.1 the day these were vendored). babel-standalone left this list on 2026-08-13: the
+     app now ships as COMPILED artifacts (the defer'd *.compiled.js tags below, built by
+     `npm run compile` from the .jsx sources — scripts/compile.mjs), so visitors no longer
+     download a 2.85MB compiler or pay seconds of main-thread compile per load; the vendored
+     Babel file remains in /vendor/ as the OFFLINE compiler. ROOT-ABSOLUTE on purpose:
+     portal.html is served at /portal/<page>/<sub> too, where a relative src resolves against
+     the URL depth and gets swallowed by the /portal/* splat - the bug that once blanked the
+     whole portal. Version is in the filename so a bump is a visible rename; the compiled tags
+     carry content-hash ?v= busters that `npm run compile` rewrites. No crossorigin attribute:
+     same-origin scripts already give window.onerror full error detail. Keep all three pages
+     identical and keep the files present - preflight enforces both. Provenance + update
+     recipe: vendor/README.md. -->
 <script src="/vendor/react-18.2.0.production.min.js"></script>
 <script src="/vendor/react-dom-18.2.0.production.min.js"></script>
 <script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
-<script src="/vendor/babel-standalone-7.23.9.min.js"></script>
-<script src="structure-studio.component.js?v=20260812a" type="text/babel"></script>
-<script type="text/babel">
-// ── Thin mount. The full designer body lives in structure-studio.component.js — the ONE
-// shared module loaded by BOTH this page and portal.html. The hand-mirrored pair is now
-// StructureStudio.jsx ↔ structure-studio.component.js (this file carries no component code).
-// Served origin required: Babel FETCHES the src sibling, so file:// opens are CORS-blocked
-// — sanity-check via a local server (python -m http.server), never by double-clicking.
-const StructureStudio = window.StructureStudio;
-const ssAllowedOrigin = window.ssAllowedOrigin;
 
-// Supabase coordinates for the error logger below — duplicated from the module on
-// purpose (Babel blocks don't share top-level consts; the anon key is browser-safe).
-const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
-
-// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
-// never throws, never blocks the app. Auto-captures uncaught errors + unhandled promise
-// rejections; the component also reports submit/render failures via window.ssLogError. ──
-const SS_ERR_SOURCE = "designer";
-function ssLogError(source, message, code, context) {
-  try {
-    const params = new URLSearchParams(location.search);
-    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
-      method: "POST", keepalive: true,
-      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
-      body: JSON.stringify({
-        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
-        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
-        p_code: code == null ? null : String(code).slice(0, 100),
-        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
-        p_url: location.href.slice(0, 600),
-        p_context: context || null,
-      }),
-    }).catch(() => {});
-  } catch (_) { /* logging must never break the app */ }
-}
-window.ssLogError = ssLogError;
-window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
-  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
-window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
-  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
-
-// The shared module is the ONE dependency the boot guard cannot check for us. Babel fetches
-// src'd text/babel files by XHR AFTER the guard has run, so when
-// structure-studio.component.js does not load, all four library globals are present, the
-// guard stays correctly silent, and `StructureStudio` here is undefined. Rendering undefined
-// throws React error #130 ("element type is invalid") and leaves a PERMANENTLY BLANK page:
-// that is what GOOGLEBOT got on 2026-08-06 while crawling a tenant's shopfront (app_errors
-// 96ce38ff). So check before rendering, and reuse the guard's own failure screen.
-//
-// A falsy read here means the module block never executed AT ALL — it cannot mean a partial
-// or still-in-flight load. The module declares `function StructureStudio(…)` at top level,
-// which publishes itself onto window the instant the block starts running, before any of its
-// own statements. Verified all four ways it can fail: a 404'd module (falsy, caught here), a
-// module that throws mid-run (truthy via that hoisting — renders the config-error screen, a
-// different and already-reported bug), and one whose explicit publish line was deleted
-// (truthy, renders perfectly). So this can never fire on a page that was going to work.
-if (!StructureStudio) {
-  // ssBootFail is the guard's renderer; the ?? branch is for the case where even the guard
-  // was lost, which must still not be silent.
-  if (window.ssBootFail) window.ssBootFail(["structure-studio.component.js"], "boot_component_missing");
-  else {
-    document.getElementById("root").textContent = "Couldn't load the designer. Please reload the page.";
-    ssLogError("boot", "boot aborted: the shared component module did not load (structure-studio.component.js), and the boot guard was absent", "boot_component_missing", { app: "designer", missing: ["structure-studio.component.js"] });
-  }
-} else {
-  const root=ReactDOM.createRoot(document.getElementById("root"));
-  root.render(<StructureStudio/>);
-  // Host-supplied config remount (embedding API). Origin-gated, config required, and
-  // reuses the single root above (creating a new root per message leaked one each time).
-  window.addEventListener("message",(e)=>{if(ssAllowedOrigin(e.origin)&&e.data&&e.data.type==="structureConfig"&&e.data.config){root.render(<StructureStudio config={e.data.config}/>);}});
-}
-</script><script data-ss-app="designer">
+<script defer src="/structure-studio.component.compiled.js?v=f1178559"></script>
+<script defer src="/index.mount.compiled.js?v=3a00b23a"></script><script data-ss-app="designer">
 /* ── Dependency boot guard ────────────────────────────────────────────────────────────────
-   The four <script> tags at the top of this page are its ONLY dependencies, and there is no
-   build step. If any one of them does not load, babel-standalone still compiles the mount
-   block, the block throws on the first missing global, and the visitor gets a PERMANENTLY
-   BLANK PAGE - no message, nothing to act on. That happened twice in the wild while those four
-   were loaded from CDNs ("Uncaught ReferenceError: ReactDOM is not defined", 2026-08-04 and
-   2026-08-05), the second time to GOOGLEBOT, i.e. a tenant's public shopfront was crawled blank.
+   The three /vendor/ tags above are this page's only library dependencies, and the app
+   itself arrives as COMPILED, defer'd classic scripts (built offline by scripts/compile.mjs
+   - in-browser Babel was removed from the pages on 2026-08-13). If a library does not
+   load, the app scripts still run, throw on the first missing global, and the visitor gets
+   a PERMANENTLY BLANK PAGE - no message, nothing to act on. That happened twice in the wild
+   while the libraries came from CDNs ("Uncaught ReferenceError: ReactDOM is not defined",
+   2026-08-04 and 2026-08-05), the second time to GOOGLEBOT, i.e. a tenant's public
+   shopfront was crawled blank.
 
-   Those four are now SELF-HOSTED under /vendor/, which removes the third-party failure mode
+   The libraries are SELF-HOSTED under /vendor/, which removes the third-party failure mode
    that caused both incidents. This guard stays because same-origin is not the same as
-   infallible, and the remaining causes are ones this repo has actually shipped: an asset that
-   404s because of a routing rule (the /portal/* splat once swallowed the component's relative
-   src and blanked the entire portal), a deploy that uploaded an incomplete tree, a host
-   exclusion list that grew a pattern matching /vendor, or a connection dropped mid-load.
+   infallible, and the remaining causes are ones this repo has actually shipped: an asset
+   that 404s because of a routing rule (the /portal/* splat once swallowed the component's
+   relative src and blanked the entire portal), a deploy that uploaded an incomplete tree, a
+   host exclusion list that grew a bad pattern, or a connection dropped mid-load.
 
-   WHY THIS IS PLAIN JS AT THE END OF THE BODY, and not a check inside the mount block:
-     * If babel-standalone is the file that failed, EVERY type="text/babel" block on the page
-       never executes - blank and completely unlogged, because the error reporter itself lives
-       inside one of those blocks. Only plain JS can see and report that case.
-     * A plain inline script runs during parsing, while babel-standalone transforms on
-       DOMContentLoaded. So this runs BEFORE the blocks above and can still stop them -
-       verified: document.readyState is "loading" here and the blocks have not run yet.
-     * Sitting after them in the document means they are already in the DOM to neutralise.
-     * The four script tags block parsing, so all four have resolved (loaded or failed) by now.
+   HOW NEUTRALISING WORKS: the compiled app scripts are defer'd, so they execute after
+   parsing - after this guard. Every artifact opens with `if (window.__ssBootBlocked)
+   return;` (scripts/compile.mjs adds it), so setting that flag here is what stops the app
+   running on top of the failure screen. The old guard re-typed text/babel tags before
+   Babel compiled them; there are no such tags anymore.
+
+   THE APP-RAN SENTINEL: each page's own app source ends with `window.__ssAppBooted = true`.
+   Deferred scripts finish before DOMContentLoaded, so a page reaching DOMContentLoaded with
+   no sentinel and no blocked flag means the app artifact itself never ran - 404'd, or
+   served as HTML by a routing rule (the /portal/* splat answers any non-asset path with
+   portal.html at HTTP 200, which a classic script parses as a SyntaxError). The old
+   inline-babel world could not even see that class - Babel's abort killed the reporter too.
+   Now it reports boot_app_missing and shows this same screen.
+
+   WHY THIS IS PLAIN JS AT THE END OF THE BODY:
+     * It must work when everything else failed, so it may depend on nothing.
+     * A plain inline script runs during parsing - BEFORE the defer'd app scripts execute -
+       so the blocked flag is already set by the time they check it.
+     * The /vendor/ tags block parsing, so all three have resolved (loaded or failed) by now.
 
    KEEP THIS BLOCK BYTE-IDENTICAL ACROSS index.html / portal.html / admin.html - preflight
-   enforces it, exactly as it enforces the vendored-dependency lock. The mount blocks themselves
-   are NOT twinned, so nothing else would notice one page drifting. The only per-page difference
+   enforces it, exactly as it enforces the vendored-dependency lock. The app sources are NOT
+   twinned, so nothing else would notice one page drifting. The only per-page difference
    is the data-ss-app label on the tag above, which names the app in the message.
 */
 (function () {
   try {
     var app = (document.currentScript && document.currentScript.getAttribute("data-ss-app")) || "page";
 
-    // PUBLISHED so a page's own mount block can reuse this exact failure screen for the one
-    // dependency this guard cannot see. Babel fetches src'd text/babel files (the shared
-    // structure-studio.component.js) by XHR AFTER this script has run, so a module that never
-    // loaded leaves all four library globals present, this guard silent, and the mount block
-    // holding `undefined` - which it then renders, throwing React error #130 onto a blank page.
-    // That reached GOOGLEBOT on 2026-08-06 (app_errors 96ce38ff). The check has to live in the
-    // mount block because only it runs late enough to see the module; the MESSAGE has to live
-    // here because a second hand-written copy per page is exactly the drift preflight exists to
-    // catch. `missing` names the file(s); `code` separates the two causes in app_errors.
+    // PUBLISHED so a page's own app script can reuse this exact failure screen for the one
+    // dependency this guard cannot check itself: the shared component module. index.mount
+    // checks window.StructureStudio before rendering (a compiled module that 404s leaves it
+    // undefined) and calls in here with boot_component_missing; the portal deliberately only
+    // REPORTS that case, because there the module backs one tab of a working page. The
+    // MESSAGE lives here because a second hand-written copy per page is exactly the drift
+    // preflight exists to catch. `missing` names the file(s); `code` separates the causes
+    // in app_errors.
     function ssBootFail(missing, code) {
-      // Stop Babel compiling the blocks above. Without this they still run and still throw on
-      // the missing global - an app_errors row that reads like a product bug, on top of a
-      // message the visitor has already been given. A block that is ALREADY running (the
-      // module-missing caller below) is unaffected by a type change, so both callers can
-      // share this path.
-      var tags = document.querySelectorAll('script[type="text/babel"]');
-      for (var i = 0; i < tags.length; i++) tags[i].type = "text/ss-boot-blocked";
+      // Stop the app scripts running on top of the failure screen. Every compiled artifact
+      // checks this flag as its first statement (scripts/compile.mjs adds the check); the
+      // guard runs during parsing, before any defer'd script executes, so the flag is
+      // always seen. A script that is ALREADY running (the module-missing caller) is
+      // unaffected, so both callers can share this path.
+      window.__ssBootBlocked = true;
 
       // A broken render must never be indexed. Googlebot executes this; the healthy path
       // never calls in here, so a working page never gets the tag.
@@ -185,7 +129,9 @@ if (!StructureStudio) {
         body: JSON.stringify({
           p_source: "boot",
           p_message: "boot aborted: "
-            + (code === "boot_component_missing" ? "the shared component module" : "vendored dependencies")
+            + (code === "boot_component_missing" ? "the shared component module"
+              : code === "boot_app_missing" ? "this page's compiled app script"
+              : "vendored dependencies")
             + " did not load (" + missing.join(", ") + ")",
           p_code: code,
           p_client_id: new URLSearchParams(location.search).get("client") || null,
@@ -196,15 +142,30 @@ if (!StructureStudio) {
     }
     window.ssBootFail = ssBootFail;
 
-    // This guard's own case: the four vendored libraries. All are plain <script src> tags that
-    // block parsing, so every one of them has already resolved (loaded or failed) by now.
+    // This guard's own case: the three vendored libraries. All are plain <script src> tags
+    // that block parsing, so every one of them has already resolved (loaded or failed) by now.
     var missing = [];
     if (typeof React === "undefined" || !React) missing.push("react");
     if (typeof ReactDOM === "undefined" || !ReactDOM) missing.push("react-dom");
     if (!window.supabase || typeof window.supabase.createClient !== "function") missing.push("supabase-js");
-    if (typeof Babel === "undefined" || !Babel) missing.push("babel-standalone");
-    if (!missing.length) return;
-    ssBootFail(missing, "boot_deps_missing");
+    if (missing.length) {
+      ssBootFail(missing, "boot_deps_missing");
+      return;
+    }
+
+    // The app-ran sentinel (see the header comment). Deferred scripts execute before
+    // DOMContentLoaded in document order, so a quiet page here means this page's own app
+    // artifact never ran at all - the failure class the inline-babel world swallowed.
+    document.addEventListener("DOMContentLoaded", function () {
+      if (window.__ssAppBooted || window.__ssBootBlocked) return;
+      var srcs = [];
+      var tags = document.querySelectorAll("script[defer]");
+      for (var i = 0; i < tags.length; i++) {
+        var s = tags[i].getAttribute("src") || "";
+        if (s.indexOf(".compiled.js") !== -1) srcs.push(s.split("?")[0].replace(/^\//, ""));
+      }
+      ssBootFail(srcs.length ? srcs : ["this page's compiled app script"], "boot_app_missing");
+    });
   } catch (_e) {
     /* A guard that throws is worse than no guard. */
   }
