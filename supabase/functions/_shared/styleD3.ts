@@ -45,6 +45,7 @@ export type D3Spec = {
   siding: string | null;
   colors: Record<string, string>;
   wallHeightFt?: number;
+  roofMaterial?: string;
 };
 
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
@@ -77,6 +78,10 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   const d3: D3Spec = { roof, siding, colors };
   const wh = num(src.wallHeightFt);
   if (wh !== null && wh >= 5 && wh <= 14) d3.wallHeightFt = wh;
+  // The style's default roof MATERIAL (2026-08-15): the renderer textures the
+  // roof with it before any customer roof-type pick. Same posture as siding —
+  // anything unknown means "unset".
+  if (src.roofMaterial === "shingle" || src.roofMaterial === "metal") d3.roofMaterial = src.roofMaterial;
 
   // A spec is a handful of numbers. Anything approaching this size is either a mistake
   // or someone using a customer-visible jsonb column as free storage.

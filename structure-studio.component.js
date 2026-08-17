@@ -1583,6 +1583,9 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     roof: { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) },
     siding: sidingOverride || (o.siding !== undefined ? o.siding : (base.siding || null)),
     colors: { ...(base.colors || {}), ...(o.colors || {}) },
+    // The style's default roof MATERIAL (shingle|metal) — texture + surface
+    // response even before the customer picks a roof type; their pick wins.
+    roofMaterial: o.roofMaterial === "metal" || o.roofMaterial === "shingle" ? o.roofMaterial : (base.roofMaterial || null),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
 }
@@ -1675,36 +1678,123 @@ function d3CssColor(v, fallback) {
 // singleton pattern below): a live drag re-mints only the cheap CanvasTexture
 // wrapper per build, so dispose stays safe while the pixels — and the mipmap
 // upload cost they used to re-pay every rebuilt frame — are paid once.
+// Each kind rasters a COLOR canvas (multiplied by the material color, so it
+// stays white-based) and a BUMP canvas (grayscale relief) at 512px, with a
+// seeded PRNG so the variegation is identical every session — a quote PDF
+// captured today must match one captured tomorrow.
 const _d3TexCanvases = {};
+function _d3Rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function _d3RasterKind(kind) {
+  const N = 512;
+  const color = document.createElement("canvas"); color.width = color.height = N;
+  const bump = document.createElement("canvas"); bump.width = bump.height = N;
+  const g = color.getContext("2d");
+  const b = bump.getContext("2d");
+  const rng = _d3Rng(kind.length * 2654435761 + 20260815);
+  g.fillStyle = "#ffffff"; g.fillRect(0, 0, N, N);
+  b.fillStyle = "#808080"; b.fillRect(0, 0, N, N);
+  if (kind === "shingle") {
+    // Architectural asphalt: staggered variegated tabs, deep course shadows,
+    // faint vertical weather streaks.
+    const row = 64, tab = 86;
+    for (let y = 0, r = 0; y < N + row; y += row, r++) {
+      const off = (r % 2) * (tab / 2);
+      for (let x = -tab; x < N + tab; x += tab) {
+        const v = 0.82 + rng() * 0.26;               // per-tab lightness 0.82–1.08
+        const gray = Math.round(238 * Math.min(1.04, v));
+        g.fillStyle = `rgb(${gray},${gray},${gray})`;
+        g.fillRect(x + off, y, tab - 3, row - 4);
+        const bv = Math.round(112 + rng() * 48);
+        b.fillStyle = `rgb(${bv},${bv},${bv})`;
+        b.fillRect(x + off, y, tab - 3, row - 4);
+        // tab gap
+        g.fillStyle = "rgba(0,0,0,0.35)"; g.fillRect(x + off + tab - 3, y, 3, row - 4);
+        b.fillStyle = "#3a3a3a"; b.fillRect(x + off + tab - 3, y, 3, row - 4);
+      }
+      // course shadow + butt-edge highlight
+      g.fillStyle = "rgba(0,0,0,0.42)"; g.fillRect(0, y + row - 4, N, 4);
+      g.fillStyle = "rgba(255,255,255,0.10)"; g.fillRect(0, y + row, N, 2);
+      b.fillStyle = "#242424"; b.fillRect(0, y + row - 4, N, 4);
+    }
+    for (let i = 0; i < 26; i++) {                    // weather streaks
+      const x = rng() * N;
+      g.fillStyle = `rgba(0,0,0,${0.02 + rng() * 0.04})`;
+      g.fillRect(x, 0, 1 + rng() * 3, N);
+    }
+  } else if (kind === "metal") {
+    // Standing seam: wide pans with soft cross-pan sheen, paired ribs at each
+    // seam, strong bump ridges so the sun catches them.
+    const pan = 128;
+    for (let x = 0; x < N; x += pan) {
+      const grad = g.createLinearGradient(x, 0, x + pan, 0);
+      grad.addColorStop(0, "rgba(0,0,0,0.10)");
+      grad.addColorStop(0.35, "rgba(255,255,255,0.09)");
+      grad.addColorStop(0.65, "rgba(255,255,255,0.02)");
+      grad.addColorStop(1, "rgba(0,0,0,0.14)");
+      g.fillStyle = grad; g.fillRect(x, 0, pan, N);
+      g.fillStyle = "rgba(0,0,0,0.30)"; g.fillRect(x, 0, 3, N);            // seam shadow
+      g.fillStyle = "rgba(255,255,255,0.5)"; g.fillRect(x + 3, 0, 3, N);   // rib light
+      g.fillStyle = "rgba(0,0,0,0.18)"; g.fillRect(x + 6, 0, 2, N);
+      b.fillStyle = "#e8e8e8"; b.fillRect(x + 1, 0, 6, N);                 // rib ridge
+      b.fillStyle = "#565656"; b.fillRect(x + 7, 0, 2, N);
+    }
+  } else if (kind === "lap") {
+    // Horizontal lap boards: per-board tone, butt shadow, faint grain.
+    const board = 64;
+    for (let y = 0; y < N; y += board) {
+      const v = 0.90 + rng() * 0.16;
+      const gray = Math.round(244 * Math.min(1.03, v));
+      g.fillStyle = `rgb(${gray},${gray},${gray})`;
+      g.fillRect(0, y, N, board);
+      for (let i = 0; i < 7; i++) {                  // grain streaks
+        g.fillStyle = `rgba(0,0,0,${0.015 + rng() * 0.03})`;
+        g.fillRect(0, y + 6 + rng() * (board - 12), N, 1 + rng());
+      }
+      g.fillStyle = "rgba(0,0,0,0.34)"; g.fillRect(0, y + board - 5, N, 5);   // butt shadow
+      g.fillStyle = "rgba(255,255,255,0.16)"; g.fillRect(0, y, N, 2);          // top catch-light
+      const bg = b.createLinearGradient(0, y, 0, y + board);                  // board tilt
+      bg.addColorStop(0, "#9a9a9a"); bg.addColorStop(0.9, "#6f6f6f"); bg.addColorStop(1, "#2f2f2f");
+      b.fillStyle = bg; b.fillRect(0, y, N, board);
+    }
+  } else {
+    // "groove" — vertical T1-11 style panel: grooves with soft shoulders + grain.
+    const gap = 84;
+    for (let i = 0; i < 30; i++) {
+      g.fillStyle = `rgba(0,0,0,${0.012 + rng() * 0.025})`;
+      g.fillRect(rng() * N, 0, 1 + rng() * 2, N);
+    }
+    for (let x = 0; x < N; x += gap) {
+      g.fillStyle = "rgba(0,0,0,0.10)"; g.fillRect(x - 3, 0, 3, N);
+      g.fillStyle = "rgba(0,0,0,0.30)"; g.fillRect(x, 0, 4, N);
+      g.fillStyle = "rgba(255,255,255,0.12)"; g.fillRect(x + 4, 0, 2, N);
+      b.fillStyle = "#4a4a4a"; b.fillRect(x, 0, 4, N);
+      b.fillStyle = "#6a6a6a"; b.fillRect(x - 2, 0, 2, N);
+    }
+  }
+  return { color, bump };
+}
 function d3MakeTexture(THREE, kind) {
   if (!kind || typeof document === "undefined") return null;
   if (kind !== "metal" && kind !== "groove" && kind !== "lap" && kind !== "shingle") return null;
-  if (!_d3TexCanvases[kind]) {
-    const N = 128, cv = document.createElement("canvas"); cv.width = cv.height = N;
-    const g = cv.getContext("2d");
-    g.fillStyle = "#ffffff"; g.fillRect(0, 0, N, N);
-    if (kind === "metal") {
-      for (let x = 0; x <= N; x += 16) {
-        g.fillStyle = "rgba(0,0,0,0.30)"; g.fillRect(x, 0, 2.5, N);       // seam shadow
-        g.fillStyle = "rgba(255,255,255,0.55)"; g.fillRect(x + 2.5, 0, 2, N); // rib highlight
-      }
-    } else if (kind === "groove") {
-      for (let x = 0; x <= N; x += 21) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(x, 0, 2, N); }
-    } else if (kind === "lap") {
-      for (let y = 0; y <= N; y += 16) { g.fillStyle = "rgba(0,0,0,0.16)"; g.fillRect(0, y, N, 3); g.fillStyle = "rgba(255,255,255,0.10)"; g.fillRect(0, y + 3, N, 2); }
-    } else {
-      const row = 20, tab = 26;
-      g.fillStyle = "#ededed"; g.fillRect(0, 0, N, N);
-      for (let y = 0, r = 0; y <= N; y += row, r++) {
-        g.fillStyle = "rgba(0,0,0,0.24)"; g.fillRect(0, y, N, 3);          // course shadow
-        g.fillStyle = "rgba(0,0,0,0.12)";
-        const off = (r % 2) * (tab / 2);
-        for (let x = -tab + off; x <= N; x += tab) g.fillRect(x, y, 1.5, row); // staggered tab gaps
-      }
-    }
-    _d3TexCanvases[kind] = cv;
-  }
-  const tex = new THREE.CanvasTexture(_d3TexCanvases[kind]);
+  if (!_d3TexCanvases[kind]) _d3TexCanvases[kind] = _d3RasterKind(kind);
+  const tex = new THREE.CanvasTexture(_d3TexCanvases[kind].color);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+// Matching relief map (same cached canvas family, same repeat contract as the
+// color texture — the caller copies .repeat onto it).
+function d3MakeBumpTexture(THREE, kind) {
+  if (!kind || typeof document === "undefined") return null;
+  if (!_d3TexCanvases[kind]) return null;   // color texture is always made first
+  const tex = new THREE.CanvasTexture(_d3TexCanvases[kind].bump);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
@@ -1933,7 +2023,11 @@ function buildShed3DModel(THREE, p) {
   // else the D3 default (plan §6 gap #1).
   const H = p.wallHeightFt || D3.WALL_H, T = D3.WALL_T;
   const root = new THREE.Group();
-  const mat = (color, extra) => new THREE.MeshLambertMaterial({ color, ...(extra || {}) });
+  // Standard (PBR) materials, not Lambert: with the ACES tone mapping the viewer
+  // sets, they are what makes painted siding read as PAINT and a metal roof as
+  // METAL instead of flat matte plastic — the single biggest realism lever.
+  // Roughness defaults high (wood/asphalt); callers override for metal.
+  const mat = (color, extra) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.0, ...(extra || {}) });
   const wallMat = mat(bodyColor);
   const trimMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
@@ -1953,8 +2047,14 @@ function buildShed3DModel(THREE, p) {
   };
   // Siding texture (vertical groove panel by default; horizontal lap boards when
   // the customer picked a lap-siding upgrade) — multiplies the body color.
-  const wallTex = d3MakeTexture(THREE, (p.styleSpec && p.styleSpec.siding === "lap") ? "lap" : "groove");
-  if (wallTex) { wallTex.repeat.set(Math.max(2, Math.round((bldgW + bldgH) / 3)), Math.max(2, Math.round(H / 3))); wallMat.map = wallTex; }
+  const wallKind = (p.styleSpec && p.styleSpec.siding === "lap") ? "lap" : "groove";
+  const wallTex = d3MakeTexture(THREE, wallKind);
+  if (wallTex) {
+    wallTex.repeat.set(Math.max(2, Math.round((bldgW + bldgH) / 3)), Math.max(2, Math.round(H / 3)));
+    wallMat.map = wallTex;
+    const wallBump = d3MakeBumpTexture(THREE, wallKind);
+    if (wallBump) { wallBump.repeat.copy(wallTex.repeat); wallMat.bumpMap = wallBump; wallMat.bumpScale = 0.4; }
+  }
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
 
   // Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
@@ -2239,14 +2339,31 @@ function buildShed3DModel(THREE, p) {
   const shape = new THREE.Shape();
   dedup.forEach((pt, i) => (i === 0 ? shape.moveTo(pt[0], pt[1]) : shape.lineTo(pt[0], pt[1])));
   const rg = new THREE.Group(); // local space: x = profile u, y = up, z = 0..L along the ridge
-  rg.add(new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false }), wallMat));
-  // Roof texture: metal standing-seam ribs vs shingle courses per the customer's
-  // roof-type pick (multiplies the roof color; flat when no roof type chosen).
-  const roofTex = d3MakeTexture(THREE, p.roofType === "Metal" ? "metal" : p.roofType === "Shingle" ? "shingle" : null);
+  // The gable/end faces get their OWN material: the extrusion's UVs are in
+  // profile units, so sampling the wall texture through them painted a smeared
+  // pale wedge above the plate line. Plain body color reads clean; the viewer
+  // ghosts this material alongside wallMat in look-inside mode.
+  const gableMat = mat(bodyColor);
+  rg.add(new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false }), gableMat));
+  // Roof texture: metal standing-seam vs shingle courses. The customer's
+  // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
+  // fills in before any pick — a bare flat-color slab was the single biggest
+  // "this looks fake" tell. Metal also gets a metal SURFACE (lower roughness,
+  // some metalness) so the sun actually glints off the pans.
+  const roofKind = p.roofType === "Metal" ? "metal"
+    : p.roofType === "Shingle" ? "shingle"
+    : (p.styleSpec && (p.styleSpec.roofMaterial === "metal" || p.styleSpec.roofMaterial === "shingle") ? p.styleSpec.roofMaterial : "shingle");
+  const roofTex = d3MakeTexture(THREE, roofKind);
   if (roofTex) {
-    roofTex.repeat.set(Math.max(2, Math.round(S / (p.roofType === "Metal" ? 1.5 : 2.5))), Math.max(2, Math.round(L / 2.5)));
+    roofTex.repeat.set(Math.max(2, Math.round(S / (roofKind === "metal" ? 1.5 : 2.5))), Math.max(2, Math.round(L / 2.5)));
     roofMat.map = roofTex; roofMat.needsUpdate = true;
+    const roofBump = d3MakeBumpTexture(THREE, roofKind);
+    if (roofBump) { roofBump.repeat.copy(roofTex.repeat); roofMat.bumpMap = roofBump; roofMat.bumpScale = roofKind === "metal" ? 0.5 : 0.35; }
+    if (roofKind === "metal") { roofMat.roughness = 0.45; roofMat.metalness = 0.35; }
+    else { roofMat.roughness = 0.95; roofMat.metalness = 0.0; }
   }
+  let profPeak = -Infinity;
+  dedup.forEach((pt) => { if (pt[1] > profPeak) profPeak = pt[1]; });
   slopes.forEach((sl) => {
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
@@ -2260,6 +2377,37 @@ function buildShed3DModel(THREE, p) {
       L / 2
     );
     rg.add(slab);
+    const ux = du / slen, uy = dy / slen;
+    // Eave fascia: a trim board hung on the slab's LOW edge, the finish
+    // carpentry that stops a roof reading as a floating slab. Positioned with
+    // the SAME normal offset the slab itself carries, or it hangs visibly
+    // detached at some angles. Only slopes that reach the wall plate get one
+    // (a gambrel's upper legs do not).
+    const lowEnd = A[1] <= B[1] ? A : B;
+    if (lowEnd[1] <= H + 0.01) {
+      const towardLow = lowEnd === A ? -1 : 1;
+      const edgeU = lowEnd[0] + towardLow * ux * OV + nx * (D3.ROOF_T / 2 + 0.02);
+      const edgeY = lowEnd[1] + towardLow * uy * OV + ny * (D3.ROOF_T / 2 + 0.02);
+      const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
+      fascia.position.set(edgeU, edgeY - 0.14, L / 2);
+      rg.add(fascia);
+    }
+    // Ridge cap: one angled board LYING ON each slope that reaches the peak
+    // (both halves of a gable, the upper legs of a gambrel) — a flat box can
+    // never seat on the V of two pitches, which is why the first cut floated.
+    const highEnd = A[1] >= B[1] ? A : B;
+    if (roofCfg.type !== "shed" && highEnd[1] >= profPeak - 0.01) {
+      const towardHigh = highEnd === A ? -1 : 1;
+      const CAPW = 0.55;
+      const capBoard = box(roofMat, CAPW, 0.06, L + OV * 2);
+      capBoard.rotation.z = Math.atan2(dy, du);
+      capBoard.position.set(
+        highEnd[0] - towardHigh * ux * (CAPW / 2 - 0.06) + nx * (D3.ROOF_T + 0.05),
+        highEnd[1] - towardHigh * uy * (CAPW / 2 - 0.06) + ny * (D3.ROOF_T + 0.05),
+        L / 2
+      );
+      rg.add(capBoard);
+    }
   });
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
@@ -2350,7 +2498,7 @@ function buildShed3DModel(THREE, p) {
   // the siding texture survives too). builtFrontWall lets the flush detect a
   // FRONT flip, which needs the full path (roof + ground labels re-home).
   const sharedMats = new Set([wallMat, trimMat]);
-  const model = { root, envGroup, wallMat, trimMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
+  const model = { root, envGroup, wallMat, trimMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -2397,7 +2545,12 @@ function disposeSubtree(obj, sharedMats) {
   if (sharedMats) sharedMats.forEach((m) => mats.delete(m));
   // Fixture photo textures are shared across every rebuild (see d3FixtureTexture)
   // — disposing one here would blank every catalog door on the first drag frame.
-  mats.forEach((m) => { if (m.map && !(m.map.userData && m.map.userData.ssShared)) m.map.dispose(); m.dispose(); });
+  // Bump maps are per-build mints like color maps and dispose with them.
+  mats.forEach((m) => {
+    if (m.map && !(m.map.userData && m.map.userData.ssShared)) m.map.dispose();
+    if (m.bumpMap && !(m.bumpMap.userData && m.bumpMap.userData.ssShared)) m.bumpMap.dispose();
+    m.dispose();
+  });
   d3UnbindFixtureMats(mats);
 }
 
@@ -2485,6 +2638,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
       renderer.shadowMap.enabled = true;                 // SmartBuild-style sun shadows
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      // Filmic tone mapping is what lets the PBR materials read as real
+      // surfaces — flat Linear output was a big part of the "toy render" look.
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.15;
       // The sun is a fixed directional light with a fixed ortho shadow camera,
       // so the shadow map is VIEW-INDEPENDENT: orbiting re-renders the same
       // depth map for nothing (a full 2048² PCFSoft pass per pointermove).
@@ -2507,7 +2664,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
       const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures }));
       scene.add(model.root);
-      scene.add(new THREE.HemisphereLight(0xFFFFFF, 0x8D8573, 1.8));
+      // Sky-tinted fill + warm sun: under ACES, white-on-white lighting reads
+      // as overcast plastic; a blue-ish ambient with a warm key is what makes
+      // painted siding and shingle relief look sunlit.
+      scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
       // Start the camera on the FRONT side (same wall the 2D labels call FRONT),
       // nudged sideways for a three-quarter view; the sun follows the camera side.
       const fw = frontWall || "south";
@@ -2516,7 +2676,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const dist = R * 2.7;
       const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
       const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
-      const sun = new THREE.DirectionalLight(0xFFFFFF, 2.2);
+      const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
       sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
       // Shadow camera sized to the building footprint (grass receives the shadow).
       sun.castShadow = true;
@@ -2602,6 +2762,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         e.model.wallMat.opacity = e.interior ? 0.14 : 1;
         e.model.wallMat.depthWrite = !e.interior;
         e.model.wallMat.needsUpdate = true;
+        if (e.model.gableMat) {
+          // The gable/end faces carry their own material (UV mismatch with the
+          // wall texture) but must ghost in step with the walls.
+          e.model.gableMat.transparent = !!e.interior;
+          e.model.gableMat.opacity = e.interior ? 0.14 : 1;
+          e.model.gableMat.depthWrite = !e.interior;
+          e.model.gableMat.needsUpdate = true;
+        }
         // Every caller changed what casts or shows shadow (rebuild flush, roof
         // toggle, look-inside) - re-render the cached shadow map next frame.
         e.renderer.shadowMap.needsUpdate = true;
@@ -2748,6 +2916,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const e = engineRef.current;
         if (!e) return;
         e.model.wallMat.color.set(liveBodyCss);
+        if (e.model.gableMat) e.model.gableMat.color.set(liveBodyCss);
         e.model.trimMat.color.set(liveTrimCss);
         render();
       };
