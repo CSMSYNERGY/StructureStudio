@@ -1,0 +1,331 @@
+/**
+ * Resend transport: sender-domain provisioning and email sending, one API.
+ *
+ * DARK FILE — nothing imports this yet. Postmark rejected the account on 2026-08-13 (appeal
+ * pending); Resend is the runner-up, and this module exists so that if the appeal fails the
+ * platform switches providers by swapping the transport underneath `emailSend.ts` instead of
+ * rewriting the email path under pressure. It deliberately mirrors postmark.ts — same leaf
+ * shape, same error contract, same test posture — so the swap is a rename, not a redesign.
+ *
+ * Like postmark.ts, this file is TRANSPORT ONLY: typed errors, request-time secrets, safe
+ * error surfaces. It holds no supabase client, writes no ledger, and never decides whether
+ * an email SHOULD be sent; `emailSend.ts` owns outcomes and the `email_sends` rows. Keeping
+ * the transport a leaf module with zero imports is also what lets the preflight gate
+ * unit-test it offline with a stubbed fetch (see resend.test.ts).
+ *
+ * THE RULE THIS FILE ENFORCES (inherited from postmark.ts): every failure carries a verdict —
+ * is a retry pointless? `permanent` is claimed only on positive evidence: a 400 whose error
+ * name is `validation_error`, any 403 (Resend uses it for "this request may not do that",
+ * e.g. testing-mode recipient restrictions), a 404 `not_found`, or a 422 (invalid/missing
+ * fields). A 429 (`rate_limit_exceeded`), any 5xx, a network failure, an unreadable body, or
+ * anything unrecognized stays retryable — a wrongly-permanent verdict strands an email that
+ * would have gone through on the next attempt, and that is the more expensive mistake.
+ *
+ * Resend facts callers must not have to re-learn:
+ *   - ONE key does everything. `RESEND_API_KEY` authorizes both domain provisioning and
+ *     sending (`Authorization: Bearer`), unlike Postmark's account/server token split — so
+ *     configured-ness is a single check and there is no per-API token to mix up.
+ *   - Domain-level `status` values: "not_started" | "pending" | "verified" | "failed" |
+ *     "temporary_failure". Only `rsDomainVerified` (status === "verified") means usable;
+ *     "temporary_failure" is a previously-passing domain that failed a periodic re-check.
+ *   - Resend returns DNS record hosts as RELATIVE names ("send", "resend._domainkey").
+ *     A UI rendering those verbatim hands the tenant a record that lands at the wrong node.
+ *     Normalization happens HERE: every record carries both `host` (Resend's relative name,
+ *     what a DNS panel's "Name" field usually wants) and `fqdn` (host + domain, built from
+ *     the response's own `name`), so no caller ever appends the domain itself.
+ *   - The verify endpoint acknowledges with only `{object, id}` — no records, no status —
+ *     so rsVerifyDomain follows the POST with a GET. That GET is not just the consolidated
+ *     read postmark.ts does for freshness; it is the only full-shape read available.
+ *
+ * Error bodies are never surfaced raw. Resend's `message` field can echo RECIPIENT
+ * ADDRESSES (e.g. its testing-mode 403 names the address you may send to), and a lead's
+ * email must not land in app_errors or a tenant-facing string — the postmark.ts posture.
+ * Only the HTTP status and the enum-ish error `name` survive, and the name is kept ONLY
+ * when it matches the lowercase-snake shape Resend's error names use — a body field that
+ * fails that gate could carry anything, so it is dropped rather than trusted.
+ */
+
+const API_BASE = "https://api.resend.com";
+
+/** Read at REQUEST time, never at module top: a module-top read needs a redeploy to pick
+ *  up a rotated secret, which cost us a debugging session on Deposyt. */
+function apiKey(): string | null {
+  return Deno.env.get("RESEND_API_KEY") || null;
+}
+
+/** The ONE test for "may the Resend path run at all" — a single key covers domains and
+ *  sending, so unlike postmarkConfigured there are no halves to check. */
+export function resendConfigured(): boolean {
+  return apiKey() !== null;
+}
+
+export class ResendNotConfigured extends Error {
+  constructor(msg = "Resend is not configured on this deployment.") {
+    super(msg);
+    this.name = "ResendNotConfigured";
+  }
+}
+
+/**
+ * A Resend API call that answered non-OK, or could not be reached at all.
+ *
+ * `permanent` answers "is a Retry pointless?" — claimed only on the positive evidence in
+ * `verdictOf` below. `status` is 0 when no HTTP answer arrived. `name_` holds Resend's
+ * enum-ish error name ("validation_error", "not_found", …) or "" when the body carried
+ * none we trust; the trailing underscore exists because `Error.name` is already taken by
+ * the class name ("ResendApiError").
+ */
+export class ResendApiError extends Error {
+  readonly status: number;
+  readonly name_: string;
+  readonly permanent: boolean;
+  constructor(init: { message: string; status: number; name_: string; permanent: boolean }) {
+    super(init.message);
+    this.name = "ResendApiError";
+    this.status = init.status;
+    this.name_ = init.name_;
+    this.permanent = init.permanent;
+  }
+}
+
+/**
+ * Positive evidence that an identical retry fails identically:
+ *   400 validation_error  the request itself is malformed (bad from/to/body)
+ *   403                   the key may not do this — domain not yours, testing-mode
+ *                         recipient restriction, plan restriction; a human unblocks
+ *                         these, not a retry loop
+ *   404 not_found         the domain/email id does not exist on this account
+ *   422                   invalid or missing fields — the request must change to succeed
+ * Everything else — 429, 5xx, network, an unrecognized shape, a 401 a key rotation would
+ * fix without a code change — stays retryable.
+ */
+function verdictOf(status: number, name_: string): boolean {
+  if (status === 400 && name_ === "validation_error") return true;
+  if (status === 403) return true;
+  if (status === 404 && name_ === "not_found") return true;
+  if (status === 422) return true;
+  return false;
+}
+
+/** Pull ONLY the enum-ish `name` out of a Resend error body. `message` is never read — see
+ *  the header: it echoes recipient addresses. The charset gate is what makes `name` safe to
+ *  surface at all: Resend's error names are lowercase snake_case, which cannot spell an
+ *  email address, so anything else is dropped rather than trusted. */
+function errorNameOf(body: string): string {
+  try {
+    const name = (JSON.parse(body) as { name?: unknown })?.name;
+    return typeof name === "string" && /^[a-z0-9_]{1,64}$/.test(name) ? name : "";
+  } catch {
+    return "";
+  }
+}
+
+function requireKey(): string {
+  const key = apiKey();
+  if (!key) throw new ResendNotConfigured("RESEND_API_KEY is not set.");
+  return key;
+}
+
+/** One authenticated round trip. Failures throw ResendApiError with the verdict attached;
+ *  successes return the parsed JSON (null when the body is empty or unparsable). */
+async function rsFetch(key: string, path: string, init: RequestInit = {}): Promise<unknown> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${key}`,
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+      },
+    });
+  } catch (e) {
+    // Could not reach Resend at all — nothing about the REQUEST has been judged, so
+    // permanence cannot be claimed. The message carries only our own URL and the runtime's
+    // network error text, never provider or customer data.
+    throw new ResendApiError({
+      message: `Could not reach Resend: ${(e as Error).message}`,
+      status: 0,
+      name_: "",
+      permanent: false,
+    });
+  }
+
+  const text = await res.text();
+  if (!res.ok) {
+    const name_ = errorNameOf(text);
+    throw new ResendApiError({
+      message: `Resend API ${res.status} on ${path.split("?")[0]}`
+        + (name_ ? ` — ${name_}` : ""),
+      status: res.status,
+      name_,
+      permanent: verdictOf(res.status, name_),
+    });
+  }
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One DNS record the tenant must hold, normalized. `purpose` is Resend's `record` field
+ * ("SPF" | "DKIM" today); `type` is "TXT" | "CNAME" | "MX" today — both kept as string so a
+ * value Resend adds later passes through instead of being coerced into a lie. `host` is the
+ * relative name exactly as Resend gave it; `fqdn` is the absolute name built here (see the
+ * header). `priority` is present only on MX records — dropping it would hand the tenant an
+ * MX they cannot actually create.
+ */
+export type RsDnsRecord = {
+  purpose: string;
+  host: string;
+  fqdn: string;
+  type: string;
+  value: string;
+  verified: boolean;
+  priority?: number;
+};
+
+/** One sender domain, normalized. `status` is Resend's domain-level enum (see the header);
+ *  gate usability on `rsDomainVerified`, never on records alone. */
+export type RsDomain = {
+  id: string;
+  status: string;
+  records: RsDnsRecord[];
+};
+
+/** The ONE meaning of "usable": Resend has checked the records and says verified. Every
+ *  other status — including "pending" and "temporary_failure" — is not-yet/no-longer. */
+export function rsDomainVerified(d: RsDomain): boolean {
+  return d.status === "verified";
+}
+
+/** Build the absolute record name from Resend's relative one. Defensive on both ends: an
+ *  already-absolute name is not double-appended, and ""/"@" (apex) resolves to the domain. */
+function toFqdn(host: string, domain: string): string {
+  if (!domain) return host;
+  if (!host || host === "@") return domain;
+  if (host === domain || host.endsWith(`.${domain}`)) return host;
+  return `${host}.${domain}`;
+}
+
+function toRsRecord(raw: unknown, domain: string): RsDnsRecord {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const host = str(r.name);
+  const rec: RsDnsRecord = {
+    purpose: str(r.record),
+    host,
+    fqdn: toFqdn(host, domain),
+    type: str(r.type),
+    value: str(r.value),
+    verified: r.status === "verified",
+  };
+  if (typeof r.priority === "number" && Number.isFinite(r.priority)) rec.priority = r.priority;
+  return rec;
+}
+
+/** Normalize one Resend domain response. The `fqdn` on each record is built from the
+ *  response's own `name`, so every read path (create, get, verify) yields the same shape
+ *  without the caller ever supplying the domain twice. */
+function toRsDomain(raw: unknown): RsDomain {
+  const d = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const domainName = str(d.name);
+  const rawRecords = Array.isArray(d.records) ? d.records : [];
+  return {
+    id: str(d.id),
+    status: str(d.status),
+    records: rawRecords.map((r) => toRsRecord(r, domainName)),
+  };
+}
+
+/**
+ * Create a sender domain on the Resend account. The region is pinned to us-east-1: the
+ * region is baked into the SPF record's value (feedback-smtp.<region>.amazonses.com), so a
+ * per-tenant choice would make otherwise-identical tenants hold different DNS for no
+ * requirement anyone has stated.
+ */
+export async function rsCreateDomain(name: string): Promise<RsDomain> {
+  const key = requireKey();
+  const raw = await rsFetch(key, "/domains", {
+    method: "POST",
+    body: JSON.stringify({ name, region: "us-east-1" }),
+  });
+  return toRsDomain(raw);
+}
+
+/** Read one domain's current records + verification state. */
+export async function rsGetDomain(id: string): Promise<RsDomain> {
+  const key = requireKey();
+  return toRsDomain(await rsFetch(key, `/domains/${id}`));
+}
+
+/**
+ * Ask Resend to check the DNS records, then report one fresh full read. The verify POST
+ * acknowledges with only `{object, id}` — the follow-up GET is the only way to get records
+ * and status at all, and it also means a caller can never see a half-updated shape. A check
+ * that simply finds the records absent is NOT an error — the domain comes back with its
+ * status still unverified; a thrown ResendApiError here means the API call itself failed.
+ */
+export async function rsVerifyDomain(id: string): Promise<RsDomain> {
+  const key = requireKey();
+  await rsFetch(key, `/domains/${id}/verify`, { method: "POST" });
+  return toRsDomain(await rsFetch(key, `/domains/${id}`));
+}
+
+/** Remove a domain from the Resend account (the disconnect path). */
+export async function rsDeleteDomain(id: string): Promise<void> {
+  const key = requireKey();
+  await rsFetch(key, `/domains/${id}`, { method: "DELETE" });
+}
+
+/**
+ * One outgoing email. Unlike PmSendInput (Postmark's PascalCase names, passed through),
+ * these are our names: only `replyTo` differs from the wire (`reply_to`), and rsSendEmail
+ * owns that mapping. `tags` carry `{client_id, short_code, kind}`-style telemetry — how one
+ * shared account stays filterable per tenant in Resend's dashboard.
+ */
+export type RsSendInput = {
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  replyTo?: string;
+  tags?: { name: string; value: string }[];
+};
+
+/** Resend rejects the WHOLE send with a 422 when a tag name or value carries anything
+ *  outside ASCII letters/numbers/underscores/dashes — so a tenant slug or short code with a
+ *  dot would fail the email over telemetry. Degrading the tag is the right trade: the send
+ *  survives, and the sanitized value stays recognizable in the dashboard. */
+function sanitizeTag(s: string): string {
+  return s.replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
+/**
+ * Send one email. Returns Resend's email `id` — persist it on the `email_sends` row
+ * IMMEDIATELY: it is the only key delivery/bounce webhooks can match on, so a lost id is a
+ * send whose fate is unknowable (the pmSendEmail rule, unchanged).
+ */
+export async function rsSendEmail(input: RsSendInput): Promise<{ id: string }> {
+  const key = requireKey();
+  const raw = await rsFetch(key, "/emails", {
+    method: "POST",
+    // JSON.stringify drops undefined-valued keys, so optional fields the caller omitted
+    // never appear on the wire.
+    body: JSON.stringify({
+      from: input.from,
+      to: input.to,
+      subject: input.subject,
+      html: input.html,
+      text: input.text,
+      reply_to: input.replyTo,
+      tags: input.tags?.map((t) => ({ name: sanitizeTag(t.name), value: sanitizeTag(t.value) })),
+    }),
+  });
+  const msg = (raw ?? {}) as Record<string, unknown>;
+  return { id: typeof msg.id === "string" ? msg.id : "" };
+}
