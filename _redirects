@@ -17,6 +17,9 @@
 /admin       /admin.html    200
 /admin/      /admin         301
 
+/my-quotes   /my-quotes.html  200
+/my-quotes/  /my-quotes       301
+
 # Every portal page has its own URL (/portal/settings/colors, /portal/admin/clients). The
 # splat rewrites them all to the same document — 200, never 301, so the address the user
 # typed is the address they keep and the SPA can read the path on boot.

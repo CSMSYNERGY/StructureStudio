@@ -75,6 +75,7 @@ export const AREAS: Area[] = [
   { key: "settings_branding",   label: "Branding & Estimates", group: "settings", hint: "Your look, business details, lots",   levels: RVE },
   { key: "settings_crm",        label: "CRM Connection",       group: "settings", hint: "Synergy/GHL keys and pipelines",      levels: RVE },
   { key: "settings_quickbooks", label: "QuickBooks",           group: "settings", hint: "Accounting connection + mappings",    levels: RVE },
+  { key: "settings_email",      label: "Email Sending",        group: "settings", hint: "Send estimates and invoices from your own domain", levels: RVE },
   { key: "settings_team",       label: "Team",                 group: "settings", hint: "Add people and set their access",     levels: RVE, byTitleOnly: true },
   // The card that pays for the product: off for every admin by default, granted per person
   // by an owner, never grantable by anyone else. See the ownerGranted doc above.
@@ -101,7 +102,8 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
     settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
-    settings_crm: "edit", settings_quickbooks: "edit", settings_team: "edit",
+    settings_crm: "edit", settings_quickbooks: "edit", settings_email: "edit",
+    settings_team: "edit",
     settings_billing: "none",
   },
   sales_rep: {

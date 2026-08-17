@@ -1,6 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
+import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { estimateEmail } from "../_shared/emailTemplates.ts";
+import { estimateUrl } from "../_shared/ghlLinks.ts";
+import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -8,13 +12,35 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// SEND ROUTING (step 10, 2026-08-10 — Postmark integration). Two paths, routed per tenant
+// by `client_settings.email_provider`:
+//
+//  • 'postmark' — the GHL send is called with action:"send_manually" (live-verified
+//    2026-08-10 on the test location: 201, flips the estimate to 'sent' so the hosted
+//    Accept/Reject page and sync-design-status derivation stay intact, sends NO email,
+//    and a repeat call is idempotent; the send body REQUIRES userId — 422 without it).
+//    Then _shared/emailSend.ts `sendTenantEmail()` delivers our own branded email
+//    (_shared/emailTemplates.ts) linking GHL's hosted estimate page (_shared/ghlLinks.ts).
+//    sendTenantEmail owns, internally: the dark guards (secrets / provider flag /
+//    platform-domain readiness), From resolution (verified tenant domain, else the
+//    platform domain), the email_sends ledger, and the BETA REDIRECT for this path —
+//    recording the pre-redirect recipient as `intended_email`. If it returns {sent:false}
+//    (not active or failed), step 10 falls through to the GHL path below: GHL accepts a
+//    second send on an already-'sent' estimate (double-send verified safe), so the
+//    customer still gets an email. A formal estimate PDF is generated best-effort on this
+//    path only; its failure never blocks the email.
+//
+//  • 'ghl' (the default) — today's GHL action:"email" send, byte-identical to the
+//    pre-Postmark behavior. On THIS path the beta redirect happens right in step 10 by
+//    replacing the recipient list.
+//
 // BETA MODE REDIRECT (restored 2026-08-07, Carolyn's call).
 //
 // When the tenant's own `beta_mode` switch is on, the estimate email goes to that
-// tenant's OWN `beta_email` test inbox instead of the customer. This
-// is what the portal's Testing card has always claimed; between the removal of the first
-// redirect and this change it was a false promise, and testing with a real lead's details
-// emailed that lead a live branded quote.
+// tenant's OWN `beta_email` test inbox instead of the customer — on BOTH paths, in the
+// two places named above. This is what the portal's Testing card has always claimed;
+// between the removal of the first redirect and this change it was a false promise, and
+// testing with a real lead's details emailed that lead a live branded quote.
 //
 // The first redirect was removed because it pointed at a single hard-coded QA address
 // that was NOT deliverable, so beta estimates silently failed to send. Two rules keep
@@ -31,7 +57,8 @@ const cors = {
 // and remains telemetry — see `redirectToTestInbox` below for why coupling them would
 // break every beta-host submission for tenants who never opted in.
 //
-// `sendDebug.sentTo` and the response's `betaRedirected` report where it actually went.
+// `sendDebug.sentTo` and the response's `betaRedirected` report where it actually went;
+// `sendDebug.provider` says which sender delivered it.
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -75,7 +102,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -1249,56 +1276,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
   }
 
-  // 10. Send (re-emails on update, per requirements). Recipient is the tenant's test inbox
-  //     when beta mode is on, otherwise the customer — see the header. `betaEmail` was
-  //     already validated above, so by here beta mode implies a usable address. We capture
-  //     the GHL response (status + body) and return it as `sendDebug` so failures don't
-  //     hide behind a generic 200 — the React app or curl caller can inspect what GHL
-  //     rejected, and `sentTo` says who actually received it.
-  let sendDebug: { status: number | null; ok: boolean; body: string; sentTo: string[] } = {
-    status: null,
-    ok: false,
-    body: "send step did not run",
-    sentTo: [],
-  };
-  try {
-    if (estimateId) {
-      // Beta mode redirects to the tenant's own test inbox. Not a filter over the
-      // customer's address — a REPLACEMENT, so the customer is never a recipient of a
-      // test estimate even if their address is also on the design.
-      const recipients = redirectToTestInbox ? [betaEmail] : [contact?.email].filter(Boolean);
-      sendDebug.sentTo = recipients;
-      const sendBody = {
-        altId: dynamicLocationId,
-        altType: "location",
-        userId: dynamicUserId,
-        action: "email",
-        liveMode: true,
-        sentTo: { email: recipients },
-      };
-      const r = await fetch(
-        `https://services.leadconnectorhq.com/invoices/estimate/${estimateId}/send`,
-        { method: "POST", headers: ghlHeaders, body: JSON.stringify(sendBody) }
-      );
-      sendDebug.status = r.status;
-      sendDebug.ok = r.ok;
-      sendDebug.body = (await r.text()).slice(0, 2000); // cap to avoid huge responses
-      if (!r.ok) console.warn("Estimate send failed:", r.status, sendDebug.body);
-      else console.log("Estimate send OK:", r.status, sendDebug.body.slice(0, 200));
-    } else {
-      sendDebug.body = "no estimateId after create/update";
-    }
-  } catch (e) {
-    sendDebug.body = `send threw: ${(e as Error).message}`;
-    console.warn("Estimate send error:", (e as Error).message);
-  }
-
-  // 11. Persist GHL IDs + the line provenance snapshot.
+  // Line provenance snapshot (persisted as designs.estimate_lines at step 11).
   //
-  // Serialized HERE — after pct_estimate_total resolution, credit baking, and the
-  // discount clamp — so every amount is the FINAL number that went to GHL. The style id
-  // is stored once at the top level (every building/layout line shares it) and the
+  // Serialized after pct_estimate_total resolution, credit baking, and the discount clamp
+  // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
+  // style id is stored once at the top level (every building/layout line shares it) and the
   // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
+  // Built BEFORE step 10 because the Postmark path's formal estimate PDF renders from this
+  // same snapshot — the emailed document and the persisted books lines can never disagree.
   const estimateLines = {
     version: 1,
     styleId: styleRowId,
@@ -1322,6 +1307,194 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         };
       }),
   };
+
+  // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
+  //     email_provider='postmark' get action:"send_manually" + our own Postmark email;
+  //     everyone else (and every Postmark failure) gets today's GHL action:"email" send.
+  //     Recipient is the tenant's test inbox when beta mode is on, otherwise the customer
+  //     — see the header for where each path implements that. `betaEmail` was already
+  //     validated above, so by here beta mode implies a usable address. We capture the GHL
+  //     response (status + body) and return it as `sendDebug` so failures don't hide
+  //     behind a generic 200 — the React app or curl caller can inspect what GHL rejected,
+  //     `sentTo` says who actually received it, `provider` says which sender delivered it,
+  //     and `postmark` carries the ledger outcome whenever the Postmark path was attempted.
+  let sendDebug: {
+    status: number | null;
+    ok: boolean;
+    body: string;
+    sentTo: string[];
+    provider: "postmark" | "ghl";
+    postmark?: { sent: boolean; messageId?: string; reason?: string; error?: string };
+  } = {
+    status: null,
+    ok: false,
+    body: "send step did not run",
+    sentTo: [],
+    provider: "ghl",
+  };
+  try {
+    if (estimateId) {
+      const hostedUrl = estimateUrl(estimateId);
+      const intendedTo = String(contact?.email || "").trim();
+      let postmarkHandled = false;
+
+      // Postmark path. Routes on the provider flag + a buildable hosted-page link + having
+      // somewhere to send (the customer's address, or beta mode's guaranteed test inbox).
+      // Deliberately NOT on email_domain_status: sendTenantEmail owns From resolution
+      // (verified tenant domain vs the platform domain) and goes dark on its own when
+      // neither is usable — that dark verdict lands us on the GHL fallback below.
+      if (settings.email_provider === "postmark" && hostedUrl && (intendedTo || redirectToTestInbox)) {
+        // (a) Flip the estimate to 'sent' in GHL WITHOUT GHL emailing anyone.
+        // action:"send_manually", live-verified 2026-08-10: 201, estimateStatus 'sent',
+        // no email, idempotent on a repeat call. Same body as the email send otherwise —
+        // including userId, which the endpoint REQUIRES (422 "userId is required").
+        const manualBody = {
+          altId: dynamicLocationId,
+          altType: "location",
+          userId: dynamicUserId,
+          action: "send_manually",
+          liveMode: true,
+        };
+        const mr = await fetch(
+          `https://services.leadconnectorhq.com/invoices/estimate/${estimateId}/send`,
+          { method: "POST", headers: ghlHeaders, body: JSON.stringify(manualBody) }
+        );
+        sendDebug.status = mr.status;
+        sendDebug.ok = mr.ok;
+        sendDebug.body = (await mr.text()).slice(0, 2000); // cap to avoid huge responses
+
+        if (mr.ok) {
+          // (b) Formal estimate PDF — BEST-EFFORT, Postmark path only. Any failure here
+          // logs and proceeds without the link; a cosmetic document must never block the
+          // estimate email.
+          let formalPdfUrl: string | null = null;
+          try {
+            // estimate_lines.desc carries GHL-flavored HTML in two places (the floor-plan
+            // <a> link prepended to the building line, and <br>-joined credit notes, both
+            // entity-escaped). The PDF is plain text — de-render for it only: drop anchors
+            // whole (a link label with no href is noise on paper), <br> → newline, strip
+            // tags, then unescape in reverse of the escape order (&lt;/&gt; before &amp;).
+            const deHtml = (s: string) =>
+              s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
+                .replace(/<br\s*\/?>/gi, "\n")
+                .replace(/<[^>]*>/g, "")
+                .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+                .trim();
+            const pdfBytes = await buildFormalEstimatePdf({
+              business: {
+                name: businessName,
+                phone: businessPhone || null,
+                website: businessWebsite || null,
+                address: businessAddress,
+              },
+              estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || null,
+              dateIso: today,          // same issue date as the GHL estimate (step 8)
+              lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
+              discount: estimateLines.discount,
+              quoteTerms: quoteTerms || null,
+            });
+            // Service-role upload: the floor-plans bucket's path-shape RLS policy
+            // (`{clientId}/SS-….pdf`) governs the ANON browser upload only — service role
+            // bypasses RLS, so the `-estimate.pdf` suffix is fine here. upsert:true keeps
+            // one formal PDF per design, replaced on every resubmit.
+            const pdfPath = `${clientId}/${designId}-estimate.pdf`;
+            const up = await supabase.storage.from("floor-plans")
+              .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+            if (up.error) {
+              console.warn("formal estimate PDF upload failed:", up.error.message);
+            } else {
+              const { data: pub } = supabase.storage.from("floor-plans").getPublicUrl(pdfPath);
+              formalPdfUrl = pub?.publicUrl || null;
+            }
+          } catch (e) {
+            console.warn("formal estimate PDF generation failed:", (e as Error).message);
+          }
+
+          // (c) The branded email. sendTenantEmail handles the beta redirect itself
+          // (recording the pre-redirect recipient as intended_email), the dark guards,
+          // and the email_sends ledger — and it never throws.
+          const content = estimateEmail({
+            businessName,
+            logoUrl: businessLogoUrl || null,
+            phone: businessPhone || null,
+            website: businessWebsite || null,
+            estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || "",
+            total: oppValue,
+            styleLabel,
+            sizeLabel: size,
+            estimateUrl: hostedUrl,
+            // Same tenant-prefix guard as the estimate attachment in step 8 — never a
+            // caller-supplied external URL in a customer's email.
+            pdfUrl: imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null,
+            formalPdfUrl,
+            quoteTerms: quoteTerms || null,
+          });
+          const outcome = await sendTenantEmail(supabase, clientId, {
+            kind: "estimate",
+            shortCode: designId,
+            to: intendedTo,
+            subject: content.subject,
+            html: content.html,
+            text: content.text,
+          });
+          if (outcome.sent) {
+            postmarkHandled = true;
+            sendDebug.provider = "postmark";
+            sendDebug.sentTo = [outcome.to];
+            sendDebug.postmark = { sent: true, messageId: outcome.messageId };
+          } else {
+            // not_active or failed → fall through to the GHL email send below. GHL accepts
+            // a second send call on an already-'sent' estimate (double-send verified safe
+            // 2026-08-10), so the recovery path is today's exact sender. The failed
+            // attempt stays inspectable in sendDebug.postmark.
+            sendDebug.postmark = {
+              sent: false,
+              reason: outcome.reason,
+              ...(outcome.error ? { error: outcome.error } : {}),
+            };
+          }
+        } else {
+          // send_manually refused → the estimate was never flipped to 'sent'; the GHL
+          // email send below both flips and emails, so fall through to it.
+          console.warn("Estimate send_manually failed:", mr.status, sendDebug.body);
+        }
+      }
+
+      if (!postmarkHandled) {
+        // GHL path — byte-identical to the pre-Postmark behavior for 'ghl' tenants.
+        // Beta mode redirects to the tenant's own test inbox. Not a filter over the
+        // customer's address — a REPLACEMENT, so the customer is never a recipient of a
+        // test estimate even if their address is also on the design.
+        const recipients = redirectToTestInbox ? [betaEmail] : [contact?.email].filter(Boolean);
+        sendDebug.sentTo = recipients;
+        const sendBody = {
+          altId: dynamicLocationId,
+          altType: "location",
+          userId: dynamicUserId,
+          action: "email",
+          liveMode: true,
+          sentTo: { email: recipients },
+        };
+        const r = await fetch(
+          `https://services.leadconnectorhq.com/invoices/estimate/${estimateId}/send`,
+          { method: "POST", headers: ghlHeaders, body: JSON.stringify(sendBody) }
+        );
+        sendDebug.status = r.status;
+        sendDebug.ok = r.ok;
+        sendDebug.body = (await r.text()).slice(0, 2000); // cap to avoid huge responses
+        if (!r.ok) console.warn("Estimate send failed:", r.status, sendDebug.body);
+        else console.log("Estimate send OK:", r.status, sendDebug.body.slice(0, 200));
+      }
+    } else {
+      sendDebug.body = "no estimateId after create/update";
+    }
+  } catch (e) {
+    sendDebug.body = `send threw: ${(e as Error).message}`;
+    console.warn("Estimate send error:", (e as Error).message);
+  }
+
+  // 11. Persist GHL IDs + the line provenance snapshot (estimateLines — built just above
+  //     step 10, same object; see its comment for the serialization-timing invariants).
 
   await supabase
     .from("designs")

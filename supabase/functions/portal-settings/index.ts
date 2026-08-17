@@ -7,6 +7,13 @@ import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
+import {
+  pmCreateDomain, pmDeleteDomain, pmGetDomain, pmVerifyDomain,
+  postmarkConfigured, PostmarkApiError, PostmarkNotConfigured, type PmDomain,
+} from "../_shared/postmark.ts";
+import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
+import { invoiceUrl } from "../_shared/ghlLinks.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -93,6 +100,17 @@ const GATES: GateTable = {
   qbo_test:        { area: "settings_quickbooks", level: "edit" },
   disconnect_qbo:  { area: "settings_quickbooks", level: "edit" },
   retry_qbo_push:  { area: "settings_quickbooks", level: "edit" },
+
+  // ── Email sending (Settings → Email Sending) ─────────────────────────────
+  // Own-domain estimate/invoice email (Postmark-backed). The area is admin-preset only
+  // (deny-by-default for every staff title — intended: connecting a domain changes what
+  // every customer-facing email looks like).
+  email_status:         { area: "settings_email", level: "view" },
+  email_connect_domain: { area: "settings_email", level: "edit" },
+  email_verify_domain:  { area: "settings_email", level: "edit" },
+  email_activate:       { area: "settings_email", level: "edit" },
+  email_send_test:      { area: "settings_email", level: "edit" },
+  email_disconnect:     { area: "settings_email", level: "edit" },
 
   // ── Workspace ────────────────────────────────────────────────────────────
   contact_activity: { area: "contacts", level: "view" },
@@ -195,6 +213,50 @@ function dbFail(
 function maskId(v: string | null): string | null {
   if (!v) return null;
   return v.length > 8 ? v.slice(0, 4) + "…" + v.slice(-4) : v.slice(0, 2) + "…";
+}
+
+// ── Email sending helpers ───────────────────────────────────────────────────────
+// The Settings → Email DNS table's rows, snapshotted onto client_settings.email_dns_records
+// so email_status can render without a Postmark round trip. Shape is the EmailSendingView
+// contract: [{type, host, value, verified}] — DKIM is the TXT record, Return-Path the CNAME.
+function dnsRecordsOf(d: PmDomain): { type: string; host: string; value: string; verified: boolean }[] {
+  const rows = [
+    { type: "TXT", host: d.dkimHost, value: d.dkimValue, verified: d.dkimVerified },
+    { type: "CNAME", host: d.returnPathHost, value: d.returnPathValue, verified: d.returnPathVerified },
+  ];
+  // A row with no host is a shape we can't render or copy — drop it rather than showing
+  // an empty record a tenant would dutifully paste into their DNS.
+  return rows.filter((r) => r.host && r.value);
+}
+
+/**
+ * A Postmark call failed. Two authored outcomes, never a 500 and never provider text:
+ *   - PostmarkNotConfigured is the platform-not-ready state, not an incident — the tenant
+ *     gets the same friendly sentence the platformReady:false card shows.
+ *   - PostmarkApiError carries only enum-ish fields by construction (postmark.ts strips
+ *     the provider Message because it can echo recipient addresses). The status/errorCode
+ *     go to app_errors under the same `where` label the caller is shown — dbFail's
+ *     correlation posture applied to a third-party API.
+ */
+function pmFail(req: Request, clientId: string | null, where: string, e: unknown) {
+  if (e instanceof PostmarkNotConfigured) {
+    return json({ error: "Email sending isn't available yet — it's still being set up. Please try again later." }, 503);
+  }
+  const detail = e instanceof PostmarkApiError
+    ? `postmark ${e.status}/${e.errorCode}${e.permanent ? " permanent" : ""}`
+    : String((e as Error)?.message ?? e ?? "unknown error").slice(0, 300);
+  logEdgeError({
+    fn: "portal-settings",
+    req,
+    clientId,
+    code: e instanceof PostmarkApiError ? e.status || 502 : 502,
+    message: `${where}: ${detail}`,
+    context: { where, postmarkErrorCode: e instanceof PostmarkApiError ? e.errorCode : null },
+  }).catch(() => {});
+  return json({
+    error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
+    ref: where,
+  }, 502);
 }
 
 // Upper bound on any caller-supplied bulk array. Not a business limit — it is far above
@@ -2594,6 +2656,248 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, clientId });
   }
 
+  // ── Email sending (Settings → Email Sending) ────────────────────────────────────
+  // Own-domain estimate/invoice email, Postmark-backed — the provider never appears in
+  // tenant-facing copy. Connection state lives on client_settings (migration 107):
+  // not_configured → pending (connect: domain created, DNS records handed out) →
+  // verified (BOTH records seen). `active` (email_provider = 'postmark') is a SEPARATE
+  // explicit switch — a verify never auto-flips it, and turning it off is the instant
+  // per-tenant rollback to the GHL sender. Response field names are the EmailSendingView
+  // contract (portal.html ~10504) — change both or neither.
+
+  if (action === "email_status") {
+    const { data: s, error } = await admin
+      .from("client_settings")
+      .select("email_provider, email_domain, email_from_local, email_from_name, email_domain_status, email_dns_records, email_verified_at, email_last_error")
+      .eq("client_id", clientId)
+      .maybeSingle();
+    if (error) return dbFail(req, clientId, "load your email sending settings", error);
+    const { data: sends, error: sendsErr } = await admin
+      .from("email_sends")
+      .select("id, kind, to_email, status, error, bounce_reason, created_at")
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (sendsErr) return dbFail(req, clientId, "load your recent emails", sendsErr);
+    const domain = s?.email_domain ?? null;
+    const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
+    return json({
+      clientId, // operator view-as tripwire (the qbo_status pattern)
+      platformReady: postmarkConfigured(),
+      domainStatus: s?.email_domain_status ?? "not_configured",
+      domain,
+      fromName: s?.email_from_name ?? null,
+      fromLocal,
+      fromAddress: domain ? `${fromLocal}@${domain}` : null,
+      verifiedAt: s?.email_verified_at ?? null,
+      lastError: s?.email_last_error ?? null,
+      active: s?.email_provider === "postmark",
+      dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
+      // deno-lint-ignore no-explicit-any
+      recentSends: (sends ?? []).map((r: any) => ({
+        id: r.id, kind: r.kind, to: r.to_email, status: r.status,
+        error: r.error ?? null, bounceReason: r.bounce_reason ?? null, createdAt: r.created_at,
+      })),
+    });
+  }
+
+  if (action === "email_connect_domain") {
+    // Normalize what people actually paste: a URL ("https://mybarn.com/contact"), a full
+    // address, a trailing dot, uppercase. What's left must LOOK like a registrable host,
+    // and must not be one of ours — a tenant "verifying" a platform domain would be
+    // claiming the sender identity every other tenant's fallback email rides on.
+    let domain = String(payload?.domain ?? "").trim().toLowerCase();
+    domain = domain.replace(/^[a-z]+:\/\//, "");     // pasted with a protocol
+    domain = domain.replace(/^[^@/]*@/, "");         // pasted a full address — keep the domain half
+    domain = domain.split(/[/?#]/)[0];               // pasted with a path/query
+    domain = domain.split(":")[0];                   // pasted with a port
+    domain = domain.replace(/\.+$/, "");             // trailing dot(s)
+    if (!/^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) {
+      return json({ error: "That doesn't look like a domain — enter just the part after the @, like yourbusiness.com." }, 400);
+    }
+    const PLATFORM_APEXES = ["structurestudiosuite.com", "structurestudio.app"];
+    if (PLATFORM_APEXES.some((apex) => domain === apex || domain.endsWith(`.${apex}`))) {
+      return json({ error: "That domain belongs to StructureStudio — connect your own business domain instead." }, 400);
+    }
+    const fromLocalRaw = String(payload?.fromLocal ?? "").trim().toLowerCase();
+    if (fromLocalRaw && !/^[a-z0-9._%+-]{1,64}$/.test(fromLocalRaw)) {
+      return json({ error: "The from address can only contain letters, numbers and . _ % + - (just the part before the @)." }, 400);
+    }
+    const fromLocal = fromLocalRaw || "info";
+    const fromName = String(payload?.fromName ?? "").trim().slice(0, 120) || null;
+
+    // Someone else already holds this domain? Refuse BEFORE creating anything on the
+    // provider; the unique-index catch below stays as the race-proof backstop.
+    const { data: holder, error: holderErr } = await admin
+      .from("client_settings").select("client_id")
+      .eq("email_domain", domain).neq("client_id", clientId).maybeSingle();
+    if (holderErr) return dbFail(req, clientId, "check that domain", holderErr);
+    if (holder) return json({ error: "That domain is already connected to another account." }, 409);
+
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("email_domain, postmark_domain_id")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+
+    let d: PmDomain;
+    try {
+      // Reconnect reuse: this tenant's same domain already exists on the provider —
+      // re-read its records rather than erroring on a duplicate create.
+      d = cur?.postmark_domain_id && cur?.email_domain === domain
+        ? await pmGetDomain(Number(cur.postmark_domain_id))
+        : await pmCreateDomain(domain);
+    } catch (e) {
+      return pmFail(req, clientId, "connect that domain", e);
+    }
+
+    const dnsRecords = dnsRecordsOf(d);
+    const { error: upErr } = await admin.from("client_settings").upsert({
+      client_id: clientId,
+      email_domain: domain,
+      postmark_domain_id: d.id,
+      email_domain_status: "pending",
+      email_dns_records: dnsRecords,
+      email_from_local: fromLocal,
+      email_from_name: fromName,
+      email_verified_at: null,
+      email_last_error: null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (upErr) {
+      // 23505 = the partial unique index on email_domain (migration 107): another tenant
+      // connected this domain between the pre-check above and this write.
+      if ((upErr as { code?: string }).code === "23505") {
+        return json({ error: "That domain is already connected to another account." }, 409);
+      }
+      return dbFail(req, clientId, "save your email domain", upErr);
+    }
+    return json({ ok: true, dnsRecords });
+  }
+
+  if (action === "email_verify_domain") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("postmark_domain_id")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    if (!cur?.postmark_domain_id) return json({ error: "Connect a domain first." }, 400);
+
+    let d: PmDomain;
+    try {
+      d = await pmVerifyDomain(Number(cur.postmark_domain_id));
+    } catch (e) {
+      // Park an authored note on the card (the UI's failed/pending panel renders
+      // lastError) — never provider text. Best-effort: the response already says it.
+      await admin.from("client_settings").update({
+        email_last_error: "The verification check couldn't run — try again in a few minutes.",
+        updated_at: new Date().toISOString(),
+      }).eq("client_id", clientId);
+      return pmFail(req, clientId, "check your domain's DNS records", e);
+    }
+
+    // "Verified" means BOTH records (postmark.ts: DKIM alone leaks the provider's return
+    // path into customer-visible headers). A check that simply finds the records absent
+    // is NOT an error — the per-record flags refresh and the status stays pending.
+    const verified = d.dkimVerified && d.returnPathVerified;
+    const dnsRecords = dnsRecordsOf(d);
+    const domainStatus = verified ? "verified" : "pending";
+    const { error: upErr } = await admin.from("client_settings").update({
+      email_domain_status: domainStatus,
+      email_dns_records: dnsRecords,
+      email_verified_at: verified ? new Date().toISOString() : null,
+      email_last_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "save your domain's verification state", upErr);
+    return json({ ok: true, verified, domainStatus, dnsRecords });
+  }
+
+  if (action === "email_activate") {
+    const enabled = payload?.enabled === true;
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("email_domain_status")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    // Enabling requires a VERIFIED domain — never auto-flipped by verify, and never
+    // allowed before it, or estimates would send from a domain inboxes distrust.
+    // Disabling is always allowed: it is the instant rollback to the GHL sender.
+    if (enabled && cur?.email_domain_status !== "verified") {
+      return json({ error: "Verify your domain's DNS records before turning this on." }, 409);
+    }
+    const { error: upErr } = await admin.from("client_settings").update({
+      email_provider: enabled ? "postmark" : "ghl",
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "save your email sending switch", upErr);
+    return json({ ok: true, active: enabled });
+  }
+
+  if (action === "email_send_test") {
+    const to = String(payload?.to ?? "").trim();
+    if (!isEmail(to)) return json({ error: "Enter a valid email address to send the test to." }, 400);
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings")
+      .select("email_provider, email_domain_status, email_domain, email_from_local, business_name")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    if (cur?.email_domain_status !== "verified" || cur?.email_provider !== "postmark") {
+      return json({ error: "Verify your domain and turn sending on before sending a test email." }, 409);
+    }
+    const fromLocal = (typeof cur.email_from_local === "string" && cur.email_from_local.trim()) || "info";
+    const businessName = String(cur.business_name ?? "").trim() || clientId;
+    // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
+    // never throws; the verdict below is the whole outcome.
+    const out = await sendTenantEmail(admin, clientId, {
+      kind: "test",
+      to,
+      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}` }),
+    });
+    if (out.sent) return json({ ok: true, messageId: out.messageId });
+    if (out.reason === "not_active") {
+      // The tenant-side switches all say go, so the missing half is the platform's
+      // (secrets unset) — the friendly not-ready sentence, never a 500.
+      return json({ error: "Email sending isn't available yet — it's still being set up. Please try again later." }, 503);
+    }
+    return json({ error: `The test email didn't send${out.error ? ` (${out.error})` : ""}. Try again — if it keeps happening, tell CSM Synergy.` }, 502);
+  }
+
+  if (action === "email_disconnect") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("postmark_domain_id")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    if (cur?.postmark_domain_id) {
+      // Best-effort on the provider side: whatever happens there, the tenant's OWN reset
+      // below must land — a stuck provider must not trap a tenant on a domain they are
+      // trying to leave. An orphaned provider domain is inert (nothing sends from it once
+      // email_provider is back on 'ghl') and shows in the provider dashboard for cleanup.
+      try {
+        await pmDeleteDomain(Number(cur.postmark_domain_id));
+      } catch (e) {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "email_disconnect_provider",
+          message: `provider domain delete failed (id ${cur.postmark_domain_id}): ${
+            e instanceof PostmarkApiError ? `postmark ${e.status}/${e.errorCode}` : String((e as Error)?.message ?? e)
+          }`,
+        }).catch(() => {});
+      }
+    }
+    // Back to the migration-107 defaults — the same shape a never-connected tenant has.
+    const { error: upErr } = await admin.from("client_settings").update({
+      email_domain: null,
+      email_from_local: "info",
+      email_from_name: null,
+      email_provider: "ghl",
+      postmark_domain_id: null,
+      email_domain_status: "not_configured",
+      email_dns_records: null,
+      email_verified_at: null,
+      email_last_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "disconnect your email domain", upErr);
+    return json({ ok: true });
+  }
+
   // ── Send invoice for an ACCEPTED design (Contacts tab). Owner/admin only (it is a
   // mutation, so the role gate above already applies). Converts the design's GHL
   // estimate to an invoice (marking the estimate invoiced) and emails it to the
@@ -2650,7 +2954,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
     const { data: cur, error: curErr } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key")
+      // email_* + business_* ride along for the own-domain email branch below — the
+      // Postmark-active check and the branded invoice email's identity fields.
+      .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
     if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
@@ -2680,6 +2986,68 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
     };
     const STALE_CLAIM_MS = 3 * 60 * 1000;
+
+    // ── Own-domain email branch (Postmark-active tenants) ────────────────────────
+    // When the tenant has flipped the provider AND verified their domain AND the hosted
+    // invoice link is buildable AND we know the customer's address, the GHL send call
+    // flips to action:"send_manually" — GHL marks the invoice sent (hosted page live,
+    // status derivations intact) WITHOUT emailing anyone (verified live 2026-08-10; the
+    // send body REQUIRES userId even for send_manually, and a second send call on the
+    // same invoice is idempotent) — and the branded email goes out from the tenant's own
+    // domain via sendTenantEmail. Returns true ONLY when the customer actually got that
+    // email; every other outcome returns false and the caller falls through to today's
+    // action:"email" GHL send unchanged, so an email problem can never strand a sent
+    // invoice. email_sends rows are additional telemetry — the invoice_sends claim
+    // machinery above stays untouched and authoritative for convert-idempotency.
+    const pmActive = postmarkConfigured() &&
+      cur.email_provider === "postmark" && cur.email_domain_status === "verified";
+    const tryOwnDomainEmail = async (
+      invId: string,
+      invNumber: string | null,
+      senderUserId: string,
+      knownTotal: number | null,
+    ): Promise<boolean> => {
+      if (!pmActive) return false;
+      const hosted = invoiceUrl(invId);
+      if (!hosted) return false;
+      // The customer's address, read ONLY here: the design select above deliberately
+      // dropped `contact` as a dead PII read (2026-08-07), and it stays dead unless this
+      // path is actually addressing an email.
+      const { data: c } = await admin.from("designs").select("contact")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+      const to = String((c?.contact as { email?: unknown } | null)?.email ?? "").trim();
+      if (!isEmail(to)) return false;
+      // Recovery path has no convert response to read the total off — best-effort GET of
+      // the live invoice, so the branded email's "Amount due" isn't blank. A miss leaves
+      // the amount out; it never blocks the send.
+      let total = knownTotal;
+      if (total == null) {
+        const inv = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invId)}?altId=${encodeURIComponent(locationId)}&altType=location`, { headers: ghlHeaders });
+        const t = Number(inv.body?.invoice?.total ?? inv.body?.total);
+        if (inv.ok && Number.isFinite(t)) total = t;
+      }
+      const manual = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invId)}/send`, {
+        method: "POST", headers: ghlHeaders,
+        body: JSON.stringify({ altId: locationId, altType: "location", action: "send_manually", liveMode: true, userId: senderUserId }),
+      });
+      if (!manual.ok) return false;
+      const out = await sendTenantEmail(admin, clientId, {
+        kind: "invoice",
+        shortCode,
+        to,
+        ...invoiceEmail({
+          businessName: String(cur.business_name ?? "").trim() || clientId,
+          logoUrl: cur.business_logo_url,
+          phone: cur.business_phone,
+          website: cur.business_website,
+          invoiceNumber: invNumber ?? "",
+          total: total ?? "",
+          invoiceUrl: hosted,
+          quoteTerms: cur.quote_terms,
+        }),
+      });
+      return out.sent;
+    };
 
     // ── 1. Claim the send (idempotency + recovery). ──────────────────────────────
     let resendInvoiceId: string | null = null;   // set when recovering a created-but-unsent invoice
@@ -2792,17 +3160,23 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // email fails (or this function dies) the retry re-sends instead of converting.
       await setClaim({ status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null, sender_user_id: userId });
 
-      // ── 5. Email it to the customer. ──
-      const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
-        method: "POST", headers: ghlHeaders,
-        body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
-      });
-      if (!sendRes.ok) {
-        await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
-        return json({
-          error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
-          invoiceId, invoiceNumber, created: true, sent: false,
-        }, 502);
+      // ── 5. Email it to the customer — own-domain branch first, GHL's email otherwise.
+      //    tryOwnDomainEmail returning false (whatever the reason) lands on the stock GHL
+      //    send below unchanged; if send_manually already ran, that second send call is
+      //    idempotent (verified live 2026-08-10). ──
+      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, ghlInvoiceTotal);
+      if (!ownDomainSent) {
+        const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
+          method: "POST", headers: ghlHeaders,
+          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+        });
+        if (!sendRes.ok) {
+          await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
+          return json({
+            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
+            invoiceId, invoiceNumber, created: true, sent: false,
+          }, 502);
+        }
       }
     } else {
       // ── Recovery path: the invoice already exists, only the email is outstanding.
@@ -2816,13 +3190,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!userId) {
         return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then retry." }, 400);
       }
-      const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
-        method: "POST", headers: ghlHeaders,
-        body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
-      });
-      if (!sendRes.ok) {
-        await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
-        return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+      // Own-domain branch first here too — the recovery is only ever about the EMAIL
+      //  (the invoice already exists), so the same rule applies: our branded send when the
+      //  tenant is Postmark-active, the stock GHL email as the unchanged fallback.
+      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, null);
+      if (!ownDomainSent) {
+        const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
+          method: "POST", headers: ghlHeaders,
+          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+        });
+        if (!sendRes.ok) {
+          await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
+          return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+        }
       }
     }
 

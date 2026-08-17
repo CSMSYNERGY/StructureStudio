@@ -45,6 +45,12 @@ verify_jwt = false
 # monday.com posts here. Authenticated by a shared secret (FEEDBACK_SYNC_SECRET).
 verify_jwt = false
 
+[functions.postmark-events]
+# Postmark posts delivery/bounce/spam-complaint events here server-to-server. Authenticated
+# by a shared secret in the URL (?key= ⇄ POSTMARK_WEBHOOK_SECRET) compared in constant time —
+# the same pattern as feedback-monday-webhook.
+verify_jwt = false
+
 [functions.admin-save-settings]
 # Called by the designer's ?admin=1 panel, which sends the anon key and authenticates with
 # the shared ADMIN_PASSWORD via _shared/adminAuth.ts (plus a per-operator can_write check).
@@ -92,6 +98,20 @@ verify_jwt = true
 # Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
 # protections are body validation, a tenant existence check, and the per-tenant rate cap
 # added 2026-07-30. Kept true so a bare unauthenticated request is still refused early.
+verify_jwt = true
+
+[functions.customer-auth]
+# Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
+# protections are the Twilio Verify OTP (the caller proves control of the phone), the
+# per-phone + per-IP throttle buckets with lockout (customer_otp_throttle), a tenant
+# existence check, and US-only numbers. Kept true so a bare unauthenticated request is
+# still refused early.
+verify_jwt = true
+
+[functions.customer-quotes]
+# Session-token auth inside (customer_sessions, hash-at-rest): the function resolves the
+# presented bearer token and returns ONLY the verified phone's rows for the named tenant.
+# The anon key passes the gateway here too — the token check is the real gate.
 verify_jwt = true
 
 [functions.qbo-oauth-connect]

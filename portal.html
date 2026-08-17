@@ -420,13 +420,14 @@ const SETTINGS_TAB_AREA = {
   branding: "settings_branding",
   connection: "settings_crm",
   quickbooks: "settings_quickbooks",
+  email: "settings_email",
   commissions: "commissions",
   team: "settings_team",
   billing: "settings_billing",
 };
 // Settings is a hub: show it if ANY of its cards is readable, then each card gates itself.
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
-  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing"];
+  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email"];
 
 // 'own' (commissions) counts as read — see canRead in _shared/access.ts. Kept deliberately
 // tiny and mirrored rather than imported: portal.html has no module loader, and the SERVER
@@ -2205,12 +2206,16 @@ function SettingsView({ section }) {
           doing nothing, which is how a verification quote reached a real customer — so the
           UI now refuses to arm the switch without an inbox, and the server refuses too
           (portal-settings' save guard + submit-estimate's pre-flight check). Three places,
-          because the only failure that matters here is the silent one. */}
+          because the only failure that matters here is the silent one.
+          Since the own-domain email work (2026-08-10), the redirect exists ONLY on the
+          own-domain (Postmark) send path — the CRM/GHL path emails the customer regardless —
+          and the copy below says so rather than promising a redirect that half the tenants
+          don't get. */}
       <div style={S.card}>
         <div style={S.h2}>Testing</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B", marginBottom: 10 }}>
           <input type="checkbox" checked={form.betaMode} onChange={set("betaMode")} />
-          Beta mode — estimate emails go to the test inbox below instead of customers
+          Beta mode — when your own email domain is connected and active, estimate emails go to the test inbox below instead of customers. When sending through your CRM (the default), estimate emails always go to the customer.
         </label>
         <div style={{ maxWidth: 320 }}><span style={S.lbl}>Test inbox</span>
           <input style={S.input} type="email" value={form.betaEmail} onChange={set("betaEmail")} placeholder="you@yourbusiness.com" /></div>
@@ -2222,8 +2227,9 @@ function SettingsView({ section }) {
         )}
         {form.betaMode && ssIsEmail(form.betaEmail) && (
           <div style={{ marginTop: 10, background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            While this is on, <strong>every</strong> estimate goes to {form.betaEmail} — your
-            customers receive nothing. Turn it off when you're done testing.
+            While this is on and your own email domain is active, <strong>every</strong> estimate
+            goes to {form.betaEmail} — your customers receive nothing. Turn it off when you're
+            done testing.
           </div>
         )}
       </div>
@@ -10490,6 +10496,328 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   );
 }
 
+// ─── Email Sending (Settings → Email Sending) ───
+// Own-domain estimate/invoice email (Postmark-backed, but the provider never appears in
+// tenant-facing copy). Follows QuickBooksView's shape: one status call drives everything,
+// every action re-pulls status afterwards, and the server (portal-settings, area
+// settings_email) is the enforcement point — this component only decides what to show.
+// email_status contract (portal-settings): { platformReady, domainStatus:
+//   "not_configured"|"pending"|"verified"|"failed", domain, fromName, fromLocal,
+//   fromAddress, verifiedAt, lastError, active, dnsRecords: [{type,host,value,verified}],
+//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt}] }.
+// `failed` renders the same remediation panel as `pending` (plus lastError): the fix for
+// both is "add the records, check again", so a separate dead-end state helps nobody.
+function EmailSendingView({ clientId, viewingLabel = null }) {
+  const [status, setStatus] = useState(null);   // email_status response; null = loading
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);      // any action in flight
+  const [msg, setMsg] = useState(null);         // { ok } | { err } one-shot banner
+  // Connect form (not_configured state only)
+  const [domain, setDomain] = useState("");
+  const [fromName, setFromName] = useState("");
+  const [fromLocal, setFromLocal] = useState("info");
+  // Verification feedback + per-row copy state (pending state)
+  const [checkNote, setCheckNote] = useState(null);
+  const [copied, setCopied] = useState(null);   // "v<i>" | "fail:v<i>" | null
+  // Test send (verified state)
+  const [testTo, setTestTo] = useState("");
+  const [testResult, setTestResult] = useState(null);  // { ok } | { err }
+
+  const load = useCallback(async () => {
+    setError(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "email_status" } });
+    if (e || (d && d.error)) { setError((e && e.message) || (d && d.error)); setStatus({}); return; }
+    setStatus(d || {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // Write, report, then refresh from server truth — the QuickBooksView rhythm. A failing
+  // refresh never masks a write that landed (the next action's load catches up).
+  const act = async (body, after) => {
+    setBusy(true); setMsg(null); setCheckNote(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body });
+    setBusy(false);
+    if (e || (d && d.error)) { setMsg({ err: (e && e.message) || (d && d.error) }); return; }
+    if (after) after(d || {});
+    load();
+  };
+
+  // Awaited clipboard write (the AdmAccount lesson: an unawaited copy reports "Copied"
+  // even when the write rejected), keyed per row so only the copied row lights up.
+  const copy = async (text, key) => {
+    try { await navigator.clipboard.writeText(text); setCopied(key); }
+    catch (_e) { setCopied("fail:" + key); }
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  const domainOk = /^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(domain.trim());
+  const localOk = /^[a-z0-9._%+-]+$/i.test(fromLocal.trim());
+  const canConnect = domainOk && localOk && fromName.trim().length > 0 && !busy;
+
+  const connect = () => act(
+    { action: "email_connect_domain", domain: domain.trim().toLowerCase(), fromName: fromName.trim(), fromLocal: fromLocal.trim().toLowerCase() },
+    () => setMsg({ ok: "Domain connected — now add the DNS records below at your DNS host." }));
+
+  const verify = () => act({ action: "email_verify_domain" }, (d) => {
+    if (d.verified || d.domainStatus === "verified") setMsg({ ok: "Domain verified — you can activate sending below." });
+    else setCheckNote("Not verified yet — give DNS a little longer, then check again.");
+  });
+
+  const active = !!(status && status.active);
+
+  const toggleActive = () => act({ action: "email_activate", enabled: !active }, () =>
+    setMsg({ ok: !active
+      ? "Your own domain now sends your estimate and invoice emails."
+      : "Reverted — estimate and invoice emails send through your CRM again." }));
+
+  const disconnect = () => {
+    const warn = active
+      ? "Disconnect this email domain?\n\nEstimate and invoice emails immediately go back to sending through your CRM. You can connect a domain again at any time."
+      : "Disconnect this domain?\n\nEmails keep sending through your CRM. You can connect a domain again at any time.";
+    if (!window.confirm(warn)) return;
+    act({ action: "email_disconnect" }, () => {
+      setMsg({ ok: "Domain disconnected." });
+      setDomain(""); setFromName(""); setFromLocal("info"); setTestTo(""); setTestResult(null);
+    });
+  };
+
+  const sendTest = async () => {
+    if (!ssIsEmail(testTo)) { setTestResult({ err: "Enter a valid email address." }); return; }
+    setBusy(true); setMsg(null); setTestResult(null);
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "email_send_test", to: testTo.trim() } });
+    setBusy(false);
+    if (e || (d && d.error)) { setTestResult({ err: (e && e.message) || (d && d.error) || "The test send failed." }); return; }
+    setTestResult({ ok: "Sent — check the inbox. Delivery status shows in the list below (press ↻ Refresh in a minute)." });
+    load();
+  };
+
+  const fmtWhen = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch { return iso; }
+  };
+  const chipStyle = (s) => {
+    const good = s === "sent" || s === "delivered";
+    const bad = s === "failed" || s === "bounced";
+    return {
+      background: good ? "#F0FDF4" : bad ? "#FEF2F2" : "#F1F5F9",
+      color: good ? "#15803D" : bad ? "#DC2626" : "#475569",
+      border: "1px solid " + (good ? "#BBF7D0" : bad ? "#FECACA" : "#E2E8F0"),
+      borderRadius: 999, padding: "2px 9px", fontSize: 11, fontWeight: 700, flexShrink: 0,
+    };
+  };
+
+  if (status === null) return <div style={{ padding: 24, color: "#64748B", fontSize: 13 }}>Loading email sending…</div>;
+
+  const platformReady = status.platformReady !== false;
+  const st = status.domainStatus || "not_configured";
+  const dns = Array.isArray(status.dnsRecords) ? status.dnsRecords : [];
+  const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
+  const fromAddress = status.fromAddress || (status.fromLocal && status.domain ? `${status.fromLocal}@${status.domain}` : "");
+
+  return (
+    <div>
+      {error && <div style={S.err}>{error}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+
+      {!platformReady && (
+        <div style={{ ...S.card, opacity: 0.7 }}>
+          <div style={S.h2}>Email sending</div>
+          <p style={{ fontSize: 13, color: "#64748B", margin: 0 }}>
+            Email sending isn't available yet — it's being set up.
+          </p>
+        </div>
+      )}
+
+      {/* ── not_configured: explainer + connect form ── */}
+      {platformReady && st === "not_configured" && (
+        <div style={S.card}>
+          <div style={S.h2}>Send from your own email address</div>
+          <p style={{ fontSize: 13, color: "#64748B", lineHeight: 1.55, marginBottom: 14 }}>
+            Send estimates and invoices from your own email address, like info@yourbusiness.com.
+            Connect your domain here, add the DNS records we give you at your DNS host, and your
+            emails arrive from your business instead of a shared address.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
+            <div>
+              <label style={S.lbl}>Domain</label>
+              <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="yourbusiness.com" style={S.input} />
+              <div style={{ fontSize: 11, color: domain.trim() && !domainOk ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
+                {domain.trim() && !domainOk ? "That doesn't look like a domain — just the part after the @, like yourbusiness.com." : "The domain your business email lives on — no https:// and no @."}
+              </div>
+            </div>
+            <div>
+              <label style={S.lbl}>From name</label>
+              <input value={fromName} onChange={(e) => setFromName(e.target.value)} placeholder="Your Business" style={S.input} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>What customers see as the sender's name.</div>
+            </div>
+            <div>
+              <label style={S.lbl}>From address</label>
+              <input value={fromLocal} onChange={(e) => setFromLocal(e.target.value)} placeholder="info" style={S.input} />
+              <div style={{ fontSize: 11, color: fromLocal.trim() && !localOk ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
+                Emails will come from <strong style={{ color: "#475569" }}>{(fromLocal.trim() || "info") + "@" + (domain.trim() || "yourbusiness.com")}</strong>
+              </div>
+            </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <button type="button" onClick={connect} disabled={!canConnect}
+              title={!canConnect && !busy ? "Enter your domain, a from name, and a from address" : undefined}
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: canConnect ? 1 : 0.6, cursor: canConnect ? "pointer" : "not-allowed" }}>
+              {busy ? "Connecting…" : "Connect domain"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── pending / failed: DNS records + verification ── */}
+      {platformReady && (st === "pending" || st === "failed") && (
+        <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
+          <div style={{ ...S.h2, color: "#92400E" }}>Add these records at your DNS host</div>
+          {st === "failed" && status.lastError && (
+            <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>{status.lastError}</div>
+          )}
+          <p style={{ fontSize: 12.5, color: "#92400E", marginBottom: 12, lineHeight: 1.5 }}>
+            These records prove to inbox providers that {status.domain || "your domain"} really is
+            yours. Add them wherever your DNS is managed (Cloudflare, GoDaddy, your web host),
+            then check verification below.
+          </p>
+          {dns.length === 0 && (
+            <p style={{ fontSize: 12.5, color: "#92400E", fontWeight: 600 }}>
+              The records are being prepared — check again in a moment.
+            </p>
+          )}
+          {dns.length > 0 && (
+            <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #FDE68A", borderRadius: 8 }}>
+              <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...S.th, width: 28 }} aria-label="Verified" />
+                    <th style={S.th}>Type</th>
+                    <th style={S.th}>Host</th>
+                    <th style={S.th}>Value</th>
+                    <th style={{ ...S.th, width: 90 }} aria-label="Copy" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {dns.map((r, i) => (
+                    <tr key={i}>
+                      <td style={{ ...S.td, textAlign: "center" }}>
+                        {r.verified
+                          ? <span title="Verified" style={{ color: "#16A34A", fontWeight: 800 }}>✓</span>
+                          : <span title="Not verified yet" style={{ color: "#CBD5E1" }}>•</span>}
+                      </td>
+                      <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>{r.type}</td>
+                      <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.host}</td>
+                      <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.value}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                        <button type="button" onClick={() => copy(r.value, "v" + i)}
+                          style={{ ...S.btn(copied === "v" + i ? "#15803D" : "#F1F5F9", copied === "v" + i ? "#FFF" : "#334155"), border: "1px solid #E2E8F0", padding: "5px 10px", fontSize: 11.5 }}>
+                          {copied === "v" + i ? "✓ Copied" : copied === "fail:v" + i ? "Copy failed" : "Copy"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
+            <button type="button" onClick={verify} disabled={busy}
+              style={{ ...S.btn("#92400E", "#FFF"), opacity: busy ? 0.6 : 1 }}>
+              {busy ? "Checking…" : "Check verification"}
+            </button>
+            {checkNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{checkNote}</span>}
+          </div>
+          <p style={{ fontSize: 12, color: "#92400E", marginTop: 12, marginBottom: 0 }}>
+            DNS changes can take up to an hour to appear — keep this tab open and check again.
+          </p>
+          <div style={{ marginTop: 10 }}>
+            <button type="button" onClick={disconnect} disabled={busy}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "#B45309", textDecoration: "underline" }}>
+              Start over with a different domain
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── verified: status + activate + test + recent sends ── */}
+      {platformReady && st === "verified" && (
+        <div>
+          <div style={S.card}>
+            <div style={S.h2}>Email sending</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ width: 10, height: 10, borderRadius: 5, background: "#16A34A", flexShrink: 0 }} />
+              <div style={{ minWidth: 0, flex: "1 1 260px" }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", wordBreak: "break-word" }}>
+                  {active
+                    ? `Sending as ${status.fromName ? status.fromName + " " : ""}<${fromAddress}>`
+                    : `Verified — ready to send as ${status.fromName ? status.fromName + " " : ""}<${fromAddress}>`}
+                </div>
+                <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                  {status.domain || "Your domain"} is verified{status.verifiedAt ? ` · ${fmtDate(status.verifiedAt)}` : ""}
+                </div>
+              </div>
+              <button type="button" onClick={disconnect} disabled={busy}
+                style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", flexShrink: 0 }}>Disconnect</button>
+            </div>
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B", cursor: busy ? "default" : "pointer" }}>
+                <input type="checkbox" checked={active} disabled={busy} onChange={toggleActive} />
+                Send estimate &amp; invoice emails from my domain
+              </label>
+              <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+                Activating switches your estimate and invoice emails to send from your own domain.
+                Deactivating instantly reverts to sending through your CRM — nothing else changes.
+              </p>
+            </div>
+          </div>
+
+          <div style={S.card}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+              <div style={S.h2}>Send a test email</div>
+              <button type="button" onClick={load} title="Re-check delivery status"
+                style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <input style={{ ...S.input, flex: "1 1 240px", maxWidth: 340 }} type="email" value={testTo}
+                onChange={(e) => setTestTo(e.target.value)} placeholder="you@yourbusiness.com" />
+              <button type="button" onClick={sendTest} disabled={busy || !ssIsEmail(testTo)}
+                title={!ssIsEmail(testTo) ? "Enter a valid email address" : undefined}
+                style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !ssIsEmail(testTo)) ? 0.6 : 1 }}>
+                {busy ? "Sending…" : "Send test"}
+              </button>
+            </div>
+            {testResult && (
+              <div style={{ marginTop: 10, fontSize: 12.5, fontWeight: 600, color: testResult.err ? "#DC2626" : "#15803D" }}>
+                {testResult.err || testResult.ok}
+              </div>
+            )}
+            {sends.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={S.lbl}>Recent sends</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {sends.map((sd, i) => (
+                    <div key={sd.id || i} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", border: "1px solid #F1F5F9", borderRadius: 8, padding: "7px 10px" }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, minWidth: 56 }}>{sd.kind || "email"}</span>
+                      <span style={{ fontSize: 12.5, color: "#1E293B", fontWeight: 600, flex: "1 1 180px", minWidth: 0, wordBreak: "break-all" }}>{sd.to}</span>
+                      <span style={chipStyle(sd.status)}>{sd.status || "—"}</span>
+                      <span style={{ fontSize: 11.5, color: "#94A3B8", flexShrink: 0 }}>{fmtWhen(sd.createdAt)}</span>
+                      {(sd.status === "failed" || sd.status === "bounced") && (sd.error || sd.bounceReason) && (
+                        <span style={{ fontSize: 11.5, color: "#DC2626", flexBasis: "100%" }}>{sd.error || sd.bounceReason}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Commission structure (owner-only Settings sub-tab) ───
 // The tenant's commission RULES: who earns by default, the base, the earned-on date, the
 // payout cadence, and the cancel-clawback rule. Owner-only — the row is RLS-gated to the
@@ -11531,6 +11859,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
+    ["email", "Email Sending", "Send estimates and invoices from your own email domain"],
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
     ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates"]] : []),
     ["billing", "Billing", "Your StructureStudio subscription"],
@@ -11597,6 +11926,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "quickbooks" && (qboUnlocked
         ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
+      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
           schedule tabs (operator, or the tenant's schedule_builds subscription). */}
