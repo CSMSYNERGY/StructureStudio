@@ -3612,7 +3612,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               (pick3) — the 2D picker modals commit outside this scene's liveItems, so
               routing them there would place items the open viewer never draws. */}
           {(paletteKeys || []).map((k) => (
-            <button key={k} onClick={() => setTool3((t) => (t === k ? null : k))} disabled={phase !== "ready"}
+            <button key={k} onClick={() => {
+              const arming = tool3 !== k;
+              setTool3(arming ? k : null);
+              // Interior items are invisible behind walls with the roof on —
+              // arming their tool flips Look inside on so the placement is
+              // visible as it lands (Ahsan 2026-08-18). The existing button
+              // toggles back to the exterior.
+              if (arming && (itemTypes[k].wallSnap || k === "loft") && !interior) setInterior(true);
+            }} disabled={phase !== "ready"}
               style={{ background: tool3 === k ? accent : "#1E293B", color: tool3 === k ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               {itemTypes[k].icon} {itemTypes[k].shortLabel || itemTypes[k].label}
             </button>
