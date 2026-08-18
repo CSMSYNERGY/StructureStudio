@@ -3612,11 +3612,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             <button key={k} onClick={() => {
               const arming = tool3 !== k;
               setTool3(arming ? k : null);
-              // Interior items are invisible behind walls with the roof on —
-              // arming their tool flips Look inside on so the placement is
-              // visible as it lands (Ahsan 2026-08-18). The existing button
-              // toggles back to the exterior.
-              if (arming && (itemTypes[k].wallSnap || k === "loft") && !interior) setInterior(true);
+              // Arming a tool flips the view to the side the item lands on
+              // (Ahsan 2026-08-18): interior items (bench/loft) are invisible
+              // behind walls with the roof on, and wall/exterior items are
+              // disorienting to place from the ghost view. Notes/lines are
+              // visible either way and force nothing. The Look inside button
+              // stays the manual toggle.
+              if (arming) {
+                const kc = itemTypes[k];
+                if ((kc.wallSnap || k === "loft") && !interior) setInterior(true);
+                else if ((kc.wallOnly || kc.doorSnap) && interior) setInterior(false);
+              }
             }} disabled={phase !== "ready"}
               style={{ background: tool3 === k ? accent : "#1E293B", color: tool3 === k ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               {itemTypes[k].icon} {itemTypes[k].shortLabel || itemTypes[k].label}
