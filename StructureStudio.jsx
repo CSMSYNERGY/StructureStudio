@@ -1784,6 +1784,7 @@ function d3MakeTexture(THREE, kind) {
   if (!_d3TexCanvases[kind]) _d3TexCanvases[kind] = _d3RasterKind(kind);
   const tex = new THREE.CanvasTexture(_d3TexCanvases[kind].color);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;   // clamped to the GPU max at upload; kills grazing-angle smear on roofs
   return tex;
 }
 // Matching relief map (same cached canvas family, same repeat contract as the
@@ -1793,6 +1794,7 @@ function d3MakeBumpTexture(THREE, kind) {
   if (!_d3TexCanvases[kind]) return null;   // color texture is always made first
   const tex = new THREE.CanvasTexture(_d3TexCanvases[kind].bump);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
   return tex;
 }
 
@@ -1949,6 +1951,7 @@ function d3MakeGrassTexture(THREE) {
   }
   const tex = new THREE.CanvasTexture(_d3GrassCanvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;   // the lawn is the biggest grazing-angle surface on screen
   return tex;
 }
 function d3MakeSkyTexture(THREE) {
@@ -2563,7 +2566,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paletteKeys, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -2586,6 +2589,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     const c = canvasRef.current;
     if (c) c.style.cursor = tool3 ? "crosshair" : "";
   }, [tool3]);
+  // In-viewer catalog chooser (door/window/ramp picker tools). The 2D picker
+  // modals live outside the 3D modal's liveItems world, so choosing there
+  // could not rebuild this scene — the 3D flow keeps its own small sheet and
+  // commits through the same onItemAdd pipeline as every other placement.
+  const [pick3, setPick3] = useState(null);   // { kind: door|window|ramp, wall, ptx, pty, door }
+  // Refusal feedback (the 2D toasts' 3D counterpart) — shown in the hint slot.
+  const [msg3, setMsg3] = useState(null);
   // Paint picker selection; labels flow into paintColors (same free-text
   // semantics as the 2D paint inputs).
   const [paintSel, setPaintSel] = useState({ body: painted ? (paintBody || "") : "", trim: painted ? (paintTrim || "") : "" });
@@ -2670,7 +2680,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const fw = frontWall || "south";
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
       const R = Math.max(bldgW, bldgH) * 0.5 + D3.WALL_H;
-      const dist = R * 2.7;
+      // 34° lens (was 45°): the long-lens architectural look — less perspective
+      // distortion on the box, matching how buildings are photographed. dist
+      // carries the tan(22.5°)/tan(17°) ≈ 1.355 factor so framing is unchanged,
+      // and everything sized off dist (sky dome, far plane, orbit limits, sun)
+      // scales with it.
+      const dist = R * 3.66;
       const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
       const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
       const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
@@ -2688,7 +2703,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       sun.shadow.camera.updateProjectionMatrix();
       scene.add(sun);
       // far covers the sky dome even at controls.maxDistance (2.5d + 6.5d < 10d).
-      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, dist * 10);
+      const camera = new THREE.PerspectiveCamera(34, 1, 0.1, dist * 10);
       camera.position.set(camX, dist * 0.5, camZ);
       // Sky dome: gradient + soft clouds on the inside of a hemisphere, slightly
       // past the horizon so no gap shows between grass edge and sky. Hidden by
@@ -2917,32 +2932,178 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         e.model.trimMat.color.set(liveTrimCss);
         render();
       };
+      // ── 3D placement pipeline (every item class, §10.4) ──
+      // Each branch below is the 2D handleClick branch for that class, fed
+      // page coordinates from the 3D ray instead of an SVG click: same module
+      // snap/collision functions, same stamped fields, committed through the
+      // same onItemAdd callback. Never invent a 3D-only placement rule here.
+      const flash3 = (m) => {
+        setMsg3(m);
+        setTimeout(() => setMsg3((cur) => (cur === m ? null : cur)), 4000);
+      };
+      const commitPlaced3 = (ni) => {
+        liveItems = liveItems.concat([ni]);
+        if (onItemAdd) onItemAdd(ni);
+        if (onItemSelect) { lastSentSelect = ni.id; onItemSelect(ni.id); }
+        capturedRef.current = false;
+        setShotTaken(false);
+        setTool3(null);
+        queueRebuild();
+      };
+      // Catalog door/window from the in-viewer chooser (also the included-chip
+      // path): the FIXTURE stamps are what the estimate prices from — placing
+      // these as their raw tool key was the bug that made 3D-placed included
+      // fixtures invisible to pricing.
+      const placeFixture3 = (fx, type, ptx, pty) => {
+        const w = getWallFromClick(ptx, pty, pWpx, pHpx, mgX, mgY) || getNearestWall(ptx, pty, pWpx, pHpx, mgX, mgY);
+        const widthFt = (Number(fx.widthIn) || (type === "window" ? 24 : 36)) / 12;
+        const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY);
+        let ni;
+        if (type === "window") {
+          ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
+            planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
+            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+        } else {
+          const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
+          const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
+          ni = { id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name || "Door",
+            planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation };
+        }
+        if (checkDoorCollision(ni, { width: widthFt }, liveItems, itemTypes, scale)) {
+          flash3("Something's already there — pick a different spot on the wall.");
+          return false;
+        }
+        commitPlaced3(ni);
+        return true;
+      };
+      const placeRamp3 = (fx, door) => {
+        const rampDepth = (Number(fx.heightIn) || 0) / 12 || 2;   // 2 = RAMP_SPACE_FT
+        const rp = rampPlacementForDoor(door, rampDepth, pWpx, pHpx, mgX, mgY, scale);
+        if (!rp) return false;
+        const ni = { id: idCounter++, type: "ramp", ...rp, widthFt: (Number(fx.widthIn) || 36) / 12, heightFt: rampDepth, snapDoorId: door.id,
+          fixtureItemId: fx.id, rampName: fx.name || "Ramp",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+        commitPlaced3(ni);
+        return true;
+      };
+      const place3 = (tool, cfg, pageX, pageY) => {
+        // Same dispatch order as 2D handleClick: pickers → included chips →
+        // doorSnap → wallSnap → loft → wallOnly built-ins.
+        if (cfg.isDoorPicker || cfg.isWindowPicker) {
+          const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+          setPick3({ kind: cfg.isDoorPicker ? "door" : "window", wall: w, ptx: pageX, pty: pageY });
+          setTool3(null);
+          return;
+        }
+        if (cfg.includedFixture && !cfg.doorSnap) {
+          placeFixture3(cfg.includedFixture, cfg.includedFixture.category === "window" ? "window" : "fixtureDoor", pageX, pageY);
+          return;
+        }
+        if (cfg.doorSnap) {
+          const doors = liveItems.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor");
+          if (!doors.length) { flash3("Place a door first, then add a ramp to it."); return; }
+          let closest = null, minDist = Infinity;
+          doors.forEach((d) => { const dx = pageX - d.x, dy = pageY - d.y; const dist = Math.sqrt(dx * dx + dy * dy); if (dist < minDist) { minDist = dist; closest = d; } });
+          if (!closest) return;
+          if (liveItems.find((i) => i.type === "ramp" && i.snapDoorId === closest.id)) { flash3("This door already has a ramp. Delete it first to replace."); return; }
+          if (cfg.isRampPicker) { setPick3({ kind: "ramp", door: closest }); setTool3(null); return; }
+          if (cfg.includedFixture) { placeRamp3(cfg.includedFixture, closest); return; }
+          const doorCfg = itemTypes[closest.type];
+          const rampDepth = 2;   // RAMP_SPACE_FT — visual run out from the door
+          const rp = rampPlacementForDoor(closest, rampDepth, pWpx, pHpx, mgX, mgY, scale);
+          if (!rp) return;
+          commitPlaced3({ id: idCounter++, type: tool, ...rp, widthFt: closest.widthFt || (doorCfg ? doorCfg.width : 3), heightFt: rampDepth, snapDoorId: closest.id });
+          return;
+        }
+        if (cfg.wallSnap) {
+          const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+          const sn = snapToWallInterior(nw, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY);
+          const candidate = { id: idCounter, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+          if (checkDoorCollision(candidate, cfg, liveItems, itemTypes, scale)) {
+            flash3("A door is blocking this wall — try a different wall, or move the door first.");
+            return;
+          }
+          const isH = sn.wall === "north" || sn.wall === "south";
+          const candPos = isH ? sn.x : sn.y;
+          const candHalf = cfg.width * scale / 2;
+          for (let i = 0; i < liveItems.length; i++) {
+            const ob = liveItems[i];
+            if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
+            const obW = (ob.widthFt || itemTypes[ob.type].width) * scale / 2;
+            const obPos = isH ? ob.x : ob.y;
+            if (Math.abs(candPos - obPos) < candHalf + obW - 2) {
+              flash3("Another workbench is in the way. Try a different spot on the wall.");
+              return;
+            }
+          }
+          idCounter++;   // only burned on success, like 2D
+          commitPlaced3(candidate);
+          return;
+        }
+        if (tool === "loft") {
+          // Auto-span wall-to-wall at the clicked position — the 2D rule.
+          const loftH = cfg.height || 4;
+          const cyFtRound = Math.max(loftH / 2, Math.min(Math.round((pageY - mgY) / scale), bldgH - loftH / 2));
+          const nL = 0, nR = bldgW, nT = cyFtRound - loftH / 2, nB = cyFtRound + loftH / 2;
+          const otherLofts = liveItems.filter((i) => i.type === "loft");
+          for (let i = 0; i < otherLofts.length; i++) {
+            const o = otherLofts[i];
+            const ow = (o.widthFt || cfg.width) / 2, oh = (o.heightFt || cfg.height) / 2;
+            const ocx = (o.x - mgX) / scale, ocy = (o.y - mgY) / scale;
+            if (nL < ocx + ow - 0.1 && nR > ocx - ow + 0.1 && nT < ocy + oh - 0.1 && nB > ocy - oh + 0.1) {
+              flash3("Can't place a loft overlapping another loft — click a different spot.");
+              return;
+            }
+          }
+          commitPlaced3({ id: idCounter++, type: "loft", x: mgX + (bldgW / 2) * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, elevationFt: D3.LOFT_ELEV });
+          return;
+        }
+        // wallOnly built-ins (config singleDoor/doubleDoor/window/roughOpening)
+        const w2 = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+        const sn = snapToWall(w2, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY);
+        const cand = { id: -1, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+        if (checkDoorCollision(cand, cfg, liveItems, itemTypes, scale)) {
+          flash3("Something is already on that spot. Pick a clear part of the wall.");
+          return;
+        }
+        if (checkWorkbenchOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale)) {
+          flash3("A workbench is on that wall — place this somewhere else on the wall.");
+          return;
+        }
+        commitPlaced3({ id: idCounter++, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height, ...d3OpeningDefaults(tool) });
+      };
       const onPtr3Down = (ev) => {
         if (ev.button !== undefined && ev.button !== 0) return;
         canvasRect = canvas.getBoundingClientRect();   // re-prime the cache at gesture start
-        // Armed palette tool: click a wall to place a new item (§10.4) via the
-        // SAME pipeline as the 2D click — page coords → snapToWall — plus the
-        // Phase 5 opening stamps. Clicking sky/roof keeps the tool armed and
-        // lets the orbit through.
+        // Armed palette tool: click to place via place3 — wall items use the
+        // wall hit, floor items (workbench/loft/ramp) fall back to the ground
+        // plane, so every class the 2D palette offers places here too.
+        // Clicking the sky keeps the tool armed and lets the orbit through.
         const tool = tool3Ref.current;
         if (tool) {
           const cfg = itemTypes[tool];
-          const hitW = cfg ? pickWall3(ev) : null;
+          if (!cfg) return;
+          const hitW = pickWall3(ev);
+          let pageX = null, pageY = null;
           if (hitW) {
+            pageX = mgX + (hitW.point.x + bldgW / 2) * scale;
+            pageY = mgY + (hitW.point.z + bldgH / 2) * scale;
+          } else {
+            setRay(ev);
+            dragPlane.set(new THREE.Vector3(0, 1, 0), 0);
+            const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+            const lim = Math.max(bldgW, bldgH) * 4;
+            if (p && Math.abs(p.x) <= lim && Math.abs(p.z) <= lim) {
+              pageX = mgX + (p.x + bldgW / 2) * scale;
+              pageY = mgY + (p.z + bldgH / 2) * scale;
+            }
+          }
+          if (pageX !== null) {
             ev.stopImmediatePropagation();
             ev.preventDefault();
-            const pageX = mgX + (hitW.point.x + bldgW / 2) * scale;
-            const pageY = mgY + (hitW.point.z + bldgH / 2) * scale;
-            const w2 = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-            const sn = snapToWall(w2, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY);
-            const ni = { id: idCounter++, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height, ...d3OpeningDefaults(tool) };
-            liveItems = liveItems.concat([ni]);
-            if (onItemAdd) onItemAdd(ni);
-            if (onItemSelect) { lastSentSelect = ni.id; onItemSelect(ni.id); }
-            capturedRef.current = false;
-            setShotTaken(false);
-            setTool3(null);
-            queueRebuild();
+            place3(tool, cfg, pageX, pageY);
           }
           return;
         }
@@ -3195,7 +3356,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -3309,9 +3470,43 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         {closing && (
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,0.45)", color: "#E2E8F0", fontWeight: 700 }}>Saving your 3D view…</div>
         )}
+        {/* In-viewer catalog chooser: the 3D counterpart of the 2D DoorPicker/
+            WindowPicker/RampPicker modals. Choosing commits through the engine's
+            place3Fixture/place3Ramp (closure functions published on engineRef),
+            so the placed item lands in THIS scene's liveItems and rebuilds. */}
+        {pick3 && (
+          <div style={{ position: "absolute", left: "50%", bottom: 14, transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 12, padding: 12, zIndex: 40, width: "min(540px, 92%)", maxHeight: 300, overflowY: "auto", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ color: "#E2E8F0", fontSize: 13, fontWeight: 800 }}>
+                {pick3.kind === "door" ? "Pick a door" : pick3.kind === "window" ? "Pick a window" : "Pick a ramp"}
+              </span>
+              <button onClick={() => setPick3(null)} style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 18, cursor: "pointer", lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+              {(pick3.kind === "door" ? (placeableDoors || []) : pick3.kind === "window" ? (placeableWindows || []) : (placeableRamps || [])).map((fx) => (
+                <button key={fx.id}
+                  onClick={() => {
+                    const e = engineRef.current;
+                    if (!e) return;
+                    const ok = pick3.kind === "ramp"
+                      ? e.place3Ramp(fx, pick3.door)
+                      : e.place3Fixture(fx, pick3.kind === "window" ? "window" : "fixtureDoor", pick3.ptx, pick3.pty);
+                    if (ok !== false) setPick3(null);
+                  }}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, background: "#1E293B", border: "1px solid #334155", borderRadius: 8, padding: 8, cursor: "pointer", width: 108 }}>
+                  {fx.imageUrl
+                    ? <img src={fx.imageUrl} alt="" style={{ width: 84, height: 64, objectFit: "contain" }} />
+                    : <span style={{ fontSize: 28 }}>{pick3.kind === "window" ? "🪟" : pick3.kind === "ramp" ? "📐" : "🚪"}</span>}
+                  <span style={{ color: "#CBD5E1", fontSize: 11, fontWeight: 700, textAlign: "center" }}>{fx.name}</span>
+                  {fx.widthIn ? <span style={{ color: "#64748B", fontSize: 10 }}>{fx.widthIn}" wide</span> : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 16px", background: "#0F172A" }}>
-        {/* Add-item palette: wall items place with the same pipeline as 2D clicks */}
+        {/* Add-item palette: every class places with the same pipeline as 2D clicks */}
         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
           <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Add</span>
           {/* The placeable set is handed in by the parent — the SAME list the 2D tool row
@@ -3320,18 +3515,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               (built-in singleDoor/doubleDoor/window, the fixtureDoor stand-in) whose
               placements carry none of the fixture stamps the estimate prices from, plus
               `internalOnly` staff items that the public 2D palette deliberately hides.
-              The door/window PICKER tools are excluded too: in 2D they open a chooser
-              modal (see the isDoorPicker branch in the click handler), and 3D has no such
-              flow — placing one here produced a raw `doorPicker` item that no renderer
-              draws and no pricing recognises. Catalog fixtures get placed on the 2D plan
-              and then show up in 3D with their photo. */}
+              The door/window/ramp PICKER tools are handled by the in-viewer chooser
+              (pick3) — the 2D picker modals commit outside this scene's liveItems, so
+              routing them there would place items the open viewer never draws. */}
           {(paletteKeys || []).map((k) => (
             <button key={k} onClick={() => setTool3((t) => (t === k ? null : k))} disabled={phase !== "ready"}
               style={{ background: tool3 === k ? accent : "#1E293B", color: tool3 === k ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               {itemTypes[k].icon} {itemTypes[k].shortLabel || itemTypes[k].label}
             </button>
           ))}
-          {tool3 && <span style={{ color: accent, fontSize: 12, fontWeight: 700 }}>← click a wall to place</span>}
+          {tool3 && !msg3 && <span style={{ color: accent, fontSize: 12, fontWeight: 700 }}>← {itemTypes[tool3] && itemTypes[tool3].doorSnap ? "click near a door" : itemTypes[tool3] && (itemTypes[tool3].wallOnly || itemTypes[tool3].wallSnap) ? "click a wall" : "click the floor"}</span>}
+          {msg3 && <span style={{ color: "#FCA5A5", fontSize: 12, fontWeight: 700 }}>{msg3}</span>}
         </div>
         {/* Wall height — rebuilds live; the pick rides into the saved design + estimate */}
         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -8391,8 +8585,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
           fixtures={C.fixtures}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && ITEMS[k].wallOnly && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
-            && !ITEMS[k].isDoorPicker && !ITEMS[k].isWindowPicker)}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
+            && !ITEMS[k].noteType && !ITEMS[k].lineType)}
+          placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
           onClose={() => setAdminCalPreview(false)}
@@ -8409,8 +8604,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && ITEMS[k].wallOnly && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
-            && !ITEMS[k].isDoorPicker && !ITEMS[k].isWindowPicker)}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
+            && !ITEMS[k].noteType && !ITEMS[k].lineType)}
+          placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });
