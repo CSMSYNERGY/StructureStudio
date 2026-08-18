@@ -2640,7 +2640,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -2670,6 +2670,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const [pick3, setPick3] = useState(null);   // { kind: door|window|ramp, wall, ptx, pty, door }
   // Refusal feedback (the 2D toasts' 3D counterpart) — shown in the hint slot.
   const [msg3, setMsg3] = useState(null);
+  // The item selected by tapping in 3D — drives the footer's Remove button.
+  // { id, label } or null; kept in step with every onItemSelect report.
+  const [sel3d, setSel3d] = useState(null);
   // Paint picker selection; labels flow into paintColors (same free-text
   // semantics as the 2D paint inputs).
   const [paintSel, setPaintSel] = useState({ body: painted ? (paintBody || "") : "", trim: painted ? (paintTrim || "") : "" });
@@ -3015,13 +3018,27 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setMsg3(m);
         setTimeout(() => setMsg3((cur) => (cur === m ? null : cur)), 4000);
       };
+      const itemLabel3 = (type) => (itemTypes[type] && (itemTypes[type].shortLabel || itemTypes[type].label)) || type;
       const commitPlaced3 = (ni) => {
         liveItems = liveItems.concat([ni]);
         if (onItemAdd) onItemAdd(ni);
         if (onItemSelect) { lastSentSelect = ni.id; onItemSelect(ni.id); }
+        setSel3d({ id: ni.id, label: itemLabel3(ni.type) });
         capturedRef.current = false;
         setShotTaken(false);
         setTool3(null);
+        queueRebuild();
+      };
+      // Remove the selected item — same one-liner semantics as the 2D delSel,
+      // ramp cascade included (a deleted door takes its ramp along).
+      const deleteItem3 = (id) => {
+        if (!id) return;
+        liveItems = liveItems.filter((i) => i.id !== id && !(i.type === "ramp" && i.snapDoorId === id));
+        if (onItemDelete) onItemDelete(id);
+        if (onItemSelect) { lastSentSelect = null; onItemSelect(null); }
+        setSel3d(null);
+        capturedRef.current = false;
+        setShotTaken(false);
         queueRebuild();
       };
       // Catalog door/window from the in-viewer chooser (also the included-chip
@@ -3380,6 +3397,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // selects what it moved. Tapping the already-selected item again is a
         // no-op and shouldn't re-render the parent (unless it moved).
         if (onItemSelect && (d.moved || d.id !== lastSentSelect)) { lastSentSelect = d.id; onItemSelect(d.id); }
+        const selIt = liveItems.find((i) => i.id === d.id);
+        setSel3d(selIt ? { id: selIt.id, label: itemLabel3(selIt.type) } : null);
       };
       canvas.addEventListener("pointerdown", onPtr3Down, true);
       canvas.addEventListener("pointermove", onPtr3Move);
@@ -3449,7 +3468,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -3633,6 +3652,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           ))}
           {tool3 && !msg3 && <span style={{ color: accent, fontSize: 12, fontWeight: 700 }}>← {itemTypes[tool3] && itemTypes[tool3].doorSnap ? "click near a door" : itemTypes[tool3] && (itemTypes[tool3].wallOnly || itemTypes[tool3].wallSnap) ? "click a wall" : "click the floor"}</span>}
           {msg3 && <span style={{ color: "#FCA5A5", fontSize: 12, fontWeight: 700 }}>{msg3}</span>}
+          {sel3d && !tool3 && (
+            <button onClick={() => { const e = engineRef.current; if (e && e.delete3) e.delete3(sel3d.id); }}
+              style={{ background: "#7F1D1D", color: "#FECACA", border: "1px solid #991B1B", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              🗑 Remove {sel3d.label}
+            </button>
+          )}
         </div>
         {/* Wall height — rebuilds live; the pick rides into the saved design + estimate */}
         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -8720,6 +8745,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           onItemAdd={(ni) => setItems((p) => [...p, ni])}
           onItemSelect={(id) => setSelectedId(id)}
           onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}
+          onItemDelete={(id) => { setItems((p) => p.filter((i) => i.id !== id && !(i.type === "ramp" && i.snapDoorId === id))); setSelectedId(null); }}
           onSnapshot={(shot) => { render3DSnapshotRef.current = shot || null; setHas3DSnapshot(Boolean(shot)); }}
           onClose={() => setShow3D(false)}
         />
