@@ -2472,6 +2472,34 @@ function buildShed3DModel(THREE, p) {
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
     if (!c) return;
+    // Plan annotations, one more view of them: the note's text as a plaque
+    // lying at its plan position, the line as a thin strip between its
+    // endpoints. Text edits stay a 2D affordance.
+    if (c.noteType) {
+      const lbl = d3MakeGroundLabel(THREE, String(it.text || "Note").replace(/\s+/g, " ").slice(0, 60), 0.9);
+      if (lbl) {
+        const ng = new THREE.Group();
+        ng.userData = { itemId: it.id, floorItem: true };
+        lbl.position.set(ftX(it.x), 0.06, ftZ(it.y));
+        ng.add(lbl);
+        interiorGroup.add(ng);
+      }
+      return;
+    }
+    if (c.lineType) {
+      const x1 = ftX(it.x1), z1 = ftZ(it.y1), x2 = ftX(it.x2), z2 = ftZ(it.y2);
+      const len = Math.sqrt((x2 - x1) * (x2 - x1) + (z2 - z1) * (z2 - z1));
+      if (len > 0.05) {
+        const ng = new THREE.Group();
+        ng.userData = { itemId: it.id, floorItem: true };
+        const strip = box(mat("#475569"), len, 0.05, 0.12);
+        strip.position.set((x1 + x2) / 2, 0.05, (z1 + z2) / 2);
+        strip.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+        ng.add(strip);
+        interiorGroup.add(ng);
+      }
+      return;
+    }
     if (it.type === "loft") {
       const w = it.widthFt || c.width, d = it.heightFt || c.height;
       const elev = it.elevationFt || D3.LOFT_ELEV; // Phase 5 field, D3 fallback
@@ -3045,6 +3073,25 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
         if (cfg.includedFixture && !cfg.doorSnap) {
           placeFixture3(cfg.includedFixture, cfg.includedFixture.category === "window" ? "window" : "fixtureDoor", pageX, pageY);
+          return;
+        }
+        // Annotation tools — same stamps as the 2D branches; the page-bound
+        // clamps approximate PAGE_W/TEXT_BAND_TOP (page-layout values the
+        // viewer doesn't carry) closely enough to keep the item on the page.
+        if (cfg.noteType) {
+          commitPlaced3({ id: idCounter++, type: tool,
+            x: Math.max(20, Math.min(pageX, mgX * 2 + pWpx - 20)),
+            y: Math.max(20, Math.min(pageY, mgY + pHpx + 40)),
+            rotation: 0, wall: null, widthPx: 160, heightPx: 40, text: "Note" });
+          return;
+        }
+        if (cfg.lineType) {
+          const halfLenPx = ((cfg.width || 4) / 2) * scale;
+          const cx = Math.max(20, Math.min(pageX, mgX * 2 + pWpx - 20));
+          const cy = Math.max(20, Math.min(pageY, mgY + pHpx + 40));
+          commitPlaced3({ id: idCounter++, type: tool, wall: null,
+            x1: Math.max(0, cx - halfLenPx), y1: cy,
+            x2: Math.min(mgX * 2 + pWpx, cx + halfLenPx), y2: cy });
           return;
         }
         if (cfg.doorSnap) {
@@ -8630,8 +8677,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
           fixtures={C.fixtures}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
-            && !ITEMS[k].noteType && !ITEMS[k].lineType)}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
@@ -8649,8 +8695,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly)
-            && !ITEMS[k].noteType && !ITEMS[k].lineType)}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
