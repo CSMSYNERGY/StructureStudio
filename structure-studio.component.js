@@ -2256,15 +2256,37 @@ function buildShed3DModel(THREE, p) {
       };
       if (o.it.type === "window") {
         og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
-        og.add(wallBox(mat(D3_COLORS.glass, { transparent: true, opacity: 0.5 }), wf, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0, 0.08));
+        // Sill nose: a slightly wider, deeper board under the casing — the one
+        // horizontal shadow line that makes the window read as installed.
+        og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, T / 2 + 0.04, 0.16));
+        // Sash: a slim dark inner ring set INTO the opening. The depth step
+        // between casing → sash → glass is what turns the old flat decal into
+        // an assembly (the SmartBuild teardown's biggest close-up win).
+        const s = 0.09;
+        const sashMat = mat("#3A3F45", { roughness: 0.6 });
+        og.add(wallBox(sashMat, wf, o.a0, o.a0 + s, o.y0, o.y1, 0, T * 0.5));
+        og.add(wallBox(sashMat, wf, o.a1 - s, o.a1, o.y0, o.y1, 0, T * 0.5));
+        og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y1 - s, o.y1, 0, T * 0.5));
+        og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y0, o.y0 + s, 0, T * 0.5));
+        // Glass you can genuinely see through — the interior showing through
+        // the panes is what sells it. Slight blue-green tint, a whisper of
+        // metalness for sky glint; depthWrite off so the ghosted look-inside
+        // mode never sorts against it.
+        og.add(wallBox(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), wf, o.a0 + s, o.a1 - s, o.y0 + s, o.y1 - s, 0, 0.05));
         const winEntry = fixturePhotoTex(o.it);
         if (winEntry) {
           photoLayer(winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08);
         } else {
-          // Muntins only without a photo: a real sash photo already shows its own grid.
-          const midY = (o.y0 + o.y1) / 2;
-          og.add(wallBox(trimMat, wf, o.a - 0.04, o.a + 0.04, o.y0, o.y1, 0, 0.1));
-          og.add(wallBox(trimMat, wf, o.a0, o.a1, midY - 0.04, midY + 0.04, 0, 0.1));
+          // Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
+          // by width, double-hung rail across the middle.
+          const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
+          const cols = Math.max(2, Math.min(3, Math.round(ww / 1.1)));
+          for (let ci = 1; ci < cols; ci++) {
+            const a = o.a0 + (ww * ci) / cols;
+            og.add(wallBox(trimMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
+          }
+          const midY = o.y0 + wh / 2;
+          og.add(wallBox(trimMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
         }
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
         const photoEntry = fixturePhotoTex(o.it);
@@ -2281,6 +2303,14 @@ function buildShed3DModel(THREE, p) {
               if (seamTex) { seamTex.repeat.set(1, Math.max(2, Math.round(o.y1 - 0.1))); doorMat.map = seamTex; }
             }
             og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+            if (!photoEntry && o.it.operation !== "slideup") {
+              // Raised panels + a handle on a plain hinged slab — the relief
+              // shadows are what stop it reading as a painted rectangle.
+              const pa0 = o.a0 + 0.22, pa1 = o.a1 - 0.22, ph = o.y1 - 0.05;
+              og.add(wallBox(doorMat, wf, pa0, pa1, ph * 0.55, ph - 0.18, 0.1, 0.05));
+              og.add(wallBox(doorMat, wf, pa0, pa1, 0.22, ph * 0.45, 0.1, 0.05));
+              og.add(wallBox(mat("#6B7280", { metalness: 0.6, roughness: 0.3 }), wf, o.a1 - 0.38, o.a1 - 0.24, 3.0, 3.14, 0.12, 0.08));
+            }
           }
         }
         // One photo layer even for a double or a roll-up: the photo already shows both
@@ -2411,6 +2441,19 @@ function buildShed3DModel(THREE, p) {
       );
       rg.add(capBoard);
     }
+    // Rake boards: trim running up the roof edge at each gable end. Without
+    // them the slab's raw end face reads unfinished — every rake on the
+    // SmartBuild reference building is boarded (teardown polish list).
+    [-OV + 0.05, L + OV - 0.05].forEach((z) => {
+      const rake = box(trimMat, slen + OV * 2, 0.32, 0.1);
+      rake.rotation.z = Math.atan2(dy, du);
+      rake.position.set(
+        (A[0] + B[0]) / 2 + nx * (D3.ROOF_T / 2 - 0.08),
+        (A[1] + B[1]) / 2 + ny * (D3.ROOF_T / 2 - 0.08),
+        z
+      );
+      rg.add(rake);
+    });
   });
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }

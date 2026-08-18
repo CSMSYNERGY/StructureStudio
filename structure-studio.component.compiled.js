@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 1a224b1c93bf)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 9a41ed547392)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -607,10 +607,22 @@ var photoLayer=function photoLayer(entry,a0,a1,y0,y1,depth){// alphaTest discard
 // blending it); transparent:true keeps the feathered edges of a soft cut-out.
 var pm=new THREE.MeshBasicMaterial({map:entry.tex,transparent:true,alphaTest:0.06});var mesh=wallBox(pm,wf,a0,a1,y0,y1,0.02,depth);// 0.02 ft proud: no z-fight
 mesh.visible=Boolean(entry.tex);// hidden until the photo has decoded
-d3BindFixturePhoto(entry,pm,mesh);og.add(mesh);};if(o.it.type==="window"){og.add(wallBox(trimMat,wf,o.a0-f,o.a1+f,o.y0-f,o.y0,0,T+0.06));og.add(wallBox(mat(D3_COLORS.glass,{transparent:true,opacity:0.5}),wf,o.a0+0.05,o.a1-0.05,o.y0+0.05,o.y1-0.05,0,0.08));var winEntry=fixturePhotoTex(o.it);if(winEntry){photoLayer(winEntry,o.a0+0.05,o.a1-0.05,o.y0+0.05,o.y1-0.05,0.08);}else{// Muntins only without a photo: a real sash photo already shows its own grid.
-var midY=(o.y0+o.y1)/2;og.add(wallBox(trimMat,wf,o.a-0.04,o.a+0.04,o.y0,o.y1,0,0.1));og.add(wallBox(trimMat,wf,o.a0,o.a1,midY-0.04,midY+0.04,0,0.1));}}else if(o.it.type==="singleDoor"||o.it.type==="doubleDoor"||o.it.type==="fixtureDoor"){var photoEntry=fixturePhotoTex(o.it);{var doorMat=mat(D3_COLORS.door);if(o.it.type==="doubleDoor"||o.it.operation==="double"){og.add(wallBox(doorMat,wf,o.a0+0.05,o.a-0.03,0.05,o.y1-0.05,0,0.16));og.add(wallBox(doorMat,wf,o.a+0.03,o.a1-0.05,0.05,o.y1-0.05,0,0.16));}else{if(o.it.operation==="slideup"&&!photoEntry){// Roll-up read: reuse the lap texture as ~1 ft horizontal panel
+d3BindFixturePhoto(entry,pm,mesh);og.add(mesh);};if(o.it.type==="window"){og.add(wallBox(trimMat,wf,o.a0-f,o.a1+f,o.y0-f,o.y0,0,T+0.06));// Sill nose: a slightly wider, deeper board under the casing — the one
+// horizontal shadow line that makes the window read as installed.
+og.add(wallBox(trimMat,wf,o.a0-f-0.03,o.a1+f+0.03,o.y0-0.06,o.y0+0.02,T/2+0.04,0.16));// Sash: a slim dark inner ring set INTO the opening. The depth step
+// between casing → sash → glass is what turns the old flat decal into
+// an assembly (the SmartBuild teardown's biggest close-up win).
+var s=0.09;var sashMat=mat("#3A3F45",{roughness:0.6});og.add(wallBox(sashMat,wf,o.a0,o.a0+s,o.y0,o.y1,0,T*0.5));og.add(wallBox(sashMat,wf,o.a1-s,o.a1,o.y0,o.y1,0,T*0.5));og.add(wallBox(sashMat,wf,o.a0,o.a1,o.y1-s,o.y1,0,T*0.5));og.add(wallBox(sashMat,wf,o.a0,o.a1,o.y0,o.y0+s,0,T*0.5));// Glass you can genuinely see through — the interior showing through
+// the panes is what sells it. Slight blue-green tint, a whisper of
+// metalness for sky glint; depthWrite off so the ghosted look-inside
+// mode never sorts against it.
+og.add(wallBox(mat("#BFE0E8",{transparent:true,opacity:0.22,roughness:0.05,metalness:0.4,side:THREE.DoubleSide,depthWrite:false}),wf,o.a0+s,o.a1-s,o.y0+s,o.y1-s,0,0.05));var winEntry=fixturePhotoTex(o.it);if(winEntry){photoLayer(winEntry,o.a0+0.05,o.a1-0.05,o.y0+0.05,o.y1-0.05,0.08);}else{// Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
+// by width, double-hung rail across the middle.
+var ww=o.a1-o.a0,wh=o.y1-o.y0;var cols=Math.max(2,Math.min(3,Math.round(ww/1.1)));for(var ci=1;ci<cols;ci++){var a=o.a0+ww*ci/cols;og.add(wallBox(trimMat,wf,a-0.03,a+0.03,o.y0+s,o.y1-s,0,0.09));}var midY=o.y0+wh/2;og.add(wallBox(trimMat,wf,o.a0+s,o.a1-s,midY-0.035,midY+0.035,0,0.09));}}else if(o.it.type==="singleDoor"||o.it.type==="doubleDoor"||o.it.type==="fixtureDoor"){var photoEntry=fixturePhotoTex(o.it);{var doorMat=mat(D3_COLORS.door);if(o.it.type==="doubleDoor"||o.it.operation==="double"){og.add(wallBox(doorMat,wf,o.a0+0.05,o.a-0.03,0.05,o.y1-0.05,0,0.16));og.add(wallBox(doorMat,wf,o.a+0.03,o.a1-0.05,0.05,o.y1-0.05,0,0.16));}else{if(o.it.operation==="slideup"&&!photoEntry){// Roll-up read: reuse the lap texture as ~1 ft horizontal panel
 // seams, matching the segmented glyph the 2D plan draws.
-var seamTex=d3MakeTexture(THREE,"lap");if(seamTex){seamTex.repeat.set(1,Math.max(2,Math.round(o.y1-0.1)));doorMat.map=seamTex;}}og.add(wallBox(doorMat,wf,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0,0.16));}}// One photo layer even for a double or a roll-up: the photo already shows both
+var seamTex=d3MakeTexture(THREE,"lap");if(seamTex){seamTex.repeat.set(1,Math.max(2,Math.round(o.y1-0.1)));doorMat.map=seamTex;}}og.add(wallBox(doorMat,wf,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0,0.16));if(!photoEntry&&o.it.operation!=="slideup"){// Raised panels + a handle on a plain hinged slab — the relief
+// shadows are what stop it reading as a painted rectangle.
+var pa0=o.a0+0.22,pa1=o.a1-0.22,ph=o.y1-0.05;og.add(wallBox(doorMat,wf,pa0,pa1,ph*0.55,ph-0.18,0.1,0.05));og.add(wallBox(doorMat,wf,pa0,pa1,0.22,ph*0.45,0.1,0.05));og.add(wallBox(mat("#6B7280",{metalness:0.6,roughness:0.3}),wf,o.a1-0.38,o.a1-0.24,3.0,3.14,0.12,0.08));}}}// One photo layer even for a double or a roll-up: the photo already shows both
 // leaves / the panel seams, so splitting it would draw them twice.
 if(photoEntry)photoLayer(photoEntry,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0.16);}ogs.push(og);});return{wg:wg,ogs:ogs};};Object.keys(WALLS).forEach(function(wname){var built=buildOneWall(wname,items);wallsGroup.add(built.wg);built.ogs.forEach(function(og){return openingsGroup.add(og);});});// ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
 // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
@@ -646,7 +658,10 @@ slab.position.set((A[0]+B[0])/2+nx*(D3.ROOF_T/2+0.02),(A[1]+B[1])/2+ny*(D3.ROOF_
 var lowEnd=A[1]<=B[1]?A:B;if(lowEnd[1]<=H+0.01){var towardLow=lowEnd===A?-1:1;var edgeU=lowEnd[0]+towardLow*ux*OV+nx*(D3.ROOF_T/2+0.02);var edgeY=lowEnd[1]+towardLow*uy*OV+ny*(D3.ROOF_T/2+0.02);var fascia=box(trimMat,0.14,0.4,L+OV*2);fascia.position.set(edgeU,edgeY-0.14,L/2);rg.add(fascia);}// Ridge cap: one angled board LYING ON each slope that reaches the peak
 // (both halves of a gable, the upper legs of a gambrel) — a flat box can
 // never seat on the V of two pitches, which is why the first cut floated.
-var highEnd=A[1]>=B[1]?A:B;if(roofCfg.type!=="shed"&&highEnd[1]>=profPeak-0.01){var towardHigh=highEnd===A?-1:1;var CAPW=0.55;var capBoard=box(roofMat,CAPW,0.06,L+OV*2);capBoard.rotation.z=Math.atan2(dy,du);capBoard.position.set(highEnd[0]-towardHigh*ux*(CAPW/2-0.06)+nx*(D3.ROOF_T+0.05),highEnd[1]-towardHigh*uy*(CAPW/2-0.06)+ny*(D3.ROOF_T+0.05),L/2);rg.add(capBoard);}});if(uAxisIsX){rg.position.z=-L/2;}else{rg.rotation.y=-Math.PI/2;rg.position.x=L/2;}roofGroup.add(rg);// Corner trim boards live in roofGroup so "look inside" hides them with the roof.
+var highEnd=A[1]>=B[1]?A:B;if(roofCfg.type!=="shed"&&highEnd[1]>=profPeak-0.01){var towardHigh=highEnd===A?-1:1;var CAPW=0.55;var capBoard=box(roofMat,CAPW,0.06,L+OV*2);capBoard.rotation.z=Math.atan2(dy,du);capBoard.position.set(highEnd[0]-towardHigh*ux*(CAPW/2-0.06)+nx*(D3.ROOF_T+0.05),highEnd[1]-towardHigh*uy*(CAPW/2-0.06)+ny*(D3.ROOF_T+0.05),L/2);rg.add(capBoard);}// Rake boards: trim running up the roof edge at each gable end. Without
+// them the slab's raw end face reads unfinished — every rake on the
+// SmartBuild reference building is boarded (teardown polish list).
+[-OV+0.05,L+OV-0.05].forEach(function(z){var rake=box(trimMat,slen+OV*2,0.32,0.1);rake.rotation.z=Math.atan2(dy,du);rake.position.set((A[0]+B[0])/2+nx*(D3.ROOF_T/2-0.08),(A[1]+B[1])/2+ny*(D3.ROOF_T/2-0.08),z);rg.add(rake);});});if(uAxisIsX){rg.position.z=-L/2;}else{rg.rotation.y=-Math.PI/2;rg.position.x=L/2;}roofGroup.add(rg);// Corner trim boards live in roofGroup so "look inside" hides them with the roof.
 [[-bldgW/2,-bldgH/2],[bldgW/2,-bldgH/2],[-bldgW/2,bldgH/2],[bldgW/2,bldgH/2]].forEach(function(c){var post=box(trimMat,T+0.14,H,T+0.14);post.position.set(c[0],H/2,c[1]);roofGroup.add(post);});// ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
 // Same isolation as buildOneWall: rebuildInterior repopulates this group
 // alone when a loft/workbench/ramp moves during a live drag.
