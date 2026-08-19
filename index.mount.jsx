@@ -1,13 +1,13 @@
-// ── Thin mount. The full designer body lives in structure-studio.component.js — the ONE
-// shared module loaded by BOTH this page and portal.html. The hand-mirrored pair is now
-// StructureStudio.jsx ↔ structure-studio.component.js (this file carries no component code).
-// Served origin required: Babel FETCHES the src sibling, so file:// opens are CORS-blocked
-// — sanity-check via a local server (python -m http.server), never by double-clicking.
+// ── Thin mount for index.html. The full designer body lives in
+// structure-studio.component.js — the ONE shared module loaded (compiled) by BOTH this
+// page and portal.html. The hand-mirrored pair is StructureStudio.jsx ↔
+// structure-studio.component.js; THIS file compiles to index.mount.compiled.js via
+// `npm run compile` (scripts/compile.mjs) — edit here, never the artifact.
 const StructureStudio = window.StructureStudio;
 const ssAllowedOrigin = window.ssAllowedOrigin;
 
 // Supabase coordinates for the error logger below — duplicated from the module on
-// purpose (Babel blocks don't share top-level consts; the anon key is browser-safe).
+// purpose (each compiled artifact is an isolated scope; the anon key is browser-safe).
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 
@@ -38,21 +38,18 @@ window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.messag
 window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
   { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
 
-// The shared module is the ONE dependency the boot guard cannot check for us. Babel fetches
-// src'd text/babel files by XHR AFTER the guard has run, so when
-// structure-studio.component.js does not load, all four library globals are present, the
-// guard stays correctly silent, and `StructureStudio` here is undefined. Rendering undefined
-// throws React error #130 ("element type is invalid") and leaves a PERMANENTLY BLANK page:
-// that is what GOOGLEBOT got on 2026-08-06 while crawling a tenant's shopfront (app_errors
+// The shared module is the ONE dependency the boot guard cannot check itself. Its compiled
+// artifact loads with `defer` ahead of this one, so when it does not load (404, or served
+// as HTML by a bad route) `StructureStudio` here is undefined. Rendering undefined throws
+// React error #130 ("element type is invalid") and leaves a PERMANENTLY BLANK page: that
+// is what GOOGLEBOT got on 2026-08-06 while crawling a tenant's shopfront (app_errors
 // 96ce38ff). So check before rendering, and reuse the guard's own failure screen.
 //
-// A falsy read here means the module block never executed AT ALL — it cannot mean a partial
-// or still-in-flight load. The module declares `function StructureStudio(…)` at top level,
-// which publishes itself onto window the instant the block starts running, before any of its
-// own statements. Verified all four ways it can fail: a 404'd module (falsy, caught here), a
-// module that throws mid-run (truthy via that hoisting — renders the config-error screen, a
-// different and already-reported bug), and one whose explicit publish line was deleted
-// (truthy, renders perfectly). So this can never fire on a page that was going to work.
+// A falsy read here means the module artifact did not run to its publish line. Under the
+// compiled wrapper (an isolated function scope) the ONLY publish is the explicit
+// `window.StructureStudio = …` at the module's end — so a module that throws MID-RUN now
+// also lands here (boot_component_missing) instead of half-publishing via hoisting and
+// rendering the config-error screen, which is stricter and better-reported than before.
 if (!StructureStudio) {
   // ssBootFail is the guard's renderer; the ?? branch is for the case where even the guard
   // was lost, which must still not be silent.

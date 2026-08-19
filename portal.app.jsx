@@ -99,7 +99,7 @@ window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; 
 // nobody finds out. One row, at block scope rather than inside DesignerTab, so it cannot fire
 // twice on a re-render and is not a side effect in render.
 if (!window.StructureStudio) {
-  ssLogError("boot", "the shared component module did not load (structure-studio.component.js) — the portal still works, the Designer tab does not", "boot_component_missing", { app: "portal", missing: ["structure-studio.component.js"], degraded: "designer-tab-only" });
+  ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not", "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only" });
 }
 // ── Operator "view as" tenant override (transport-level) ──────────────────────
 // While an operator has another tenant's portal open, every portal-settings /
@@ -214,7 +214,7 @@ const TAB_META = {
   "delivery-schedule": ["Delivery Schedule", "Plan truck loads and manage deliveries"],
   "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
   "repairs": ["Repairs", "Manage repair jobs from request to done"],
-  "view-3d": ["3D Design", "Let customers see their building in 3D — coming soon"],
+  "view-3d": ["3D Design", "Give each building style its own 3D look"],
   "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
   "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
@@ -2982,6 +2982,13 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                       ? <img src={s.image_url} alt="" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    {/* Whether this style has a 3D look of its own yet. Read-only here —
+                        setting one needs the live 3D preview, so it lives in the Designer
+                        tab's 3D Style Calibration panel. */}
+                    <span title={s.d3 ? "This style has its own 3D look — tune it in Designer → 3D Style Calibration" : "No 3D look set yet: 3D falls back to a generic shape. Set one in Designer → 3D Style Calibration."}
+                      style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 7px", border: "1px solid " + (s.d3 ? "#A7F3D0" : "#E2E8F0"), background: s.d3 ? "#ECFDF5" : "#F8FAFC", color: s.d3 ? "#047857" : "#94A3B8" }}>
+                      {s.d3 ? "3D ✓" : "3D —"}
+                    </span>
                     <label title="Attach this style's photo to the CRM estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
@@ -3341,6 +3348,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   const [dragIdx, setDragIdx] = useState(null);
   const [imgBusy, setImgBusy] = useState(false);
   const [imgFileKey, setImgFileKey] = useState(0);
+  const [straighten, setStraighten] = useState(null);   // File awaiting the straighten step
   const [dlBusy, setDlBusy] = useState(false);
   const [fileKey, setFileKey] = useState(0);
 
@@ -3436,18 +3444,29 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 20_000_000) { setMsg({ err: "That photo is over 20MB — take it at a lower resolution." }); return false; } return true; };
   const uploadImg = async (file) => {
+    file = await ssFitImageForUpload(file);
     const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
     const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
     return data.url;
   };
-  const onDraftImg = async (file) => {
+  // A picked photo goes through the straighten step FIRST. This image is what the 3D
+  // masks onto the door slab, so a tilted phone shot becomes a tilted door on the
+  // customer's building; squaring it up here is cheaper than asking for a reshoot.
+  // The aspect comes from the dimensions the builder already typed for pricing.
+  const onDraftImg = (file) => {
     if (!file) return; if (!guardImg(file)) { setImgFileKey((k) => k + 1); return; }
+    setImgFileKey((k) => k + 1);
+    setStraighten(file);
+  };
+  const onStraightened = async (file) => {
+    setStraighten(null);
+    if (!file) return;
     setImgBusy(true); setMsg(null);
     try { const url = await uploadImg(file); setDraft({ image_url: url }); } catch (e) { setMsg({ err: e.message }); }
-    setImgBusy(false); setImgFileKey((k) => k + 1);
+    setImgBusy(false);
   };
 
   // ── Excel round-trip. ASCII-only headers (a “×” becomes mojibake in Excel and the column
@@ -3702,6 +3721,22 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
 
   return (
     <>
+      {straighten && (
+        <SSStraightenPhoto
+          file={straighten}
+          // For a door or window the width/height typed for pricing IS the real-world shape
+          // of the thing in the photo, so it is the right aspect to square the crop to. For
+          // a RAMP those two numbers are a plan footprint (width x run) and describe nothing
+          // visible in a photo of it, so the crop is left square and the builder frames it.
+          aspect={(() => {
+            if (category === "ramp") return 1;
+            const w = Number(ftInToInches(edit && edit.draft ? edit.draft.width_in : "")), h = Number(ftInToInches(edit && edit.draft ? edit.draft.height_in : ""));
+            return (w > 0 && h > 0) ? (w / h) : 1;
+          })()}
+          onCancel={() => setStraighten(null)}
+          onDone={onStraightened}
+        />
+      )}
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
       {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
@@ -3842,8 +3877,9 @@ function RampsView({ viewingLabel = null, clientId = null }) {
   useEffect(() => { load(); }, []);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); return false; } return true; };
+  const guardImg = (file) => { if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); return false; } if (file.size > 20_000_000) { setMsg({ err: "That photo is over 20MB — take it at a lower resolution." }); return false; } return true; };
   const uploadImg = async (file) => {
+    file = await ssFitImageForUpload(file);
     const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onerror = () => rej(new Error("Could not read that image.")); r.onload = () => res(r.result); r.readAsDataURL(file); });
     const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "upload_fixture_image", imageBase64: base64, imageContentType: file.type || "image/jpeg" }) });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -8411,14 +8447,347 @@ function LocationsCard() {
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
 // — the loader then skips URL parsing entirely and can never hit its bare-root
 // /portal.html redirect (which would loop the portal).
-function DesignerTab({ clientId, onSaved, openDesign = null }) {
+// ── Photo straightening for fixture images ──────────────────────────────────────────
+// A door photo taken on a phone is never square-on, and in 3D that photo is stretched
+// flat onto the door slab: every degree of camera tilt shows up as a leaning door on the
+// customer's building. Carolyn's ask was explicit -- the builder supplies the photo, and
+// we straighten it a little rather than sending them away to reshoot ("nobody's going to
+// get them perfect").
+//
+// A 2D canvas transform is affine and CANNOT do this: mapping an arbitrary quadrilateral
+// to a rectangle needs a projective transform. So we solve the homography ourselves (8
+// unknowns, 4 point pairs) and resample. No library: this is ~40 lines and adding a
+// dependency to a buildless page costs more than it saves.
+//
+// Solves for H mapping DEST(rect) -> SRC(quad), so each output pixel can look up where
+// it came from -- the inverse direction is what resampling needs.
+function ssSolveHomography(dst, src) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = dst[i], [u, v] = src[i];
+    A.push([x, y, 1, 0, 0, 0, -x * u, -y * u]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -x * v, -y * v]); b.push(v);
+  }
+  // Gaussian elimination with partial pivoting.
+  for (let c = 0; c < 8; c++) {
+    let p = c;
+    for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    if (Math.abs(A[p][c]) < 1e-12) return null;      // degenerate quad (collinear corners)
+    [A[c], A[p]] = [A[p], A[c]]; [b[c], b[p]] = [b[p], b[c]];
+    for (let r = 0; r < 8; r++) {
+      if (r === c) continue;
+      const f = A[r][c] / A[c][c];
+      if (!f) continue;
+      for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  const h = b.map((val, i) => val / A[i][i]);
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+
+// Warp the quad the user marked out into a straight-on rectangle of the given aspect.
+function ssWarpQuad(img, quad, aspect, maxPx) {
+  const ratio = aspect > 0 ? aspect : 1;
+  let w = Math.min(maxPx, img.naturalWidth || img.width);
+  let h = Math.round(w / ratio);
+  if (h > maxPx) { h = maxPx; w = Math.round(h * ratio); }
+  const src = document.createElement("canvas");
+  src.width = img.naturalWidth || img.width; src.height = img.naturalHeight || img.height;
+  src.getContext("2d").drawImage(img, 0, 0);
+  const sd = src.getContext("2d").getImageData(0, 0, src.width, src.height);
+  // Reject a quad that is not a sane convex shape before doing any work. The matrix solve
+  // alone does not catch these: a bow-tie (self-crossing) or near-zero-area quad solves
+  // fine and warps the photo into garbage, and a hair-thin one samples almost nothing.
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  let area = 0;
+  for (let i = 0; i < 4; i++) { const p = quad[i], q = quad[(i + 1) % 4]; area += p[0] * q[1] - q[0] * p[1]; }
+  area = Math.abs(area) / 2;
+  const signs = [0, 1, 2, 3].map((i) => Math.sign(cross(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4])));
+  const convex = signs.every((s) => s > 0) || signs.every((s) => s < 0);
+  const minSide = Math.min(...[0, 1, 2, 3].map((i) => Math.hypot(quad[(i + 1) % 4][0] - quad[i][0], quad[(i + 1) % 4][1] - quad[i][1])));
+  if (!convex || minSide < 8 || area < (src.width * src.height) * 0.005) return null;
+  const H = ssSolveHomography([[0, 0], [w, 0], [w, h], [0, h]], quad);
+  if (!H) return null;
+  const out = document.createElement("canvas"); out.width = w; out.height = h;
+  const octx = out.getContext("2d");
+  // Paint the door colour first: the result is encoded as JPEG, which has no alpha, so any
+  // pixel left transparent would flatten to BLACK. Sampling outside the photo now lands on
+  // a plausible door tone instead of a black wedge.
+  octx.fillStyle = "#77664C";
+  octx.fillRect(0, 0, w, h);
+  const od = octx.getImageData(0, 0, w, h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const d = H[6] * x + H[7] * y + H[8];
+      const fu = (H[0] * x + H[1] * y + H[2]) / d;
+      const fv = (H[3] * x + H[4] * y + H[5]) / d;
+      const o = (y * w + x) * 4;
+      // Bilinear, not nearest-neighbour: a 4000px phone photo lands on a <=1024px output,
+      // and point-sampling that ratio aliases every straight edge into a staircase.
+      const u0 = Math.floor(fu), v0 = Math.floor(fv);
+      if (u0 < 0 || v0 < 0 || u0 >= src.width || v0 >= src.height) continue;   // outside: keep the fill
+      // Clamp the far neighbour rather than skipping the pixel: a quad drawn right to the
+      // photo edge used to lose its last row/column to a 1px line of fill colour.
+      const u1 = Math.min(u0 + 1, src.width - 1), v1 = Math.min(v0 + 1, src.height - 1);
+      const au = fu - u0, av = fv - v0;
+      for (let c = 0; c < 4; c++) {
+        const p00 = sd.data[(v0 * src.width + u0) * 4 + c], p10 = sd.data[(v0 * src.width + u1) * 4 + c];
+        const p01 = sd.data[(v1 * src.width + u0) * 4 + c], p11 = sd.data[(v1 * src.width + u1) * 4 + c];
+        od.data[o + c] = (p00 * (1 - au) + p10 * au) * (1 - av) + (p01 * (1 - au) + p11 * au) * av;
+      }
+      // The source may itself be a cut-out PNG; anything see-through composites onto the
+      // door colour rather than carrying alpha into a format that cannot hold it.
+      const a = od.data[o + 3] / 255;
+      if (a < 1) {
+        od.data[o] = od.data[o] * a + 0x77 * (1 - a);
+        od.data[o + 1] = od.data[o + 1] * a + 0x66 * (1 - a);
+        od.data[o + 2] = od.data[o + 2] * a + 0x4C * (1 - a);
+      }
+      od.data[o + 3] = 255;
+    }
+  }
+  octx.putImageData(od, 0, 0);
+  // Sanity-check the result. A source the browser refused to decode reads as fully
+  // transparent, which the fill above turns into a flat door-coloured rectangle: better
+  // than the old all-black JPEG, but still not the builder's photo. If almost nothing was
+  // sampled, report failure so the caller keeps the original file.
+  let sampled = 0;
+  for (let i = 0; i < od.data.length; i += 4 * 97) {
+    if (!(od.data[i] === 0x77 && od.data[i + 1] === 0x66 && od.data[i + 2] === 0x4C)) sampled++;
+  }
+  if (sampled < Math.ceil((od.data.length / (4 * 97)) * 0.02)) return null;
+  return out;
+}
+
+// Drag the four corners onto the door/window itself, then straighten. "Use as-is" exists
+// because a photo that is already square-on needs nothing, and forcing a four-corner
+// ritual on every upload would be its own reason not to upload.
+// Guarantee an upload fits the server's 3MB cap. The file picker deliberately accepts a
+// big original now (a modern phone photo is 4-12MB and the straightener shrinks it to a
+// couple of hundred KB), but 'Use as-is' hands the original straight through -- so the
+// last step before upload re-encodes anything still too large. Longest edge 1600px is
+// well above the 1024px the 3D texture cache downsamples to anyway.
+async function ssFitImageForUpload(file, maxBytes = 2_800_000, maxPx = 1600) {
+  if (!file || file.size <= maxBytes) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode failed')); i.src = url; });
+    const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const g = cv.getContext('2d');
+    // Flatten onto white: JPEG has no alpha, and a transparent PNG would otherwise
+    // encode its see-through areas as black.
+    g.fillStyle = '#FFFFFF'; g.fillRect(0, 0, cv.width, cv.height);
+    g.drawImage(img, 0, 0, cv.width, cv.height);
+    for (const q of [0.9, 0.8, 0.7]) {
+      const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', q));
+      if (blob && blob.size <= maxBytes) return new File([blob], 'photo.jpg', { type: 'image/jpeg' });
+    }
+    return file;   // could not get it under the cap; let the server say so
+  } catch (_e) {
+    return file;
+  } finally { URL.revokeObjectURL(url); }
+}
+
+function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
+  const [img, setImg] = useState(null);
+  const [quad, setQuad] = useState(null);        // [[x,y]×4] in natural image pixels
+  const [drag, setDrag] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const boxRef = useRef(null);
+  const VIEW = 460;
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => {
+      setImg(im);
+      const w = im.naturalWidth, h = im.naturalHeight;
+      const ix = w * 0.08, iy = h * 0.08;        // start slightly inside, so the handles are grabbable
+      setQuad([[ix, iy], [w - ix, iy], [w - ix, h - iy], [ix, h - iy]]);
+    };
+    im.onerror = () => { setErr("That image could not be opened — try a JPG or PNG straight from the camera."); };
+    im.src = url;
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  // The box is sized to the viewport, not to a fixed 460px: this is a step a builder does
+  // on the phone they took the photo with, and a hard-coded width pushed two of the four
+  // corner handles off a phone screen entirely.
+  const view = Math.max(220, Math.min(VIEW, (typeof window !== "undefined" ? window.innerWidth : VIEW) - 96));
+  const scale = img ? view / Math.max(img.naturalWidth, img.naturalHeight) : 1;
+  const dispW = img ? img.naturalWidth * scale : 0, dispH = img ? img.naturalHeight * scale : 0;
+
+  // Pointer events, not mouse events: the handles were undraggable on every phone and
+  // tablet — the exact devices this feature is for.
+  const moveTo = (e) => {
+    if (drag == null || !boxRef.current || !img) return;
+    const t = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    if (t.clientX == null) return;
+    if (e.cancelable) e.preventDefault();          // stop the page scrolling under the drag
+    const r = boxRef.current.getBoundingClientRect();
+    const px = Math.max(0, Math.min(img.naturalWidth, (t.clientX - r.left) / scale));
+    const py = Math.max(0, Math.min(img.naturalHeight, (t.clientY - r.top) / scale));
+    setQuad((q) => q.map((pt, i) => (i === drag ? [px, py] : pt)));
+  };
+  // A release outside the modal (or outside the window) must still end the drag, or a
+  // handle stays glued to the cursor.
+  useEffect(() => {
+    if (drag == null) return;
+    const end = () => setDrag(null);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("touchend", end);
+    window.addEventListener("blur", end);
+    return () => {
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("touchend", end);
+      window.removeEventListener("blur", end);
+    };
+  }, [drag]);
+
+  const finish = async (straighten) => {
+    setBusy(true);
+    try {
+      if (!straighten) { onDone(file); return; }
+      const out = ssWarpQuad(img, quad, aspect, 1024);
+      // A quad the solver refuses (collinear/duplicate corners) or a warp that produced
+      // nothing usable falls back to the original photo rather than uploading a ruined one.
+      if (!out) { onDone(file); return; }
+      const blob = await new Promise((res) => out.toBlob(res, "image/jpeg", 0.9));
+      // JPEG, not WEBP: Safari's canvas WEBP encoder support is patchy and a silent
+      // null blob here would look like a broken upload.
+      onDone(blob ? new File([blob], "straightened.jpg", { type: "image/jpeg" }) : file);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.75)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+      onPointerMove={moveTo} onPointerUp={() => setDrag(null)} onTouchMove={moveTo} onTouchEnd={() => setDrag(null)}>
+      <div style={{ background: "#FFF", borderRadius: 14, padding: 18, maxWidth: 560, width: "100%", maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ fontWeight: 800, fontSize: 16, color: "#0F172A", marginBottom: 4 }}>Straighten this photo</div>
+        <p style={{ margin: "0 0 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+          Drag the four dots onto the corners of the door itself. We'll square it up so it sits flat on the building in 3D.
+          If the photo is already straight on, just use it as-is.
+        </p>
+        {err && <div style={{ fontSize: 13, color: "#DC2626", fontWeight: 600 }}>{err}</div>}
+        {!img && !err && <div style={{ fontSize: 13, color: "#64748B" }}>Loading photo…</div>}
+        {img && (
+          <div ref={boxRef} style={{ position: "relative", width: dispW, height: dispH, margin: "0 auto", userSelect: "none", touchAction: "none" }}>
+            <img src={img.src} alt="" style={{ width: dispW, height: dispH, display: "block", borderRadius: 6 }} draggable={false} />
+            <svg viewBox={`0 0 ${dispW} ${dispH}`} style={{ position: "absolute", inset: 0, width: dispW, height: dispH, pointerEvents: "none" }}>
+              <polygon points={quad.map(([x, y]) => `${x * scale},${y * scale}`).join(" ")} fill="rgba(124,58,237,0.16)" stroke="#7C3AED" strokeWidth="2" />
+            </svg>
+            {quad.map(([x, y], i) => (
+              <div key={i} onPointerDown={(e) => { if (e.currentTarget.setPointerCapture && e.pointerId != null) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_e) {} } setDrag(i); }} onTouchStart={() => setDrag(i)}
+                style={{ position: "absolute", left: x * scale - 9, top: y * scale - 9, width: 18, height: 18, borderRadius: "50%", background: "#7C3AED", border: "2px solid #FFF", boxShadow: "0 1px 4px rgba(0,0,0,0.4)", cursor: "grab" }} />
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
+          <button type="button" onClick={onCancel} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+          <button type="button" onClick={() => finish(false)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Use as-is</button>
+          <button type="button" onClick={() => finish(true)} disabled={busy || !img}
+            style={{ background: busy ? "#9CA3AF" : "#7C3AED", color: "#FFF", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 800, cursor: busy ? "wait" : "pointer" }}>
+            {busy ? "Working…" : "Straighten & use"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 3D Design tab. Replaced a "3rd Qtr" coming-soon panel: 3D ships, so this reports the
+// only thing a builder can act on — which of their styles has a 3D look of its own, and
+// which is still falling back to a generic shape. Read-only by design; setting a look
+// needs the live 3D preview, which lives in the Designer tab's calibration panel.
+function Studio3DStatus({ clientId, canAdmin, navigate }) {
+  const [state, setState] = useState({ loading: true, err: null, styles: [] });
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+        if (error) throw new Error(error.message || "Could not load your styles.");
+        if (!data || !data.ok) throw new Error((data && data.error) || "Could not load your styles.");
+        if (!dead) setState({ loading: false, err: null, styles: data.styles || [] });
+      } catch (e) {
+        if (!dead) setState({ loading: false, err: e.message, styles: [] });
+      }
+    })();
+    return () => { dead = true; };
+  }, [clientId]);
+
+  const done = state.styles.filter((s) => s.d3).length;
+  return (
+    <div style={{ maxWidth: 860, margin: "0 auto", width: "100%" }}>
+      <h2 style={{ margin: "0 0 6px", fontSize: 20, fontWeight: 800, color: "#0F172A" }}>3D Design</h2>
+      <p style={{ margin: "0 0 16px", fontSize: 13.5, color: "#475569", lineHeight: 1.5 }}>
+        Customers can spin their design in 3D and see their own size, colors, doors and windows on the building.
+        Photos you upload for a door or window are shown on that door in 3D, so it looks like the one you actually sell.
+        Give each building style its own 3D look below and the shape matches your real buildings too.
+      </p>
+      {state.loading && <div style={{ fontSize: 13, color: "#64748B" }}>Loading your styles…</div>}
+      {state.err && <div style={{ fontSize: 13, color: "#DC2626", fontWeight: 600 }}>{state.err}</div>}
+      {!state.loading && !state.err && state.styles.length === 0 && (
+        <div style={{ fontSize: 13, color: "#64748B" }}>No building styles yet — add one in Settings → Structures first.</div>
+      )}
+      {!state.loading && !state.err && state.styles.length > 0 && (
+        <>
+          <div style={{ fontSize: 12.5, color: "#475569", fontWeight: 700, marginBottom: 8 }}>
+            {done} of {state.styles.length} styles have their own 3D look
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {state.styles.map((s) => {
+              const photos = Array.isArray(s.d3_photos) ? s.d3_photos.filter(Boolean).length : 0;
+              return (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px" }}>
+                  {s.image_url
+                    ? <img src={s.image_url} alt="" style={{ width: 48, height: 36, objectFit: "cover", borderRadius: 6, border: "1px solid #E2E8F0", flexShrink: 0 }} />
+                    : <div style={{ width: 48, height: 36, borderRadius: 6, border: "1px solid #E2E8F0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>🏠</div>}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: "#0F172A" }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <div style={{ fontSize: 12, color: s.d3 ? "#047857" : "#94A3B8", fontWeight: 600 }}>
+                      {s.d3
+                        ? `3D look set${s.d3.roof && s.d3.roof.type ? ` — ${s.d3.roof.type} roof` : ""}${photos ? ` · ${photos} reference photo${photos === 1 ? "" : "s"}` : ""}`
+                        : "Using a generic shape — set its 3D look to match your real building"}
+                    </div>
+                  </div>
+                  {canAdmin && (
+                    <button type="button" onClick={() => navigate("designer")}
+                      style={{ flexShrink: 0, background: s.d3 ? "#F1F5F9" : "#7C3AED", color: s.d3 ? "#334155" : "#FFF", border: s.d3 ? "1px solid #E2E8F0" : "none", borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer" }}>
+                      {s.d3 ? "Adjust" : "Set up 3D"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {canAdmin && (
+            <p style={{ margin: "14px 0 0", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              Setting a style's 3D look happens in the <strong>Designer</strong> tab, under <strong>🧊 3D Style Calibration</strong> —
+              it needs the live 3D preview so you can see each change on a real building as you make it.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, view3d = false }) {
   const SS = window.StructureStudio;
   if (!SS) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
   }
   return (
     <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
-      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} />
+      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} />
     </div>
   );
 }
@@ -12038,6 +12407,110 @@ function Dashboard({ session }) {
 
   const signOut = () => sb.auth.signOut();
 
+  // Only owners/admins manage Pricing + Settings; regular team members see only
+  // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
+  // can't reach the other views even by forcing the tab state).
+  // Null-safe on purpose: the loading/no-tenant early returns sit BELOW setup3d (the
+  // last hook), so this line also runs while tenant is still null / "none".
+  const isAdmin = !!tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin");
+  // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
+  // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
+
+  // While VIEWING another tenant, operator status is the admin grant. isAdmin above
+  // describes the operator's role in their OWN client_users row — routinely "user", or
+  // absent entirely — so using it here would leave Settings dead in the viewed account,
+  // which is exactly the "only two tabs" symptom Carolyn reported.
+  const canAdmin = viewing ? isOperator : isAdmin;
+  // The tenant every surface should read and write. Feeds the clientId props and the
+  // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
+  // resolves — every real read happens below the early returns.
+  const effClientId = viewing ? viewing.clientId : (tenant && tenant !== "none" ? tenant.clientId : null);
+  // 3D setup contract handed to the embedded designer's calibration editor. The editor
+  // itself lives in the designer component (it needs the live 3D preview); the I/O lives
+  // here because THIS is where the signed-in session is — the component's own supabase
+  // client is the anon one and would 401 at resolveTenant. Null unless the user may
+  // administer the tenant, which is what keeps a role-"user" salesperson out of it.
+  //
+  // This is a HOOK, so it must run on EVERY render — same constraint as the replaceState
+  // effect above. It used to sit below the tenant-loading early returns: the first render
+  // returned before reaching it, the render after the tenant resolved called one hook
+  // more, and React threw #310 — a blank portal for everyone (app_errors bb53f026,
+  // bcfc2007). The early returns now sit below this memo; keep every hook above them.
+  const setup3d = useMemo(() => (!canAdmin ? null : {
+    onSaveSpec: async (styleValue, d3, d3Photos) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_d3", styleValue, d3, d3Photos } });
+      if (error) throw new Error(error.message || "Save failed");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
+      return data;
+    },
+    // Reference photos are no longer in the customer-facing config (migration 093 stopped
+    // get_config broadcasting a builder's photos of their real buildings to anonymous
+    // shoppers), so the editor asks for them here, over the authenticated session.
+    // A 10-40MB mesh cannot go through an edge function (it would have to be buffered as
+    // base64 inside a 256MB / 2s worker), so the browser writes straight into the PRIVATE
+    // `models` bucket with the builder's own session — the same route portal.html already uses
+    // for feedback attachments, and the RLS policy in 094 confines it to their own folder.
+    onUploadModel: async (file, styleValue) => {
+      // supabase-js IGNORES the contentType option when the body is a Blob (it builds a
+      // FormData and reads Blob.type), and a .glb usually arrives as application/octet-stream
+      // or "". Re-tag it with a zero-copy slice so the stored mime matches the bucket's
+      // allow-list instead of failing at the storage gate for an undiagnosable reason.
+      const typed = file.slice(0, file.size, "model/gltf-binary");
+      const safe = String(styleValue || "style").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
+      const path = effClientId + "/" + safe + "-" + Date.now() + ".glb";
+      const up = await sb.storage.from("models").upload(path, typed, { contentType: "model/gltf-binary", upsert: false });
+      if (up.error) throw new Error(up.error.message || "Upload failed");
+      return path;
+    },
+    onSaveModel: async (styleValue, modelPath, modelMeta) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_model", styleValue, modelPath, modelMeta } });
+      if (error) throw new Error(error.message || "Could not save that scan");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Could not save that scan");
+      return data;
+    },
+    onSetModelStatus: async (styleValue, status) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_model_status", styleValue, status } });
+      if (error) throw new Error(error.message || "Could not change that");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Could not change that");
+      return data;
+    },
+    onLoadStyle3D: async (styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+      if (error || !data || !data.ok) return null;
+      const st = (data.styles || []).find((x) => x.key === styleValue);
+      return {
+        photos: (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [],
+        modelStatus: (st && st.model_status) || "none",
+        aiReady: data.aiReady !== false,
+      };
+    },
+    onDraftFromPhotos: async (photoUrls, styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue } });
+      if (error) throw new Error(error.message || "Drafting failed");
+      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Drafting failed");
+      return data.d3;
+    },
+    // Signed URL (10 min) for the style's stored scan — the re-measure path:
+    // an algorithm improvement should never require walking the lot again.
+    onLoadModelUrl: async (styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "style_model_url", styleValue } });
+      if (error || !data || !data.ok) return null;
+      return data.url || null;
+    },
+    onUploadPhoto: async (file) => {
+      const imageBase64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result || "").split(",")[1] || "");
+        fr.onerror = () => rej(new Error("Could not read that file."));
+        fr.readAsDataURL(file);
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_style_photo", imageBase64, imageContentType: file.type || "image/jpeg" } });
+      if (error) throw new Error(error.message || "Upload failed");
+      if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
+      return data.url;
+    },
+  }), [canAdmin, effClientId]);
+
   if (tenant === null) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
   }
@@ -12053,25 +12526,14 @@ function Dashboard({ session }) {
     );
   }
 
-  // Only owners/admins manage Pricing + Settings; regular team members see only
-  // Designs & Leads. Gate both the tabs and the rendered content (so a non-admin
-  // can't reach the other views even by forcing the tab state).
-  const isAdmin = tenant.role === "owner" || tenant.role === "admin";
-  // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
-  // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
-
-  // While VIEWING another tenant, operator status is the admin grant. isAdmin above
-  // describes the operator's role in their OWN client_users row — routinely "user", or
-  // absent entirely — so using it here would leave Settings dead in the viewed account,
-  // which is exactly the "only two tabs" symptom Carolyn reported.
-  const canAdmin = viewing ? isOperator : isAdmin;
+  // isAdmin / canAdmin / effClientId are declared ABOVE the early returns (null-safe),
+  // because the hook-order rules require every hook to run before them. Only the per-area
+  // map is resolved here — it needs a settled tenant.
+  //
   // The caller's resolved per-area map, straight from the status call (migration 100).
   // Operators viewing a tenant have none — their rights come from app_operators — and
   // canAdmin short-circuits every check below for them.
   const myAccess = (tenant && tenant !== "none") ? tenant.access : null;
-  // The tenant every surface should read and write. Feeds the clientId props and the
-  // remount keys; the invoke wrapper handles the edge functions.
-  const effClientId = viewing ? viewing.clientId : tenant.clientId;
   // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
@@ -12252,7 +12714,12 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
-          {soonItem("view-3d", "3D Design", "3rd Qtr")}
+          {/* INTERIM GATE (Phase 4 replaces this with featureOn("view_3d") once
+              client_feature_grants exists). isOperator only: 3D is DARK for every
+              tenant, and visible to CSM Synergy immediately. It deliberately does NOT
+              use featureOn yet - view_3d has billing_plans rows, so the exempt blanket
+              would hand it to every grandfathered tenant the moment this merged. */}
+          {isOperator ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
@@ -12364,8 +12831,8 @@ function Dashboard({ session }) {
               max-width would box the designer in); hidden, never unmounted, off-tab. */}
           {designerOpened && !gateLocked && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
-              <DesignerTab key={"d-" + effClientId} clientId={effClientId} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
-                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} />
+              <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={isOperator} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
+                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} setup3d={setup3d} />
             </div>
           )}
           <div className="ss-inner">
@@ -12586,17 +13053,18 @@ function Dashboard({ session }) {
               )
             )}
             {!gateLocked && activeTab === "view-3d" && (
-              <ComingSoon
-                title="3D Design"
-                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>}
-                blurb="Let customers see the building they just designed in 3D, not just as a floor plan. Spin it, look at it from any angle, and see their real style, size, and color choices on the actual structure — so they know exactly what's showing up on their lot."
-                bullets={[
-                  "Turn any design into a 3D view — no extra work for you",
-                  "Their own siding, trim, and roof colors shown on the building",
-                  "Doors, windows, and lofts appear right where they placed them",
-                  "Share the 3D view alongside the estimate to help close the sale",
-                ]}
-              />
+              isOperator
+                ? <Studio3DStatus clientId={effClientId} canAdmin={canAdmin} navigate={navigate} />
+                : <ComingSoon
+                    title="3D Design"
+                    icon={ICONS["view-3d"]}
+                    blurb="Let a shopper turn their floor plan into a real 3D building - their sizes, their roof, their colors - and put that view straight onto the quote."
+                    bullets={[
+                      "Orbit the building the customer just designed",
+                      "Roof profile, cladding, doors and windows in their colors",
+                      "The 3D view rides along on the emailed quote",
+                    ]}
+                  />
             )}
             {!gateLocked && activeTab === "rent-to-own-contracts" && (
               <ComingSoon

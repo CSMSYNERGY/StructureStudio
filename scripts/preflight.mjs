@@ -469,7 +469,11 @@ function run(files) {
     const end = rest.search(/\n\};/);
     const table = rest.slice(0, end);
     const body = rest.slice(end);
-    const gated = new Set([...table.matchAll(/^\s*([a-z_]+)\s*:/gm)].map((m) => m[1]));
+    // [a-z0-9_] not [a-z_]: an action name carrying a DIGIT (save_style_d3) never matched, so
+    // the table could not satisfy this rule for it by ANY spelling. The only ways out were
+    // renaming a deployed action or --no-verify -- i.e. a correctness gate teaching people to
+    // bypass it. Surfaced by the 3D merge, which grafted six such actions in at once.
+    const gated = new Set([...table.matchAll(/^\s*([a-z0-9_]+)\s*:/gm)].map((m) => m[1]));
     const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
     for (const a of used) {
       if (!gated.has(a)) {

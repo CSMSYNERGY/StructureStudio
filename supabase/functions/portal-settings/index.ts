@@ -14,6 +14,7 @@ import {
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, SPEC_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -49,6 +50,20 @@ const GATES: GateTable = {
   reorder_styles:            { area: "settings_structures", level: "edit" },
   set_style_active:          { area: "settings_structures", level: "edit" },
   set_style_estimate_image:  { area: "settings_structures", level: "edit" },
+
+  // ── Per-style 3D appearance (the `d3` spec, photos and phone-scan model) ──
+  // Grafted from beta-2.0 in the 3D merge. These write `building_styles.d3` /
+  // `.d3_photos` / `model_*`, which `get_config` emits to every ANON browser, so they are
+  // structure edits and gate exactly like every other style writer above. They arrived
+  // with no GATES lines at all: the dispatcher fails closed, so they would have 403'd on
+  // a real builder rather than shipping open -- and preflight's cross-check is what named
+  // them here instead of letting that surface as "the 3D calibration button is broken".
+  save_style_d3:             { area: "settings_structures", level: "edit" },
+  calibrate_style_ai:        { area: "settings_structures", level: "edit" },
+  upload_style_photo:        { area: "settings_structures", level: "edit" },
+  save_style_model:          { area: "settings_structures", level: "edit" },
+  set_style_model_status:    { area: "settings_structures", level: "edit" },
+  style_model_url:           { area: "settings_structures", level: "edit" },
 
   // ── Options & colours ────────────────────────────────────────────────────
   save_colors:                    { area: "settings_options", level: "edit" },
@@ -784,7 +799,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
+      // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
+      // styles are calibrated and the editor can reopen one for tuning.
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -810,7 +827,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings });
+    // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
+    // builder click a button that can only fail: the Anthropic key is an edge secret, so the
+    // browser has no other way to know whether the feature is configured.
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -1385,6 +1405,233 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (error) return dbFail(req, clientId, "save that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
+  }
+
+  // ─── 3D setup (086): the builder calibrates how their buildings look in 3D ───
+  // These three replace an operator-only path that could not work: admin-save-settings'
+  // save_style_d3 wrote client_configs.config, a column dropped in 020, so every save
+  // 404'd. Doing it here instead means the BUILDER can do it themselves against their own
+  // JWT — which is the whole product bet (no setup fees, no work queued on us).
+
+  // Save one style's 3D appearance spec. Keyed on styleValue (the style `key`) because
+  // that is all the embedded designer knows — get_config emits `value`, never the row id —
+  // and (client_id, key) is unique. styleId is accepted too for callers that have it.
+  // Resolve one of this tenant's styles by key-or-id, and report whether its 3D setup is
+  // LOCKED. Shared by every write below so the lock cannot be enforced in one place and
+  // forgotten in another.
+  const findStyleFor3D = async (styleValue: string, styleId: string) => {
+    let q = admin.from("building_styles").select("id, key, model_status, model_url").eq("client_id", clientId);
+    q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
+    const { data, error } = await q.maybeSingle();
+    if (error) return { err: json({ error: error.message }, 500) };
+    if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
+    return { style: data as { id: string; key: string; model_status: string; model_url: string | null } };
+  };
+  // The lock freezes SETUP only. Prices, sizes, active/hidden and the estimate-image flag stay
+  // editable on a locked style on purpose: those are commercial decisions a builder makes every
+  // week, while the geometry is the thing that must stop moving once it matches a real building
+  // customers are being quoted against.
+  const LOCKED_MSG = "This style's 3D setup is locked. Unlock it first if you really need to change the shape.";
+
+  if (action === "save_style_d3") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    const clean = sanitizeD3Spec(payload.d3);
+    if (!clean.ok) return json({ error: clean.error }, 400);
+    const photos = sanitizePhotoUrls(payload.d3Photos);
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    const { error, count } = await admin.from("building_styles")
+      .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
+      .eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, d3: clean.d3, d3Photos: photos });
+  }
+
+  // ─── Building scan (094) ───────────────────────────────────────────────────────────────
+  // The browser uploads the .glb straight into the PRIVATE `models` bucket with its own
+  // session (the same route portal.html already uses for feedback attachments) — a 10-40 MB
+  // mesh cannot go through an edge function, which would have to buffer it as base64 inside a
+  // 256 MB / 2 s worker. These actions therefore handle the metadata and the lifecycle, and
+  // one of them hands back a short-lived signed URL so the editor can load a mesh that is
+  // deliberately not public.
+
+  // Record an uploaded scan against a style. `modelPath` is an object path, never a URL, and
+  // it is re-derived from the tenant here so a caller cannot point a style at another
+  // tenant's object by sending a crafted path.
+  if (action === "save_style_model") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const rawPath = String(payload.modelPath ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    if (!rawPath) return json({ error: "modelPath is required." }, 400);
+    if (!rawPath.startsWith(`${clientId}/`) || rawPath.includes("..") || !/\.glb$/i.test(rawPath)) {
+      return json({ error: "That scan path does not belong to this builder." }, 400);
+    }
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    // Confirm the object really is there and really is a GLB before pointing a style at it:
+    // catches a failed upload, a renamed file, or anything that is not glTF, instead of
+    // storing a reference that breaks later. Deliberately a RANGE request rather than
+    // storage.download(): the client SDK has no range option, so downloading would pull the
+    // whole 10-40 MB mesh into a 256 MB worker to read twelve bytes.
+    const sbUrl = Deno.env.get("SUPABASE_URL");
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!sbUrl || !svcKey) return json({ error: "Storage is not configured on the server." }, 500);
+    let magic: Uint8Array;
+    try {
+      const headRes = await fetch(`${sbUrl}/storage/v1/object/models/${rawPath.split("/").map(encodeURIComponent).join("/")}`, {
+        headers: { Authorization: `Bearer ${svcKey}`, apikey: svcKey, Range: "bytes=0-11" },
+      });
+      if (!headRes.ok && headRes.status !== 206) {
+        return json({ error: "That scan is not in storage — the upload did not finish. Try uploading it again." }, 400);
+      }
+      magic = new Uint8Array(await headRes.arrayBuffer());
+    } catch (e) {
+      return json({ error: `Could not read that scan: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+    // "glTF" — the GLB container magic. Anything else is a renamed .obj/.usdz/.zip.
+    const isGlb = magic.length >= 4 && magic[0] === 0x67 && magic[1] === 0x6C && magic[2] === 0x54 && magic[3] === 0x46;
+    if (!isGlb) return json({ error: "That file is not a .glb scan — its header does not say glTF. Re-export it as GLB." }, 400);
+    const meta = (payload.modelMeta && typeof payload.modelMeta === "object" && !Array.isArray(payload.modelMeta))
+      ? payload.modelMeta : null;
+    if (meta && JSON.stringify(meta).length > 4096) return json({ error: "Those scan measurements are implausibly large." }, 400);
+    const { error, count } = await admin.from("building_styles").update({
+      model_url: rawPath, model_status: "uploaded", model_uploaded_at: new Date().toISOString(),
+      model_meta: meta, model_locked_at: null, updated_at: new Date().toISOString(),
+    }, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, modelPath: rawPath });
+  }
+
+  // Move a style through the scan lifecycle. `locked` is what Carolyn asked for: once the 3D
+  // matches the real building, stop the shape moving. Unlocking is allowed — a builder who
+  // rebuilds a model or re-scans must not need us — but it is an explicit act, which is the
+  // whole point of the state.
+  if (action === "set_style_model_status") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const status = String(payload.status ?? "").trim();
+    if (!["none", "uploaded", "calibrated", "locked"].includes(status)) {
+      return json({ error: `Unknown 3D status "${status}".` }, 400);
+    }
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (status !== "none" && !found.style!.model_url && status !== "calibrated") {
+      return json({ error: "There is no scan on this style yet." }, 400);
+    }
+    const patch: Record<string, unknown> = { model_status: status, updated_at: new Date().toISOString() };
+    patch.model_locked_at = status === "locked" ? new Date().toISOString() : null;
+    if (status === "none") { patch.model_url = null; patch.model_meta = null; patch.model_uploaded_at = null; }
+    const { error, count } = await admin.from("building_styles")
+      .update(patch, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, status });
+  }
+
+  // Short-lived signed URL so the editor can load a scan out of the private bucket. Ten
+  // minutes is long enough to download and parse a 40 MB mesh and short enough that a URL
+  // pasted somewhere by accident stops working.
+  if (action === "style_model_url") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    const path = found.style!.model_url;
+    if (!path) return json({ ok: true, url: null, status: found.style!.model_status });
+    const signed = await admin.storage.from("models").createSignedUrl(path, 600);
+    if (signed.error || !signed.data) return json({ error: `Could not open that scan: ${signed.error?.message ?? "unknown"}` }, 500);
+    return json({ ok: true, url: signed.data.signedUrl, status: found.style!.model_status });
+  }
+
+  // Upload-only: a reference photo of a real building, stored beside the style images in
+  // `branding` and handed back as a URL for a d3Photos slot. Mirrors upload_fixture_image.
+  // (Repo migration 041 proposed putting these in floor-plans; that bucket has been
+  // PDF-only since 071, so 041 is dead and must not be applied.)
+  if (action === "upload_style_photo") {
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+    const path = `${clientId}/style-photo-${Date.now()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
+  // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the
+  // result before anything is saved — this only ever returns a draft.
+  //
+  // Capped per tenant per day because it spends real money per call and is now reachable
+  // by any owner/admin rather than by whoever holds the operator password. The ledger row
+  // is written BEFORE the model call on purpose: a failing style would otherwise be a free
+  // retry loop against our API key.
+  if (action === "calibrate_style_ai") {
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls);
+    if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
+
+    const DAILY_CAP = 10;
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count: used, error: capErr } = await admin.from("ai_style_calls")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId).gt("called_at", since);
+    // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
+    // not brick calibration, and the per-call cost is cents.
+    if (capErr) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+        message: `AI calibration cap count failed, allowing the call: ${capErr.message}`,
+      });
+    } else if ((used ?? 0) >= DAILY_CAP) {
+      return json({ error: `Daily limit reached (${DAILY_CAP} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+    }
+    await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null });
+
+    let res: Response;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "claude-sonnet-5",
+          max_tokens: 700,
+          messages: [{
+            role: "user",
+            content: [
+              // URL sources: the photos live in public buckets, so Anthropic can fetch them
+              // and we never proxy the bytes through this function.
+              ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
+              { type: "text", text: SPEC_PROMPT },
+            ],
+          }],
+        }),
+      });
+    } catch (e) {
+      return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 300);
+      return json({ error: `AI service returned ${res.status}: ${body}` }, 502);
+    }
+    const data = await res.json().catch(() => null) as any;
+    const text = data?.content?.[0]?.text ?? "";
+    const drafted = parseModelSpec(text);
+    if (!drafted.ok) return json({ error: drafted.error }, 502);
+    return json({ ok: true, d3: drafted.d3 });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;

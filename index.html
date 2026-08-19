@@ -3,23 +3,29 @@
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
 </head><body><div id="root"></div>
-<!-- SELF-HOSTED, deliberately not a CDN. These four are this page's only dependencies and there
-     is no build step, so one blocked or failed third-party request used to blank the page
+<!-- SELF-HOSTED, deliberately not a CDN. These three libraries are this page's only external
+     dependencies, and one blocked or failed third-party request used to blank the page
      entirely - twice in the wild (2026-08-04, 2026-08-05), the second time to Googlebot. Serving
      them same-origin removes that failure mode instead of reporting it, and pins supabase-js,
      which was floating on @2 and could change under us on any npm publish (it resolved to
-     2.112.1 the day these were vendored). ROOT-ABSOLUTE on purpose: portal.html is served at
-     /portal/<page>/<sub> too, where a relative src resolves against the URL depth and gets
-     swallowed by the /portal/* splat - the bug that once blanked the whole portal. Version is in
-     the filename so a bump is a visible rename, never a silent byte change. No crossorigin
-     attribute: same-origin scripts already give window.onerror full error detail, which is the
-     only thing that attribute bought us across a CDN. Keep all three pages identical and keep
-     the files present - preflight enforces both. Provenance + update recipe: vendor/README.md. -->
+     2.112.1 the day these were vendored). babel-standalone left this list on 2026-08-13: the
+     app now ships as COMPILED artifacts (the defer'd *.compiled.js tags below, built by
+     `npm run compile` from the .jsx sources — scripts/compile.mjs), so visitors no longer
+     download a 2.85MB compiler or pay seconds of main-thread compile per load; the vendored
+     Babel file remains in /vendor/ as the OFFLINE compiler. ROOT-ABSOLUTE on purpose:
+     portal.html is served at /portal/<page>/<sub> too, where a relative src resolves against
+     the URL depth and gets swallowed by the /portal/* splat - the bug that once blanked the
+     whole portal. Version is in the filename so a bump is a visible rename; the compiled tags
+     carry content-hash ?v= busters that `npm run compile` rewrites. No crossorigin attribute:
+     same-origin scripts already give window.onerror full error detail. Keep all three pages
+     identical and keep the files present - preflight enforces both. Provenance + update
+     recipe: vendor/README.md. -->
 <script src="/vendor/react-18.2.0.production.min.js"></script>
 <script src="/vendor/react-dom-18.2.0.production.min.js"></script>
 <script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
-<script defer src="/structure-studio.component.compiled.js?v=605c0d58"></script>
-<script defer src="/index.mount.compiled.js?v=3a3e57b3"></script><script data-ss-app="designer">
+
+<script defer src="/structure-studio.component.compiled.js?v=5754c8c4"></script>
+<script defer src="/index.mount.compiled.js?v=3a00b23a"></script><script data-ss-app="designer">
 /* ── Dependency boot guard ────────────────────────────────────────────────────────────────
    The three /vendor/ tags above are this page's only library dependencies, and the app
    itself arrives as COMPILED, defer'd classic scripts (built offline by scripts/compile.mjs
