@@ -64,6 +64,11 @@
 import { Linter } from "eslint";
 import globalsPkg from "globals";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// The compile targets are the single source of truth for WHICH sources exist and how each
+// one is assembled. Importing them means a new file (or a new portal part) is linted the
+// moment it is compiled -- the alternative, a second hand-kept list here, is precisely how
+// this gate has twice ended up reporting clean while running zero rules.
+import { TARGETS, targetName, readTarget, PORTAL_PARTS } from "./compile.mjs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -500,14 +505,30 @@ function run(files) {
     errors.push(`cache-buster mismatch: index.html has v=${vi ?? "MISSING"}, portal.html has v=${vp ?? "MISSING"}`);
   }
 
+  // No ORPHAN portal part. A .jsx under portal/ that is not in PORTAL_PARTS is not compiled,
+  // not linted and not shipped -- it just silently does nothing, which is the worst possible
+  // failure for a file someone believes they are editing. The reverse (a listed part that is
+  // missing) already fails loudly, because compile.mjs cannot read it.
+  const partSet = new Set(PORTAL_PARTS);
+  for (const f of readdirSync(join(root, "portal")).filter((f) => f.endsWith(".jsx"))) {
+    if (!partSet.has(`portal/${f}`)) {
+      errors.push(`portal/${f}: not listed in PORTAL_PARTS (scripts/compile.mjs) -- it is `
+        + "compiled by nothing, linted by nothing and shipped nowhere. Add it in the right "
+        + "ORDER position, or delete it.");
+    }
+  }
+
   return errors;
 }
 
-const load = () => Object.fromEntries(
-  ["index.html", "portal.html", "admin.html",
-   "index.mount.jsx", "portal.app.jsx", "admin.app.jsx",
-   "structure-studio.component.js", "StructureStudio.jsx"]
-    .map((f) => [f, read(f)]));
+const load = () => Object.fromEntries([
+  ...["index.html", "portal.html", "admin.html"].map((f) => [f, read(f)]),
+  // Every compile target, under its reported name and with its parts already assembled --
+  // so `files["portal.app.jsx"]` is the exact text that gets compiled even though no such
+  // file exists on disk anymore (it is portal/01-core.jsx ... 08-shell.jsx since 2026-08-19).
+  ...TARGETS.map((t) => [targetName(t), readTarget(t)]),
+  ["StructureStudio.jsx", read("StructureStudio.jsx")],
+]);
 
 // ── Compiled artifacts: the drift gate ───────────────────────────────────────────────────
 // The pages ship artifacts compiled OFFLINE from the sources linted above (scripts/

@@ -1,0 +1,1545 @@
+// ─── Operator Accounts tab ───
+// Lists every tenant (operator-portal:list_clients, server-side app_operators gate)
+// and opens one with FULL access, GHL-subaccounts style. Every list/view is audit-logged,
+// and every cross-tenant read/write is re-authorized server-side against app_operators.
+function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
+  const [clients, setClients] = useState(null); // null = loading
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");
+  // Users are fetched PER TENANT, only when a row is expanded — opening the tab must not pull
+  // every user's name, email and phone into the browser, and each expansion is audit-logged
+  // against the tenant it belongs to. `users[clientId] === undefined` means "not loaded yet".
+  const [open, setOpen] = useState({});
+  const [users, setUsers] = useState({});
+  const [userErr, setUserErr] = useState({});
+
+  // In-flight guard. Expand-all fires one request per tenant at once, and a second click
+  // (or a refresh landing mid-expand) would otherwise duplicate every one of them.
+  const inFlight = useRef({});
+
+  // Per-user reset state, keyed by userId. Kept per-user rather than as one shared flag so
+  // resetting person A doesn't grey out the button next to person B.
+  const [resetBusy, setResetBusy] = useState({});
+  const [resetInfo, setResetInfo] = useState({});
+
+  const sendReset = async (clientId, u) => {
+    if (resetBusy[u.userId]) return;
+    setResetBusy((b) => ({ ...b, [u.userId]: true }));
+    setResetInfo((r) => ({ ...r, [u.userId]: null }));
+    try {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", {
+        body: { action: "send_reset_link", clientId, userId: u.userId },
+      });
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setResetInfo((r) => ({ ...r, [u.userId]: { error: msg || "Could not send the reset link." } }));
+        return;
+      }
+      setResetInfo((r) => ({ ...r, [u.userId]: data || {} }));
+    } finally {
+      setResetBusy((b) => { const n = { ...b }; delete n[u.userId]; return n; });
+    }
+  };
+
+  const loadUsers = useCallback(async (clientId) => {
+    if (inFlight.current[clientId]) return;
+    inFlight.current[clientId] = true;
+    setUserErr((e) => ({ ...e, [clientId]: null }));
+    try {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId } });
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setUserErr((e) => ({ ...e, [clientId]: msg || "Could not load users." }));
+        setUsers((u) => ({ ...u, [clientId]: [] }));
+        return;
+      }
+      setUsers((u) => ({ ...u, [clientId]: Array.isArray(data && data.users) ? data.users : [] }));
+    } finally {
+      // Always released, including on the error path — otherwise one failure would leave
+      // that tenant permanently unrefreshable for the rest of the session.
+      delete inFlight.current[clientId];
+    }
+  }, []);
+
+  const toggle = (clientId) => {
+    const next = !open[clientId];
+    setOpen((o) => ({ ...o, [clientId]: next }));
+    if (next && users[clientId] === undefined) loadUsers(clientId);
+  };
+
+  const q = query.trim().toLowerCase();
+  const filtered = (clients || []).filter((c) => !q || c.clientId.toLowerCase().includes(q) || (c.companyName || "").toLowerCase().includes(q));
+
+  // Expand/collapse acts on what is CURRENTLY FILTERED, not the whole list — after a search
+  // for "barns", "Expand all" that also opened every hidden tenant would be a surprise (and
+  // would fetch personal details for accounts you are not looking at).
+  const expandAll = () => {
+    setOpen((o) => {
+      const next = { ...o };
+      filtered.forEach((c) => { next[c.clientId] = true; });
+      return next;
+    });
+    filtered.forEach((c) => { if (users[c.clientId] === undefined) loadUsers(c.clientId); });
+  };
+  const collapseAll = () => setOpen({});
+  const openCount = filtered.filter((c) => open[c.clientId]).length;
+
+  // After an edit, re-fetch only the tenants currently expanded — the edited name has to
+  // appear without collapsing what the operator was looking at.
+  useEffect(() => {
+    if (!usersRefreshKey) return;
+    Object.keys(open).filter((k) => open[k]).forEach((k) => loadUsers(k));
+  }, [usersRefreshKey]);
+
+  const roleChip = (r) => ({
+    fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", borderRadius: 5, padding: "1px 5px",
+    color: r === "owner" ? "#065F46" : r === "admin" ? "#1E40AF" : "#475569",
+    background: r === "owner" ? "#D1FAE5" : r === "admin" ? "#DBEAFE" : "#F1F5F9",
+    border: `1px solid ${r === "owner" ? "#6EE7B7" : r === "admin" ? "#93C5FD" : "#E2E8F0"}`,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error: err } = await sb.functions.invoke("operator-portal", { body: { action: "list_clients" } });
+      if (cancelled) return;
+      if (err) {
+        let msg = err.message;
+        try { const ctx = await err.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
+        setError(msg || "Could not load accounts."); setClients([]); return;
+      }
+      // Null-guard the body: a 200 with no/unexpected payload must show an error, not
+      // leave the tab spinning on clients === null forever.
+      if (!data || !Array.isArray(data.clients)) {
+        setError("Synergy returned no account list — reload to try again."); setClients([]); return;
+      }
+      setClients(data.clients);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+
+  return (
+    <div style={S.card}>
+      <CardHead
+        title="Builder accounts"
+        count={clients ? (query ? `${filtered.length} of ${clients.length}` : clients.length) : null}
+        desc="Open any builder's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values."
+        right={<>
+          {/* Acts on the filtered set, and each is disabled when it would do nothing — so the
+              control tells you the current state instead of being a pair of dead buttons. */}
+          <button type="button" onClick={expandAll} disabled={!filtered.length || openCount === filtered.length}
+            title="Show the users under every account listed"
+            style={{ ...S.btn("#F1F5F9", openCount === filtered.length || !filtered.length ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
+            Expand all
+          </button>
+          <button type="button" onClick={collapseAll} disabled={openCount === 0}
+            title="Hide all user lists"
+            style={{ ...S.btn("#F1F5F9", openCount === 0 ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
+            Collapse all
+          </button>
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
+            style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 190 }} />
+        </>}
+      />
+      {error && <div style={{ color: "#B91C1C", fontSize: 13, marginBottom: 10 }}>{error}</div>}
+      {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
+      {clients !== null && !error && filtered.length === 0 && <div style={{ color: "#64748B", fontSize: 13 }}>No accounts match.</div>}
+      {filtered.map((c) => (
+        <div key={c.clientId} style={{ borderBottom: "1px solid #F1F5F9" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px" }}>
+            {/* The whole identity block toggles, so the hit target is the row rather than a
+                6px chevron. aria-expanded so it reads as a disclosure, not a mystery button. */}
+            <button type="button" onClick={() => toggle(c.clientId)}
+              aria-expanded={!!open[c.clientId]}
+              title={open[c.clientId] ? "Hide users" : "Show users"}
+              style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", textAlign: "left" }}>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#94A3B8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                style={{ flexShrink: 0, transform: open[c.clientId] ? "rotate(90deg)" : "none", transition: "transform .12s" }}><path d="M9 18l6-6-6-6"/></svg>
+              <div style={{ width: 34, height: 34, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
+                {(c.companyName || c.clientId).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{c.companyName}</div>
+                <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                  {c.clientId}
+                  {c.userCount != null && <> · {c.userCount} {c.userCount === 1 ? "user" : "users"}</>}
+                </div>
+              </div>
+            </button>
+            {viewing && viewing.clientId === c.clientId
+              ? <span style={{ fontSize: 12, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 7, padding: "5px 10px" }}>Viewing</span>
+              : <button type="button" onClick={() => onOpen({ clientId: c.clientId, companyName: c.companyName })} style={S.btn("#1E293B", "#FFF")}>Open portal →</button>}
+          </div>
+          {open[c.clientId] && (
+            <div style={{ padding: "2px 4px 12px 42px" }}>
+              {users[c.clientId] === undefined && <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "6px 0" }}>Loading users…</div>}
+              {userErr[c.clientId] && <div style={{ fontSize: 12.5, color: "#B91C1C", padding: "6px 0" }}>{userErr[c.clientId]}</div>}
+              {Array.isArray(users[c.clientId]) && users[c.clientId].length === 0 && (
+                <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "6px 0" }}>No logins linked to this account yet.</div>
+              )}
+              {Array.isArray(users[c.clientId]) && users[c.clientId].length > 0 && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead><tr>
+                      {["Name", "Email", "Phone", "Role", "Last sign-in", ""].map((h, i) => (
+                        <th key={i} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: "#94A3B8", padding: "4px 8px 6px 0", whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {users[c.clientId].map((u) => (
+                        <React.Fragment key={u.userId}>
+                        <tr style={{ borderTop: "1px solid #F1F5F9" }}>
+                          <td style={{ padding: "7px 8px 7px 0", color: u.fullName ? "#1E293B" : "#94A3B8", fontWeight: u.fullName ? 700 : 400 }}>
+                            {u.fullName || "— not set —"}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "#475569" }}>
+                            {u.email || <span style={{ color: "#94A3B8" }}>unknown</span>}
+                            {u.email && !u.emailConfirmed && (
+                              <span title="Has not confirmed their email / set a password yet" style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", color: "#92400E", background: "#FEF3C7", borderRadius: 5, padding: "1px 5px" }}>pending</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: u.phone ? "#475569" : "#CBD5E1" }}>{u.phone || "—"}</td>
+                          <td style={{ padding: "7px 8px 7px 0", whiteSpace: "nowrap" }}>
+                            <span style={roleChip(u.role)}>{u.role}</span>
+                            {/* Operator is cross-tenant (app_operators) — a separate badge, never
+                                merged into the tenant role, which would misstate who they are. */}
+                            {u.isOperator && (
+                              <span title="CSM Synergy operator — access spans every tenant, not just this one"
+                                style={{ marginLeft: 5, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", color: "#3730A3", background: "#E0E7FF", border: "1px solid #A5B4FC", borderRadius: 5, padding: "1px 5px" }}>operator</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "#94A3B8", whiteSpace: "nowrap" }}>
+                            {u.lastSignInAt ? new Date(u.lastSignInAt).toLocaleDateString() : "never"}
+                          </td>
+                          <td style={{ padding: "7px 0", textAlign: "right", whiteSpace: "nowrap" }}>
+                            <button type="button" onClick={() => onEditUser(c, u)}
+                              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 9px", fontSize: 11 }}>Edit</button>
+                            {/* Disabled without an email rather than hidden: "why is there no
+                                button here" is a worse question than a tooltip that answers it. */}
+                            <button type="button" onClick={() => sendReset(c.clientId, u)}
+                              disabled={!u.email || !!resetBusy[u.userId]}
+                              title={u.email
+                                ? `Email ${u.email} a link to set a new password`
+                                : "This login has no email address, so nothing can be sent to it"}
+                              style={{ ...S.btn("#F1F5F9", (!u.email || resetBusy[u.userId]) ? "#CBD5E1" : "#334155"), padding: "4px 9px", fontSize: 11, marginLeft: 5 }}>
+                              {resetBusy[u.userId] ? "Sending…" : "Send reset"}
+                            </button>
+                          </td>
+                        </tr>
+                        {resetInfo[u.userId] && (
+                          <tr>
+                            <td colSpan={6} style={{ padding: "0 0 8px 0" }}>
+                              {resetInfo[u.userId].error ? (
+                                <div style={{ fontSize: 12, color: "#B91C1C" }}>{resetInfo[u.userId].error}</div>
+                              ) : (
+                                <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px" }}>
+                                  <div style={{ fontSize: 12, color: resetInfo[u.userId].emailSent ? "#166534" : "#92400E", fontWeight: 600 }}>
+                                    {resetInfo[u.userId].note || (resetInfo[u.userId].emailSent ? "Sent." : "Not sent.")}
+                                  </div>
+                                  {/* The link is shown every time, not only on failure. Email
+                                      delivery is the part that has actually failed in onboarding,
+                                      and by then the operator has usually closed this row. */}
+                                  {resetInfo[u.userId].resetLink && (
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                                      <input readOnly value={resetInfo[u.userId].resetLink}
+                                        onFocus={(e) => e.target.select()}
+                                        style={{ flex: 1, minWidth: 0, border: "1px solid #E2E8F0", borderRadius: 6, padding: "5px 8px", fontSize: 11, color: "#475569", fontFamily: "ui-monospace, monospace" }} />
+                                      <button type="button"
+                                        onClick={() => { try { navigator.clipboard.writeText(resetInfo[u.userId].resetLink); } catch (_e) {} }}
+                                        style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 9px", fontSize: 11, flexShrink: 0 }}>Copy</button>
+                                    </div>
+                                  )}
+                                  {/* Always lands on the production portal, by design — one Supabase
+                                      project serves both hosts, so a password set there works on beta
+                                      too. Said out loud because a beta operator WILL notice. */}
+                                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5 }}>
+                                    The link opens app.structurestudiosuite.com/portal — a password set there works everywhere, including beta.
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Billing gate ───
+// Shown INSTEAD of the tab content while a tenant's required subscription isn't
+// active. Every nav item stays visible (with a lock) so they can see what the product
+// includes, but clicking any of them lands here. For an admin the plan picker is
+// embedded directly — the fix sits right where the problem is explained, rather than
+// sending them hunting through Settings. A non-admin can't pay, so they get told who can.
+const GATE_COPY = {
+  never_paid: {
+    title: "Activate your account",
+    body: "Welcome to StructureStudio. Choose your plan below to switch everything on — your designer link, designs, contacts, and settings all unlock as soon as payment goes through.",
+  },
+  past_due: {
+    title: "Your last payment didn't go through",
+    body: "We couldn't process the most recent charge, so the account is on hold. Updating your card below restores access right away.",
+  },
+  cancelled: {
+    title: "Your subscription has ended",
+    body: "This account was cancelled. Everything is exactly as you left it — resubscribe below and it all comes straight back.",
+  },
+  paused: {
+    title: "Your subscription is paused",
+    body: "Access is on hold while the subscription is paused. Resume below to pick up where you left off.",
+  },
+};
+
+function BillingGate({ reason, isAdmin }) {
+  const c = GATE_COPY[reason] || GATE_COPY.never_paid;
+  return (
+    <div>
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 14, padding: "22px 24px", color: "#FFF", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>{c.title}</div>
+            <div style={{ fontSize: 13, color: "#D6E4F0", marginTop: 4, lineHeight: 1.5 }}>{c.body}</div>
+          </div>
+        </div>
+      </div>
+      {isAdmin
+        ? <BillingView />
+        : (
+          <div style={S.card}>
+            <div style={S.h2}>Ask your account owner to activate</div>
+            <p style={{ fontSize: 13, color: "#64748B", lineHeight: 1.6, margin: 0 }}>
+              Only an owner or admin on this account can manage the subscription. Once they activate it,
+              everything here switches on for you automatically — nothing for you to redo.
+            </p>
+          </div>
+        )}
+    </div>
+  );
+}
+
+// ─── Dashboard shell ───
+// ═══ Operator Admin console (native) ═════════════════════════════════════════
+// Ported out of admin.html's iframe on 2026-07-30. Carolyn, 2026-07-29: "can't we just
+// bring admin in here instead of iframing it?" / "What I would rather do is like I did
+// for settings."
+//
+// Three things about this port are load-bearing:
+//
+// 1. It is built from PORTAL's primitives (S, CardHead, SearchInput, PasswordInput), not
+//    admin.html's. admin.html declares its own `S`, `ACCENT`, `PasswordInput` and CSV
+//    helpers at top level; pasting those in would throw "Identifier 'S' has already been
+//    declared", which kills this entire script — not just the Admin tab. So they are not
+//    ported at all, and the reuse is also what makes Admin *look* like Settings.
+// 2. There is NO password login. A JWT operator is authorized by app_operators membership
+//    (_shared/adminAuth.ts). The password survives only as step-up on the three actions
+//    whose blast radius is bigger than one tenant.
+// 3. The client being administered is deliberately NOT the portal's `viewing` tenant.
+//    admin-catalog takes clientId straight from the body with no session cross-check, so
+//    binding them would let "open Junior Barns to look at a design" silently re-aim the
+//    delete-client confirm. They stay separate, and the chosen client is on screen in the
+//    banner next to every destructive control.
+
+// Port of admin.html's api(). Kept (rather than using an inline invoke) for the
+// error.context unwrap: supabase-js reports every non-2xx as the opaque "Edge Function
+// returned a non-2xx status code", and the real {error} body is only on the raw Response.
+// The .clone() matters — the body can only be read once.
+async function adminApi(action, body, adminPassword) {
+  const { data, error } = await sb.functions.invoke("admin-catalog", {
+    body: { action, ...(adminPassword ? { adminPassword } : {}), ...(body || {}) },
+    // Only step-up calls opt out of the session-expiry intercept — those are the ones where a
+    // 401 means "wrong operator password", not "dead JWT" (see SS_NO_EXPIRY_HEADER). An adminApi
+    // call WITHOUT a password still 401s only on a real expiry, so it must keep the guard.
+    ...(adminPassword ? { headers: { [SS_NO_EXPIRY_HEADER]: "1" } } : {}),
+  });
+  if (error) {
+    let msg = error.message || "request failed";
+    let status = 0;
+    try {
+      const ctx = error.context;
+      if (ctx) {
+        status = ctx.status || 0;
+        if (typeof ctx.json === "function") {
+          const b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+          if (b && b.error) msg = b.error;
+        }
+      }
+    } catch (_) { /* fall back to the generic message */ }
+    const e = new Error(msg);
+    e.status = status;
+    throw e;
+  }
+  if (data && data.error) throw new Error(data.error);
+  return data;
+}
+
+function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
+
+function DoorIcon({ double = false }) {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="1.5" />
+      {double && <line x1="12" y1="3" x2="12" y2="21" />}
+      <circle cx={double ? 10.2 : 16.5} cy="12" r="0.9" fill="currentColor" stroke="none" />
+      {double && <circle cx="13.8" cy="12" r="0.9" fill="currentColor" stroke="none" />}
+    </svg>
+  );
+}
+
+// A tiny glyph per layout-item kind, so a 40-pill grid is scannable by shape as well as
+// by label. Falls back to a dot for anything unrecognised — a new master item must never
+// render as a blank.
+function layoutItemGlyph(it) {
+  const k = String((it && (it.item_key || it.key)) || "").toLowerCase();
+  if (k.indexOf("double") !== -1 && k.indexOf("door") !== -1) return <DoorIcon double />;
+  if (k.indexOf("door") !== -1) return <DoorIcon />;
+  if (k.indexOf("window") !== -1) {
+    return (<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1.5" /><line x1="12" y1="4" x2="12" y2="20" /><line x1="3" y1="12" x2="21" y2="12" /></svg>);
+  }
+  if (k.indexOf("ramp") !== -1) {
+    return (<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 19h18L3 9z" /></svg>);
+  }
+  if (k.indexOf("loft") !== -1 || k.indexOf("shelf") !== -1) {
+    return (<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><line x1="3" y1="8" x2="21" y2="8" /><line x1="3" y1="15" x2="21" y2="15" /><line x1="6" y1="8" x2="6" y2="15" /><line x1="18" y1="8" x2="18" y2="15" /></svg>);
+  }
+  return (<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg>);
+}
+
+// Portal's chip vocabulary (CardHead's count chip, S.card hairlines) rather than
+// admin.html's 2px-ACCENT-border pills, which read as buttons rather than state.
+function AdmChip({ tone = "neutral", children, title }) {
+  const T = {
+    on:      { background: "#DBEAFF", color: "#3D3672", border: "1px solid #C3D9F7" },
+    good:    { background: "#DCFCE7", color: "#15803D", border: "1px solid #86EFAC" },
+    warn:    { background: "#FEF3C7", color: "#92400E", border: "1px solid #FCD34D" },
+    danger:  { background: "#FEE2E2", color: "#991B1B", border: "1px solid #FCA5A5" },
+    neutral: { background: "#F1F5F9", color: "#64748B", border: "1px solid #E2E8F0" },
+  }[tone] || {};
+  return <span title={title} style={{ ...T, fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "2px 7px", whiteSpace: "nowrap" }}>{children}</span>;
+}
+
+const ADM_ROW = { display: "flex", alignItems: "center", gap: 10, padding: "9px 2px", borderBottom: "1px solid #F1F5F9" };
+
+// Initials tile, same construction as the Accounts tab's — an operator recognises tenants
+// by the same mark in both places.
+function AdmTile({ name, size = 34 }) {
+  return (
+    <div style={{ width: size, height: size, borderRadius: Math.round(size / 4), background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size <= 30 ? 11 : 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
+      {String(name || "?").split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
+    </div>
+  );
+}
+
+// Which features a discount covers. HOISTED to module scope on purpose: in admin.html this
+// was declared inside AdminApp, making it a new component type on every render — its inputs
+// remount (and would lose focus) the moment anyone gives it local state.
+function FeatureScope({ features, all, setAll, picked, setPicked, disabled }) {
+  return (
+    <div style={{ marginTop: 8, opacity: disabled ? 0.5 : 1, pointerEvents: disabled ? "none" : "auto" }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, color: "#1E293B" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="radio" checked={all} onChange={() => setAll(true)} />
+          <span>Every feature</span>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="radio" checked={!all} onChange={() => setAll(false)} />
+          <span>Only the ones I pick</span>
+        </label>
+      </div>
+      {!all && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginTop: 8, paddingLeft: 2 }}>
+          {features.length === 0 && <span style={{ fontSize: 12, color: "#B91C1C" }}>No billable features found.</span>}
+          {features.map((f) => (
+            <label key={f.feature} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+              <input type="checkbox" checked={picked.indexOf(f.feature) !== -1}
+                onChange={(e) => setPicked(e.target.checked ? picked.concat([f.feature]) : picked.filter((x) => x !== f.feature))} />
+              <span>{f.name}{f.required ? " (required)" : ""}{f.availability === "coming_soon" ? " — soon" : ""}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {!all && picked.length === 0 && (
+        <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 6 }}>
+          Pick at least one feature, or choose "Every feature" — an empty list means no discount applies anywhere.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Dialogs ──────────────────────────────────────────────────────────────────
+// Same overlay shape as ProfileDialog and PricingCsv's modals; position:fixed is safe from
+// this depth because no ancestor sets transform/filter/contain.
+function AdmOverlay({ onClose, maxWidth = 520, labelledBy, children }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="presentation"
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
+      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AdmClientPicker({ clients, current, onPick, onClose }) {
+  const [q, setQ] = useState("");
+  const [hi, setHi] = useState(0);
+  const term = q.trim().toLowerCase();
+  const list = (clients || []).filter((c) => !term
+    || String(c.company_name || "").toLowerCase().indexOf(term) !== -1
+    || String(c.client_id || "").toLowerCase().indexOf(term) !== -1);
+  useEffect(() => { setHi(0); }, [q]);
+  const onKey = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi((i) => Math.min(i + 1, list.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHi((i) => Math.max(i - 1, 0)); }
+    else if (e.key === "Enter" && list[hi]) { e.preventDefault(); onPick(list[hi].client_id); }
+  };
+  return (
+    <AdmOverlay onClose={onClose} labelledBy="adm-picker-ttl">
+      <div id="adm-picker-ttl" style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a builder</div>
+      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14 }}>Everything on the builder-scoped tabs is about whoever is selected here.</div>
+      <div onKeyDown={onKey}>
+        <SearchInput value={q} onChange={setQ} placeholder="Search builders…" />
+      </div>
+      <div style={{ maxHeight: 380, overflowY: "auto", margin: "0 -4px" }}>
+        {list.length === 0 && (
+          <div style={{ fontSize: 13, color: "#94A3B8", padding: "14px 6px" }}>
+            {term ? `No builders match “${q}”.` : "No builders yet."}
+          </div>
+        )}
+        {list.map((c, i) => (
+          <button key={c.client_id} type="button" onMouseEnter={() => setHi(i)} onClick={() => onPick(c.client_id)}
+            style={{ ...ADM_ROW, width: "100%", textAlign: "left", font: "inherit", cursor: "pointer", border: "none",
+              borderBottom: "1px solid #F1F5F9", background: i === hi ? "#F8FAFC" : "transparent", padding: "9px 6px" }}>
+            <AdmTile name={c.company_name || c.client_id} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{c.company_name || c.client_id}</div>
+              <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{c.client_id}</div>
+            </div>
+            {c.client_id === current && <AdmChip tone="on">Current</AdmChip>}
+            {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
+              : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+        <button type="button" onClick={onClose} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+// One destructive action = one dialog = one password prompt. There is deliberately no
+// second "now enter your password" modal and no cached password: delete_client is terminal
+// (the tenant is gone, so "the same action again" cannot happen), so a cache would avoid
+// zero prompts and would reintroduce a resident secret.
+function AdmDeleteDialog({ client, onClose, onDeleted }) {
+  const [typed, setTyped] = useState("");
+  const [pwd, setPwd] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [attempts, setAttempts] = useState(0);
+  const id = client.client_id;
+  const locked = attempts >= 3;
+  const ready = typed.trim() === id && pwd.length > 0 && !busy && !locked;
+  const submit = async () => {
+    if (!ready) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await adminApi("delete_client", { clientId: id, confirmClientId: typed.trim() }, pwd);
+      setPwd("");
+      onDeleted(id, r);
+    } catch (e) {
+      // Split by kind. An auth failure clears the password and asks again; ANY other
+      // failure keeps it typed, so a validation error or a 500 never costs the operator a
+      // retype — that is the "asked twice for the same action" failure this avoids.
+      const authish = e.status === 401 || e.status === 403 || /password/i.test(e.message || "");
+      if (authish) { setPwd(""); setAttempts((n) => n + 1); }
+      setErr(e.message || "Could not delete this builder.");
+      setBusy(false);
+    }
+  };
+  return (
+    <AdmOverlay onClose={busy ? () => {} : onClose} maxWidth={460} labelledBy="adm-del-ttl">
+      <div id="adm-del-ttl" style={{ fontSize: 17, fontWeight: 700, color: "#991B1B", marginBottom: 10 }}>
+        Delete {client.company_name || id} permanently?
+      </div>
+      <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 16 }}>
+        This erases <strong>{id}</strong> from nine tables, deletes every login attached to it, and empties
+        its stored images and branding. Their designer link stops working immediately. <strong>This cannot
+        be undone.</strong> To stop offering the account without destroying its data, set a paused billing
+        posture instead.
+      </div>
+      {err && <div style={S.err}>{err}</div>}
+      {locked && (
+        <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 12, lineHeight: 1.5 }}>
+          Stop. Two more wrong attempts will lock this IP out of the operator password for up to six hours —
+          including the break-glass console at <code>/admin</code> and the settings writer, which share the
+          same ledger. Close this and check the password before trying again.
+        </div>
+      )}
+      <label style={S.lbl}>Type <code>{id}</code> to confirm</label>
+      <input value={typed} onChange={(e) => setTyped(e.target.value)} disabled={busy || locked}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }} placeholder={id}
+        style={{ ...S.input, marginBottom: 12 }} autoFocus />
+      <label style={S.lbl}>Operator password</label>
+      <PasswordInput value={pwd} onChange={(e) => setPwd(e.target.value)} disabled={busy || locked}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }} style={{ marginBottom: 4 }} />
+      <div style={{ fontSize: 11, color: "#94A3B8", marginBottom: 18 }}>
+        Deleting a tenant still asks for the shared password even though you're signed in — its blast radius
+        is bigger than the one account.
+      </div>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        <button type="button" onClick={onClose} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+        <button type="button" onClick={submit} disabled={!ready} title={!ready ? "Type the builder id and the operator password" : undefined}
+          style={{ ...S.btn(ready ? "#DC2626" : "#FCA5A5", "#FFF"), cursor: ready ? "pointer" : "not-allowed" }}>
+          {busy ? "Deleting…" : "Delete permanently"}
+        </button>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+// ── The shell ────────────────────────────────────────────────────────────────
+// Six sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
+// Items" wrote one tenant's row while "Master Items" read the platform-wide palette, and
+// they sat adjacent in one undifferentiated pill row with nothing saying so. The tab order
+// is also the onboarding order: create the client, give the owner a login, give them
+// styles, then items, then prices.
+const ADM_TABS = [
+  ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
+  ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
+  ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
+  ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
+  ["pricing", "Pricing",        "Bulk price and inclusion import/export by CSV",                 "client"],
+  ["master",  "Master Catalog", "The global layout-item palette every builder draws from",        "global"],
+];
+
+function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
+  const [clients, setClients] = useState(null);   // null = loading
+  const [features, setFeatures] = useState([]);
+  const [master, setMaster] = useState(null);
+  const [sel, setSel] = useState("");             // the administered client — NOT `viewing`
+  const [subState, setSubState] = useState("clients");
+  const setSub = onSub || setSubState;
+  const sub = (onSub ? subProp : subState) || ADM_TABS[0][0];
+  const [msg, setMsg] = useState(null);           // { ok } | { err }
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [bootErr, setBootErr] = useState(null);
+  const promptedFor = useRef({});                 // so the picker nags at most once per tab
+
+  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 6000); };
+  const selRow = (clients || []).find((c) => c.client_id === sel) || null;
+  const active = ADM_TABS.find((t) => t[0] === sub) || ADM_TABS[0];
+  const needsClient = active[3] === "client";
+
+  const loadClients = useCallback(async () => {
+    const c = await adminApi("list_clients");
+    setClients(c.clients || []);
+    setFeatures(c.features || []);
+    return c.clients || [];
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [list, m] = await Promise.all([adminApi("list_clients"), adminApi("get_master")]);
+        if (cancelled) return;
+        setClients(list.clients || []);
+        setFeatures(list.features || []);
+        setMaster(m);
+        // Restore the last-administered client, but only if it still exists — a tenant
+        // deleted in another session must not come back as a selection.
+        try {
+          const saved = sessionStorage.getItem("ss.admin.clientId");
+          if (saved && (list.clients || []).some((c) => c.client_id === saved)) setSel(saved);
+        } catch (_e) { /* private mode */ }
+      } catch (e) {
+        if (!cancelled) { setBootErr(e.message || "Could not load the operator console."); setClients([]); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const pickClient = (cid) => {
+    setSel(cid);
+    setMsg(null);
+    setPickerOpen(false);
+    try { sessionStorage.setItem("ss.admin.clientId", cid); } catch (_e) {}
+    if (sub === "clients") setSub("account");
+  };
+
+  // Clicking a client-scoped tab with nothing selected opens the picker ONCE. The tab is
+  // never disabled — a disabled tab is a dead end that teaches nothing.
+  useEffect(() => {
+    if (needsClient && !sel && clients && !promptedFor.current[sub]) {
+      promptedFor.current[sub] = true;
+      setPickerOpen(true);
+    }
+  }, [sub, sel, clients, needsClient]);
+
+  return (
+    <div>
+      {/* Banner. Settings' exact treatment, but it earns the repetition of the topbar title
+          by carrying the administered client — visible from every sub-tab, so an operator
+          can never lose track of who the next write lands on. */}
+      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 14, padding: "20px 22px", color: "#FFF", marginBottom: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ width: 44, height: 44, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "#FFF" }}>
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>Admin</div>
+            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>The operator console — every tenant's catalog, setup and onboarding. Changes here are live in a builder's account.</div>
+          </div>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.26)", borderRadius: 10, padding: "8px 12px" }}>
+            {selRow ? (
+              <>
+                <AdmTile name={selRow.company_name || selRow.client_id} size={28} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#FFF", whiteSpace: "nowrap" }}>{selRow.company_name || selRow.client_id}</div>
+                  <div style={{ fontSize: 11.5, color: "#C9DCEA" }}>{selRow.client_id}</div>
+                </div>
+                <button type="button" onClick={() => setPickerOpen(true)}
+                  style={{ fontFamily: "inherit", background: "transparent", border: "1px solid rgba(255,255,255,0.4)", color: "#FFF", borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                  Change
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#D6E4F0" }}>No builder selected</div>
+                <button type="button" onClick={() => setPickerOpen(true)} disabled={!clients}
+                  style={{ fontFamily: "inherit", background: "transparent", border: "1px solid rgba(255,255,255,0.4)", color: "#FFF", borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: clients ? 1 : 0.5 }}>
+                  Choose builder
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Sub-navigation. Real <button>s, unlike admin.html's <div onClick> tabs, which were
+          not focusable and had no Enter/Space. The divider is the whole point of the
+          reorganisation: everything left of it is about one client, everything right of it
+          is platform-wide. */}
+      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
+        {ADM_TABS.map(([id, label, , scope], i) => (
+          <React.Fragment key={id}>
+            {i > 0 && ADM_TABS[i - 1][3] !== scope && (
+              <span aria-hidden="true" style={{ width: 1, alignSelf: "stretch", background: "#E2E8F0", margin: "8px 10px 0" }} />
+            )}
+            <button type="button" onClick={() => setSub(id)} aria-current={sub === id ? "page" : undefined}
+              style={{
+                background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+                padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+                color: sub === id ? ACCENT : "#64748B",
+                borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+                marginBottom: -2,
+              }}>
+              {label}
+            </button>
+          </React.Fragment>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span>{active[1]} — {active[2]}</span>
+        <AdmChip tone={active[3] === "global" ? "warn" : "neutral"}>
+          {active[3] === "global" ? "Platform-wide" : (selRow ? `For ${selRow.company_name || selRow.client_id}` : "Per builder")}
+        </AdmChip>
+      </div>
+
+      {bootErr && <div style={S.err}>{bootErr}</div>}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      {sub === "clients" && (
+        <AdmClients clients={clients} features={features} sel={sel}
+          onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
+      )}
+      {sub === "master" && <AdmMaster master={master} />}
+
+      {needsClient && !sel && clients && (
+        <div style={S.card}>
+          <CardHead title="Choose a builder first"
+            desc="Styles, items and pricing are per-builder. Pick the tenant you're setting up and this page fills in." />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" onClick={() => setPickerOpen(true)} style={S.btn(ACCENT, "#FFF")}>Choose builder</button>
+            <button type="button" onClick={() => setSub("clients")} style={S.btn("#F1F5F9", "#334155")}>Browse all builders</button>
+          </div>
+        </div>
+      )}
+
+      {/* The remount key is the single most important line in this port. Every staged,
+          uncommitted thing — ticked item pills, a parsed CSV report, a half-filled billing
+          or link-owner form, a chosen style image — lives inside AdminClientPanes, so
+          changing client destroys it STRUCTURALLY. In admin.html an effect keyed on
+          [sel, cat] wiped the ticks while the UI was still rendering "N unsaved changes". */}
+      {needsClient && sel && (
+        <AdminClientPanes key={"ac-" + sel} sub={sub} clientId={sel} clientRow={selRow}
+          master={master} features={features} onFlash={flash}
+          onReloadClients={loadClients} onDeleted={() => { setSel(""); setSub("clients"); try { sessionStorage.removeItem("ss.admin.clientId"); } catch (_e) {} }} />
+      )}
+
+      {pickerOpen && (
+        <AdmClientPicker clients={clients || []} current={sel}
+          onPick={pickClient} onClose={() => setPickerOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// ── Clients (global) ─────────────────────────────────────────────────────────
+function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, onReload }) {
+  const [q, setQ] = useState("");
+  const [openNew, setOpenNew] = useState(false);
+  const [id, setId] = useState("");
+  const [company, setCompany] = useState("");
+  const [tpl, setTpl] = useState("__none__");
+  const [idTouched, setIdTouched] = useState(false);
+  const [exempt, setExempt] = useState(false);
+  const [discount, setDiscount] = useState("0");
+  const [allFeat, setAllFeat] = useState(true);
+  const [picked, setPicked] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  const term = q.trim().toLowerCase();
+  const list = (clients || []).filter((c) => !term
+    || String(c.company_name || "").toLowerCase().indexOf(term) !== -1
+    || String(c.client_id || "").toLowerCase().indexOf(term) !== -1);
+
+  const slug = id.trim().toLowerCase();
+  const taken = (clients || []).some((c) => c.client_id === slug);
+  const shapeOk = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
+  const idErr = !slug ? null : taken ? "That builder id is already taken." : !shapeOk ? "Lowercase letters, numbers and hyphens only — it becomes their subdomain." : null;
+  const canCreate = slug && company.trim() && !idErr && !busy;
+
+  const create = async () => {
+    if (!canCreate) return;
+    setBusy(true);
+    try {
+      await adminApi("create_client", {
+        clientId: slug, companyName: company.trim(), templateClientId: tpl,
+        billingExempt: exempt, discountPercent: exempt ? 0 : (Number(discount) || 0),
+        discountFeatures: allFeat ? [] : picked,
+      });
+      await onReload();
+      setOpenNew(false); setId(""); setCompany(""); setTpl("__none__"); setIdTouched(false);
+      setExempt(false); setDiscount("0"); setAllFeat(true); setPicked([]);
+      onFlash({ ok: `Created “${slug}”. Next: give the owner a login on the Account tab, then styles, items and pricing.` });
+      onPick(slug);
+    } catch (e) { onFlash({ err: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <div style={S.card}>
+        <CardHead title="Builder accounts"
+          count={clients ? (term ? `${list.length} of ${clients.length}` : clients.length) : null}
+          desc="Every tenant on the platform. Manage puts a builder into the tabs above; Open portal takes you into their account as an operator."
+          right={<button type="button" onClick={() => setOpenNew((v) => !v)} style={S.btn(ACCENT, "#FFF")}>
+            {openNew ? "Cancel" : "+ New builder"}
+          </button>} />
+        <SearchInput value={q} onChange={setQ} placeholder="Search builders…" />
+        {clients === null && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading builders…</div>}
+        {clients && list.length === 0 && (
+          <div style={{ fontSize: 13, color: "#94A3B8" }}>{term ? `No builders match “${q}”.` : "No builders yet — create the first one above."}</div>
+        )}
+        {list.map((c) => (
+          <div key={c.client_id} style={ADM_ROW}>
+            <AdmTile name={c.company_name || c.client_id} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{c.company_name || c.client_id}</div>
+              <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{c.client_id}</div>
+            </div>
+            {c.client_id === sel && <AdmChip tone="on">Selected</AdmChip>}
+            {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
+              : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
+            <button type="button" onClick={() => onPick(c.client_id)} title="Administer this builder"
+              style={{ ...S.btn("#FFFFFF", ACCENT), border: "1px solid " + ACCENT, padding: "6px 12px", fontSize: 12 }}>Manage</button>
+            {onOpenAccount && (
+              <button type="button" onClick={() => onOpenAccount({ clientId: c.client_id, companyName: c.company_name || c.client_id })}
+                title="Open their portal and act as them"
+                style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Open portal</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {openNew && (
+        <div style={S.card}>
+          <CardHead title="Create a builder" desc="The builder id becomes their subdomain and can't be changed afterwards, so get it right here." />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
+            <div>
+              <label style={S.lbl}>Company name</label>
+              <input value={company} autoFocus
+                onChange={(e) => { setCompany(e.target.value); if (!idTouched) setId(slugify(e.target.value)); }}
+                placeholder="Junior Barns" style={S.input} />
+            </div>
+            <div>
+              <label style={S.lbl}>Builder id</label>
+              <input value={id} onChange={(e) => { setIdTouched(true); setId(e.target.value); }}
+                placeholder="junior-barns" style={{ ...S.input, borderColor: idErr ? "#DC2626" : "#CBD5E1" }} />
+              <div style={{ fontSize: 11, color: idErr ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
+                {idErr || (idTouched ? "Used in the customer designer link: ?client=junior-barns." : "Auto-generated from the company name — edit to override.")}
+              </div>
+            </div>
+            <div>
+              <label style={S.lbl}>Copy catalog from</label>
+              <select value={tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}>
+                <option value="__none__">Start empty</option>
+                {(clients || []).map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id}</option>)}
+              </select>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Copies styles, sizes and items — not designs or settings.</div>
+            </div>
+          </div>
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+              <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} />
+              <span>Non-billable — CSM Synergy's own, demo or testing account (skips the billing gate)</span>
+            </label>
+            <div style={{ marginTop: 10, maxWidth: 220, opacity: exempt ? 0.5 : 1, pointerEvents: exempt ? "none" : "auto" }}>
+              <label style={S.lbl}>Account discount %</label>
+              <input value={discount} onChange={(e) => setDiscount(e.target.value)} inputMode="numeric" style={S.input} />
+            </div>
+            {!exempt && Number(discount) > 0 && (
+              <FeatureScope features={features} all={allFeat} setAll={setAllFeat} picked={picked} setPicked={setPicked} />
+            )}
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <button type="button" onClick={create} disabled={!canCreate}
+              title={!canCreate ? (idErr || "Enter a company name and a builder id") : undefined}
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: canCreate ? 1 : 0.6, cursor: canCreate ? "pointer" : "not-allowed" }}>
+              {busy ? "Creating…" : "Create builder"}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── Master catalog (global, read-only) ───────────────────────────────────────
+function AdmMaster({ master }) {
+  const [q, setQ] = useState("");
+  const items = (master && master.layoutItemTypes) || [];
+  const term = q.trim().toLowerCase();
+  const list = items.filter((i) => !term
+    || String(i.label || "").toLowerCase().indexOf(term) !== -1
+    || String(i.item_key || "").toLowerCase().indexOf(term) !== -1);
+  return (
+    <div style={S.card}>
+      <CardHead title="Master layout items" count={master ? items.length : null}
+        desc="The platform-wide palette. Every builder's Items tab is a selection from this list — nothing here belongs to one tenant, and turning an item on for a builder never edits this." />
+      {!master && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading master catalog…</div>}
+      {master && items.length > 0 && <SearchInput value={q} onChange={setQ} placeholder="Search items…" />}
+      {master && items.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No master items defined yet.</div>}
+      {master && items.length > 0 && list.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No items match “{q}”.</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {list.map((i) => (
+          <div key={i.item_key} title={i.item_key}
+            style={{ display: "flex", alignItems: "center", gap: 7, border: "1px solid #E2E8F0", background: "#F8FAFC", borderRadius: 9, padding: "7px 11px", fontSize: 12.5, fontWeight: 600, color: "#334155" }}>
+            <span style={{ color: "#64748B", display: "flex" }}>{layoutItemGlyph(i)}</span>
+            {i.label || i.item_key}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Per-client panes ─────────────────────────────────────────────────────────
+// Mounted with key={"ac-" + clientId}. Everything staged and uncommitted lives HERE, so a
+// client change destroys it structurally rather than by an effect that races the render.
+function AdminClientPanes({ sub, clientId, clientRow, master, features, onFlash, onReloadClients, onDeleted }) {
+  const [cat, setCat] = useState(null);
+  const [catErr, setCatErr] = useState(null);
+
+  const loadCat = useCallback(async () => {
+    setCatErr(null);
+    try { setCat(await adminApi("get_client_catalog", { clientId })); }
+    catch (e) { setCatErr(e.message || "Could not load this builder's catalog."); }
+  }, [clientId]);
+
+  useEffect(() => { loadCat(); }, [loadCat]);
+
+  // Write, then report, then refresh — in that order, and refresh failures are swallowed.
+  // Ported deliberately from admin.html's act(): a failing get_client_catalog must never
+  // mask a write that actually landed.
+  const act = async (action, body, okMsg) => {
+    try { await adminApi(action, body); }
+    catch (e) { onFlash({ err: e.message }); return false; }
+    onFlash({ ok: okMsg || "Saved." });
+    try { setCat(await adminApi("get_client_catalog", { clientId })); } catch (_e) { /* catches up next action */ }
+    return true;
+  };
+
+  const label = (clientRow && clientRow.company_name) || clientId;
+  const common = { clientId, clientRow, label, cat, setCat, master, features, onFlash, act, loadCat, onReloadClients };
+
+  if (catErr && sub !== "account") return <div style={S.err}>{catErr}</div>;
+
+  return (
+    <>
+      {sub === "account" && <AdmAccount {...common} onDeleted={onDeleted} />}
+      {sub === "styles" && <AdmStyles {...common} />}
+      {sub === "items" && <AdmItems {...common} />}
+      {sub === "pricing" && <AdmPricing {...common} />}
+    </>
+  );
+}
+
+function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadClients, onDeleted }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("owner");
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkResult, setLinkResult] = useState(null);
+  const [reassignFrom, setReassignFrom] = useState(null);
+  const [copied, setCopied] = useState(null);
+
+  const [pct, setPct] = useState(String((clientRow && clientRow.discountPercent) ?? 0));
+  const [exempt, setExempt] = useState(Boolean(clientRow && clientRow.billingExempt));
+  const scoped = Array.isArray(clientRow && clientRow.discountFeatures) ? clientRow.discountFeatures : [];
+  const [allFeat, setAllFeat] = useState(scoped.length === 0);
+  const [picked, setPicked] = useState(scoped);
+  const [until, setUntil] = useState(clientRow && clientRow.exemptUntil ? String(clientRow.exemptUntil).slice(0, 10) : "");
+  const [billBusy, setBillBusy] = useState(false);
+
+  // Early access (migration 109): features comped to THIS builder before they go on sale.
+  const grantable = (features || []).filter((f) => f.operatorGrantable);
+  const rowGrants = Array.isArray(clientRow && clientRow.grants) ? clientRow.grants : [];
+  const [grantPick, setGrantPick] = useState(rowGrants.map((g) => g.feature));
+  const [grantUntil, setGrantUntil] = useState(() => {
+    const withDate = rowGrants.find((g) => g.expiresAt);
+    return withDate ? String(withDate.expiresAt).slice(0, 10) : "";
+  });
+  const [grantBusy, setGrantBusy] = useState(false);
+
+  const [delOpen, setDelOpen] = useState(false);
+
+  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+
+  const link = async (reassign) => {
+    if (!emailOk || linkBusy) return;
+    setLinkBusy(true); setLinkResult(null);
+    const addr = email.trim();
+    try {
+      const r = await adminApi("link_owner", { clientId, email: addr, role, ...(reassign ? { reassign: true } : {}) });
+      const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
+      setLinkResult({ email: addr, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null, movedFrom: reassign && reassignFrom ? reassignFrom.fromClient : null });
+      setEmail(""); setReassignFrom(null);
+      onFlash({ ok: `“${addr}” ${reassign ? "reassigned to" : "linked to"} ${label} as ${roleLabel}.` });
+    } catch (e) {
+      const m = e.message || String(e);
+      if (/reassign\s*:\s*true/i.test(m)) {
+        // Tolerates BOTH wordings: the server said "client" before the 2026-08-02
+        // builder rename, and an operator's browser can be running a cached page
+        // against a newer function (or vice versa) — a strict match would silently
+        // stop naming the tenant in the reassign prompt.
+        const hit = /already linked to (?:client|builder) "([^"]+)"/.exec(m);
+        setReassignFrom({ email: addr, fromClient: hit ? hit[1] : null });
+      } else setReassignFrom(null);
+      onFlash({ err: m });
+    }
+    setLinkBusy(false);
+  };
+
+  const copy = async (text) => {
+    // admin.html fired this unawaited and flashed success unconditionally — it reported
+    // "copied" even when the write rejected. Await it, and the link stays on screen either way.
+    try { await navigator.clipboard.writeText(text); setCopied(true); }
+    catch (_e) { setCopied(false); }
+    setTimeout(() => setCopied(null), 4000);
+  };
+
+  const saveBilling = async () => {
+    const n = Math.round(Number(pct));
+    if (!Number.isFinite(n) || n < 0 || n > 100) { onFlash({ err: "Discount must be a whole number from 0 to 100." }); return; }
+    if (n > 0 && !exempt && !allFeat && picked.length === 0) { onFlash({ err: "Choose which features the discount applies to, or select “Every feature”." }); return; }
+    setBillBusy(true);
+    try {
+      const r = await adminApi("set_billing", { clientId, billingExempt: exempt, discountPercent: n, discountFeatures: allFeat ? [] : picked, exemptUntil: until });
+      await onReloadClients();
+      onFlash({ ok: `Billing saved for ${label}. ${(r && r.note) || ""}`.trim() });
+    } catch (e) { onFlash({ err: e.message }); }
+    setBillBusy(false);
+  };
+
+  const saveGrants = async () => {
+    setGrantBusy(true);
+    try {
+      const r = await adminApi("set_feature_grants", {
+        clientId,
+        grants: grantPick.map((feature) => ({ feature, expiresAt: grantUntil || null })),
+      });
+      await onReloadClients();
+      onFlash({ ok: `Early access saved for ${label}. ${(r && r.note) || ""}`.trim() });
+    } catch (e) { onFlash({ err: e.message }); }
+    setGrantBusy(false);
+  };
+
+  return (
+    <>
+      <div style={S.card}>
+        <CardHead title="Owner logins" desc="Grant someone access to this builder's portal. A new email gets a one-time set-up link; an email already attached to another builder has to be moved deliberately." />
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ flex: "1 1 240px", minWidth: 200 }}>
+            <label style={S.lbl}>Email</label>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@theirbusiness.com"
+              onKeyDown={(e) => { if (e.key === "Enter" && emailOk) link(false); }} style={S.input} />
+          </div>
+          <div style={{ width: 200 }}>
+            <label style={S.lbl}>Role</label>
+            <select value={role} onChange={(e) => setRole(e.target.value)} style={S.input}>
+              <option value="owner">Admin — full access</option>
+              <option value="user">Team member — Designs &amp; Leads only</option>
+            </select>
+          </div>
+          <button type="button" onClick={() => link(false)} disabled={!emailOk || linkBusy}
+            title={!emailOk ? "Enter a valid email address" : undefined}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (!emailOk || linkBusy) ? 0.6 : 1, cursor: emailOk && !linkBusy ? "pointer" : "not-allowed" }}>
+            {linkBusy ? "Linking…" : "Link login"}
+          </button>
+        </div>
+        {reassignFrom && (
+          <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 12.5, marginTop: 12, lineHeight: 1.5 }}>
+            <strong>{reassignFrom.email}</strong> already belongs to <strong>{reassignFrom.fromClient || "another builder"}</strong>.
+            Moving them removes their access to that account.
+            <div style={{ marginTop: 8 }}>
+              <button type="button" onClick={() => { setEmail(reassignFrom.email); link(true); }} disabled={linkBusy}
+                style={{ ...S.btn("#92400E", "#FFF"), padding: "6px 12px", fontSize: 12 }}>Move them to {label}</button>
+            </div>
+          </div>
+        )}
+        {linkResult && (
+          <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>
+            <div>{linkResult.email} — {linkResult.roleLabel}{linkResult.created ? " · login created" : ""}{linkResult.emailSent ? " · invite emailed" : ""}</div>
+            {linkResult.setupLink && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <input readOnly value={linkResult.setupLink} onFocus={(e) => e.target.select()}
+                  style={{ ...S.input, fontFamily: "ui-monospace, monospace", fontSize: 11, fontWeight: 400 }} />
+                <button type="button" onClick={() => copy(linkResult.setupLink)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 12px", fontSize: 12, flexShrink: 0 }}>
+                  {copied === true ? "Copied" : copied === false ? "Copy failed" : "Copy"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <CardHead title="Billing posture" desc="An attribute of the account, not of a purchase — it follows them onto every feature they add later." />
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+          <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} />
+          <span>Non-billable — skips the billing gate entirely</span>
+        </label>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+          <div style={{ width: 180, opacity: exempt ? 0.5 : 1, pointerEvents: exempt ? "none" : "auto" }}>
+            <label style={S.lbl}>Account discount %</label>
+            <input value={pct} onChange={(e) => setPct(e.target.value)} inputMode="numeric" style={S.input} />
+          </div>
+          <div style={{ width: 200 }}>
+            <label style={S.lbl}>Free until (optional)</label>
+            <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} style={S.input} />
+          </div>
+        </div>
+        {!exempt && Number(pct) > 0 && (
+          <FeatureScope features={features} all={allFeat} setAll={setAllFeat} picked={picked} setPicked={setPicked} />
+        )}
+        <div style={{ marginTop: 16 }}>
+          <button type="button" onClick={saveBilling} disabled={billBusy}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: billBusy ? 0.6 : 1 }}>{billBusy ? "Saving…" : "Save billing"}</button>
+        </div>
+      </div>
+
+      {/* EARLY ACCESS — Carolyn 2026-08-18: "I would like to be able to see the 3D as I'm
+          in beta, but not all clients need to see it." Only features whose billing_plans rows
+          carry operator_grantable appear here, so paid-only features can never be listed. */}
+      {grantable.length > 0 && (
+        <div style={S.card}>
+          <CardHead title="Early access"
+            desc="Switch a feature on for this builder before it goes on sale. This is a comp, not a purchase: it does not create a subscription and does not charge anything. Unchecking a box revokes it." />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", paddingLeft: 2 }}>
+            {grantable.map((f) => (
+              <label key={f.feature} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+                <input type="checkbox" checked={grantPick.indexOf(f.feature) !== -1}
+                  onChange={(e) => setGrantPick(e.target.checked ? grantPick.concat([f.feature]) : grantPick.filter((x) => x !== f.feature))} />
+                <span>{f.name}{f.availability === "coming_soon" ? " — not on sale yet" : ""}</span>
+              </label>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, maxWidth: 260 }}>
+            <label style={S.lbl}>Until (optional)</label>
+            <input type="date" value={grantUntil} onChange={(e) => setGrantUntil(e.target.value)}
+              style={{ ...S.input, width: "100%" }} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>
+              Leave empty to keep it on until you revoke it. A date makes the preview end by
+              itself, so &ldquo;just for a look&rdquo; does not quietly become free forever.
+            </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <button type="button" onClick={saveGrants} disabled={grantBusy}
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: grantBusy ? 0.6 : 1 }}>{grantBusy ? "Saving…" : "Save early access"}</button>
+          </div>
+        </div>
+      )}
+
+      {/* The only tinted card in the shell, which is what makes the tint mean something.
+          Last card on the tab, below a scroll — unreachable by accident, and impossible to
+          hit while aiming for "Billing", which is exactly what the old button row made easy. */}
+      <div style={{ ...S.card, background: "#FEE2E2", border: "1px solid #DC2626" }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#991B1B", letterSpacing: 0.3, marginBottom: 6 }}>Danger zone</div>
+        <div style={{ fontSize: 12.5, color: "#991B1B", lineHeight: 1.55, marginBottom: 14 }}>
+          Deleting {label} erases their catalog, designs, settings, logins and stored images. It cannot be
+          undone, and it still asks for the operator password even though you're signed in.
+        </div>
+        <button type="button" onClick={() => setDelOpen(true)} style={S.btn("#FEF2F2", "#DC2626")}>Delete this builder…</button>
+      </div>
+
+      {delOpen && (
+        <AdmDeleteDialog client={clientRow || { client_id: clientId }} onClose={() => setDelOpen(false)}
+          onDeleted={async (id, r) => {
+            setDelOpen(false);
+            const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+            await onReloadClients();
+            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.` });
+            onDeleted();
+          }} />
+      )}
+    </>
+  );
+}
+
+function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
+  const [name, setName] = useState("");
+  const [img, setImg] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [styleBusy, setStyleBusy] = useState({});   // per-row, not page-wide
+  const styles = (cat && cat.buildingStyles) || [];
+  const sizes = (cat && cat.buildingSizes) || [];
+  const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+  const pickImg = (file) => {
+    if (!file) { setImg(null); return; }
+    if (ALLOWED.indexOf(file.type) === -1) { onFlash({ err: "Use a JPG, PNG, WEBP or GIF image." }); setFileKey((k) => k + 1); return; }
+    if (file.size > 3000000) { onFlash({ err: "Image too large — 3 MB maximum." }); setFileKey((k) => k + 1); return; }
+    const r = new FileReader();
+    r.onerror = () => onFlash({ err: "Could not read that image." });
+    r.onload = () => setImg({ base64: r.result, contentType: file.type || "image/jpeg" });
+    r.readAsDataURL(file);
+  };
+
+  const toggle = async (row) => {
+    setStyleBusy((b) => ({ ...b, [row.key]: true }));
+    // Optimistic: one idempotent boolean, and the authoritative refresh follows anyway.
+    setCat((c) => ({ ...c, buildingStyles: (c.buildingStyles || []).map((s) => s.key === row.key ? { ...s, active: !s.active } : s) }));
+    const ok = await act("save_style", { clientId, styleKey: row.key, active: !row.active },
+      `${row.label || row.key} is now ${row.active ? "hidden" : "active"}.`);
+    if (!ok) setCat((c) => ({ ...c, buildingStyles: (c.buildingStyles || []).map((s) => s.key === row.key ? { ...s, active: row.active } : s) }));
+    setStyleBusy((b) => { const n = { ...b }; delete n[row.key]; return n; });
+  };
+
+  const create = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      let imageUrl = null;
+      if (img) {
+        const up = await adminApi("upload_image", { clientId, base64: img.base64, contentType: img.contentType });
+        imageUrl = (up && up.url) || null;
+      }
+      await adminApi("create_style", { clientId, label: name.trim(), ...(imageUrl ? { imageUrl } : {}) });
+      setName(""); setImg(null); setFileKey((k) => k + 1);
+      onFlash({ ok: `Added “${name.trim()}”.` });
+      setCat(await adminApi("get_client_catalog", { clientId }));
+    } catch (e) { onFlash({ err: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <div style={S.card}>
+        <CardHead title="Building styles" count={cat ? styles.length : null}
+          desc={`What ${label} offers on their design page. Hiding a style stops offering it without touching its sizes or prices.`} />
+        {!cat && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading catalog…</div>}
+        {cat && styles.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No styles yet — add one below.</div>}
+        {styles.map((row) => {
+          // Sizes join on the style's UUID `id`, NOT its `key`. Getting this wrong is silent:
+          // every style renders "0 sizes" while the tenant actually has dozens.
+          const mine = sizes.filter((s) => s.style_id === row.id);
+          return (
+            <div key={row.key} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{row.label || row.key}</div>
+                <div style={{ fontSize: 11.5, color: "#94A3B8" }}>
+                  {row.key} · {mine.length} size{mine.length === 1 ? "" : "s"}
+                  {mine.length > 0 && <> · {mine.slice(0, 6).map((s) => `${s.width_ft}×${s.length_ft}`).join(", ")}{mine.length > 6 ? "…" : ""}</>}
+                </div>
+              </div>
+              <AdmChip tone={row.active ? "good" : "neutral"}>{row.active ? "Active" : "Hidden"}</AdmChip>
+              <button type="button" onClick={() => toggle(row)} disabled={!!styleBusy[row.key]} aria-pressed={!!row.active}
+                style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12, opacity: styleBusy[row.key] ? 0.6 : 1 }}>
+                {styleBusy[row.key] ? "Saving…" : row.active ? "Hide" : "Show"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={S.card}>
+        <CardHead title="Add a style" desc="The photo shows on their design page. Sizes and prices come from the Pricing tab once the style exists." />
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ flex: "1 1 220px", minWidth: 180 }}>
+            <label style={S.lbl}>Style name</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Lofted Barn"
+              onKeyDown={(e) => { if (e.key === "Enter") create(); }} style={S.input} />
+          </div>
+          <div style={{ flex: "1 1 220px", minWidth: 180 }}>
+            <label style={S.lbl}>Photo (optional, max 3 MB)</label>
+            <input key={fileKey} type="file" accept="image/*" onChange={(e) => pickImg(e.target.files && e.target.files[0])}
+              style={{ ...S.input, padding: 6, fontWeight: 400 }} />
+          </div>
+          <button type="button" onClick={create} disabled={!name.trim() || busy}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (!name.trim() || busy) ? 0.6 : 1 }}>{busy ? "Adding…" : "Add style"}</button>
+        </div>
+        {img && <div style={{ fontSize: 11.5, color: "#15803D", marginTop: 8 }}>Image ready — it uploads when you add the style.</div>}
+      </div>
+    </>
+  );
+}
+
+function AdmItems({ clientId, label, cat, setCat, master, onFlash }) {
+  const assigned = useMemo(() => new Set(((cat && cat.clientLayoutItems) || []).filter((i) => i.active).map((i) => i.item_key)), [cat]);
+  const [staged, setStaged] = useState(null);      // null until cat lands
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (cat) setStaged(new Set(assigned)); }, [cat, assigned]);
+
+  const all = (master && master.layoutItemTypes) || [];
+  const term = q.trim().toLowerCase();
+  const list = all.filter((i) => !term
+    || String(i.label || "").toLowerCase().indexOf(term) !== -1
+    || String(i.item_key || "").toLowerCase().indexOf(term) !== -1);
+
+  const sel = staged || new Set();
+  const toEnable = all.filter((i) => sel.has(i.item_key) && !assigned.has(i.item_key));
+  const toDisable = all.filter((i) => !sel.has(i.item_key) && assigned.has(i.item_key));
+  const pending = toEnable.length + toDisable.length;
+
+  const save = async () => {
+    if (!pending || busy) return;
+    setBusy(true);
+    try {
+      for (const i of toEnable) await adminApi("toggle_item", { clientId, itemKey: i.item_key, active: true });
+      for (const i of toDisable) await adminApi("toggle_item", { clientId, itemKey: i.item_key, active: false });
+    } catch (e) {
+      // N sequential writes with no transaction: say so rather than implying all-or-nothing.
+      onFlash({ err: `${e.message} — some changes may already have been applied; the list below has been refreshed.` });
+      try { setCat(await adminApi("get_client_catalog", { clientId })); } catch (_e) {}
+      setBusy(false); return;
+    }
+    onFlash({ ok: `Saved ${pending} change${pending === 1 ? "" : "s"}.` });
+    try { setCat(await adminApi("get_client_catalog", { clientId })); } catch (_e) {}
+    setBusy(false);
+  };
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Layout items" count={cat && master ? `${sel.size} of ${all.length}` : null}
+        desc={`Which items ${label}'s customers can place on a building. Ticking is staged — nothing is written until you save.`}
+        right={<>
+          <button type="button" onClick={() => setStaged(new Set(all.map((i) => i.item_key)))} disabled={!cat || busy} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Select all</button>
+          <button type="button" onClick={() => setStaged(new Set())} disabled={!cat || busy} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Clear</button>
+        </>} />
+      {(!cat || !master) && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading items…</div>}
+      {cat && master && (
+        <>
+          {pending > 0 && (
+            <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span>{pending} unsaved change{pending === 1 ? "" : "s"} for {label}{toEnable.length ? ` · +${toEnable.length}` : ""}{toDisable.length ? ` · −${toDisable.length}` : ""}</span>
+              <button type="button" onClick={() => setStaged(new Set(assigned))} disabled={busy}
+                style={{ ...S.btn("#FEF3C7", "#92400E"), border: "1px solid #F59E0B", padding: "4px 10px", fontSize: 11.5, marginLeft: "auto" }}>Discard</button>
+            </div>
+          )}
+          {all.length > 12 && <SearchInput value={q} onChange={setQ} placeholder="Filter items…" />}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {list.map((i) => {
+              const on = sel.has(i.item_key);
+              const changed = on !== assigned.has(i.item_key);
+              return (
+                <button key={i.item_key} type="button" aria-pressed={on} title={i.item_key}
+                  onClick={() => setStaged((prev) => { const n = new Set(prev); n.has(i.item_key) ? n.delete(i.item_key) : n.add(i.item_key); return n; })}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontFamily: "inherit",
+                    borderRadius: 9, padding: "7px 11px", fontSize: 12.5, fontWeight: 700,
+                    background: on ? "#DBEAFF" : "#FFF",
+                    color: on ? "#3D3672" : "#64748B",
+                    border: changed ? "1px solid #F59E0B" : on ? "1px solid #C3D9F7" : "1px solid #E2E8F0",
+                    boxShadow: changed ? "0 0 0 2px #FEF3C7" : "none",
+                  }}>
+                  <span style={{ display: "flex" }}>{layoutItemGlyph(i)}</span>
+                  {i.label || i.item_key}
+                </button>
+              );
+            })}
+          </div>
+          {list.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>{term ? `No items match “${q}”.` : "The master catalog is empty."}</div>}
+          <div style={{ marginTop: 16 }}>
+            <button type="button" onClick={save} disabled={!pending || busy}
+              title={!pending ? "No changes to save" : undefined}
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: (!pending || busy) ? 0.6 : 1, cursor: pending && !busy ? "pointer" : "not-allowed" }}>
+              {busy ? "Saving…" : pending ? `Save ${pending} change${pending === 1 ? "" : "s"}` : "Save"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  const [warn, setWarn] = useState(null);   // { unmatched[], rows, headers }
+
+  const items = useMemo(() => {
+    const active = ((cat && cat.clientLayoutItems) || []).filter((i) => i.active);
+    const byKey = {};
+    ((master && master.layoutItemTypes) || []).forEach((m) => { byKey[m.item_key] = m.label || m.item_key; });
+    return active.map((i) => ({ key: i.item_key, label: byKey[i.item_key] || i.item_key }));
+  }, [cat, master]);
+
+  const download = () => {
+    const headers = ["style", "width", "length", "price"].concat(items.map((i) => i.label)).concat(["active"]);
+    const styles = (cat && cat.buildingStyles) || [];
+    const sizes = (cat && cat.buildingSizes) || [];
+    const inc = (cat && cat.inclusions) || [];
+    const rows = sizes.map((s) => {
+      // Join on the style's UUID `id` — buildingSizes carries `style_id`, never `style_key`.
+      const st = styles.find((x) => x.id === s.style_id);
+      const base = [st ? (st.label || st.key) : "", s.width_ft, s.length_ft, s.base_price];
+      const counts = items.map((i) => {
+        const hit = inc.find((n) => n.size_id === s.id && n.item_key === i.key);
+        return hit ? hit.qty : 0;
+      });
+      return base.concat(counts).concat([s.active === false ? "no" : "yes"]);
+    });
+    downloadFile(`${clientId}-pricing.csv`, toCSV(headers, rows));
+  };
+
+  const doImport = async (rows) => {
+    setBusy(true); setWarn(null);
+    try {
+      const res = await adminApi("import_pricing_csv", { clientId, rows });
+      setResult(res);
+      setCat(await adminApi("get_client_catalog", { clientId }));
+      onFlash({ ok: `Imported ${res.imported || 0} size(s)${res.skipped && res.skipped.length ? `; ${res.skipped.length} row(s) skipped — listed below.` : "."}` });
+    } catch (e) { onFlash({ err: e.message }); }
+    setBusy(false);
+    setFileKey((k) => k + 1);
+  };
+
+  const onFile = async (file) => {
+    if (!file) return;
+    setResult(null);
+    let text = "";
+    try { text = await file.text(); } catch (_e) { onFlash({ err: "Could not read that file." }); return; }
+    const grid = parseCSV(text);
+    if (grid.length < 2) { onFlash({ err: "That file has no data rows." }); setFileKey((k) => k + 1); return; }
+    const headers = grid[0].map((h) => String(h || "").trim());
+    const RESERVED = ["style", "width", "length", "price", "active"];
+    const labelToKey = {};
+    items.forEach((i) => { labelToKey[i.label.toLowerCase()] = i.key; labelToKey[i.key.toLowerCase()] = i.key; });
+    const unmatched = headers.filter((h) => h && RESERVED.indexOf(h.toLowerCase()) === -1 && !labelToKey[h.toLowerCase()]);
+    const rows = grid.slice(1).map((r) => {
+      const o = { inclusions: {} };
+      headers.forEach((h, i) => {
+        const v = r[i];
+        const lower = String(h || "").toLowerCase();
+        if (lower === "style") o.style = v;
+        else if (lower === "width") o.width = v;
+        else if (lower === "length") o.length = v;
+        else if (lower === "price") o.price = v;
+        else if (lower === "active") o.active = v;
+        else { const k = labelToKey[lower]; if (k) o.inclusions[k] = v; }
+      });
+      return o;
+    });
+    // A template exported for a different client imports its prices happily and drops every
+    // inclusion column without a word — the old console gave no signal at all, because
+    // unmatched columns never reach the server's `skipped` list.
+    const styleNames = new Set(((cat && cat.buildingStyles) || []).map((s) => String(s.label || s.key).toLowerCase()));
+    const anyStyleMatch = rows.some((r) => styleNames.has(String(r.style || "").toLowerCase()));
+    if (!anyStyleMatch) {
+      onFlash({ err: `None of the styles in that file match ${label}'s styles — it looks like it was exported for a different builder. Nothing was imported.` });
+      setFileKey((k) => k + 1);
+      return;
+    }
+    if (unmatched.length) { setWarn({ unmatched, rows }); return; }
+    doImport(rows);
+  };
+
+  return (
+    <>
+      <div style={S.card}>
+        <CardHead title="Sizes &amp; prices" desc={`Download ${label}'s current sizes as a spreadsheet, edit it, and upload it back. Columns are one per active layout item, so the file matches whatever the Items tab has switched on.`} />
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <button type="button" onClick={download} disabled={!cat} style={S.btn("#F1F5F9", "#334155")}>Download template</button>
+          <div style={{ flex: "1 1 240px", minWidth: 200 }}>
+            <label style={S.lbl}>Upload a filled-in file</label>
+            <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy || !cat}
+              onChange={(e) => onFile(e.target.files && e.target.files[0])}
+              style={{ ...S.input, padding: 6, fontWeight: 400 }} />
+          </div>
+        </div>
+        {busy && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Importing…</div>}
+        {warn && (
+          <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "12px 14px", color: "#92400E", fontSize: 12.5, marginTop: 12, lineHeight: 1.55 }}>
+            <strong>{warn.unmatched.length} column{warn.unmatched.length === 1 ? "" : "s"}</strong> in this file don't match any item switched on for {label}, and will be ignored:
+            <div style={{ marginTop: 6, fontWeight: 700 }}>{warn.unmatched.join(", ")}</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+              <button type="button" onClick={() => doImport(warn.rows)} style={{ ...S.btn("#92400E", "#FFF"), padding: "6px 12px", fontSize: 12 }}>Import anyway</button>
+              <button type="button" onClick={() => { setWarn(null); setFileKey((k) => k + 1); }} style={{ ...S.btn("#FEF3C7", "#92400E"), border: "1px solid #F59E0B", padding: "6px 12px", fontSize: 12 }}>Cancel</button>
+            </div>
+          </div>
+        )}
+        {result && (
+          <div style={{ marginTop: 12 }}>
+            <div style={S.okMsg}>Imported {result.imported || 0} size(s){result.created ? ` · ${result.created} created` : ""}{result.updated ? ` · ${result.updated} updated` : ""}.</div>
+            {result.skipped && result.skipped.length > 0 && (
+              <div style={{ fontSize: 12, color: "#92400E", background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 8, padding: "10px 14px" }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>{result.skipped.length} row(s) skipped</div>
+                {result.skipped.slice(0, 12).map((s, i) => <div key={i}>{typeof s === "string" ? s : JSON.stringify(s)}</div>)}
+                {result.skipped.length > 12 && <div>…and {result.skipped.length - 12} more.</div>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+

@@ -35,7 +35,7 @@ wrangler.beta.jsonc
 StructureStudio.jsx
 FeedbackWidget.jsx
 index.mount.jsx
-portal.app.jsx
+portal/
 admin.app.jsx
 wrangler.beta2.jsonc
 # First Workers Builds trigger: 2026-08-05 (deploy-freshness verification)

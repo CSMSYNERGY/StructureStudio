@@ -71,14 +71,47 @@ const RUNNER_OPTIONS = {
   configFile: false,
 };
 
+// The portal app, split into ORDERED PARTS (2026-08-19). They are concatenated here and
+// compiled as one script, which is the whole point: the emitted artifact is byte-identical
+// to the single portal.app.jsx it replaced, so the split is a pure file reorganisation with
+// nothing to re-verify at runtime.
+//
+// WHY CONCATENATION rather than one <script> per module: a compiled artifact is wrapped in
+// its own IIFE, so separate artifacts share NO lexical scope and every one of the ~75
+// top-level components would have to be re-plumbed through a window.* namespace. That is a
+// large, risky rewrite which buys nothing here — the portal is ONE page, so all six tabs'
+// code is downloaded on any route either way. Concatenating gets the thing that was actually
+// asked for (Carolyn 2026-08-18: two people editing different areas stop colliding) at zero
+// behavioural risk.
+//
+// ORDER IS LOAD-BEARING and must stay source order: `const` does not hoist, so moving a part
+// changes evaluation order. Parts are contiguous slices of the original file, cut only at
+// top-level boundaries (never inside a function), which is why 08-shell holds Dashboard and
+// PortalApp together — Dashboard's hook order and its render-time ssTargetClientId
+// assignment are documented hazards and nothing about them moves.
+export const PORTAL_PARTS = [
+  "portal/01-core.jsx",          // supabase client, ssFetch/ssLogError, tenant scoping, routing, S/ACCENT, UI atoms
+  "portal/02-sales.jsx",         // DesignsTable, contact timeline, LeadsTable
+  "portal/03-catalog.jsx",       // SettingsView, csv/xlsx, BillingView, PricingCsv, LayoutPricing, fixtures, colors
+  "portal/04-orders.jsx",        // feedback + releases, ComingSoon, Orders, OrderDetail, Inventory
+  "portal/05-schedule.jsx",      // build + delivery schedule, repairs, drivers, locations, 3D status, DesignerTab
+  "portal/06-admin.jsx",         // AccountsTab, BillingGate, the operator admin console (Adm*)
+  "portal/07-integrations.jsx",  // QuickBooks, email sending, commissions, per-person access, SettingsShell
+  "portal/08-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
+];
+
 // source → artifact. The component's artifact name is load-bearing in preflight
 // and the pages; extend here when a page grows a new source file.
 export const TARGETS = [
   { src: "structure-studio.component.js", out: "structure-studio.component.compiled.js" },
   { src: "index.mount.jsx", out: "index.mount.compiled.js" },
-  { src: "portal.app.jsx", out: "portal.app.compiled.js" },
+  { name: "portal.app.jsx", parts: PORTAL_PARTS, out: "portal.app.compiled.js" },
   { src: "admin.app.jsx", out: "admin.app.compiled.js" },
 ];
+
+// The name a target is REPORTED under (banners, preflight lint labels). A split target keeps
+// its old single-file name so nothing downstream has to learn about the parts.
+export const targetName = (t) => t.name || t.src;
 
 export const PAGES = ["index.html", "portal.html", "admin.html"];
 
@@ -106,6 +139,13 @@ export function compileSource(srcText, srcName) {
 
 const read = (f) => readFileSync(join(root, f), "utf8");
 
+// One target's full source: a plain file, or its parts concatenated IN ORDER. Exported so
+// preflight lints exactly the text that gets compiled, rather than keeping its own list that
+// could drift out of step (a source nothing lints is this repo's oldest silent-pass shape).
+export function readTarget(t) {
+  return t.parts ? t.parts.map(read).join("") : read(t.src);
+}
+
 // Rewrite every compiled-artifact tag's ?v= on a page to the artifact's hash.
 function rebuster(html, hashes) {
   return html.replace(/(src="\/?([a-zA-Z0-9.-]+\.compiled\.js))\?v=[a-zA-Z0-9]*"/g,
@@ -116,7 +156,7 @@ export function buildAll() {
   const artifacts = {};
   const hashes = {};
   for (const t of TARGETS) {
-    const art = compileSource(read(t.src), t.src);
+    const art = compileSource(readTarget(t), targetName(t));
     artifacts[t.out] = art;
     hashes[t.out] = sha256(art).slice(0, 8);
   }
