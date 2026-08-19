@@ -9820,6 +9820,16 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
   const [until, setUntil] = useState(clientRow && clientRow.exemptUntil ? String(clientRow.exemptUntil).slice(0, 10) : "");
   const [billBusy, setBillBusy] = useState(false);
 
+  // Early access (migration 109): features comped to THIS builder before they go on sale.
+  const grantable = (features || []).filter((f) => f.operatorGrantable);
+  const rowGrants = Array.isArray(clientRow && clientRow.grants) ? clientRow.grants : [];
+  const [grantPick, setGrantPick] = useState(rowGrants.map((g) => g.feature));
+  const [grantUntil, setGrantUntil] = useState(() => {
+    const withDate = rowGrants.find((g) => g.expiresAt);
+    return withDate ? String(withDate.expiresAt).slice(0, 10) : "";
+  });
+  const [grantBusy, setGrantBusy] = useState(false);
+
   const [delOpen, setDelOpen] = useState(false);
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
@@ -9868,6 +9878,19 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       onFlash({ ok: `Billing saved for ${label}. ${(r && r.note) || ""}`.trim() });
     } catch (e) { onFlash({ err: e.message }); }
     setBillBusy(false);
+  };
+
+  const saveGrants = async () => {
+    setGrantBusy(true);
+    try {
+      const r = await adminApi("set_feature_grants", {
+        clientId,
+        grants: grantPick.map((feature) => ({ feature, expiresAt: grantUntil || null })),
+      });
+      await onReloadClients();
+      onFlash({ ok: `Early access saved for ${label}. ${(r && r.note) || ""}`.trim() });
+    } catch (e) { onFlash({ err: e.message }); }
+    setGrantBusy(false);
   };
 
   return (
@@ -9943,6 +9966,38 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             style={{ ...S.btn(ACCENT, "#FFF"), opacity: billBusy ? 0.6 : 1 }}>{billBusy ? "Saving…" : "Save billing"}</button>
         </div>
       </div>
+
+      {/* EARLY ACCESS — Carolyn 2026-08-18: "I would like to be able to see the 3D as I'm
+          in beta, but not all clients need to see it." Only features whose billing_plans rows
+          carry operator_grantable appear here, so paid-only features can never be listed. */}
+      {grantable.length > 0 && (
+        <div style={S.card}>
+          <CardHead title="Early access"
+            desc="Switch a feature on for this builder before it goes on sale. This is a comp, not a purchase: it does not create a subscription and does not charge anything. Unchecking a box revokes it." />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", paddingLeft: 2 }}>
+            {grantable.map((f) => (
+              <label key={f.feature} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+                <input type="checkbox" checked={grantPick.indexOf(f.feature) !== -1}
+                  onChange={(e) => setGrantPick(e.target.checked ? grantPick.concat([f.feature]) : grantPick.filter((x) => x !== f.feature))} />
+                <span>{f.name}{f.availability === "coming_soon" ? " — not on sale yet" : ""}</span>
+              </label>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, maxWidth: 260 }}>
+            <label style={S.lbl}>Until (optional)</label>
+            <input type="date" value={grantUntil} onChange={(e) => setGrantUntil(e.target.value)}
+              style={{ ...S.input, width: "100%" }} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>
+              Leave empty to keep it on until you revoke it. A date makes the preview end by
+              itself, so &ldquo;just for a look&rdquo; does not quietly become free forever.
+            </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <button type="button" onClick={saveGrants} disabled={grantBusy}
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: grantBusy ? 0.6 : 1 }}>{grantBusy ? "Saving…" : "Save early access"}</button>
+          </div>
+        </div>
+      )}
 
       {/* The only tinted card in the shell, which is what makes the tint mean something.
           Last card on the tab, below a scroll — unreachable by accident, and impossible to
@@ -12714,12 +12769,13 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
-          {/* INTERIM GATE (Phase 4 replaces this with featureOn("view_3d") once
-              client_feature_grants exists). isOperator only: 3D is DARK for every
-              tenant, and visible to CSM Synergy immediately. It deliberately does NOT
-              use featureOn yet - view_3d has billing_plans rows, so the exempt blanket
-              would hand it to every grandfathered tenant the moment this merged. */}
-          {isOperator ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
+          {/* 3D is gated the same way every paid add-on is: featureOn reads
+              entitlement.features, which portal-billing now computes from a THREE-branch
+              map. view_3d is `grantable`, so it is deliberately NOT covered by the
+              exempt/transition blankets - an operator grant (or a real subscription) is
+              the only way in, which is what "not all clients need to see it" requires.
+              Operators are never gated by featureOn, so CSM Synergy always sees it. */}
+          {featureOn("view_3d") ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
@@ -12831,7 +12887,7 @@ function Dashboard({ session }) {
               max-width would box the designer in); hidden, never unmounted, off-tab. */}
           {designerOpened && !gateLocked && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
-              <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={isOperator} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
+              <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={featureOn("view_3d")} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
                 openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} setup3d={setup3d} />
             </div>
           )}
@@ -13053,7 +13109,7 @@ function Dashboard({ session }) {
               )
             )}
             {!gateLocked && activeTab === "view-3d" && (
-              isOperator
+              featureOn("view_3d")
                 ? <Studio3DStatus clientId={effClientId} canAdmin={canAdmin} navigate={navigate} />
                 : <ComingSoon
                     title="3D Design"

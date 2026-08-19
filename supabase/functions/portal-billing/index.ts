@@ -140,7 +140,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // sold the same feature twice. A plan row is a historical fact; only its availability expires.
   const { data: planRows, error: plansErr } = await admin
     .from("billing_plans")
-    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order, price_visible, active")
+    .select("id, feature, name, price_cents, billing_interval, gateway_plan_id, setup_fee_cents, availability, required, sort_order, price_visible, active, operator_grantable")
     .order("sort_order", { ascending: false });
   if (plansErr) return json({ error: plansErr.message }, 500);
   const allPlans = planRows ?? [];
@@ -324,11 +324,39 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // Synergy's own account), and operators are never gated, so no builder lost a working
   // integration.
   const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync"]);
+
+  // OPERATOR GRANTS (migration 109). An operator can comp one feature to one tenant before it
+  // is on sale — Carolyn 2026-08-18, about showing 3D to chosen builders. Read here because
+  // client_feature_grants is service-role only: a tenant can neither see nor forge its own.
+  const { data: grantRows } = await admin
+    .from("client_feature_grants")
+    .select("feature, expires_at")
+    .eq("client_id", clientId);
+  const nowMs = Date.now();
+  const granted = new Set((grantRows ?? [])
+    .filter((g) => !g.expires_at || Date.parse(g.expires_at) > nowMs)
+    .map((g) => g.feature));
+  // Read off allPlans, NOT plans: a feature whose current price point has been retired must
+  // not silently stop being grantable (the same lesson planById records above). Belt and
+  // braces on PAID_ONLY: operator_grantable defaults false so those cannot be marked
+  // grantable, but if someone flips the column by hand this still refuses.
+  const grantable = new Set(allPlans
+    .filter((p) => p.operator_grantable && !PAID_ONLY_FEATURES.has(p.feature))
+    .map((p) => p.feature));
+
   const features: Record<string, boolean> = {};
   for (const p of plans) {
     features[p.feature] = PAID_ONLY_FEATURES.has(p.feature)
+      // Pay-only: a real subscription is the ONLY way in, for everyone.
       ? Boolean(featureState.get(p.feature)?.usable)
-      : (exempt || inTransition || Boolean(featureState.get(p.feature)?.usable));
+      : grantable.has(p.feature)
+        // GRANTABLE: the grant, or a real subscription — and deliberately NOT the
+        // exempt/inTransition blankets. That omission is the whole design. Every tenant
+        // predating the billing gate is `exempt`, so leaving the blanket here would hand
+        // 3D to all of them the moment this shipped, which is the opposite of "not all
+        // clients need to see it" and would make the gate decorative.
+        ? (granted.has(p.feature) || Boolean(featureState.get(p.feature)?.usable))
+        : (exempt || inTransition || Boolean(featureState.get(p.feature)?.usable));
   }
 
   let entState = "active";
@@ -394,6 +422,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     transitionEndsAt,                // dated free period; null unless state === "transition"
     requiredRate,                    // what the required feature costs THIS tenant
     features,
+    // Which of the enabled features are ON BY GRANT rather than by purchase, so the UI can
+    // say "switched on for you by Structure Studio" instead of implying they bought it.
+    // Filtered through `grantable` so a stale row for a feature that has since been made
+    // non-grantable never shows up as an entitlement the tenant supposedly holds.
+    granted: [...granted].filter((f) => grantable.has(f)),
   };
 
   if (action === "status") {

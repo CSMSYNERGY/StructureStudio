@@ -4228,6 +4228,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // sniffing the URL. If a feature is for the business, use `embedded`; if it is lead- or
   // customer-flavoured (contact gates, silent lead capture), use `customerFacing`.
   const customerFacing = !embedded;
+  // Is 3D on for this viewer? Two DIFFERENT authorities on purpose:
+  //   embedded (the portal designer) -> the `view3d` prop, which the portal derives from
+  //     featureOn("view_3d") -- i.e. entitlement, which also makes every operator true.
+  //   public page -> `C.view3d` from get_config (migration 110), sourced from the operator
+  //     grant table only. index.html is anonymous and can never call portal-billing, so it
+  //     cannot use the entitlement path at all.
+  // A tenant whose staff can see 3D in their portal does NOT automatically expose it to
+  // shoppers: that needs a real grant row, which is the point of the split.
+  const view3dOn = embedded ? !!view3d : !!C.view3d;
   const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
   const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
   const windowFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "window"), [C.fixtures]);
@@ -8095,11 +8104,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               DRAGS items through the same pipeline as the 2D canvas, so without this an
               anonymous shopper could design a whole building without ever being asked who
               they are — which is the one thing the gate exists to prevent. */}
-          {!planLocked && view3d && <button onClick={() => { if (gateRequired) { setGateOpen(true); return; } setShow3D(true); }} style={S.btn("#7C3AED", "#FFF")}>{has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View"}</button>}
+          {!planLocked && view3dOn && <button onClick={() => { if (gateRequired) { setGateOpen(true); return; } setShow3D(true); }} style={S.btn("#7C3AED", "#FFF")}>{has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View"}</button>}
           {/* Not granted 3D yet: keep the marketing teaser shoppers already see on the
               public designer, so a tenant without the feature sees NO change. Portal
               users never get the teaser - business users see 3D Design in their nav. */}
-          {!view3d && customerFacing && (
+          {!view3dOn && customerFacing && (
             <button disabled title="See your building in 3D — coming soon"
               style={{ ...S.btn("#F8FAFC", "#94A3B8"), border: "1px dashed #CBD5E1", cursor: "default", display: "inline-flex", alignItems: "center", gap: 5 }}>
               3D

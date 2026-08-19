@@ -234,7 +234,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Money is a separate grant from configuration — 056's own words: "Adding an operator
     // should never silently grant the ability to charge a client's card." set_billing sets
     // the discount and the exemption that every later charge is computed from.
-    if (String(action ?? "") === "set_billing" && !identity.canBill) {
+    if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants")
+        && !identity.canBill) {
       return json({ error: "This operator account cannot change billing." }, 403);
     }
   }
@@ -269,13 +270,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // picker without hardcoding a copy of the catalogue that would drift from
         // billing_plans. One entry per feature (monthly/annual share a feature).
         const { data: planRows } = await sb.from("billing_plans")
-          .select("feature, name, availability, required").eq("active", true).order("sort_order", { ascending: false });
+          .select("feature, name, availability, required, operator_grantable").eq("active", true).order("sort_order", { ascending: false });
         const seenFeature = new Set<string>();
         const features = (planRows ?? []).filter((p: any) => {
           if (!p.feature || seenFeature.has(p.feature)) return false;
           seenFeature.add(p.feature);
           return true;
-        }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required }));
+        }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required, operatorGrantable: Boolean(p.operator_grantable) }));
+        // Operator grants per tenant (migration 109) — the console's "Early access" card.
+        // client_feature_grants is service-role only, so this function is the only reader.
+        const { data: grantRows } = await sb.from("client_feature_grants")
+          .select("client_id, feature, expires_at");
+        const grantsById = new Map<string, any[]>();
+        for (const g of (grantRows ?? []) as any[]) {
+          const arr = grantsById.get(g.client_id) ?? [];
+          arr.push({ feature: g.feature, expiresAt: g.expires_at ?? null });
+          grantsById.set(g.client_id, arr);
+        }
         const clients = (data ?? []).map((c: any) => {
           const s = byId.get(c.client_id);
           return {
@@ -284,6 +295,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             discountPercent: Number(s?.discount_percent) || 0,
             discountFeatures: s?.discount_features ?? null,
             exemptUntil: s?.billing_exempt_until ?? null,
+            grants: grantsById.get(c.client_id) ?? [],
           };
         });
         return json({ ok: true, clients, features });
@@ -637,6 +649,76 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // needs SMTP), and either way we return a one-time set-password link the
       // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
       // Settings) or "user" (Designs & Leads only).
+      case "set_feature_grants": {
+        // EARLY ACCESS: switch a feature on for ONE builder before it goes on sale.
+        // Carolyn 2026-08-18 — "I would like to be able to see the 3D as I'm in beta, but not
+        // all clients need to see it." This is a COMP: it creates no subscription, charges
+        // nothing, and never touches the billing gate (portal-billing keeps requiredFeatures
+        // and entState untouched by grants).
+        //
+        // Replaces the whole set for this tenant, the way the Team screen replaces an access
+        // map: the card sends what should be true now, so an unchecked box is a revoke.
+        const clientId = reqStr(p.clientId, "clientId");
+        const { data: exists } = await sb.from("client_configs")
+          .select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+
+        // TWO SERVER-SIDE GUARDS, both mandatory. The UI only ever offers grantable
+        // features, but the UI is a courtesy and this is the control.
+        const { data: planRows } = await sb.from("billing_plans")
+          .select("feature, operator_grantable");
+        const grantable = new Set((planRows ?? [])
+          .filter((r: any) => r.operator_grantable)
+          .map((r: any) => r.feature));
+        // Mirrors portal-billing's set. Kept here as well rather than imported, because the
+        // two functions are deployed separately and a comp that the reader refuses to honour
+        // is confusing, while a comp this writer refuses is self-explanatory.
+        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync"]);
+
+        const wanted = Array.isArray(p.grants) ? p.grants : [];
+        if (wanted.length > 50) throw new Error("Too many grants in one request.");
+        const rows: Record<string, unknown>[] = [];
+        const refused: string[] = [];
+        for (const g of wanted) {
+          const feature = typeof g?.feature === "string" ? g.feature.trim() : "";
+          if (!feature) continue;
+          // Refuse LOUDLY rather than dropping silently: a checkbox that saves and comes
+          // back unchecked reads as a broken save.
+          if (!grantable.has(feature) || PAID_ONLY_FEATURES.has(feature)) { refused.push(feature); continue; }
+          let expiresAt: string | null = null;
+          if (g.expiresAt) {
+            const t = Date.parse(String(g.expiresAt));
+            if (!Number.isFinite(t)) throw new Error(`Not a date: ${g.expiresAt}`);
+            expiresAt = new Date(t).toISOString();
+          }
+          rows.push({
+            client_id: clientId,
+            feature,
+            // Only the operator-JWT path has a user id. The ADMIN_PASSWORD break-glass path
+            // has none, and reading userId off it yields undefined — see _shared/adminAuth.ts.
+            granted_by: identity.via === "operator" ? identity.userId : null,
+            expires_at: expiresAt,
+            note: typeof g.note === "string" ? g.note.slice(0, 300) : null,
+          });
+        }
+        if (refused.length) {
+          throw new Error(`Not available for early access: ${refused.join(", ")}. `
+            + "A feature must be marked operator_grantable, and paid-only features never are.");
+        }
+        const { error: delErr } = await sb.from("client_feature_grants").delete().eq("client_id", clientId);
+        if (delErr) throw delErr;
+        if (rows.length) {
+          const { error: insErr } = await sb.from("client_feature_grants").insert(rows);
+          if (insErr) throw insErr;
+        }
+        return json({
+          ok: true,
+          grants: rows.map((r: any) => ({ feature: r.feature, expiresAt: r.expires_at })),
+          note: rows.length
+            ? `Early access on for ${rows.length} feature(s). This is a comp — no subscription, no charge.`
+            : "Early access cleared for this builder.",
+        });
+      }
       case "set_billing": {
         // Billing posture for an EXISTING tenant: the comp flag and the account discount.
         // Separate from create_client because the customers most likely to need a discount
