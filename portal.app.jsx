@@ -12681,6 +12681,26 @@ function Dashboard({ session }) {
   // the same way as scheduling (Carolyn 2026-08-08), and PAY-ONLY on the server, so the
   // exempt/free-period blankets don't hand it to grandfathered tenants either.
   const qboUnlocked = featureOn("quickbooks_sync");
+  // 3D reads entitlement.GRANTED, not entitlement.features, and that is deliberate.
+  //
+  // `features.view_3d` is computed by portal-billing, where view_3d falls under the
+  // exempt/free-period BLANKET unless that function has the three-branch map (which needs
+  // billing_plans.operator_grantable, migration 109). Every tenant predating the billing gate
+  // is exempt, so gating on features here would show 3D to essentially all of them the moment
+  // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
+  // when this landed on beta before the migration could be applied.
+  //
+  // `granted` is emitted ONLY by the new portal-billing and only for features an operator
+  // actually comped, so this is correct in BOTH worlds: against the old function it is
+  // undefined and only operators see 3D; against the new one it honours real grants. It also
+  // cannot be widened by a blanket, ever, which is the property that matters for a feature
+  // whose whole point is "not all clients need to see it" (Carolyn 2026-08-18).
+  //
+  // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
+  // featureOn, or the blanket returns with it.
+  const view3dUnlocked = isOperator
+    || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
+        && entitlement.granted.indexOf("view_3d") !== -1);
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -12775,7 +12795,7 @@ function Dashboard({ session }) {
               exempt/transition blankets - an operator grant (or a real subscription) is
               the only way in, which is what "not all clients need to see it" requires.
               Operators are never gated by featureOn, so CSM Synergy always sees it. */}
-          {featureOn("view_3d") ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
+          {view3dUnlocked ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
@@ -12887,7 +12907,7 @@ function Dashboard({ session }) {
               max-width would box the designer in); hidden, never unmounted, off-tab. */}
           {designerOpened && !gateLocked && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
-              <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={featureOn("view_3d")} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
+              <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={view3dUnlocked} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
                 openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} setup3d={setup3d} />
             </div>
           )}
@@ -13109,7 +13129,7 @@ function Dashboard({ session }) {
               )
             )}
             {!gateLocked && activeTab === "view-3d" && (
-              featureOn("view_3d")
+              view3dUnlocked
                 ? <Studio3DStatus clientId={effClientId} canAdmin={canAdmin} navigate={navigate} />
                 : <ComingSoon
                     title="3D Design"
