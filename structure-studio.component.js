@@ -1736,6 +1736,45 @@ const D3_STYLE_DEFAULTS = {
 };
 const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 
+// ── CLADDING ──────────────────────────────────────────────────────────────────
+// The customer-facing exterior material. Carolyn's direction (2026-08-18): call it
+// CLADDING, not siding, and offer three genuinely different products rather than one
+// texture rotated:
+//   lap     horizontal boards, each course overlapping the one below (~6in exposure)
+//   panel   vertical 4ft x 8ft sheets with grooves cut INTO the face (T1-11 / EWGWG)
+//   agpanel metal sheets whose ribs stand OUT, overlapping at the rib (Panel-Loc Plus)
+// `batten` is kept as a FOURTH, non-customer-facing id so the tenants whose styles
+// already say "batten" (northwood, farmland) keep their exact current look.
+//
+// Before this, three sites disagreed about the vocabulary: the texture selector spoke
+// lap|groove, the relief branch spoke batten|lap, and d3SidingOverride returned lap|null
+// -- so "batten" silently drew the GROOVE texture, and there was no way to say "metal"
+// at all. One table, one normalizer, and all three read from it.
+//
+// tileFtU/tileFtV are how many FEET one 512px texture tile covers, so the pattern is
+// anchored to the BUILDING rather than to each wall's own 0..1 UV span.
+const D3_CLADDING = {
+  lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
+  panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
+  agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
+  batten:  { id: "batten",  label: "Board & Batten", tex: "groove",  relief: "batten", stepFt: 1.5,  tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
+};
+// The customer-selectable set, in the order Carolyn listed them. `batten` is deliberately
+// absent -- it is a legacy value we still RENDER, not one we offer.
+const D3_CLADDING_CHOICES = ["lap", "panel", "agpanel"];
+
+// Every value `building_styles.d3.siding` can already hold, mapped onto the table above.
+// This is the whole backward-compatibility story and it needs NO migration: today `null`
+// and `"batten"` differ only in relief, and `panel` carries no relief, so every existing
+// tenant renders exactly as it does now.
+function d3NormalizeCladding(v) {
+  const s = String(v == null ? "" : v).trim().toLowerCase();
+  if (s === "lap" || s === "lapsiding" || s === "lap-siding") return "lap";
+  if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
+  if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
+  return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
+}
+
 // Resolve a style's 3D appearance: tenant config override (the style entry's
 // `d3` object) over the built-in per-style defaults, over the generic gable.
 // sidingOverride (from d3SidingOverride) wins over everything — it's the
@@ -1766,6 +1805,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
 // triggers the switch — so a tenant just adding the option works untouched.
 function d3SidingOverride(config, sel) {
   if (!config || !sel) return null;
+  // The explicit Cladding pick wins over everything below. `sel.cladding` is set by the
+  // Cladding control in the 2D toolbar; the two legacy paths after it stay for tenants who
+  // already wired their own "Siding" option before Cladding existed.
+  if (sel.cladding && D3_CLADDING[sel.cladding]) return sel.cladding;
   const s3 = config.siding3d;
   if (s3 && s3.optionId) {
     const v = sel[s3.optionId];
@@ -1849,6 +1892,7 @@ function d3CssColor(v, fallback) {
 // stays white-based) and a BUMP canvas (grayscale relief) at 512px, with a
 // seeded PRNG so the variegation is identical every session — a quote PDF
 // captured today must match one captured tomorrow.
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -1913,6 +1957,37 @@ function _d3RasterKind(kind) {
       b.fillStyle = "#e8e8e8"; b.fillRect(x + 1, 0, 6, N);                 // rib ridge
       b.fillStyle = "#565656"; b.fillRect(x + 7, 0, 2, N);
     }
+  } else if (kind === "agpanel") {
+    // Panel-Loc Plus (Central States) — the reference Carolyn sent for WALL metal. This is
+    // NOT the standing-seam "metal" raster above: that one is the ROOF look and she
+    // explicitly rejected SmartBuild's metal wall view. The distinction that matters is the
+    // bump map — these ribs stand OUT (light), where groove's grooves are cut IN (dark).
+    // 4 major ribs per tile at tileFtU 3.0 puts them ~9in apart, matching a 36in-coverage
+    // panel, with a wider side-lap rib at the tile seam where sheets overlap.
+    const rib = N / 4;
+    for (let x = 0; x < N; x += rib) {
+      const grad = g.createLinearGradient(x, 0, x + rib, 0);
+      grad.addColorStop(0, "rgba(0,0,0,0.13)");
+      grad.addColorStop(0.30, "rgba(255,255,255,0.07)");
+      grad.addColorStop(0.70, "rgba(255,255,255,0.02)");
+      grad.addColorStop(1, "rgba(0,0,0,0.10)");
+      g.fillStyle = grad; g.fillRect(x, 0, rib, N);
+      // the rib itself: shadow on the leading face, highlight on the crown
+      g.fillStyle = "rgba(0,0,0,0.34)"; g.fillRect(x, 0, 4, N);
+      g.fillStyle = "rgba(255,255,255,0.55)"; g.fillRect(x + 4, 0, 5, N);
+      g.fillStyle = "rgba(0,0,0,0.20)"; g.fillRect(x + 9, 0, 3, N);
+      b.fillStyle = "#efefef"; b.fillRect(x + 2, 0, 8, N);   // ribs stand OUT
+      b.fillStyle = "#4f4f4f"; b.fillRect(x + 10, 0, 2, N);
+      // minor striations between ribs — Panel-Loc has them, standing seam does not
+      for (let k = 1; k <= 2; k++) {
+        const sx = x + (rib * k) / 3;
+        g.fillStyle = "rgba(0,0,0,0.07)"; g.fillRect(sx, 0, 1, N);
+        b.fillStyle = "#9a9a9a"; b.fillRect(sx, 0, 1, N);
+      }
+    }
+    // side-lap rib at the seam: wider, because that is where two sheets overlap
+    g.fillStyle = "rgba(0,0,0,0.28)"; g.fillRect(N - 3, 0, 3, N);
+    b.fillStyle = "#f5f5f5"; b.fillRect(N - 3, 0, 3, N);
   } else if (kind === "lap") {
     // Horizontal lap boards: per-board tone, butt shadow, faint grain.
     const board = 64;
@@ -1950,7 +2025,8 @@ function _d3RasterKind(kind) {
 }
 function d3MakeTexture(THREE, kind) {
   if (!kind || typeof document === "undefined") return null;
-  if (kind !== "metal" && kind !== "groove" && kind !== "lap" && kind !== "shingle") return null;
+  // Widened from a four-way chain when agpanel arrived (Carolyn's wall-metal cladding).
+  if (!D3_TEX_KINDS.has(kind)) return null;
   if (!_d3TexCanvases[kind]) _d3TexCanvases[kind] = _d3RasterKind(kind);
   const tex = new THREE.CanvasTexture(_d3TexCanvases[kind].color);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -2215,15 +2291,23 @@ function buildShed3DModel(THREE, p) {
     if (!fx || !fx.imageUrl) return null;
     return d3FixtureTexture(THREE, fx.imageUrl);
   };
-  // Siding texture (vertical groove panel by default; horizontal lap boards when
-  // the customer picked a lap-siding upgrade) — multiplies the body color.
-  const wallKind = (p.styleSpec && p.styleSpec.siding === "lap") ? "lap" : "groove";
+  // Cladding texture — multiplies the body color, so the customer's paint still drives
+  // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
+  // raster, the relief style below, and the tile scale.
+  const clad = D3_CLADDING[d3NormalizeCladding(p.styleSpec && p.styleSpec.siding)] || D3_CLADDING.panel;
+  const wallKind = clad.tex;
   const wallTex = d3MakeTexture(THREE, wallKind);
   if (wallTex) {
-    wallTex.repeat.set(Math.max(2, Math.round((bldgW + bldgH) / 3)), Math.max(2, Math.round(H / 3)));
+    // Anchored to the BUILDING, not to each wall's own UV span: the old
+    // `(bldgW + bldgH) / 3` was ONE repeat shared by all four walls through the single
+    // wallMat, so a 2ft strip beside a door drew the same course count as a 12ft wall.
+    wallTex.repeat.set(Math.max(1, (bldgW + bldgH) / 2 / clad.tileFtU), Math.max(1, H / clad.tileFtV));
     wallMat.map = wallTex;
     const wallBump = d3MakeBumpTexture(THREE, wallKind);
-    if (wallBump) { wallBump.repeat.copy(wallTex.repeat); wallMat.bumpMap = wallBump; wallMat.bumpScale = 0.4; }
+    if (wallBump) { wallBump.repeat.copy(wallTex.repeat); wallMat.bumpMap = wallBump; wallMat.bumpScale = clad.bump; }
+    // Metal reads as metal only with the surface response, not the pattern alone — the
+    // same recipe the metal ROOF already uses.
+    if (clad.metal) { wallMat.roughness = 0.45; wallMat.metalness = 0.35; }
   }
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
 
@@ -2363,22 +2447,26 @@ function buildShed3DModel(THREE, p) {
       cursor = rg.a1;
     });
     if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
-    // Siding relief on the exterior of the full-height segments (strips break
-    // at openings, like real siding). Shading makes it read without textures.
-    // "batten" = vertical board-and-batten (the standard groove-panel look);
-    // "lap" = horizontal lap boards — per Carolyn (2026-07-02) the universal
-    // UPGRADE, usually chosen via a siding option (see d3SidingOverride).
-    const sidingMode = p.styleSpec && p.styleSpec.siding;
-    if (sidingMode === "batten" || sidingMode === "lap") {
+    // Cladding relief on the exterior of the full-height segments (strips break at
+    // openings, like real cladding). Real geometry on top of the texture, so the material
+    // still reads at a grazing angle where a flat map flattens out.
+    //   batten  proud VERTICAL battens (board-and-batten)
+    //   lap     proud HORIZONTAL course lines, stepped by the same exposure the raster uses
+    //   rib     proud vertical metal RIBS (Panel-Loc): narrower and shallower than a batten
+    //   null    panel siding has its grooves cut INTO the face, so it gets NO proud strips.
+    //           The old code gave it battens, which is the opposite of the real product.
+    if (clad.relief) {
       const relief = (b0, b1) => {
         if (b1 - b0 < 0.3) return;
-        if (sidingMode === "batten") {
-          const bs = 1.5;
+        if (clad.relief === "batten" || clad.relief === "rib") {
+          const bs = clad.stepFt;
+          const halfW = clad.relief === "rib" ? 0.05 : 0.07;
+          const depth = clad.relief === "rib" ? 0.05 : 0.1;
           for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
-            wg.add(wallBox(wallMat, wf, a - 0.07, a + 0.07, 0, H, T / 2 + 0.03, 0.1));
+            wg.add(wallBox(wallMat, wf, a - halfW, a + halfW, 0, H, T / 2 + 0.03, depth));
           }
         } else {
-          for (let y = 0.8; y < H - 0.15; y += 0.8) {
+          for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
             wg.add(wallBox(wallMat, wf, b0 + 0.03, b1 - 0.03, y - 0.04, y + 0.04, T / 2 + 0.03, 0.1));
           }
         }
@@ -2539,12 +2627,28 @@ function buildShed3DModel(THREE, p) {
   const shape = new THREE.Shape();
   dedup.forEach((pt, i) => (i === 0 ? shape.moveTo(pt[0], pt[1]) : shape.lineTo(pt[0], pt[1])));
   const rg = new THREE.Group(); // local space: x = profile u, y = up, z = 0..L along the ridge
-  // The gable/end faces get their OWN material: the extrusion's UVs are in
-  // profile units, so sampling the wall texture through them painted a smeared
-  // pale wedge above the plate line. Plain body color reads clean; the viewer
-  // ghosts this material alongside wallMat in look-inside mode.
+  // The gable END FACES are this extrusion's caps, and they are the wall above the plate
+  // line — so they must carry the CLADDING, or the siding visibly stops at the plate and
+  // the peak is a flat wedge. That is what Carolyn pointed at: "this needs to go on up,
+  // on the top" (2026-08-18).
+  //
+  // It used to be flat body color deliberately, because sampling the wall texture through
+  // profile-unit UVs "painted a smeared pale wedge". The fix is the material GROUP, not a
+  // different texture: ExtrudeGeometry emits group 0 = the two caps and group 1 = the swept
+  // sides, and its default WorldUVGenerator gives the caps UVs equal to profile-space
+  // (u, y) in FEET — the same world-anchored convention the walls now use — so wallMat
+  // tiles across the gable at true scale and in phase with the wall below it.
+  //
+  // gableMat stays and becomes the SOFFIT material (the swept underside), which keeps
+  // applyShellMode's existing ghost block and the live body-color write working unchanged.
+  // The guard matters: group ordering is a three.js internal, not a documented API, so a
+  // shape that does not produce exactly two groups falls back to today's behaviour rather
+  // than painting the soffit with cladding — which would look like the very defect this
+  // fixes, with a false green light.
   const gableMat = mat(bodyColor);
-  rg.add(new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false }), gableMat));
+  const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false });
+  rg.add(new THREE.Mesh(gableGeom,
+    (gableGeom.groups && gableGeom.groups.length === 2) ? [wallMat, gableMat] : gableMat));
   // Roof texture: metal standing-seam vs shingle courses. The customer's
   // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
   // fills in before any pick — a bare flat-color slab was the single biggest
@@ -2564,20 +2668,41 @@ function buildShed3DModel(THREE, p) {
   }
   let profPeak = -Infinity;
   dedup.forEach((pt) => { if (pt[1] > profPeak) profPeak = pt[1]; });
+  // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
+  // or a gambrel knee. Everything else is a free edge that should really overhang.
+  const jointAt = (pt, self) => slopes.some((o) => o !== self
+    && ((Math.abs(o[0][0] - pt[0]) < 1e-6 && Math.abs(o[0][1] - pt[1]) < 1e-6)
+     || (Math.abs(o[1][0] - pt[0]) < 1e-6 && Math.abs(o[1][1] - pt[1]) < 1e-6)));
   slopes.forEach((sl) => {
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
     const slen = Math.sqrt(du * du + dy * dy);
-    const slab = box(roofMat, slen + OV * 2, D3.ROOF_T, L + OV * 2);
-    slab.rotation.z = Math.atan2(dy, du);
+    const ux = du / slen, uy = dy / slen;
     const nx = -dy / slen, ny = du / slen; // 2D normal of the slope, pointing up-outward
+    // PER-END extensions. This slab used to be `slen + OV * 2` centred on the slope
+    // midpoint, i.e. it overhung the RIDGE by the full eave overhang as well as the eave.
+    // Both gable halves therefore crossed above the peak and poked through each other
+    // (~0.22 ft of visible crossed blades at pitch 0.4 / OV 0.6) -- what Carolyn meant by
+    // "we don't build roofs like that" (2026-08-18). The ridge cap below is only CAPW wide
+    // and shifted inward, so it could never hide it.
+    //
+    // A free edge keeps the real overhang. An interior joint gets a MITER instead: the top
+    // faces sit `t` above the slope lines, so they meet a distance t*tan(a) beyond the peak
+    // measured along the slope. At pitch 0.4 that is a 0.03 ft tuck rather than a 0.6 ft
+    // overshoot, and the two top faces meet exactly on the ridge line.
+    const t = D3.ROOF_T / 2 + 0.02;
+    const miter = t * (Math.abs(du) > 1e-6 ? Math.abs(dy / du) : 0);
+    const extA = jointAt(A, sl) ? miter : OV;
+    const extB = jointAt(B, sl) ? miter : OV;
+    const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, L + OV * 2);
+    slab.rotation.z = Math.atan2(dy, du);
+    const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
     slab.position.set(
-      (A[0] + B[0]) / 2 + nx * (D3.ROOF_T / 2 + 0.02),
-      (A[1] + B[1]) / 2 + ny * (D3.ROOF_T / 2 + 0.02),
+      (A[0] + B[0]) / 2 + ux * shift + nx * t,
+      (A[1] + B[1]) / 2 + uy * shift + ny * t,
       L / 2
     );
     rg.add(slab);
-    const ux = du / slen, uy = dy / slen;
     // Eave fascia: a trim board hung on the slab's LOW edge, the finish
     // carpentry that stops a roof reading as a floating slab. Positioned with
     // the SAME normal offset the slab itself carries, or it hangs visibly
@@ -4120,7 +4245,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const rampEnabled = !!(C.rampSettings && C.rampSettings.enabled);
   const rampCustom = rampMode === "custom" && placeableRamps.length > 0;
   const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "", roofType: "", roofColor: "" };
+    const init = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
@@ -4217,6 +4342,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
+  // Cladding is a FIXED triple (we ship a texture for each; a tenant cannot invent a
+  // fourth), so it is a constant list like roofTypes rather than a catalog read. Empty
+  // string = "builder's standard", i.e. fall through to the style's own d3.siding, which
+  // is what every existing design does today.
+  const claddingChoices = D3_CLADDING_CHOICES;
   // The paint option renders inline beside the Roof Options (same row), not in
   // the option list below — see the Size/Roof/Paint row and renderPaintFields.
   const paintOpt = visibleOptions.find((o) => o.type === "counter" && o.id === "paint") || null;
@@ -4885,7 +5015,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // from before roofType/roofColor shipped) must not inherit the previously opened
     // design's values for those keys. Mirrors the sel useState initializer.
     setSel(() => {
-      const base = { style: "", size: "", roofType: "", roofColor: "" };
+      const base = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
       C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
       return { ...base, ...(design.selections || {}) };
     });
@@ -6865,6 +6995,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
           // unselected, so the estimate always shows the Roof line in order.
           ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "" } : {}),
+          // Cladding (Carolyn 2026-08-18). VISUAL ONLY in v1 -- it is recorded on the design
+          // and reported here so the estimate template can surface it, but it carries no
+          // price and adds no line to the estimate. Pricing bolts on later the way Roof and
+          // Paint already do (a rate + pricing_method on the catalog row, priced server-side
+          // in submit-estimate) without changing this key.
+          //
+          // ADDITIVE and permanent: only sent when the customer actually chose something, so
+          // tenants on the old frontend emit nothing. n8n/GoHighLevel read named fields, so a
+          // new key is safe -- renaming or removing one is not. Do not rename it.
+          ...(sel.cladding && D3_CLADDING[sel.cladding] ? { cladding: D3_CLADDING[sel.cladding].label } : {}),
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
@@ -7716,8 +7856,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           </div>
 
-          {/* Building Size + Roof Options + Paint — one row; paint sits beside the roof colors. */}
-          {(sizeOpts.length > 0 || roofTypes.length > 0 || paintOpt) && (
+          {/* Building Size + Roof Options + Cladding + Paint — one row. Cladding sits between
+              the roof and the paint, which is exactly where Carolyn drew it (2026-08-18). */}
+          {(sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || paintOpt) && (
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
               {sizeOpts.length > 0 && (
                 <div>
@@ -7771,6 +7912,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                 );
               })()}
+              {claddingChoices.length > 0 && (
+                <div>
+                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Cladding</span>
+                  <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
+                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    <option value="">Builder's standard</option>
+                    {claddingChoices.map((id) => <option key={id} value={id}>{D3_CLADDING[id].label}</option>)}
+                  </select>
+                </div>
+              )}
               {paintOpt && (
                 <div style={{ flex: 1, minWidth: 260 }}>
                   <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{paintOpt.label}</span>
