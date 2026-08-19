@@ -328,12 +328,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // OPERATOR GRANTS (migration 109). An operator can comp one feature to one tenant before it
   // is on sale — Carolyn 2026-08-18, about showing 3D to chosen builders. Read here because
   // client_feature_grants is service-role only: a tenant can neither see nor forge its own.
-  const { data: grantRows } = await admin
+  // FAIL SOFT, like the entitlement itself: this table is a comp bonus, and a read error
+  // (the table missing on a restored pre-109 snapshot is the proven case -- deploying this
+  // function ahead of migration 109 hard-500'd every billing call for two minutes on
+  // 2026-08-19) must cost the comp, never the whole billing/entitlement surface.
+  const { data: grantRows, error: grantErr } = await admin
     .from("client_feature_grants")
     .select("feature, expires_at")
     .eq("client_id", clientId);
+  if (grantErr) {
+    console.error("client_feature_grants read failed; treating as no grants:", grantErr.message);
+  }
   const nowMs = Date.now();
-  const granted = new Set((grantRows ?? [])
+  const granted = new Set(((grantErr ? [] : grantRows) ?? [])
     .filter((g) => !g.expires_at || Date.parse(g.expires_at) > nowMs)
     .map((g) => g.feature));
   // Read off allPlans, NOT plans: a feature whose current price point has been retired must

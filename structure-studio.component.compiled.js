@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 2ddc6feb10d7)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 71e2590de631)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -626,10 +626,11 @@ var fixturePhotoTex=function fixturePhotoTex(it){if(it.fixtureItemId==null)retur
 var fx=fxById.get(String(it.fixtureItemId));if(!fx||!fx.imageUrl)return null;return d3FixtureTexture(THREE,fx.imageUrl);};// Cladding texture — multiplies the body color, so the customer's paint still drives
 // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
 // raster, the relief style below, and the tile scale.
-var clad=D3_CLADDING[d3NormalizeCladding(p.styleSpec&&p.styleSpec.siding)]||D3_CLADDING.panel;var wallKind=clad.tex;var wallTex=d3MakeTexture(THREE,wallKind);if(wallTex){// Anchored to the BUILDING, not to each wall's own UV span: the old
-// `(bldgW + bldgH) / 3` was ONE repeat shared by all four walls through the single
-// wallMat, so a 2ft strip beside a door drew the same course count as a 12ft wall.
-wallTex.repeat.set(Math.max(1,(bldgW+bldgH)/2/clad.tileFtU),Math.max(1,H/clad.tileFtV));wallMat.map=wallTex;var wallBump=d3MakeBumpTexture(THREE,wallKind);if(wallBump){wallBump.repeat.copy(wallTex.repeat);wallMat.bumpMap=wallBump;wallMat.bumpScale=clad.bump;}// Metal reads as metal only with the surface response, not the pattern alone — the
+var clad=D3_CLADDING[d3NormalizeCladding(p.styleSpec&&p.styleSpec.siding)]||D3_CLADDING.panel;var wallKind=clad.tex;var wallTex=d3MakeTexture(THREE,wallKind);if(wallTex){// One tile per tileFt of WORLD FEET: wallBox rewrites every face's UVs to feet, so the
+// repeat is a constant unit conversion, not a per-building guess. (The first cut set a
+// building-averaged repeat against 0..1 face UVs, which anchored nothing -- every face
+// still stretched its tiles to its own length; audit 2026-08-19.)
+wallTex.repeat.set(1/clad.tileFtU,1/clad.tileFtV);wallMat.map=wallTex;var wallBump=d3MakeBumpTexture(THREE,wallKind);if(wallBump){wallBump.repeat.copy(wallTex.repeat);wallMat.bumpMap=wallBump;wallMat.bumpScale=clad.bump;}// Metal reads as metal only with the surface response, not the pattern alone — the
 // same recipe the metal ROOF already uses.
 if(clad.metal){wallMat.roughness=0.45;wallMat.metalness=0.35;}}var box=function box(m,w,h,d){return new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);};// Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
 var ftX=function ftX(px){return(px-mgX)/scale-bldgW/2;};var ftZ=function ftZ(py){return(py-mgY)/scale-bldgH/2;};// Environment: grass field to the horizon + on-ground dimension labels
@@ -644,7 +645,18 @@ var WALLS={north:{len:bldgW,O:[-bldgW/2,-bldgH/2],U:[1,0],N:[0,-1]},south:{len:b
 var openingsGroup=new THREE.Group();// frames + door/window fills (stay solid)
 // Place a box on wall `wf` spanning [a0,a1] along it and [y0,y1] vertically,
 // `out` ft toward the exterior, `depth` ft thick (defaults to wall thickness).
-var wallBox=function wallBox(m,wf,a0,a1,y0,y1,out,depth){var b=box(m,a1-a0,y1-y0,depth||T);var ac=(a0+a1)/2;b.position.set(wf.O[0]+wf.U[0]*ac+wf.N[0]*(out||0),(y0+y1)/2,wf.O[1]+wf.U[1]*ac+wf.N[1]*(out||0));if(wf.U[0]===0)b.rotation.y=Math.PI/2;return b;};// Opening vertical extent: item-stamped fields first (Phase 5 — placed items
+var wallBox=function wallBox(m,wf,a0,a1,y0,y1,out,depth){var b=box(m,a1-a0,y1-y0,depth||T);// WORLD-FEET UVs -- the actual anchoring. Stock BoxGeometry UVs span 0..1 per face, so
+// with a shared repeat every segment crammed the full tile count into its own face
+// (a 2 ft strip beside a door drew the same course count as a 12 ft wall), and the
+// gable cap -- whose ExtrudeGeometry UVs ARE in profile feet -- tiled 8-24x denser
+// than the wall under it (audit 2026-08-19; setting wallTex.repeat alone never
+// delivered what its comment claimed). Rewriting u/v to wall-run/height FEET makes
+// the single wallMat repeat of 1/tileFt land every face at true scale, keeps the
+// texture's drawn ribs in phase with the proud relief strips (both count feet from
+// the wall origin), and lines the cap's courses up with the wall's at the plate line.
+// The box's thin edge faces get stripe UVs out of this; they are 0.3 ft slivers
+// buried in corner trim, invisible either way.
+var uvA=b.geometry.attributes.uv,posA=b.geometry.attributes.position;var cu=(a0+a1)/2,cv=(y0+y1)/2;for(var i=0;i<uvA.count;i++)uvA.setXY(i,posA.getX(i)+cu,posA.getY(i)+cv);uvA.needsUpdate=true;var ac=(a0+a1)/2;b.position.set(wf.O[0]+wf.U[0]*ac+wf.N[0]*(out||0),(y0+y1)/2,wf.O[1]+wf.U[1]*ac+wf.N[1]*(out||0));if(wf.U[0]===0)b.rotation.y=Math.PI/2;return b;};// Opening vertical extent: item-stamped fields first (Phase 5 — placed items
 // carry openingHeightFt/sillFt), D3 defaults for legacy designs.
 // Catalog fixtures carry their real size as widthIn/heightIn instead of the
 // Phase 5 stamps, so a 7 ft roll-up finally reads taller than a walk door.
@@ -751,7 +763,7 @@ var gableMat=mat(bodyColor);var gableGeom=new THREE.ExtrudeGeometry(shape,{depth
 // some metalness) so the sun actually glints off the pans.
 var roofKind=p.roofType==="Metal"?"metal":p.roofType==="Shingle"?"shingle":p.styleSpec&&(p.styleSpec.roofMaterial==="metal"||p.styleSpec.roofMaterial==="shingle")?p.styleSpec.roofMaterial:"shingle";var roofTex=d3MakeTexture(THREE,roofKind);if(roofTex){roofTex.repeat.set(Math.max(2,Math.round(S/(roofKind==="metal"?1.5:2.5))),Math.max(2,Math.round(L/2.5)));roofMat.map=roofTex;roofMat.needsUpdate=true;var roofBump=d3MakeBumpTexture(THREE,roofKind);if(roofBump){roofBump.repeat.copy(roofTex.repeat);roofMat.bumpMap=roofBump;roofMat.bumpScale=roofKind==="metal"?0.5:0.35;}if(roofKind==="metal"){roofMat.roughness=0.45;roofMat.metalness=0.35;}else{roofMat.roughness=0.95;roofMat.metalness=0.0;}}var profPeak=-Infinity;dedup.forEach(function(pt){if(pt[1]>profPeak)profPeak=pt[1];});// A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
 // or a gambrel knee. Everything else is a free edge that should really overhang.
-var jointAt=function jointAt(pt,self){return slopes.some(function(o){return o!==self&&(Math.abs(o[0][0]-pt[0])<1e-6&&Math.abs(o[0][1]-pt[1])<1e-6||Math.abs(o[1][0]-pt[0])<1e-6&&Math.abs(o[1][1]-pt[1])<1e-6);});};slopes.forEach(function(sl){var A=sl[0],B=sl[1];var du=B[0]-A[0],dy=B[1]-A[1];var slen=Math.sqrt(du*du+dy*dy);var ux=du/slen,uy=dy/slen;var nx=-dy/slen,ny=du/slen;// 2D normal of the slope, pointing up-outward
+var jointPartnerAt=function jointPartnerAt(pt,self){return slopes.find(function(o){return o!==self&&(Math.abs(o[0][0]-pt[0])<1e-6&&Math.abs(o[0][1]-pt[1])<1e-6||Math.abs(o[1][0]-pt[0])<1e-6&&Math.abs(o[1][1]-pt[1])<1e-6);})||null;};slopes.forEach(function(sl){var A=sl[0],B=sl[1];var du=B[0]-A[0],dy=B[1]-A[1];var slen=Math.sqrt(du*du+dy*dy);var ux=du/slen,uy=dy/slen;var nx=-dy/slen,ny=du/slen;// 2D normal of the slope, pointing up-outward
 // PER-END extensions. This slab used to be `slen + OV * 2` centred on the slope
 // midpoint, i.e. it overhung the RIDGE by the full eave overhang as well as the eave.
 // Both gable halves therefore crossed above the peak and poked through each other
@@ -759,11 +771,18 @@ var jointAt=function jointAt(pt,self){return slopes.some(function(o){return o!==
 // "we don't build roofs like that" (2026-08-18). The ridge cap below is only CAPW wide
 // and shifted inward, so it could never hide it.
 //
-// A free edge keeps the real overhang. An interior joint gets a MITER instead: the top
-// faces sit `t` above the slope lines, so they meet a distance t*tan(a) beyond the peak
-// measured along the slope. At pitch 0.4 that is a 0.03 ft tuck rather than a 0.6 ft
-// overshoot, and the two top faces meet exactly on the ridge line.
-var t=D3.ROOF_T/2+0.02;var miter=t*(Math.abs(du)>1e-6?Math.abs(dy/du):0);var extA=jointAt(A,sl)?miter:OV;var extB=jointAt(B,sl)?miter:OV;var slab=box(roofMat,slen+extA+extB,D3.ROOF_T,L+OV*2);slab.rotation.z=Math.atan2(dy,du);var shift=(extB-extA)/2;// recentre: the ends no longer extend equally
+// A free edge keeps the real overhang. An interior joint extends exactly to the
+// OFFSET-POLYGON VERTEX: both slabs' top faces sit `t` above their slope lines and
+// intersect at Q = P + t*(n1+n2)/(1 + n1.n2); each slab runs to Q measured along its
+// own direction, so the faces meet with no crossing and no gap. For a symmetric ridge
+// this reduces to the old t*tan(a) (0.032 ft at pitch 0.4). It replaces a per-slope
+// tan that was only valid for symmetric joints: at a gambrel KNEE the two angles
+// differ, and per-slope tan gave 0.098/0.036 ft where the true meeting point needs
+// 0.019 ft from both sides -- the crossed-blades bug again at one-sixth scale.
+// Verified numerically against both profiles before landing (audit 2026-08-19).
+var t=D3.ROOF_T/2+0.02;var jointExt=function jointExt(P,dirInX,dirInY){var o=jointPartnerAt(P,sl);if(!o)return OV;// free edge: the real eave overhang
+var odu=o[1][0]-o[0][0],ody=o[1][1]-o[0][1];var olen=Math.sqrt(odu*odu+ody*ody)||1;var onx=-ody/olen,ony=odu/olen;var dot=nx*onx+ny*ony;var qx=t*(nx+onx)/(1+dot),qy=t*(ny+ony)/(1+dot);return Math.max(0,qx*dirInX+qy*dirInY);};var extA=jointExt(A,-ux,-uy);// the slab extends beyond A along -u
+var extB=jointExt(B,ux,uy);var slab=box(roofMat,slen+extA+extB,D3.ROOF_T,L+OV*2);slab.rotation.z=Math.atan2(dy,du);var shift=(extB-extA)/2;// recentre: the ends no longer extend equally
 slab.position.set((A[0]+B[0])/2+ux*shift+nx*t,(A[1]+B[1])/2+uy*shift+ny*t,L/2);rg.add(slab);// Eave fascia: a trim board hung on the slab's LOW edge, the finish
 // carpentry that stops a roof reading as a floating slab. Positioned with
 // the SAME normal offset the slab itself carries, or it hangs visibly
@@ -775,7 +794,11 @@ var lowEnd=A[1]<=B[1]?A:B;if(lowEnd[1]<=H+0.01){var towardLow=lowEnd===A?-1:1;va
 var highEnd=A[1]>=B[1]?A:B;if(roofCfg.type!=="shed"&&highEnd[1]>=profPeak-0.01){var towardHigh=highEnd===A?-1:1;var CAPW=0.55;var capBoard=box(roofMat,CAPW,0.06,L+OV*2);capBoard.rotation.z=Math.atan2(dy,du);capBoard.position.set(highEnd[0]-towardHigh*ux*(CAPW/2-0.06)+nx*(D3.ROOF_T+0.05),highEnd[1]-towardHigh*uy*(CAPW/2-0.06)+ny*(D3.ROOF_T+0.05),L/2);rg.add(capBoard);}// Rake boards: trim running up the roof edge at each gable end. Without
 // them the slab's raw end face reads unfinished — every rake on the
 // SmartBuild reference building is boarded (teardown polish list).
-[-OV+0.05,L+OV-0.05].forEach(function(z){var rake=box(trimMat,slen+OV*2,0.32,0.1);rake.rotation.z=Math.atan2(dy,du);rake.position.set((A[0]+B[0])/2+nx*(D3.ROOF_T/2-0.08),(A[1]+B[1])/2+ny*(D3.ROOF_T/2-0.08),z);rg.add(rake);});});if(uAxisIsX){rg.position.z=-L/2;}else{rg.rotation.y=-Math.PI/2;rg.position.x=L/2;}roofGroup.add(rg);// Corner trim boards live in roofGroup so "look inside" hides them with the roof.
+// Same per-end extensions and recentre as the slab they trim. These kept the old
+// symmetric `slen + OV*2` when the slab got its miter (052c79d), so two trim boards
+// crossed 0.6 ft past the ridge at every gable end -- the exact crossed-blades look
+// the miter had just removed, reintroduced in trim color (audit 2026-08-19).
+[-OV+0.05,L+OV-0.05].forEach(function(z){var rake=box(trimMat,slen+extA+extB,0.32,0.1);rake.rotation.z=Math.atan2(dy,du);rake.position.set((A[0]+B[0])/2+ux*shift+nx*(D3.ROOF_T/2-0.08),(A[1]+B[1])/2+uy*shift+ny*(D3.ROOF_T/2-0.08),z);rg.add(rake);});});if(uAxisIsX){rg.position.z=-L/2;}else{rg.rotation.y=-Math.PI/2;rg.position.x=L/2;}roofGroup.add(rg);// Corner trim boards live in roofGroup so "look inside" hides them with the roof.
 [[-bldgW/2,-bldgH/2],[bldgW/2,-bldgH/2],[-bldgW/2,bldgH/2],[bldgW/2,bldgH/2]].forEach(function(c){var post=box(trimMat,T+0.14,H,T+0.14);post.position.set(c[0],H/2,c[1]);roofGroup.add(post);});// ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
 // Same isolation as buildOneWall: rebuildInterior repopulates this group
 // alone when a loft/workbench/ramp moves during a live drag.
@@ -1098,7 +1121,14 @@ var roofColorsFor=function roofColorsFor(type){var list=Array.isArray(C.colors)?
 // fourth), so it is a constant list like roofTypes rather than a catalog read. Empty
 // string = "builder's standard", i.e. fall through to the style's own d3.siding, which
 // is what every existing design does today.
-var claddingChoices=D3_CLADDING_CHOICES;// The paint option renders inline beside the Roof Options (same row), not in
+//
+// Offered ONLY where 3D is on for this viewer. Cladding is visual-only in v1 -- the pick
+// manifests nowhere but the 3D view (plus a line of text on the estimate) -- so on a
+// tenant without the 3D grant it was a dropdown that visibly did nothing, shipped to
+// every public designer without opt-in (audit 2026-08-19). Gating it on view3dOn keeps
+// an ungranted tenant's page byte-identical to before cladding existed, and the control
+// appears together with 3D as each builder is switched on.
+var claddingChoices=view3dOn?D3_CLADDING_CHOICES:[];// The paint option renders inline beside the Roof Options (same row), not in
 // the option list below — see the Size/Roof/Paint row and renderPaintFields.
 var paintOpt=visibleOptions.find(function(o){return o.type==="counter"&&o.id==="paint";})||null;// When the building style changes, snap any now-inapplicable option back to
 // its default so a stale "Painted" (etc.) selection can't be silently sent
@@ -1388,7 +1418,11 @@ useEffect(function(){if(!supabase||!designCode){setEstimateVersions([]);return;}
 // data and keeps the current GHL refs (same estimate), marking it as the one being viewed.
 var openVersion=useCallback(/*#__PURE__*/function(){var _ref24=_asyncToGenerator(/*#__PURE__*/_regeneratorRuntime().mark(function _callee12(version){var _yield$supabase$rpc5,vrows,error,vrow,vsel,loadedItems,p;return _regeneratorRuntime().wrap(function _callee12$(_context12){while(1)switch(_context12.prev=_context12.next){case 0:if(!(!supabase||!designCode)){_context12.next=2;break;}return _context12.abrupt("return");case 2:_context12.next=4;return supabase.rpc("load_design_version",{p_code:designCode,p_version:version});case 4:_yield$supabase$rpc5=_context12.sent;vrows=_yield$supabase$rpc5.data;error=_yield$supabase$rpc5.error;vrow=Array.isArray(vrows)?vrows[0]:vrows;if(!(error||!vrow)){_context12.next=10;break;}return _context12.abrupt("return");case 10:vsel=vrow.selections||{};// Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
 // user size-change and wipe the items we're loading (same guard the initial load uses).
-prevSizeRef.current=vsel.size||prevSizeRef.current;setSel(function(prev){return _objectSpread(_objectSpread({},prev),vsel);});setPaintColors(vrow.paint_colors||{body:"",trim:""});setPaintCustom({body:false,trim:false});setCustomOptions(vrow.custom_options||[]);setRoDimensions(vrow.ro_dimensions||{});loadedItems=repairLoaded(Array.isArray(vrow.items)?vrow.items:[],(vrow.selections||{}).size);setItems(loadedItems);setSelectedId(null);idCounter=Math.max.apply(Math,[idCounter,0].concat(_toConsumableArray(loadedItems.map(function(i){return Number(i.id)||0;}))))+1;setViewingVersion(version);if(!embedded){p=new URLSearchParams(window.location.search);p.set("v",String(version));window.history.replaceState({},"","?".concat(p.toString()));}case 23:case"end":return _context12.stop();}},_callee12);}));return function(_x13){return _ref24.apply(this,arguments);};}(),[supabase,designCode,embedded]);// ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
+prevSizeRef.current=vsel.size||prevSizeRef.current;// Rebuild from pristine defaults, NEVER merge over the live sel: a version saved
+// before a key existed (cladding, roofType...) must not inherit whatever the user
+// picked five clicks ago in the current session -- the same rule the design-load
+// path already follows (audit 2026-08-19).
+setSel(function(){var base={style:"",size:"",roofType:"",roofColor:"",cladding:""};C.options.forEach(function(o){base[o.id]=o.type==="counter"?o.options[0]:"";});return _objectSpread(_objectSpread({},base),vsel);});setPaintColors(vrow.paint_colors||{body:"",trim:""});setPaintCustom({body:false,trim:false});setCustomOptions(vrow.custom_options||[]);setRoDimensions(vrow.ro_dimensions||{});loadedItems=repairLoaded(Array.isArray(vrow.items)?vrow.items:[],(vrow.selections||{}).size);setItems(loadedItems);setSelectedId(null);idCounter=Math.max.apply(Math,[idCounter,0].concat(_toConsumableArray(loadedItems.map(function(i){return Number(i.id)||0;}))))+1;setViewingVersion(version);if(!embedded){p=new URLSearchParams(window.location.search);p.set("v",String(version));window.history.replaceState({},"","?".concat(p.toString()));}case 23:case"end":return _context12.stop();}},_callee12);}));return function(_x13){return _ref24.apply(this,arguments);};}(),[supabase,designCode,embedded]);// ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
 // The SVG viewBox IS the export page. Notes/lines live in page coordinates,
 // so wherever they sit on screen is exactly where they print.
 var PAGE_W=SS_PAGE.W,PAGE_H=SS_PAGE.H;var TEXT_AREA_H=SS_PAGE.TEXT_AREA_H;// bottom band reserved for auto customer info
@@ -1702,7 +1736,7 @@ isDraftRef.current=false;draftStateRef.current=null;// Estimate sent from an inv
 unitToLink=newBuildMode?null:inventoryUnitRef.current||designUnit&&designUnit.id||null;if(embedded&&(unitToLink||newBuildMode&&designUnit)){try{supabase.functions.invoke("portal-settings",{body:{action:"link_design_to_unit",targetClientId:C.clientId,shortCode:shortCode,unitId:unitToLink}})["catch"](function(){});}catch(_e){/* never block the estimate on the label */}if(unitToLink)setDesignUnit(function(d){return d&&d.id===unitToLink?d:{id:unitToLink,serial:null};});else{setDesignUnit(null);setNewBuildMode(false);}}setDesignCode(shortCode);setViewingVersion(null);payload={// New fields — n8n can use these for GHL linking + image embed
 designId:shortCode,imageUrl:imageUrl,viewUrl:viewUrl,source:"StructureStudio",clientId:C.clientId,deliveryFee:Number(sel.deliveryFee)||0,// Included items the customer declined → the estimate adds a deduction line per item.
 declinedItems:(Array.isArray(sel.declinedItems)?sel.declinedItems:[]).filter(function(k){return includedItemKeys.includes(k);}).map(function(k){return{key:k,label:ITEMS[k]&&ITEMS[k].label||k};}),contact:{name:contact.name,email:contact.email,// Strip display formatting; n8n/GHL store raw digits.
-phone:contact.phone.replace(/\D/g,""),street:contact.street,city:contact.city,state:contact.state,zip:contact.zip},selections:_objectSpread(_objectSpread(_objectSpread(_objectSpread({buildingStyle:sel.style,buildingSize:sel.size,paint:sel.paint||"No Paint"},sel.paint==="Painted"?{paintBodyColor:paintColors.body||"TBD",paintTrimColor:paintColors.trim||"TBD"}:{}),sel.wallHeight?{wallHeightFt:sel.wallHeight}:{}),Array.isArray(C.colors)&&C.colors.some(function(c){return c.shingle||c.metal;})?{roofType:sel.roofType||"",roofColor:sel.roofColor||""}:{}),sel.cladding&&D3_CLADDING[sel.cladding]?{cladding:D3_CLADDING[sel.cladding].label}:{}),floorPlanItems:items.map(function(item){var displayLabel=getDisplayLabel(item.wall,frontWall);if(item.type==="line"){var dxFt=(item.x2-item.x1)/scale;var dyFt=(item.y2-item.y1)/scale;return{type:"line",wall:null,lengthFt:Math.round(Math.sqrt(dxFt*dxFt+dyFt*dyFt)*100)/100,angleDeg:Math.round(Math.atan2(dyFt,dxFt)*180/Math.PI*10)/10};}if(item.type==="textNote"){return{type:"textNote",wall:null,text:(item.text||"").trim()};}return _objectSpread(_objectSpread(_objectSpread(_objectSpread({type:item.type,wall:displayLabel?displayLabel.toLowerCase():item.wall||null},item.type==="workbench"?{lengthFt:item.widthFt}:{}),item.type==="fixtureDoor"?{name:item.doorName,widthIn:item.widthIn,heightIn:item.heightIn,swing:item.swing,operation:item.operation,price:item.price!=null?Number(item.price):null,fixtureItemId:item.fixtureItemId||null}:{}),item.type==="ramp"?{name:item.rampName||null,widthIn:item.widthIn||null,heightIn:item.heightIn||null,price:item.price!=null?Number(item.price):null,fixtureItemId:item.fixtureItemId||null}:{}),item.type==="window"&&item.fixtureItemId?{name:item.windowName||null,widthIn:item.widthIn||null,heightIn:item.heightIn||null,price:item.price!=null?Number(item.price):null,fixtureItemId:item.fixtureItemId}:{});}),// Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
+phone:contact.phone.replace(/\D/g,""),street:contact.street,city:contact.city,state:contact.state,zip:contact.zip},selections:_objectSpread(_objectSpread(_objectSpread(_objectSpread({buildingStyle:sel.style,buildingSize:sel.size,paint:sel.paint||"No Paint"},sel.paint==="Painted"?{paintBodyColor:paintColors.body||"TBD",paintTrimColor:paintColors.trim||"TBD"}:{}),sel.wallHeight?{wallHeightFt:sel.wallHeight}:{}),Array.isArray(C.colors)&&C.colors.some(function(c){return c.shingle||c.metal;})?{roofType:sel.roofType||"",roofColor:sel.roofColor||""}:{}),sel.cladding&&D3_CLADDING[sel.cladding]?{cladding:D3_CLADDING[sel.cladding].label,claddingId:sel.cladding}:{}),floorPlanItems:items.map(function(item){var displayLabel=getDisplayLabel(item.wall,frontWall);if(item.type==="line"){var dxFt=(item.x2-item.x1)/scale;var dyFt=(item.y2-item.y1)/scale;return{type:"line",wall:null,lengthFt:Math.round(Math.sqrt(dxFt*dxFt+dyFt*dyFt)*100)/100,angleDeg:Math.round(Math.atan2(dyFt,dxFt)*180/Math.PI*10)/10};}if(item.type==="textNote"){return{type:"textNote",wall:null,text:(item.text||"").trim()};}return _objectSpread(_objectSpread(_objectSpread(_objectSpread({type:item.type,wall:displayLabel?displayLabel.toLowerCase():item.wall||null},item.type==="workbench"?{lengthFt:item.widthFt}:{}),item.type==="fixtureDoor"?{name:item.doorName,widthIn:item.widthIn,heightIn:item.heightIn,swing:item.swing,operation:item.operation,price:item.price!=null?Number(item.price):null,fixtureItemId:item.fixtureItemId||null}:{}),item.type==="ramp"?{name:item.rampName||null,widthIn:item.widthIn||null,heightIn:item.heightIn||null,price:item.price!=null?Number(item.price):null,fixtureItemId:item.fixtureItemId||null}:{}),item.type==="window"&&item.fixtureItemId?{name:item.windowName||null,widthIn:item.widthIn||null,heightIn:item.heightIn||null,price:item.price!=null?Number(item.price):null,fixtureItemId:item.fixtureItemId}:{});}),// Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
 // price. submit-estimate turns each into a priced estimate line. Kept separate from
 // itemSummary (which counts the built-in door types) so the estimate engine has the
 // full per-door detail, not just a count.

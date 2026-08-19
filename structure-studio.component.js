@@ -2298,10 +2298,11 @@ function buildShed3DModel(THREE, p) {
   const wallKind = clad.tex;
   const wallTex = d3MakeTexture(THREE, wallKind);
   if (wallTex) {
-    // Anchored to the BUILDING, not to each wall's own UV span: the old
-    // `(bldgW + bldgH) / 3` was ONE repeat shared by all four walls through the single
-    // wallMat, so a 2ft strip beside a door drew the same course count as a 12ft wall.
-    wallTex.repeat.set(Math.max(1, (bldgW + bldgH) / 2 / clad.tileFtU), Math.max(1, H / clad.tileFtV));
+    // One tile per tileFt of WORLD FEET: wallBox rewrites every face's UVs to feet, so the
+    // repeat is a constant unit conversion, not a per-building guess. (The first cut set a
+    // building-averaged repeat against 0..1 face UVs, which anchored nothing -- every face
+    // still stretched its tiles to its own length; audit 2026-08-19.)
+    wallTex.repeat.set(1 / clad.tileFtU, 1 / clad.tileFtV);
     wallMat.map = wallTex;
     const wallBump = d3MakeBumpTexture(THREE, wallKind);
     if (wallBump) { wallBump.repeat.copy(wallTex.repeat); wallMat.bumpMap = wallBump; wallMat.bumpScale = clad.bump; }
@@ -2370,6 +2371,21 @@ function buildShed3DModel(THREE, p) {
   // `out` ft toward the exterior, `depth` ft thick (defaults to wall thickness).
   const wallBox = (m, wf, a0, a1, y0, y1, out, depth) => {
     const b = box(m, a1 - a0, y1 - y0, depth || T);
+    // WORLD-FEET UVs -- the actual anchoring. Stock BoxGeometry UVs span 0..1 per face, so
+    // with a shared repeat every segment crammed the full tile count into its own face
+    // (a 2 ft strip beside a door drew the same course count as a 12 ft wall), and the
+    // gable cap -- whose ExtrudeGeometry UVs ARE in profile feet -- tiled 8-24x denser
+    // than the wall under it (audit 2026-08-19; setting wallTex.repeat alone never
+    // delivered what its comment claimed). Rewriting u/v to wall-run/height FEET makes
+    // the single wallMat repeat of 1/tileFt land every face at true scale, keeps the
+    // texture's drawn ribs in phase with the proud relief strips (both count feet from
+    // the wall origin), and lines the cap's courses up with the wall's at the plate line.
+    // The box's thin edge faces get stripe UVs out of this; they are 0.3 ft slivers
+    // buried in corner trim, invisible either way.
+    const uvA = b.geometry.attributes.uv, posA = b.geometry.attributes.position;
+    const cu = (a0 + a1) / 2, cv = (y0 + y1) / 2;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i) + cu, posA.getY(i) + cv);
+    uvA.needsUpdate = true;
     const ac = (a0 + a1) / 2;
     b.position.set(
       wf.O[0] + wf.U[0] * ac + wf.N[0] * (out || 0),
@@ -2670,9 +2686,9 @@ function buildShed3DModel(THREE, p) {
   dedup.forEach((pt) => { if (pt[1] > profPeak) profPeak = pt[1]; });
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
-  const jointAt = (pt, self) => slopes.some((o) => o !== self
+  const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
     && ((Math.abs(o[0][0] - pt[0]) < 1e-6 && Math.abs(o[0][1] - pt[1]) < 1e-6)
-     || (Math.abs(o[1][0] - pt[0]) < 1e-6 && Math.abs(o[1][1] - pt[1]) < 1e-6)));
+     || (Math.abs(o[1][0] - pt[0]) < 1e-6 && Math.abs(o[1][1] - pt[1]) < 1e-6))) || null;
   slopes.forEach((sl) => {
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
@@ -2686,14 +2702,28 @@ function buildShed3DModel(THREE, p) {
     // "we don't build roofs like that" (2026-08-18). The ridge cap below is only CAPW wide
     // and shifted inward, so it could never hide it.
     //
-    // A free edge keeps the real overhang. An interior joint gets a MITER instead: the top
-    // faces sit `t` above the slope lines, so they meet a distance t*tan(a) beyond the peak
-    // measured along the slope. At pitch 0.4 that is a 0.03 ft tuck rather than a 0.6 ft
-    // overshoot, and the two top faces meet exactly on the ridge line.
+    // A free edge keeps the real overhang. An interior joint extends exactly to the
+    // OFFSET-POLYGON VERTEX: both slabs' top faces sit `t` above their slope lines and
+    // intersect at Q = P + t*(n1+n2)/(1 + n1.n2); each slab runs to Q measured along its
+    // own direction, so the faces meet with no crossing and no gap. For a symmetric ridge
+    // this reduces to the old t*tan(a) (0.032 ft at pitch 0.4). It replaces a per-slope
+    // tan that was only valid for symmetric joints: at a gambrel KNEE the two angles
+    // differ, and per-slope tan gave 0.098/0.036 ft where the true meeting point needs
+    // 0.019 ft from both sides -- the crossed-blades bug again at one-sixth scale.
+    // Verified numerically against both profiles before landing (audit 2026-08-19).
     const t = D3.ROOF_T / 2 + 0.02;
-    const miter = t * (Math.abs(du) > 1e-6 ? Math.abs(dy / du) : 0);
-    const extA = jointAt(A, sl) ? miter : OV;
-    const extB = jointAt(B, sl) ? miter : OV;
+    const jointExt = (P, dirInX, dirInY) => {
+      const o = jointPartnerAt(P, sl);
+      if (!o) return OV;                     // free edge: the real eave overhang
+      const odu = o[1][0] - o[0][0], ody = o[1][1] - o[0][1];
+      const olen = Math.sqrt(odu * odu + ody * ody) || 1;
+      const onx = -ody / olen, ony = odu / olen;
+      const dot = nx * onx + ny * ony;
+      const qx = t * (nx + onx) / (1 + dot), qy = t * (ny + ony) / (1 + dot);
+      return Math.max(0, qx * dirInX + qy * dirInY);
+    };
+    const extA = jointExt(A, -ux, -uy);      // the slab extends beyond A along -u
+    const extB = jointExt(B, ux, uy);
     const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, L + OV * 2);
     slab.rotation.z = Math.atan2(dy, du);
     const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
@@ -2736,12 +2766,16 @@ function buildShed3DModel(THREE, p) {
     // Rake boards: trim running up the roof edge at each gable end. Without
     // them the slab's raw end face reads unfinished — every rake on the
     // SmartBuild reference building is boarded (teardown polish list).
+    // Same per-end extensions and recentre as the slab they trim. These kept the old
+    // symmetric `slen + OV*2` when the slab got its miter (052c79d), so two trim boards
+    // crossed 0.6 ft past the ridge at every gable end -- the exact crossed-blades look
+    // the miter had just removed, reintroduced in trim color (audit 2026-08-19).
     [-OV + 0.05, L + OV - 0.05].forEach((z) => {
-      const rake = box(trimMat, slen + OV * 2, 0.32, 0.1);
+      const rake = box(trimMat, slen + extA + extB, 0.32, 0.1);
       rake.rotation.z = Math.atan2(dy, du);
       rake.position.set(
-        (A[0] + B[0]) / 2 + nx * (D3.ROOF_T / 2 - 0.08),
-        (A[1] + B[1]) / 2 + ny * (D3.ROOF_T / 2 - 0.08),
+        (A[0] + B[0]) / 2 + ux * shift + nx * (D3.ROOF_T / 2 - 0.08),
+        (A[1] + B[1]) / 2 + uy * shift + ny * (D3.ROOF_T / 2 - 0.08),
         z
       );
       rg.add(rake);
@@ -4355,7 +4389,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // fourth), so it is a constant list like roofTypes rather than a catalog read. Empty
   // string = "builder's standard", i.e. fall through to the style's own d3.siding, which
   // is what every existing design does today.
-  const claddingChoices = D3_CLADDING_CHOICES;
+  //
+  // Offered ONLY where 3D is on for this viewer. Cladding is visual-only in v1 -- the pick
+  // manifests nowhere but the 3D view (plus a line of text on the estimate) -- so on a
+  // tenant without the 3D grant it was a dropdown that visibly did nothing, shipped to
+  // every public designer without opt-in (audit 2026-08-19). Gating it on view3dOn keeps
+  // an ungranted tenant's page byte-identical to before cladding existed, and the control
+  // appears together with 3D as each builder is switched on.
+  const claddingChoices = view3dOn ? D3_CLADDING_CHOICES : [];
   // The paint option renders inline beside the Roof Options (same row), not in
   // the option list below — see the Size/Roof/Paint row and renderPaintFields.
   const paintOpt = visibleOptions.find((o) => o.type === "counter" && o.id === "paint") || null;
@@ -5202,7 +5243,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
     // user size-change and wipe the items we're loading (same guard the initial load uses).
     prevSizeRef.current = vsel.size || prevSizeRef.current;
-    setSel((prev) => ({ ...prev, ...vsel }));
+    // Rebuild from pristine defaults, NEVER merge over the live sel: a version saved
+    // before a key existed (cladding, roofType...) must not inherit whatever the user
+    // picked five clicks ago in the current session -- the same rule the design-load
+    // path already follows (audit 2026-08-19).
+    setSel(() => {
+      const base = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+      C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
+      return { ...base, ...vsel };
+    });
     setPaintColors(vrow.paint_colors || { body: "", trim: "" });
     setPaintCustom({ body: false, trim: false });
     setCustomOptions(vrow.custom_options || []);
@@ -7013,7 +7062,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // ADDITIVE and permanent: only sent when the customer actually chose something, so
           // tenants on the old frontend emit nothing. n8n/GoHighLevel read named fields, so a
           // new key is safe -- renaming or removing one is not. Do not rename it.
-          ...(sel.cladding && D3_CLADDING[sel.cladding] ? { cladding: D3_CLADDING[sel.cladding].label } : {}),
+          // Both spellings on purpose: `cladding` is the human label the estimate template
+          // prints; `claddingId` is the stable id the design row stores (p_selections holds
+          // sel verbatim), so a consumer never has to reverse-map display text.
+          ...(sel.cladding && D3_CLADDING[sel.cladding] ? { cladding: D3_CLADDING[sel.cladding].label, claddingId: sel.cladding } : {}),
         },
         floorPlanItems: items.map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);

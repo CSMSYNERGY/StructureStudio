@@ -677,14 +677,41 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
 
         const wanted = Array.isArray(p.grants) ? p.grants : [];
         if (wanted.length > 50) throw new Error("Too many grants in one request.");
-        const rows: Record<string, unknown>[] = [];
-        const refused: string[] = [];
+
+        // What this tenant holds NOW. Two reasons (both audit 2026-08-19):
+        //   1. VALIDATION applies only to what is being ADDED. A grant whose feature was
+        //      later un-armed (operator_grantable flipped false) must stay REMOVABLE --
+        //      validating the whole replacement set left stale grants that no UI could
+        //      revoke, because every save carrying the other, legitimate grants was
+        //      refused on the stale one's account.
+        //   2. METADATA on merely-preserved grants must survive. The wipe-and-reinsert
+        //      rewrote granted_by/granted_at and dropped note on every save that touched a
+        //      DIFFERENT feature, erasing the audit trail this table exists to keep.
+        const { data: existingRows } = await sb.from("client_feature_grants")
+          .select("feature, expires_at").eq("client_id", clientId);
+        const existing = new Map((existingRows ?? []).map((r: any) => [r.feature, r.expires_at ?? null]));
+
+        // Last occurrence wins: two rows for one feature share a primary key, so an
+        // un-deduped pair turned the whole save into a constraint violation.
+        const byFeature = new Map<string, any>();
         for (const g of wanted) {
           const feature = typeof g?.feature === "string" ? g.feature.trim() : "";
-          if (!feature) continue;
-          // Refuse LOUDLY rather than dropping silently: a checkbox that saves and comes
-          // back unchecked reads as a broken save.
-          if (!grantable.has(feature) || PAID_ONLY_FEATURES.has(feature)) { refused.push(feature); continue; }
+          if (feature) byFeature.set(feature, g);
+        }
+
+        const rows: Record<string, unknown>[] = [];
+        const refused: string[] = [];
+        for (const [feature, g] of byFeature) {
+          // Refuse LOUDLY rather than dropping silently -- but only for features being
+          // ADDED. A feature the tenant already holds passes through so it can be kept
+          // or revoked regardless of whether it is still grantable today.
+          if (!existing.has(feature) && (!grantable.has(feature) || PAID_ONLY_FEATURES.has(feature))) {
+            refused.push(feature);
+            continue;
+          }
+          // PAID_ONLY is refused even for held grants: a hand-inserted row for
+          // schedule_builds must not be re-writable through this door.
+          if (PAID_ONLY_FEATURES.has(feature)) { refused.push(feature); continue; }
           let expiresAt: string | null = null;
           if (g.expiresAt) {
             const t = Date.parse(String(g.expiresAt));
@@ -705,11 +732,26 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           throw new Error(`Not available for early access: ${refused.join(", ")}. `
             + "A feature must be marked operator_grantable, and paid-only features never are.");
         }
-        const { error: delErr } = await sb.from("client_feature_grants").delete().eq("client_id", clientId);
-        if (delErr) throw delErr;
-        if (rows.length) {
-          const { error: insErr } = await sb.from("client_feature_grants").insert(rows);
-          if (insErr) throw insErr;
+
+        // Write order matters without a transaction: UPSERT the changed/new rows first,
+        // then PRUNE what was un-picked. A failure between the two leaves every feature
+        // either at its old value or its new one -- never the wiped-out nothing that
+        // delete-then-insert left when the insert failed (audit 2026-08-19). Rows whose
+        // expiry is unchanged are skipped entirely, which is what preserves their
+        // granted_by/granted_at/note.
+        const changed = rows.filter((r: any) =>
+          !existing.has(r.feature) || existing.get(r.feature) !== r.expires_at);
+        if (changed.length) {
+          const { error: upErr } = await sb.from("client_feature_grants")
+            .upsert(changed, { onConflict: "client_id,feature" });
+          if (upErr) throw upErr;
+        }
+        const keep = new Set(rows.map((r: any) => r.feature));
+        const drop = [...existing.keys()].filter((f) => !keep.has(f));
+        if (drop.length) {
+          const { error: delErr } = await sb.from("client_feature_grants")
+            .delete().eq("client_id", clientId).in("feature", drop);
+          if (delErr) throw delErr;
         }
         return json({
           ok: true,

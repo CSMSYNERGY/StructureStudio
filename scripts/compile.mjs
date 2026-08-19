@@ -180,11 +180,11 @@ export function checkArtifacts() {
   }
   for (const t of TARGETS) {
     if (!existsSync(join(root, t.out))) {
-      problems.push(`${t.out}: missing — run \`npm run compile\` (compiled from ${t.src})`);
+      problems.push(`${t.out}: missing — run \`npm run compile\` (compiled from ${targetName(t)})`);
       continue;
     }
     if (lf(read(t.out)) !== built.artifacts[t.out]) {
-      problems.push(`${t.out}: STALE — ${t.src} changed without recompiling. Run \`npm run compile\``);
+      problems.push(`${t.out}: STALE — ${targetName(t)} changed without recompiling. Run \`npm run compile\``);
     }
   }
   for (const p of PAGES) {

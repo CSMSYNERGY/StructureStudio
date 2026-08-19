@@ -829,7 +829,11 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
   // is FALSE by default and can never be true for a paid-only feature. If 3D is ever put on
   // sale properly, drop the column and this button disappears on its own.
   const can3D = (features || []).some((f) => f.feature === "view_3d" && f.operatorGrantable);
-  const has3D = (c) => Array.isArray(c.grants) && c.grants.some((g) => g.feature === "view_3d");
+  // LIVE means unexpired: portal-billing ignores an expired grant, so the console must too,
+  // or an expired grant shows "3D access [on]" for a tenant who actually has nothing -- and
+  // clicking that lying button REVOKED the dead row instead of granting (audit 2026-08-19).
+  const grantLive = (g) => !g.expiresAt || Date.parse(g.expiresAt) > Date.now();
+  const has3D = (c) => Array.isArray(c.grants) && c.grants.some((g) => g.feature === "view_3d" && grantLive(g));
 
   // One-click comp/revoke straight from the list, so the common case does not need a trip
   // through Manage -> Account. The Account card still exists and is the place to set an
@@ -843,16 +847,22 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
       // sent back with it or toggling 3D would silently revoke them. Only view_3d is grantable
       // today, which is exactly why this is easy to get wrong later.
       const cur = Array.isArray(c.grants) ? c.grants : [];
-      const next = on ? cur.filter((g) => g.feature !== "view_3d")
-                      : cur.concat([{ feature: "view_3d", expiresAt: null }]);
+      // BOTH paths strip every existing view_3d row first. The ON path used to concat onto
+      // whatever was there, so granting over an EXPIRED leftover row sent two rows with the
+      // same (client_id, feature) primary key and the whole save failed (audit 2026-08-19).
+      const others = cur.filter((g) => g.feature !== "view_3d");
+      const next = on ? others : others.concat([{ feature: "view_3d", expiresAt: null }]);
       await adminApi("set_feature_grants", {
         clientId: c.client_id,
         grants: next.map((g) => ({ feature: g.feature, expiresAt: g.expiresAt || null })),
       });
-      await onReload();
-      onFlash({ ok: on
+      const okMsg = on
         ? `3D turned OFF for ${c.company_name || c.client_id}. They see the “coming soon” teaser again.`
-        : `3D turned ON for ${c.company_name || c.client_id}. This is a comp — no subscription, no charge.` });
+        : `3D turned ON for ${c.company_name || c.client_id}. This is a comp — no subscription, no charge.`;
+      // The write LANDED; a refresh hiccup after it must not read as "the save failed" --
+      // that misreport is how an operator clicks again and undoes their own change.
+      try { await onReload(); onFlash({ ok: okMsg }); }
+      catch (_e) { onFlash({ ok: okMsg + " (The list did not refresh — reload the page to see it.)" }); }
     } catch (e) { onFlash({ err: e.message }); }
     setGrantBusy(null);
   };
@@ -1081,11 +1091,15 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
   // Early access (migration 109): features comped to THIS builder before they go on sale.
   const grantable = (features || []).filter((f) => f.operatorGrantable);
   const rowGrants = Array.isArray(clientRow && clientRow.grants) ? clientRow.grants : [];
-  const [grantPick, setGrantPick] = useState(rowGrants.map((g) => g.feature));
-  const [grantUntil, setGrantUntil] = useState(() => {
-    const withDate = rowGrants.find((g) => g.expiresAt);
+  // Only LIVE grants pre-check their boxes -- an expired one is off in portal-billing and
+  // must read as off here too (audit 2026-08-19).
+  const rowGrantLive = (g) => !g.expiresAt || Date.parse(g.expiresAt) > Date.now();
+  const [grantPick, setGrantPick] = useState(rowGrants.filter(rowGrantLive).map((g) => g.feature));
+  const initialUntil = (() => {
+    const withDate = rowGrants.filter(rowGrantLive).find((g) => g.expiresAt);
     return withDate ? String(withDate.expiresAt).slice(0, 10) : "";
-  });
+  })();
+  const [grantUntil, setGrantUntil] = useState(initialUntil);
   const [grantBusy, setGrantBusy] = useState(false);
 
   const [delOpen, setDelOpen] = useState(false);
@@ -1141,10 +1155,26 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
   const saveGrants = async () => {
     setGrantBusy(true);
     try {
-      const r = await adminApi("set_feature_grants", {
-        clientId,
-        grants: grantPick.map((feature) => ({ feature, expiresAt: grantUntil || null })),
+      // A DATE input holds a local calendar day; storing it raw made the grant die at UTC
+      // midnight -- the prior EVENING in US timezones. End-of-local-day is what an operator
+      // means by "until Aug 30" (audit 2026-08-19).
+      const endOfDay = (d) => {
+        const [y, m, day] = String(d).split("-").map(Number);
+        return new Date(y, m - 1, day, 23, 59, 59, 999).toISOString();
+      };
+      // The single date field applies to every picked grant ONLY when the operator touched
+      // it this visit; untouched, each grant keeps its own stored expiry. One shared input
+      // silently rewriting every feature's end date is how a carefully staged preview
+      // schedule gets flattened (audit 2026-08-19).
+      const dateEdited = grantUntil !== initialUntil;
+      const grants = grantPick.map((feature) => {
+        const prior = rowGrants.find((g) => g.feature === feature && rowGrantLive(g));
+        const expiresAt = dateEdited
+          ? (grantUntil ? endOfDay(grantUntil) : null)
+          : (prior ? (prior.expiresAt || null) : (grantUntil ? endOfDay(grantUntil) : null));
+        return { feature, expiresAt };
       });
+      const r = await adminApi("set_feature_grants", { clientId, grants });
       await onReloadClients();
       onFlash({ ok: `Early access saved for ${label}. ${(r && r.note) || ""}`.trim() });
     } catch (e) { onFlash({ err: e.message }); }

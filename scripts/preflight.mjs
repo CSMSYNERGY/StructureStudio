@@ -140,8 +140,12 @@ function run(files) {
   // 2026-08-13, when in-browser Babel was removed) plus the two component twins.
   // The pages themselves carry no app code anymore — they get structural rules
   // below, not a lint.
-  for (const f of ["index.mount.jsx", "portal.app.jsx", "admin.app.jsx",
-                   "structure-studio.component.js", "StructureStudio.jsx"]) {
+  // Derived from TARGETS so a new compile target (or portal part, via readTarget) is
+  // linted the moment it exists -- the hand-kept five-name list this replaces is the same
+  // second-copy-drifts shape the load() comment already warns about (audit 2026-08-19).
+  // StructureStudio.jsx rides along explicitly: it is the component's hand-mirrored twin,
+  // linted but never compiled, so it is not a TARGET.
+  for (const f of [...TARGETS.map((t) => targetName(t)), "StructureStudio.jsx"]) {
     errors.push(...lint(f, files[f]));
   }
 

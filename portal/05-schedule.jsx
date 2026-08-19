@@ -2905,6 +2905,12 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
   const [state, setState] = useState({ loading: true, err: null, styles: [] });
   useEffect(() => {
     let dead = false;
+    // The catalog action is gated settings_structures:view (portal-settings GATES), which a
+    // sales rep or driver does not hold. Before this guard, every non-admin staff member of
+    // a 3D-granted tenant opened this tab onto a bare 403 message (audit 2026-08-19) -- the
+    // status list is an ADMIN calibration surface, so skip the fetch entirely for everyone
+    // else and let the static copy below stand on its own.
+    if (!canAdmin) { setState({ loading: false, err: null, styles: [] }); return () => { dead = true; }; }
     (async () => {
       try {
         const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
@@ -2929,10 +2935,16 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
       </p>
       {state.loading && <div style={{ fontSize: 13, color: "#64748B" }}>Loading your styles…</div>}
       {state.err && <div style={{ fontSize: 13, color: "#DC2626", fontWeight: 600 }}>{state.err}</div>}
-      {!state.loading && !state.err && state.styles.length === 0 && (
+      {!canAdmin && !state.loading && (
+        <div style={{ fontSize: 13, color: "#64748B" }}>
+          Your customers see 3D on the designer already. Setting up each style's 3D look is an
+          admin job — ask an admin or the owner if a style looks off.
+        </div>
+      )}
+      {canAdmin && !state.loading && !state.err && state.styles.length === 0 && (
         <div style={{ fontSize: 13, color: "#64748B" }}>No building styles yet — add one in Settings → Structures first.</div>
       )}
-      {!state.loading && !state.err && state.styles.length > 0 && (
+      {canAdmin && !state.loading && !state.err && state.styles.length > 0 && (
         <>
           <div style={{ fontSize: 12.5, color: "#475569", fontWeight: 700, marginBottom: 8 }}>
             {done} of {state.styles.length} styles have their own 3D look

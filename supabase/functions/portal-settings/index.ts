@@ -1599,7 +1599,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     } else if ((used ?? 0) >= DAILY_CAP) {
       return json({ error: `Daily limit reached (${DAILY_CAP} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
     }
-    await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null });
+    // CHECKED on purpose: this row IS the spend cap. Unchecked, a failed insert (table
+    // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
+    // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
+    // cap query above already failed soft for the read case.
+    const { error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null });
+    if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
 
     let res: Response;
     try {

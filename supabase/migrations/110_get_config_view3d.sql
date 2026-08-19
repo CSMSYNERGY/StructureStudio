@@ -1,33 +1,42 @@
 -- 110_get_config_view3d: tell the anonymous public designer whether this tenant has 3D.
 --
--- WHY A WHOLE FUNCTION RE-EMIT: get_config is one monolithic jsonb_build_object and every
--- change to it has been a full `create or replace` (014 -> 019 -> 024 -> 033 -> 034 -> 035 ->
--- 036 -> 038 -> 039 -> 040 -> 081 -> 083). This body is 083's, copied MECHANICALLY (extracted
--- from the file, one key inserted programmatically) rather than retyped -- get_config is
--- anon-callable and serves every tenant's public designer, so a transcription slip here breaks
--- every shopfront at once with no branch gate in front of it.
+-- REGENERATED 2026-08-19 (second cut). The first version of this file was built from
+-- 083_config_fixtures_internal_only.sql's function body -- but the LIVE function is NOT
+-- 083's: beta-2.0's later migrations added the per-style d3 emission
+-- (`|| case when st.d3 is not null then jsonb_build_object('d3', st.d3) ...`), so applying
+-- that first cut would have silently dropped every tenant's per-style 3D appearance spec.
+-- Caught by the 2026-08-19 audit before the file was ever applied.
 --
--- The ONLY delta from 083 is the 'view3d' key. Diff it against 083 to confirm that.
--- ROLLBACK is one statement: re-run 083's function body.
+-- THIS body was therefore extracted from the LIVE database (pg_get_functiondef) and the
+-- view3d key inserted PROGRAMMATICALLY. The lesson, twice-earned now: get_config is
+-- rewritten wholesale by whoever touches it last, ACROSS BRANCHES -- a file in this repo is
+-- never proof of what is live. Before applying THIS file, re-run the same check:
+--   select pg_get_functiondef(p.oid) from pg_proc p
+--     join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public' and p.proname = 'get_config';
+-- and diff it against this body minus the view3d block. Expect ZERO other differences;
+-- any difference means someone changed the function again after 2026-08-19 and this file
+-- must be regenerated the same way rather than applied.
+--
+-- ROLLBACK: re-apply the captured pre-110 live body (scratchpad live_gc.sql of 2026-08-19,
+-- or regenerate from pg_get_functiondef before applying).
 
-create or replace function public.get_config(p_client_id text)
-returns jsonb language sql stable security definer set search_path to ''
-as $function$
+CREATE OR REPLACE FUNCTION public.get_config(p_client_id text)
+ RETURNS jsonb
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
   select case when cc.client_id is null then null else jsonb_build_object(
     'clientId', cc.client_id,
-    -- 3D visibility for the ANONYMOUS public designer. The portal can ask portal-billing
-    -- for an entitlement; index.html has no session and never can, so the flag has to ride
-    -- along with the config it already fetches.
-    --
-    -- Sourced from the GRANT TABLE ONLY, deliberately not from the exempt/subscription logic
-    -- portal-billing runs. One input rather than a second, drifting copy of entitlement -- and
-    -- correct for now because view_3d is `coming_soon` and therefore unpurchasable, so a grant
-    -- is the only way it can be true. WHEN view_3d GOES ON SALE: add the subscription branch
-    -- here AND fix the Deposyt plans, which are still at the retired $275/$2750 (see
-    -- 095_3dview_third_reprice.sql).
-    --
-    -- Anon-callable, so this emits a BOOLEAN and nothing else: never the grant row, never who
-    -- granted it, never a plan or a price.
+    -- 3D visibility for the ANONYMOUS public designer (migration 110). The portal asks
+    -- portal-billing for an entitlement; index.html has no session and never can, so the
+    -- flag rides along with the config it already fetches. Sourced from the operator
+    -- grant table ONLY (not a mirror of entitlement logic) -- correct while view_3d is
+    -- coming_soon and therefore unpurchasable. When it goes on sale, add the
+    -- subscription branch here AND fix the Deposyt plans (still at the retired
+    -- $275/$2750, see 095_3dview_third_reprice.sql). Anon-callable: emit the boolean
+    -- and NOTHING else -- never the grant row, the grantor, a plan or a price.
     'view3d', exists (
       select 1 from public.client_feature_grants g
       where g.client_id = cc.client_id
@@ -73,6 +82,7 @@ as $function$
                  ) inc
                  where s2.style_id = st.id and s2.active and inc.qmap is not null
                ), '{}'::jsonb))
+               || case when st.d3 is not null then jsonb_build_object('d3', st.d3) else '{}'::jsonb end
              order by st.sort_order, st.label)
       from public.building_styles st
       where st.client_id = cc.client_id and st.active), '[]'::jsonb),
