@@ -822,6 +822,40 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
   const [allFeat, setAllFeat] = useState(true);
   const [picked, setPicked] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [grantBusy, setGrantBusy] = useState(null);   // client_id mid-save, so only that row disables
+
+  // Is 3D comp-able at all? Same source the Account tab's Early access card uses: a feature is
+  // offerable only when its billing_plans rows carry operator_grantable (migration 109), which
+  // is FALSE by default and can never be true for a paid-only feature. If 3D is ever put on
+  // sale properly, drop the column and this button disappears on its own.
+  const can3D = (features || []).some((f) => f.feature === "view_3d" && f.operatorGrantable);
+  const has3D = (c) => Array.isArray(c.grants) && c.grants.some((g) => g.feature === "view_3d");
+
+  // One-click comp/revoke straight from the list, so the common case does not need a trip
+  // through Manage -> Account. The Account card still exists and is the place to set an
+  // EXPIRY; this button grants open-ended.
+  const toggle3D = async (c) => {
+    if (grantBusy) return;
+    const on = has3D(c);
+    setGrantBusy(c.client_id);
+    try {
+      // set_feature_grants REPLACES this tenant's whole set, so every OTHER grant has to be
+      // sent back with it or toggling 3D would silently revoke them. Only view_3d is grantable
+      // today, which is exactly why this is easy to get wrong later.
+      const cur = Array.isArray(c.grants) ? c.grants : [];
+      const next = on ? cur.filter((g) => g.feature !== "view_3d")
+                      : cur.concat([{ feature: "view_3d", expiresAt: null }]);
+      await adminApi("set_feature_grants", {
+        clientId: c.client_id,
+        grants: next.map((g) => ({ feature: g.feature, expiresAt: g.expiresAt || null })),
+      });
+      await onReload();
+      onFlash({ ok: on
+        ? `3D turned OFF for ${c.company_name || c.client_id}. They see the “coming soon” teaser again.`
+        : `3D turned ON for ${c.company_name || c.client_id}. This is a comp — no subscription, no charge.` });
+    } catch (e) { onFlash({ err: e.message }); }
+    setGrantBusy(null);
+  };
 
   const term = q.trim().toLowerCase();
   const list = (clients || []).filter((c) => !term
@@ -876,6 +910,24 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
             {c.client_id === sel && <AdmChip tone="on">Selected</AdmChip>}
             {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
+            {can3D && (() => {
+              const on = has3D(c);
+              const saving = grantBusy === c.client_id;
+              return (
+                <button type="button" onClick={() => toggle3D(c)} disabled={saving}
+                  title={on
+                    ? "3D is ON for this builder — click to remove access"
+                    : "Switch 3D on for this builder. A comp: no subscription, no charge."}
+                  style={{
+                    ...S.btn(on ? "#75E6DA" : "#FFFFFF", on ? "#0F4C46" : "#64748B"),
+                    border: "1px solid " + (on ? "#4FD1C5" : "#CBD5E1"),
+                    padding: "6px 12px", fontSize: 12, whiteSpace: "nowrap",
+                    opacity: saving ? 0.6 : 1, cursor: saving ? "default" : "pointer",
+                  }}>
+                  {saving ? "Saving…" : on ? "3D access ✓" : "3D access"}
+                </button>
+              );
+            })()}
             <button type="button" onClick={() => onPick(c.client_id)} title="Administer this builder"
               style={{ ...S.btn("#FFFFFF", ACCENT), border: "1px solid " + ACCENT, padding: "6px 12px", fontSize: 12 }}>Manage</button>
             {onOpenAccount && (
