@@ -240,6 +240,13 @@ function checkLoftAttached(l, r, t, b, bldgW, bldgH, otherLoftEdges) {
 // stored page-pixels back into feet — so the formula lives here, called twice
 // (old, new), instead of being inlined once in the render body.
 const SS_PAGE = { W: 850, H: 1100, TEXT_AREA_H: 340, TOP_LABEL_PAD: 30, BOT_LABEL_PAD: 30, RAMP_SPACE_FT: 2 };
+// Narrowest canvas ROW that can carry the plan and the docked 3D panel side by side:
+// plan floor 560 + gap 12 + panel floor 320 + row padding 40 = 932, rounded to 960.
+// Measured on the ROW, never on window.innerWidth: the portal sidebar is 240px and
+// collapses to 68px at max-width:900px, so the designer host is ~661px at a 901px
+// viewport but ~832px at 900px — a viewport threshold would switch the dock ON for
+// the narrower layout and OFF for the wider one.
+const SS_DOCK_MIN_ROW_W = 960;
 function pageGeom(bldgW, bldgH) {
   const visibleH = SS_PAGE.H - SS_PAGE.TEXT_AREA_H;
   const scale = Math.min(
@@ -4071,6 +4078,342 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   );
 }
 
+// ─── Docked view-only 3D (Carolyn, 2026-08-19) ────────────────────────────────
+// Which part of the 3D an `items` change touched. buildOneWall selects on
+// c.wallOnly ALONE; buildInterior builds EVERYTHING else — lofts, workbenches
+// (wallSnap), ramps (doorSnap), notes (noteType, a ground plaque) and lines
+// (lineType, a strip). Anything not attributable returns { full: true }: a full
+// rebuild is ~11ms, a stale wall standing beside a corrected plan is a bug the
+// customer sees. The identity compare is exact and O(n) because every 2D
+// mutation is `setItems((p) => p.map((i) => i.id === X ? {...i, ...} : i))`,
+// which returns the SAME object for every untouched row.
+function d3ScopeForItemsChange(prev, next, itemTypes) {
+  if (prev === next) return null;
+  const walls = new Set();
+  let interior = false, full = false;
+  const index = (arr) => { const m = new Map(); (arr || []).forEach((i) => m.set(i.id, i)); return m; };
+  const pm = index(prev), nm = index(next);
+  const touch = (it) => {
+    if (!it) return;
+    const c = itemTypes[it.type];
+    if (!c) { full = true; return; }          // unknown class — never guess
+    if (c.wallOnly) { if (it.wall) walls.add(it.wall); else full = true; return; }
+    interior = true;                          // loft | workbench | ramp | note | line
+  };
+  const ids = new Set();
+  pm.forEach((_v, k) => ids.add(k));
+  nm.forEach((_v, k) => ids.add(k));
+  ids.forEach((id) => {
+    const a = pm.get(id), b = nm.get(id);
+    if (a === b) return;
+    touch(a); touch(b);
+  });
+  return full ? { full: true } : { walls: Array.from(walls), interior };
+}
+
+/**
+ * Structure3DPanel — the 3D docked BESIDE the 2D plan instead of over it.
+ *
+ * Carolyn drew this on the 2026-08-19 call: the floor plan keeps the left of the
+ * canvas, the 3D takes a column on the right, and the same toolbar button toggles
+ * it. Scope, confirmed by Ahsan: the customer can ROTATE AROUND THE BUILDING AND
+ * LOOK AT IT. Nothing more. No placing, no dragging, no wall height, no colors,
+ * no snapshot, no roof/landscape/look-inside toggles — every one of those stays
+ * the full-screen Structure3DViewer's job, and this file does not touch it.
+ *
+ * "View-only" is not a flag that could be flipped: this component simply never
+ * registers pointer handlers, never builds a raycaster, and never caches a canvas
+ * rect. That also means the whole class of scroll-stale-rect bugs cannot occur.
+ *
+ * Gating: rendered INSIDE the same `view3dOn` expression that gates the 3D button
+ * — never hoisted above it — so a tenant without the grant cannot reach, render,
+ * or discover it. There is no second switch to forget.
+ *
+ * Deliberate differences from the modal, all justified by a ~380px canvas:
+ *   shadow map 2048 → 1024 (largest single GPU allocation, invisible at this size)
+ *   DPR cap 2 → 1.75
+ *   controls.enablePan → false (in a narrow panel a pan walks the building
+ *     off-screen with no reset control to bring it back)
+ *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
+ *     GLB-scan renderer does call it, and this surface mounts far more often.
+ */
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, suspended, canEdit, onEdit, onClose }) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const engineRef = useRef(null);
+  const [phase, setPhase] = useState("loading");   // loading | ready | error
+
+  // Latest props, readable from inside the mount effect's closures. Assigned
+  // during render (not in an effect) so a flush scheduled this frame already
+  // sees this frame's values — this is what avoids the frozen-props trap.
+  const pRef = useRef(null);
+  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures };
+
+  // Every geometry input that is NOT `items`, flattened to a scalar string.
+  // d3ResolveStyleSpec returns a fresh object (with fresh nested roof/colors)
+  // on every parent render, so an object in a dep array would rebuild the whole
+  // model on every mousemove. Scalars cannot do that.
+  // Stringify the WHOLE resolved spec instead of hand-picking fields. d3ResolveStyleSpec
+  // returns a small plain object with stable key order, so this is still a cheap scalar —
+  // but unlike a field list it cannot drift out of step with what buildShed3DModel reads.
+  // The hand-picked version silently missed roofMaterial, roof.overhang and the gambrel
+  // knee numbers, so two styles differing only in those left a stale roof standing beside
+  // a corrected plan until some unrelated edit happened to force a full rebuild.
+  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY]);
+
+  useEffect(() => {
+    let disposed = false;
+    loadThree().then((bundle) => {
+      const THREE = bundle.THREE, OrbitControls = bundle.OrbitControls;
+      if (disposed || !canvasRef.current) return;
+      const canvas = canvasRef.current;
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: false });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.15;
+      // Same view-independent sun as the modal: orbiting must not re-render the
+      // depth map. Every geometry mutation below re-arms needsUpdate by hand.
+      renderer.shadowMap.autoUpdate = false;
+      renderer.shadowMap.needsUpdate = true;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#E7EEF5");
+
+      const specOf = (p) => p.style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
+      const bodyOf = (p) => (p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body) : (specOf(p).colors.body || D3_COLORS.body));
+      const trimOf = (p) => (p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim) : (specOf(p).colors.trim || D3_COLORS.trim));
+      const roofOf = (p) => p.roofColorHex || specOf(p).colors.roof || D3_COLORS.roof;
+      const buildArgs = (p, fw) => {
+        const spec = specOf(p);
+        return { bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofOf(p), roofType: p.roofType, items: p.items, itemTypes: p.itemTypes, bodyColor: bodyOf(p), trimColor: trimOf(p), frontWall: fw, scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures };
+      };
+
+      const p0 = pRef.current;
+      const fw0 = p0.frontWall || "south";
+      // The builder gets the RAW nullable frontWall, exactly as the modal does — fw0's
+      // "south" default exists for the camera lookup only. Defaulting it into the builder
+      // would give a doorless design a different roof here than in the full-screen view and
+      // the quote snapshot, and would leave model.builtFrontWall on a different domain from
+      // the value the flush below compares it against.
+      const model = d3TimedBuild(() => buildShed3DModel(THREE, buildArgs(p0, p0.frontWall)));
+      scene.add(model.root);
+      scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
+
+      // Camera framing — identical maths to the modal so the docked view and the
+      // full-screen view read as the same building from the same angle. Every
+      // constant below derives ONLY from bldgW/bldgH, which is exactly why the
+      // parent remounts this component on a size change and on nothing else.
+      const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw0] || [0.35, 1];
+      const R = Math.max(p0.bldgW, p0.bldgH) * 0.5 + D3.WALL_H;
+      const dist = R * 3.66;
+      const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
+      const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+
+      const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
+      sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
+      sun.castShadow = true;
+      sun.shadow.mapSize.width = sun.shadow.mapSize.height = 1024;
+      const shR = Math.max(p0.bldgW, p0.bldgH) * 1.6 + 8;
+      sun.shadow.camera.left = -shR; sun.shadow.camera.right = shR;
+      sun.shadow.camera.top = shR; sun.shadow.camera.bottom = -shR;
+      sun.shadow.camera.near = 0.5; sun.shadow.camera.far = dist * 4;
+      sun.shadow.bias = -0.0005;
+      sun.shadow.camera.updateProjectionMatrix();
+      scene.add(sun);
+
+      const camera = new THREE.PerspectiveCamera(34, 1, 0.1, dist * 10);
+      camera.position.set(camX, dist * 0.5, camZ);
+
+      // The sky dome stays. buildShed3DModel sizes the grass disc to "stay inside
+      // the viewer's sky dome" — drop the dome and the customer sees a green disc
+      // floating in flat grey.
+      const skyTex = d3MakeSkyTexture(THREE);
+      const sky = skyTex ? new THREE.Mesh(
+        new THREE.SphereGeometry(dist * 6.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2 + 0.14),
+        new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false })
+      ) : null;
+      if (sky) { sky.position.y = -0.5; scene.add(sky); }
+
+      const controls = new OrbitControls(camera, canvas);
+      controls.target.set(0, D3.WALL_H * 0.45, 0);
+      controls.maxPolarAngle = Math.PI * 0.495;   // never below the ground plane
+      controls.minDistance = R * 1.1;
+      controls.maxDistance = dist * 2.5;
+      // No pan. The modal leaves it on because a full-screen canvas can afford a
+      // lost building; a 380px panel with no reset control cannot.
+      controls.enablePan = false;
+      controls.update();
+
+      const render = () => renderer.render(scene, camera);
+      let renderQueued = false;
+      const scheduleRender = () => {
+        if (renderQueued) return;
+        renderQueued = true;
+        requestAnimationFrame(() => { renderQueued = false; if (engineRef.current) render(); });
+      };
+      controls.addEventListener("change", scheduleRender);
+
+      const resize = () => {
+        const el = wrapRef.current;
+        if (!el) return;
+        const w = el.clientWidth, h = el.clientHeight;
+        if (!w || !h) return;                     // collapsed/hidden: nothing to size to
+        renderer.setSize(w, h, false);
+        camera.aspect = Math.max(1, w) / Math.max(1, h);
+        camera.updateProjectionMatrix();
+        render();
+      };
+      const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
+      if (ro && wrapRef.current) ro.observe(wrapRef.current);
+      if (!ro) window.addEventListener("resize", resize);
+
+      // A builder's fixture photo that lands after the scene was built is already
+      // swapped into its materials by the cache — all that is left is asking for a
+      // frame. Direct render, not rAF: a backgrounded tab never fires rAF and the
+      // customer must not return to blank doors. Unlike the modal this NEVER
+      // touches snapshot state; the panel does not own a snapshot.
+      const offFxTex = d3OnFixtureTexSettle(() => {
+        const e2 = engineRef.current;
+        if (e2) e2.render();
+      });
+
+      // ── Scoped, rAF-coalesced rebuilds ──
+      let pending = null;
+      const flush = () => {
+        const sc = pending; pending = null;
+        const e = engineRef.current;
+        if (!e || !sc) return;
+        const p = pRef.current;
+        const nf = getFrontWall(p.items) || p.frontWall;
+        if (sc.full || nf !== e.model.builtFrontWall) {
+          scene.remove(e.model.root);
+          disposeShed3DModel(e.model);
+          e.model = d3TimedBuild(() => buildShed3DModel(THREE, buildArgs(p, nf)));
+          scene.add(e.model.root);
+        } else {
+          d3TimedBuild(() => {
+            if (sc.walls && sc.walls.length) e.model.rebuildWalls(sc.walls, p.items);
+            if (sc.interior) e.model.rebuildInterior(p.items);
+          });
+        }
+        renderer.shadowMap.needsUpdate = true;    // geometry moved: the cached depth map is stale
+        render();
+      };
+      const queue = (scope) => {
+        const full = !scope || scope.full === true;
+        if (pending) {
+          if (full) pending.full = true;
+          else {
+            (scope.walls || []).forEach((w) => { if (pending.walls.indexOf(w) === -1) pending.walls.push(w); });
+            if (scope.interior) pending.interior = true;
+          }
+          return;
+        }
+        pending = { full, walls: full ? [] : (scope.walls || []).slice(), interior: !full && Boolean(scope.interior) };
+        requestAnimationFrame(flush);
+      };
+
+      let builtItems = p0.items;
+      engineRef.current = {
+        renderer, scene, camera, controls, model, sky, sun, render, resize, ro, offFxTex,
+        applyItems: (next) => {
+          const scope = d3ScopeForItemsChange(builtItems, next, pRef.current.itemTypes);
+          builtItems = next;
+          if (scope) queue(scope);
+        },
+        applyFull: () => { builtItems = pRef.current.items; queue({ full: true }); },
+      };
+      canvas.addEventListener("webglcontextlost", (ev) => { ev.preventDefault(); setPhase("error"); });
+      // preventDefault above is what asks the browser to restore the context. Without a
+      // matching restore listener it comes back and the panel stays stuck behind a dead
+      // error overlay for the rest of the session.
+      canvas.addEventListener("webglcontextrestored", () => {
+        setPhase("ready");
+        renderer.shadowMap.needsUpdate = true;
+        render();   // direct, not rAF — a backgrounded tab never fires rAF
+      });
+      if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dPanel = engineRef.current;
+      resize();
+      setPhase("ready");
+    }).catch((err) => {
+      console.error("3D panel failed to load:", err);
+      if (!disposed) setPhase("error");
+    });
+    return () => {
+      disposed = true;
+      const e = engineRef.current;
+      if (!e) return;
+      engineRef.current = null;
+      window.removeEventListener("resize", e.resize);
+      if (e.ro) e.ro.disconnect();
+      if (e.offFxTex) e.offFxTex();
+      e.controls.dispose();
+      disposeShed3DModel(e.model);
+      if (e.sky) { e.sky.geometry.dispose(); if (e.sky.material.map) e.sky.material.map.dispose(); e.sky.material.dispose(); }
+      if (e.sun && e.sun.shadow && e.sun.shadow.map) e.sun.shadow.map.dispose();
+      e.renderer.dispose();
+      // The modal omits this. This surface toggles open and shut far more often,
+      // and browsers cap live WebGL contexts hard — dropping it deterministically
+      // is the difference between "the 3D stopped working after a while" and not.
+      if (e.renderer.forceContextLoss) e.renderer.forceContextLoss();
+    };
+  // Mount once per building size — the parent's `key` handles the rest. The shadow and
+  // orbit constants bake from bldgW/bldgH, so a size change genuinely needs a fresh scene.
+  // Be honest about one more thing that bakes at mount: the opening camera angle and the
+  // sun position derive from the FRONT wall. If the front re-homes later (dragging the only
+  // door to another wall) the geometry follows on the next rebuild but the camera keeps its
+  // current angle. That is deliberate — re-aiming the camera under someone who has just
+  // orbited to the view they wanted is worse than a slightly stale opening angle, and
+  // orbiting is this panel's whole affordance.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live follow: the plan moves, the 3D moves. `suspended` is in the dep array on
+  // purpose — releasing a drag flips it false and re-runs this effect, which is
+  // what flushes the edit even though onPtrUp never touches `items` itself.
+  useEffect(() => {
+    const e = engineRef.current;
+    if (e && !suspended) e.applyItems(items);
+  }, [items, suspended]);
+
+  // Style, cladding, roof, paint, zoom: rebuild in place, no remount, so a
+  // free-text roof colour cannot churn a WebGL context per keystroke.
+  useEffect(() => {
+    const e = engineRef.current;
+    if (e) e.applyFull();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geomSig]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 8px 12px", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", flexShrink: 0 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>3D view</span>
+        <span style={{ fontSize: 11, color: "#94A3B8" }}>{bldgW}×{bldgH} ft · drag to rotate · scroll to zoom</span>
+        <button onClick={onClose} title="Hide the 3D view" aria-label="Hide the 3D view"
+          style={{ marginLeft: "auto", background: "transparent", border: "none", color: "#64748B", fontSize: 16, lineHeight: 1, cursor: "pointer", padding: "2px 4px" }}>✕</button>
+      </div>
+      <div ref={wrapRef} style={{ flex: 1, position: "relative", minHeight: 0, background: "#E7EEF5" }}>
+        <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }} />
+        {phase !== "ready" && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#64748B", fontSize: 12, textAlign: "center", padding: 16, pointerEvents: "none" }}>
+            {phase === "error" ? "The 3D view couldn't load. Close and open it again." : "Building the 3D view…"}
+          </div>
+        )}
+      </div>
+      {canEdit && (
+        <div style={{ padding: 8, borderTop: "1px solid #E2E8F0", background: "#F8FAFC", flexShrink: 0 }}>
+          {/* S lives inside the main component, out of reach from module scope, so
+              the panel spells its one button out. Values copied verbatim from S.btn
+              so the dock button and the toolbar button stay visually identical. */}
+          <button onClick={onEdit} style={{ background: "#7C3AED", color: "#FFF", border: "none", borderRadius: 6, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", width: "100%" }}>⛶ Edit in 3D</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN COMPONENT ───
 // Custom color dropdown: a native <select> can't render a color swatch per option, so this
 // shows a color chip + name in the closed button and in each list row (matching the palette).
@@ -4817,6 +5160,62 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [toast, setToast] = useState(null);
   // ─── 3D view state ───
   const [show3D, setShow3D] = useState(false);
+  // ── Docked view-only 3D (Carolyn 2026-08-19) ──
+  // Mutually exclusive with show3D for free: the panel renders INSIDE the
+  // {!(show3D || adminCalPreview)} guard below, so two live WebGL contexts are
+  // structurally impossible rather than merely avoided.
+  const [dock3D, setDock3D] = useState(false);
+  // Boolean only. Storing the measured width would setState on every frame of a
+  // window drag, on top of the SVG re-render that already costs.
+  const [dockCapable, setDockCapable] = useState(false);
+  const canvasRowObsRef = useRef(null);
+  // Callback ref, NOT useEffect([]) — the observed row unmounts whenever the
+  // full-screen 3D opens, and an effect-attached observer would keep watching a
+  // detached node, freezing dockCapable after the first trip through the editor.
+  const canvasRowRef = useCallback((node) => {
+    if (canvasRowObsRef.current) { canvasRowObsRef.current.disconnect(); canvasRowObsRef.current = null; }
+    if (!node || typeof ResizeObserver === "undefined") return;
+    // Coarse pointer is a touch-trap guard, not a width proxy: an iPad in landscape
+    // is wide enough to dock, but the canvas sets touchAction:"none" for orbit, so a
+    // finger on the panel could never scroll the designer host — the only scroller.
+    const coarse = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+    const measure = () => {
+      const w = node.clientWidth || 0;
+      // Zero means the row is not being rendered right now — the portal keeps the Designer
+      // mounted but hidden while the builder is on another tab. It does NOT mean "too
+      // narrow", and treating it that way collapsed the dock on every tab switch.
+      if (!w) return;
+      // 40px of hysteresis on the way down, so an appearing scrollbar cannot
+      // oscillate the rule at the threshold.
+      setDockCapable((prev) => !coarse && (prev ? w >= SS_DOCK_MIN_ROW_W - 40 : w >= SS_DOCK_MIN_ROW_W));
+    };
+    // Measure SYNCHRONOUSLY here, and let the observer handle changes after.
+    // ResizeObserver delivery rides the rendering steps, so its first callback is
+    // not guaranteed to land before the customer clicks the 3D button — and in a
+    // backgrounded tab it never lands at all. Waiting for it would silently open
+    // the full-screen modal on a wide screen that should have docked.
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(node);
+    canvasRowObsRef.current = ro;
+  }, []);
+  useEffect(() => () => { if (canvasRowObsRef.current) canvasRowObsRef.current.disconnect(); }, []);
+  // Narrowing collapses the dock. Deliberately does NOT open the full-screen modal
+  // instead: a modal appearing because someone dragged a window edge is hostile,
+  // and the button is right there.
+  // PORTAL ONLY for now (Carolyn, 2026-08-20). index.html and portal.html load the SAME
+  // compiled bundle, so without the `embedded` term the dock would also appear on the
+  // anonymous public designer for any tenant holding a view_3d grant. `embedded` is true
+  // only when the portal's Designer tab is hosting us. Shipping it to the public page
+  // later is exactly this one term.
+  const dockOn = dockCapable && embedded;
+  useEffect(() => { if (!dockOn && dock3D) setDock3D(false); }, [dockOn, dock3D]);
+  // Losing the grant mid-session must close the dock, not leave it rendering. The portal
+  // refetches entitlements on every session-token refresh, so view3dOn genuinely can flip
+  // true -> false with the designer still mounted — an operator revoking view_3d, or a
+  // grant simply reaching its expiry. The render site is gated on view3dOn as well; this
+  // clears the state sitting behind that gate so nothing stale survives a re-grant.
+  useEffect(() => { if (!view3dOn && dock3D) setDock3D(false); }, [view3dOn, dock3D]);
   // Latest captured 3D snapshot ({ url, w, h } — a JPEG data-URL) — becomes
   // page 2 of the quote PDF on submit/download. Kept in a ref (it's large and
   // never rendered); has3DSnapshot mirrors it for button labels.
@@ -8308,7 +8707,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               DRAGS items through the same pipeline as the 2D canvas, so without this an
               anonymous shopper could design a whole building without ever being asked who
               they are — which is the one thing the gate exists to prevent. */}
-          {!planLocked && view3dOn && <button onClick={() => { if (gateRequired) { setGateOpen(true); return; } setShow3D(true); }} style={S.btn("#7C3AED", "#FFF")}>{has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View"}</button>}
+          {/* planLocked is relaxed for the DOCK only. The comment above is why: the
+              modal edits items through its own handlers, so it would bypass the lock.
+              The panel registers no handlers at all — it is the "view-only 3D for
+              locked plans" that comment names as the planned follow-up. Its "Edit in
+              3D" button is hidden when locked, and setShow3D is unreachable from here
+              whenever dockOn, so there is no one-click route into the editor. */}
+          {(!planLocked || dockOn) && view3dOn && (
+            <button onClick={() => {
+              if (gateRequired) { setGateOpen(true); return; }
+              if (dockOn) setDock3D((v) => !v);
+              else setShow3D(true);   // narrow or touch: byte-identical to before
+            }} style={S.btn(dock3D ? "#5B21B6" : "#7C3AED", "#FFF")}>
+              {/* No ✓ badge in docked mode: the snapshot is cleared on every
+                  items/sel/paint/size change, so a tick beside a live panel would
+                  flicker off on every keystroke and read as a bug. */}
+              {dock3D ? "🧊 Hide 3D" : dockOn ? "🧊 3D View" : (has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View")}
+            </button>
+          )}
           {/* Not granted 3D yet: keep the marketing teaser shoppers already see on the
               public designer, so a tenant without the feature sees NO change. Portal
               users never get the teaser - business users see 3D Design in their nav. */}
@@ -8353,7 +8769,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
           and the PDF export draws from state, not this DOM. */}
       {!(show3D || adminCalPreview) && (
-      <div style={{ display: "flex", justifyContent: "center", padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: dock3D ? "flex-start" : "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+        {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
+            SVG with height:auto has an intrinsic size, so without it this row
+            overflows sideways instead of letting the plan shrink beside the panel. */}
+        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", justifyContent: "center" }}>
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
           style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
@@ -8743,6 +9163,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })}
         </svg>
+        </div>
+        {view3dOn && dock3D && (
+          /* Width and height are pure CSS — never derived from `frame` or dispMaxW,
+             which recompute on every render and would realloc the drawing buffer at
+             mousemove rate. sticky (not fixed) because the designer host is the
+             scroller; fixed would escape it and float over the whole portal. */
+          <div style={{ flex: "0 0 clamp(320px, 36%, 520px)", height: "min(620px, 68vh)", position: "sticky", top: 12 }}>
+            <Structure3DPanel
+              /* Remount on building size and NOTHING else: every camera, shadow and
+                 orbit constant in the panel bakes from bldgW/bldgH at mount. Size
+                 comes from a <select>, so this is rare and correct. Style, cladding,
+                 roof and paint all rebuild in place with no context churn. */
+              key={`${bldgW}x${bldgH}`}
+              bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+              painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
+              frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
+              roofType={sel.roofType}
+              roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
+              fixtures={C.fixtures}
+              suspended={Boolean(dragging || resizing)}
+              canEdit={!planLocked}
+              onEdit={() => { setDock3D(false); setShow3D(true); }}
+              onClose={() => setDock3D(false)}
+            />
+          </div>
+        )}
       </div>
       )}
 
