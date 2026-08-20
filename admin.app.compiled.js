@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 75370fbc810f)
+// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 f723f8e309b2)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -960,8 +960,12 @@ function AdminApp() {
       return _ref7.apply(this, arguments);
     };
   }();
+  // `freshClients` lets a caller that JUST refetched the list pass it in: this closure's
+  // `clients` is the array from the render it was created in, so right after create_client
+  // the new id isn't in it, the billing seed below would read exempt=false / 0%, and one
+  // Save would silently wipe the exemption/discount the create form persisted seconds ago.
   var loadClient = /*#__PURE__*/function () {
-    var _ref8 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee6(cid) {
+    var _ref8 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee6(cid, freshClients) {
       var _row$discountPercent;
       var row, scoped;
       return _regeneratorRuntime().wrap(function _callee6$(_context6) {
@@ -981,7 +985,7 @@ function AdminApp() {
             setDelConfirm(""); // close any open delete confirmation when switching clients
             setBillOpen(false);
             // Seed the billing editor from the list row so it opens showing what is actually set.
-            row = clients.find(function (c) {
+            row = (freshClients || clients).find(function (c) {
               return c.client_id === cid;
             });
             setBillPct(String((_row$discountPercent = row === null || row === void 0 ? void 0 : row.discountPercent) !== null && _row$discountPercent !== void 0 ? _row$discountPercent : 0));
@@ -1023,7 +1027,7 @@ function AdminApp() {
         }
       }, _callee6, null, [[21, 29]]);
     }));
-    return function loadClient(_x4) {
+    return function loadClient(_x4, _x5) {
       return _ref8.apply(this, arguments);
     };
   }();
@@ -1069,8 +1073,9 @@ function AdminApp() {
             setNcAllFeat(true);
             setNcFeat([]);
             _context7.next = 24;
-            return loadClient(id);
+            return loadClient(id, c.clients || []);
           case 24:
+            // the refetched list, NOT this closure's stale `clients` — see loadClient
             flash({
               ok: "Builder \"".concat(id, "\" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.")
             });
@@ -1475,7 +1480,7 @@ function AdminApp() {
         }
       }, _callee11, null, [[2, 7], [13, 26]]);
     }));
-    return function act(_x5, _x6, _x7) {
+    return function act(_x6, _x7, _x8) {
       return _ref18.apply(this, arguments);
     };
   }();
@@ -1922,7 +1927,7 @@ function AdminApp() {
         }
       }, _callee14, null, [[5, 40]]);
     }));
-    return function onUploadCsv(_x8) {
+    return function onUploadCsv(_x9) {
       return _ref21.apply(this, arguments);
     };
   }();

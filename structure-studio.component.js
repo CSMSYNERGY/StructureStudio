@@ -1097,6 +1097,30 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   return { rows };
 }
 
+// Which placed items does a Details "Options on your plan" row cover? Built-in rows key by
+// the item TYPE, but catalog rows carry synthetic keys — fx:/win:/ramp:<fixture id, or the
+// "name|price" fallback> and "ramp:simple" — that match no item's type, and the layout
+// "window"/"ramp" rows mean only the BUILT-IN subset (catalog ones price on their own rows).
+// The row's × button and pick-one-to-remove mode both need this mapping; matching on
+// `i.type === key` made the × a silent no-op for every catalog row — the customer could not
+// remove a charged item from Details and might submit believing they had (audit 2026-08-20).
+// Mirrors the grouping in computeLayoutPricingRows above — keep the two in sync.
+function priceRowMatcher(key) {
+  const isCatalog = (i) => !!i.fixtureItemId && i.price != null;   // same test the grouping uses
+  if (key === "window") return (i) => i.type === "window" && !isCatalog(i);
+  if (key === "ramp" || key === "ramp:simple") return (i) => i.type === "ramp" && !isCatalog(i);
+  const sep = key.indexOf(":");
+  if (sep < 0) return (i) => i.type === key;
+  const kind = key.slice(0, sep), fid = key.slice(sep + 1);
+  // Group id exactly as the row was built: the fixture id when the snapshot carries one,
+  // else the name|price fallback (String(): the row key came from template interpolation).
+  const gid = (i, name) => String(i.fixtureItemId || `${name}|${i.price != null ? Number(i.price) : 0}`);
+  if (kind === "fx") return (i) => i.type === "fixtureDoor" && gid(i, i.doorName || "Door") === fid;
+  if (kind === "win") return (i) => i.type === "window" && isCatalog(i) && gid(i, i.windowName || "Window") === fid;
+  if (kind === "ramp") return (i) => i.type === "ramp" && isCatalog(i) && gid(i, i.rampName || "Ramp") === fid;
+  return () => false;
+}
+
 let idCounter = 1;
 
 // 10-char short code in format SS-XXXXXXXXXX. Alphabet drops 0/O/I/1 to avoid
@@ -4508,8 +4532,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return () => window.removeEventListener("keydown", onKey, true);
   }, [pendingRemoval]);
   useEffect(() => {
-    // Auto-exit pick mode if the last item of the target type disappears.
-    if (pendingRemoval && !items.some((i) => i.type === pendingRemoval.type)) setPendingRemoval(null);
+    // Auto-exit pick mode if the last item of the target row disappears. priceRowMatcher,
+    // not a type compare: pendingRemoval.type is a Details ROW key, and catalog rows carry
+    // fx:/win:/ramp: keys that match no item's type — the type compare exited pick mode
+    // instantly for those rows (audit 2026-08-20).
+    if (pendingRemoval && !items.some(priceRowMatcher(pendingRemoval.type))) setPendingRemoval(null);
   }, [items, pendingRemoval]);
   const [dragging, setDragging] = useState(null);
   const [resizing, setResizing] = useState(null);
@@ -4945,14 +4972,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // and skipped the wipe. The items survived carrying page-pixels computed from the OLD
   // scale/mgX/mgY, which left doors floating off their walls — and, because they then
   // failed their own wallOnly rule, unable to be dragged back. That is the bug Carolyn
-  // reported. Comparing parsed DIMENSIONS rather than label strings closes it: a blank
-  // size parses to null and is skipped without poisoning the ref.
+  // reported. Comparing parsed DIMENSIONS rather than label strings closes it — PROVIDED
+  // the skip branch leaves the ref alone: it used to record sel.size (the blank) into the
+  // ref, so the follow-up size pick saw prev=null, skipped the reflow, and re-stranded
+  // every item exactly as described above. The ref now only ever holds the last size that
+  // actually took effect, so style-then-size reflows from the real old dimensions
+  // (audit 2026-08-20).
   //
   // reflowItems is pure, so the result is inspected BEFORE committing: if anything cannot
   // be placed at all, the size change is reverted and the customer is told what to remove.
   useEffect(() => {
     const p = parseSize(sel.size);
-    if (!p) { prevSizeRef.current = sel.size; return; }
+    if (!p) return;   // blank/unparseable (a style click just blanked it): keep the last real size
     const prev = parseSize(prevSizeRef.current);
     if (prev && (prev.w !== p.w || prev.h !== p.h) && items.length) {
       const { items: nextItems, events } = reflowItems(items, prev, p, ITEMS);
@@ -5445,6 +5476,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const fx = cfg.includedFixture;
       const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
       const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : 36)) / 12;
+      // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
+      // overhangs the building corner; refuse up front, as the door picker does
+      // (audit 2026-08-20).
+      if (widthFt > (w === "north" || w === "south" ? pW : pH) / scale + 1e-6) {
+        setToast(`That ${fx.category === "window" ? "window" : "door"} is wider than this wall — pick a longer wall.`);
+        setTimeout(() => setToast(null), 4000); return;
+      }
       const iwPx2 = widthFt * scale, ihPx2 = 0.5 * scale;
       const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY);
       let ni;
@@ -5461,6 +5499,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
         setToast("Something's already there — pick a different spot on the wall."); setTimeout(() => setToast(null), 4000); return;
+      }
+      // Workbench check too, as the built-in wall placement below runs — checkDoorCollision
+      // skips workbenches, so an included chip could drop its door/window straight onto one
+      // (audit 2026-08-20).
+      if (checkWorkbenchOverlap(sn, iwPx2, items, ITEMS, scale)) {
+        setToast("A workbench is on that wall — place this somewhere else on the wall."); setTimeout(() => setToast(null), 4000); return;
       }
       setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
       return;
@@ -5639,21 +5683,68 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
   // swing/operation choice onto a stable `fixtureDoor` item.
   const placePickedDoor = useCallback((fx, swing, operation) => {
-    // Swap mode: replace the selected door in place (keep its wall/position) with the chosen door.
+    // Swap mode: replace the selected door in place with the chosen door — keeping its wall,
+    // but RE-LEGALIZED for the new width. The swap used to keep x/y verbatim with no bounds,
+    // collision, or workbench check — the one mutation path with none — so swapping to a
+    // wider door overlapped its neighbors, or hung past the building corner near an end,
+    // straight into the exported PDF (audit 2026-08-20). Same checks + refusals as click
+    // placement; when the new door cannot fit, nothing changes and the old door stays.
     if (swapId != null && fx) {
       const wFt = (Number(fx.widthIn) || 36) / 12;
-      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "fixtureDoor", fixtureItemId: fx.id, doorName: fx.name || "Door",
-        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
-        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-        // Drop the height a BUILT-IN placement stamped: openingHeightFt wins over heightIn
-        // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
-        // matter what the builder's door actually measures.
-        openingHeightFt: undefined, sillFt: undefined,
-        widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null } : it));
+      const cur = items.find((it) => it.id === swapId);
+      if (!cur || !cur.wall) { setSwapId(null); setDoorPick(null); return; }
+      if (wFt > (cur.wall === "north" || cur.wall === "south" ? pW : pH) / scale + 1e-6) {
+        setToast("That door is wider than this wall — pick a narrower door.");
+        setTimeout(() => setToast(null), 4000);
+        setSwapId(null); setDoorPick(null);
+        return;
+      }
+      const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY);
+      const others = items.filter((it) => it.id !== swapId);
+      if (checkDoorCollision({ ...cur, ...sn, widthFt: wFt }, { width: wFt }, others, ITEMS, scale)) {
+        setToast("That door doesn't fit here — something else is in the way on this wall.");
+        setTimeout(() => setToast(null), 4000);
+        setSwapId(null); setDoorPick(null);
+        return;
+      }
+      if (checkWorkbenchOverlap(sn, wFt * scale, others, ITEMS, scale)) {
+        setToast("A workbench is on that wall — the wider door would overlap it.");
+        setTimeout(() => setToast(null), 4000);
+        setSwapId(null); setDoorPick(null);
+        return;
+      }
+      setItems((p) => p.map((it) => {
+        if (it.id === swapId) return { ...it, ...sn, type: "fixtureDoor", fixtureItemId: fx.id, doorName: fx.name || "Door",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+          // Drop the height a BUILT-IN placement stamped: openingHeightFt wins over heightIn
+          // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
+          // matter what the builder's door actually measures.
+          openingHeightFt: undefined, sillFt: undefined,
+          widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null };
+        // The re-clamp can shift the door; its ramp is derived geometry and must follow,
+        // exactly like the drag path — else it detaches into the rasterized PDF.
+        if (it.type === "ramp" && it.snapDoorId === swapId) {
+          const rp = rampPlacementForDoor(sn, it.heightFt, pW, pH, mgX, mgY, scale);
+          return rp ? { ...it, ...rp } : it;
+        }
+        return it;
+      }));
       setSwapId(null); setDoorPick(null); setToast(null); return;
     }
     if (!doorPick || !fx) return;
     const widthFt = (Number(fx.widthIn) || 36) / 12;
+    // A door wider than the clicked wall can never be legal: snapToWall's clamp degenerates
+    // (its max bound exceeds its min bound) and parks the door overhanging the building
+    // corner — on the plan, in the exported PDF, and as an opening wider than the wall in
+    // 3D. reflowItems' seat() already refuses wFt > wallLen on size change; enforce the
+    // same invariant at placement (audit 2026-08-20).
+    if (widthFt > (doorPick.wall === "north" || doorPick.wall === "south" ? pW : pH) / scale + 1e-6) {
+      setToast("That door is wider than this wall — pick a longer wall or a narrower door.");
+      setTimeout(() => setToast(null), 4000);
+      setDoorPick(null);
+      return;
+    }
     const iwPx = widthFt * scale, ihPx = 0.5 * scale;
     const sn = snapToWall(doorPick.wall, doorPick.ptx, doorPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
     const ni = {
@@ -5670,6 +5761,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setDoorPick(null);
       return;
     }
+    // Same second check as the built-in wall placement and the drag path: checkDoorCollision
+    // skips workbenches (wallSnap, not wallOnly), so a picked catalog door landed straight
+    // on a workbench — the exact layout checkWorkbenchOverlap exists to prevent
+    // (audit 2026-08-20).
+    if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+      setToast("A workbench is on that wall — place this somewhere else on the wall.");
+      setTimeout(() => setToast(null), 4000);
+      setDoorPick(null);
+      return;
+    }
     setItems((p) => [...p, ni]);
     setSelectedId(ni.id);
     setDoorPick(null);
@@ -5680,9 +5781,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
   // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
   const placePickedWindow = useCallback((fx) => {
+    // Swap mode: same re-legalization as the door swap above — the new width is re-clamped
+    // to the wall and collision/workbench-checked before committing; the old swap kept x/y
+    // verbatim with no checks at all (audit 2026-08-20).
     if (swapId != null && fx) {
       const wFt = (Number(fx.widthIn) || 24) / 12;
-      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
+      const cur = items.find((it) => it.id === swapId);
+      if (!cur || !cur.wall) { setSwapId(null); setWindowPick(null); return; }
+      if (wFt > (cur.wall === "north" || cur.wall === "south" ? pW : pH) / scale + 1e-6) {
+        setToast("That window is wider than this wall — pick a narrower window.");
+        setTimeout(() => setToast(null), 4000);
+        setSwapId(null); setWindowPick(null);
+        return;
+      }
+      const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY);
+      const others = items.filter((it) => it.id !== swapId);
+      if (checkDoorCollision({ ...cur, ...sn, widthFt: wFt }, { width: wFt }, others, ITEMS, scale)) {
+        setToast("That window doesn't fit here — something else is in the way on this wall.");
+        setTimeout(() => setToast(null), 4000);
+        setSwapId(null); setWindowPick(null);
+        return;
+      }
+      if (checkWorkbenchOverlap(sn, wFt * scale, others, ITEMS, scale)) {
+        setToast("A workbench is on that wall — the wider window would overlap it.");
+        setTimeout(() => setToast(null), 4000);
+        setSwapId(null); setWindowPick(null);
+        return;
+      }
+      setItems((p) => p.map((it) => it.id === swapId ? { ...it, ...sn, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
         planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
         price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
         // As on the door swap: a built-in window stamped openingHeightFt/sillFt, and those
@@ -5692,6 +5818,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     if (!windowPick || !fx) return;
     const widthFt = (Number(fx.widthIn) || 24) / 12;
+    // Wider than the clicked wall = snapToWall's clamp degenerates and the window overhangs
+    // the building corner; refuse up front, as the door picker does (audit 2026-08-20).
+    if (widthFt > (windowPick.wall === "north" || windowPick.wall === "south" ? pW : pH) / scale + 1e-6) {
+      setToast("That window is wider than this wall — pick a longer wall or a narrower window.");
+      setTimeout(() => setToast(null), 4000);
+      setWindowPick(null);
+      return;
+    }
     const iwPx = widthFt * scale, ihPx = 0.5 * scale;
     const sn = snapToWall(windowPick.wall, windowPick.ptx, windowPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
     const ni = {
@@ -5707,6 +5841,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setWindowPick(null);
       return;
     }
+    // Workbench check too, as the built-in wall placement runs — checkDoorCollision skips
+    // workbenches, so a picked catalog window landed straight on one (audit 2026-08-20).
+    if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+      setToast("A workbench is on that wall — place this somewhere else on the wall.");
+      setTimeout(() => setToast(null), 4000);
+      setWindowPick(null);
+      return;
+    }
     setItems((p) => [...p, ni]);
     setSelectedId(ni.id);
     setWindowPick(null);
@@ -5717,13 +5859,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // type:"ramp" item (so all ramp machinery applies) but takes the style's OWN width + length
   // (length = the ramp's run/depth out from the door) and snapshots its spec + price.
   const placePickedRamp = useCallback((fx) => {
+    // Swap mode: the stored x/y were derived from the OLD depth (a ramp sits centered
+    // depth/2 OUTSIDE the wall), so keeping them while changing heightFt left a deeper
+    // ramp extending inside the building on the plan — until its door was next dragged,
+    // the only thing that recomputed it. Re-derive the position from the door for the
+    // NEW depth, exactly like the drag path (audit 2026-08-20).
     if (swapId != null && fx) {
       const wFt = (Number(fx.widthIn) || 36) / 12;
       const dpt = (Number(fx.heightIn) || 0) / 12 || RAMP_SPACE_FT;
-      setItems((p) => p.map((it) => it.id === swapId ? { ...it, type: "ramp", fixtureItemId: fx.id, rampName: fx.name || "Ramp",
-        planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
-        price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-        widthFt: wFt, heightFt: dpt } : it));
+      setItems((p) => p.map((it) => {
+        if (it.id !== swapId) return it;
+        const door = p.find((d) => d.id === it.snapDoorId);
+        const rp = door && door.wall ? rampPlacementForDoor(door, dpt, pW, pH, mgX, mgY, scale) : null;
+        return { ...it, ...(rp || {}), type: "ramp", fixtureItemId: fx.id, rampName: fx.name || "Ramp",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "RAMP").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+          widthFt: wFt, heightFt: dpt };
+      }));
       setSwapId(null); setRampPick(null); setToast(null); return;
     }
     if (!rampPick || !fx) return;
@@ -8180,7 +8332,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           to click the one to remove. Cancel (or ESC) exits without removing. */}
       {pendingRemoval && (() => {
         const prCfg = ITEMS[pendingRemoval.type];
-        const prLbl = (prCfg && prCfg.label) || pendingRemoval.type;
+        // Row label first: catalog rows' keys (fx:<id> …) are not ITEMS keys, and a raw
+        // key is not a user-facing name (audit 2026-08-20).
+        const prLbl = pendingRemoval.label || (prCfg && prCfg.label) || pendingRemoval.type;
         return (
           <>
             <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 900 }} />
@@ -8570,8 +8724,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })()}
           {/* Pick-one-to-remove overlays: pulsing ring over every candidate; clicking one removes it.
-              Rendered last so the rings (and their click targets) sit above everything else. */}
-          {pendingRemoval && items.filter((i) => i.type === pendingRemoval.type).map((it) => {
+              Rendered last so the rings (and their click targets) sit above everything else.
+              priceRowMatcher: the pending type is a Details ROW key, and catalog rows' keys
+              match no item's type (audit 2026-08-20). */}
+          {pendingRemoval && items.filter(priceRowMatcher(pendingRemoval.type)).map((it) => {
             const c = ITEMS[it.type]; if (!c) return null;
             const iwFt = it.widthFt || c.width, ihFt = it.heightFt || c.height;
             const iw = iwFt * scale, ih = ihFt * scale;
@@ -8778,16 +8934,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       onClick={() => {
                         // "each"-priced items step down one at a time (when several are
                         // placed, the plan asks which one); everything else clears the line
-                        // and removes all of that type from the layout.
-                        const placed = items.filter((i) => i.type === r.key);
+                        // and removes everything on it from the layout. priceRowMatcher, not
+                        // `i.type === r.key`: catalog rows carry fx:/win:/ramp: keys that
+                        // match no item's type, so this × removed nothing for exactly the
+                        // rows that carry a price (audit 2026-08-20). The row label rides
+                        // along so pick mode can name the item (its key is not ITEMS-keyed).
+                        const match = priceRowMatcher(r.key);
+                        const placed = items.filter(match);
                         if (r.method === "each" && placed.length > 1) {
-                          setPendingRemoval({ type: r.key });
+                          setPendingRemoval({ type: r.key, label: r.label });
                           setSelectedId(null); setActiveTool(null);
                           setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }, 0);
                         } else {
                           // Cascade like delSel: removing a door also removes its snapped ramp.
                           const removedIds = new Set(placed.map((i) => i.id));
-                          setItems((p) => p.filter((i) => i.type !== r.key && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
+                          setItems((p) => p.filter((i) => !match(i) && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
                           setSelectedId(null);
                         }
                       }}

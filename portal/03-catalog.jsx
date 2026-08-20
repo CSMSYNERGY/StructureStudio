@@ -464,7 +464,16 @@ function SettingsView({ section }) {
 }
 
 // ─── CSV helpers (RFC-4180-ish) ───
-function csvEscape(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+// Besides quoting, csvEscape neutralizes spreadsheet FORMULA INJECTION: a cell starting
+// with = + - @ (or a tab/CR-led variant) gets a leading apostrophe — the standard
+// mitigation — so a tenant-typed label like =HYPERLINK(...) can't execute when the CSV
+// fallback is opened in Excel (audit 2026-08-20). Only these CSV paths need it; the
+// primary .xlsx path is safe because ExcelJS writes strings as inline strings.
+function csvEscape(v) {
+  let s = String(v == null ? "" : v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
 function toCSV(headers, rows) { return [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\r\n"); }
 function parseCSV(text) {
   const rows = []; let row = [], field = "", inQ = false;
@@ -502,7 +511,15 @@ function loadExcelJS() {
     const s = document.createElement("script");
     s.src = "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js";
     s.crossOrigin = "anonymous";
-    s.onload = () => window.ExcelJS ? resolve(window.ExcelJS) : reject(new Error("Spreadsheet library failed to initialise."));
+    s.onload = () => {
+      if (window.ExcelJS) { resolve(window.ExcelJS); return; }
+      // Loaded-but-empty (e.g. a proxy served 200 HTML that ran without defining ExcelJS).
+      // Clear the memo like onerror does — it used to cache this rejection for the whole
+      // session, so every later export/import failed instantly even after connectivity
+      // came back, and only a full reload recovered (audit 2026-08-20).
+      _exceljsPromise = null;
+      reject(new Error("The spreadsheet library didn't initialise (the download may have been altered by a proxy or captive portal) — try again."));
+    };
     s.onerror = () => { _exceljsPromise = null; reject(new Error("Could not load the spreadsheet library — check your connection and try again.")); };
     document.head.appendChild(s);
   });
@@ -1245,8 +1262,24 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       const iStyle = lc.indexOf("style"), iWidth = lc.indexOf("width"), iLength = lc.indexOf("length"), iPrice = lc.indexOf("price"), iActive = lc.indexOf("active");
       if (iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0) throw new Error('The sheet needs "style", "width", "length" and "price" columns.');
       const reserved = new Set([iStyle, iWidth, iLength, iPrice, iActive]);
+      // Inclusion columns match by LABEL, and the label→key map is last-writer-wins: two
+      // catalog items sharing a name and size (nothing server-side enforces unique names)
+      // used to resolve BOTH columns to the second item's id, silently dropping the first
+      // item's inclusion edits (audit 2026-08-20). Refuse and name the duplicates instead.
+      {
+        const seenLabel = new Set(); const dupLabels = new Set();
+        optionCols().forEach((it) => { const l = it.label.toLowerCase(); if (seenLabel.has(l)) dupLabels.add(it.label); seenLabel.add(l); });
+        if (dupLabels.size) throw new Error(`Import stopped — two catalog items share the same name and size, so their columns can't be told apart: ${[...dupLabels].join(", ")}. Rename one of the duplicates on its catalog tab, re-download the template, then import again.`);
+      }
       const labelToKey = {}; optionCols().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key; labelToKey[it.key.toLowerCase()] = it.key; });
       const colKey = header.map((h, idx) => reserved.has(idx) ? null : (labelToKey[h.toLowerCase()] || null));
+      // Same collision from the sheet side: a copied/duplicated header column would make the
+      // second column silently overwrite the first's quantities row by row.
+      {
+        const keyCount = {}; colKey.forEach((k) => { if (k) keyCount[k] = (keyCount[k] || 0) + 1; });
+        const dupHdrs = [...new Set(header.filter((h, idx) => colKey[idx] && keyCount[colKey[idx]] > 1))];
+        if (dupHdrs.length) throw new Error(`Import stopped — the sheet has more than one column for: ${dupHdrs.join(", ")}. Keep one column per option and re-upload.`);
+      }
       const rows = matrix.slice(1).map((cols) => {
         const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
         return { style: cols[iStyle], width: cols[iWidth], length: cols[iLength], price: cols[iPrice], active: iActive >= 0 ? cols[iActive] : "", inclusions };
@@ -1522,7 +1555,16 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   const save = async (rowsToSave) => {
     setBusy(true); setMsg(null);
     try {
-      const payloadRows = (rowsToSave || rows).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: Number(r.rate) || 0, imageUrl: r.image_url ?? null }));
+      const src = rowsToSave || rows;
+      // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
+      // cell ("TBD", "1.2.3" — easy via the CSV upload) into a silent $0 BEFORE the request,
+      // sneaking past the server's own invalid-rate guard, so the option then priced at $0 on
+      // every customer estimate (audit 2026-08-20). Refuse and name the rows instead. A blank
+      // rate still means 0 — that's how an untouched row round-trips.
+      const rateOf = (r) => { const s = String(r.rate ?? "").trim(); return s === "" ? 0 : Number(s); };
+      const bad = src.filter((r) => { const n = rateOf(r); return !Number.isFinite(n) || n < 0; });
+      if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.map((r) => `${r.label} ("${r.rate}")`).join(", ")}.`);
+      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
@@ -1902,11 +1944,17 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
-      const bool = (cols, i, dflt) => (i < 0 || String(cols[i] == null ? "" : cols[i]).trim() === "") ? dflt : truthy(cols[i]);
+      // Absent column (index < 0) → undefined: the key is dropped from the JSON body, and the
+      // server's presence contract leaves that field UNCHANGED on ID-matched rows. A trimmed
+      // sheet (say ID/Style/Width/Height/Price, the natural bulk-price edit) used to reset
+      // archived/internal-only/swing flags to their defaults on every imported row — silently
+      // un-archiving retired doors into the customer designer (audit 2026-08-20). A blank cell
+      // in a PRESENT column still means the default, matching the "yes"/"no" the export writes.
+      const bool = (cols, i, dflt) => i < 0 ? undefined : (String(cols[i] == null ? "" : cols[i]).trim() === "" ? dflt : truthy(cols[i]));
       const importRows = matrix.slice(1).map((cols) => {
         const row = {
           id: iId >= 0 ? String(cols[iId] == null ? "" : cols[iId]).trim() : "",
-          name: cols[iName], planLabel: iLabel >= 0 ? cols[iLabel] : "",
+          name: cols[iName], planLabel: iLabel >= 0 ? cols[iLabel] : undefined,
           widthIn: ftInToInches(String(cols[iW] == null ? "" : cols[iW]).replace(/\s/g, "")),
           heightIn: ftInToInches(String(cols[iH] == null ? "" : cols[iH]).replace(/\s/g, "")),
           price: cols[iPrice],
@@ -1916,11 +1964,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         if (hasSwingOp) {
           row.swingOut = bool(cols, iSwOut, false); row.swingIn = bool(cols, iSwIn, false);
           const sd = String(iSwDef >= 0 ? (cols[iSwDef] == null ? "" : cols[iSwDef]) : "").trim().toLowerCase();
-          row.swingDefault = (sd === "in" || sd === "out") ? sd : null;
+          row.swingDefault = iSwDef < 0 ? undefined : ((sd === "in" || sd === "out") ? sd : null);
           row.opRight = bool(cols, iOpR, false); row.opLeft = bool(cols, iOpL, false);
           row.opDouble = bool(cols, iOpD, false); row.opSlideUp = bool(cols, iOpS, false);
           const od = String(iOpDef >= 0 ? (cols[iOpDef] == null ? "" : cols[iOpDef]) : "").trim().toLowerCase();
-          row.opDefault = (od === "right" || od === "left") ? od : null;
+          row.opDefault = iOpDef < 0 ? undefined : ((od === "right" || od === "left") ? od : null);
         }
         return row;
       });

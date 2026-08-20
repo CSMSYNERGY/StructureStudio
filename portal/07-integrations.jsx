@@ -1684,7 +1684,12 @@ function CommissionsReport() {
 
       {orderedKeys.map((k) => {
         const g = groups[k];
-        const total = g.rows.reduce((s, e) => s + (e.amountCents || 0), 0);
+        // The header total reads as "what this period pays out", so excluded lines (still listed
+        // below for the audit trail) stay OUT of it and are surfaced as their own labeled sum.
+        const total = g.rows.reduce((s, e) => s + (e.status === "excluded" ? 0 : (e.amountCents || 0)), 0);
+        const excludedTotal = g.rows.reduce((s, e) => s + (e.status === "excluded" ? (e.amountCents || 0) : 0), 0);
+        // Split lines share an order, so the "orders" count is distinct orders, not ledger lines.
+        const orderCount = new Set(g.rows.map((e) => e.orderId ?? e.id)).size;
         // Approve / pay act on the whole pay period, so count against the FULL period, not the filtered view.
         const fullRows = periodAll[k] || g.rows;
         const pendingRows = fullRows.filter((e) => e.status === "pending" && e.amountCents != null);
@@ -1693,10 +1698,15 @@ function CommissionsReport() {
           <div key={k} style={{ ...S.card, marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
               <div style={{ fontSize: 14.5, fontWeight: 800 }}>{g.label || "Unscheduled"}</div>
-              <div style={{ fontSize: 12.5, color: "#64748B" }}>{g.rows.length} order{g.rows.length === 1 ? "" : "s"} · <b style={{ color: "#1E293B" }}>{money(total)}</b></div>
+              <div style={{ fontSize: 12.5, color: "#64748B" }}>{orderCount} order{orderCount === 1 ? "" : "s"} · <b style={{ color: "#1E293B" }}>{money(total)}</b>{excludedTotal !== 0 && <> · {money(excludedTotal)} excluded</>}</div>
               {isOwner && (pendingRows.length > 0 || approvedRows.length > 0) && (
                 <div style={{ marginLeft: "auto", display: "inline-flex", gap: 8, alignItems: "center" }}>
-                  {pendingRows.length > 0 && <button onClick={() => approvePeriod(g.key)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px" }}>Approve period</button>}
+                  {/* approve_period targets a period_key server-side and rejects a null one, so the
+                      Unscheduled pseudo-group (g.key = null) gets an explanation instead of a button —
+                      its lines become approvable once they land in a real period. */}
+                  {pendingRows.length > 0 && (g.key
+                    ? <button onClick={() => approvePeriod(g.key)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px" }}>Approve period</button>
+                    : <span title="These commissions don't have a pay period yet — usually the order isn't fully collected. Once a line lands in a period, approve it there." style={{ fontSize: 11.5, fontWeight: 700, color: "#94A3B8", cursor: "help" }}>Approval waits for a pay period</span>)}
                   {approvedRows.length > 0 && <button onClick={() => unapprovePeriod(g.key)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>Un-approve</button>}
                   {approvedRows.length > 0 && <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), padding: "6px 13px" }}>Mark period paid</button>}
                 </div>

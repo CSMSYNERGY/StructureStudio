@@ -20,11 +20,17 @@ const schedInitials = (name) => String(name || "").trim().split(/\s+/).map((w) =
 // past due, delivery conflicts, the pool — already keys on it); scheduled_start is kept
 // equal for compatibility. Older rows that only set a start date still read correctly.
 const schedBuildDate = (job) => job.due_date || job.scheduled_start || null;
+// Date-ONLY strings (YYYY-MM-DD — the shape every build/load date here takes) parse as
+// UTC midnight through bare new Date(), so they render and compare a DAY EARLY in every
+// US timezone (audit 2026-08-20). The constraint: parse a date-only string as LOCAL
+// midnight, and build a day key / "today" from LOCAL components — never toISOString().
+const schedLocalDate = (iso) => (iso ? new Date(String(iso).slice(0, 10) + "T00:00:00") : null);
+const schedLocalIso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 // Past due = has a build date, that date is before today, and the stage isn't finished.
 const schedPastDue = (job, kind) => {
   const d = schedBuildDate(job);
   if (!d || kind === "done") return false;
-  return d < new Date().toISOString().slice(0, 10);
+  return d < schedLocalIso(new Date());
 };
 const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
 
@@ -313,7 +319,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const extra = { dueDate: iso, scheduledStart: iso };
     if (crewFilter !== "all") extra.crewId = crewFilter;
     const r = await call({ action: "create_job", ...body, ...extra },
-      `${label} scheduled for ${fmtDate(iso)}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
+      `${label} scheduled for ${fmtDate(schedLocalDate(iso))}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
     setBusy(false); if (r) load();
   };
   const createManual = async () => {
@@ -369,7 +375,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const l = link.load;
     const delivered = l.status === "delivered" || link.deliveredAt;
     const c = delivered ? { bg: "#F0FDF4", fg: "#15803D" } : l.status === "out" ? { bg: "#FFFBEB", fg: "#B45309" } : { bg: "#EEF2FF", fg: "#3D3672" };
-    const when = l.load_date ? " · " + fmtDate(l.load_date) : "";
+    const when = l.load_date ? " · " + fmtDate(schedLocalDate(l.load_date)) : "";
     return <span style={schedChip(c.bg, c.fg)}>{delivered ? "Delivered" : `Load ${l.load_no}${when}`}</span>;
   };
   const jobCard = (job, opts = {}) => {
@@ -432,7 +438,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           {/* One build date per job; hidden on the calendar where the column says it. */}
           {!opts.hideDate && bd && (
             <span style={{ ...schedChip(late ? "#FEF2F2" : "#F1F5F9", late ? "#DC2626" : "#475569"), fontVariantNumeric: "tabular-nums" }}>
-              {fmtDate(bd)}{late ? " · past due" : ""}
+              {fmtDate(schedLocalDate(bd))}{late ? " · past due" : ""}
             </span>
           )}
           {loadChip(job)}
@@ -673,7 +679,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                       <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
                       <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
                       <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
-                      <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedBuildDate(j)) + (late ? " · past due" : "") : "—"}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedLocalDate(schedBuildDate(j))) + (late ? " · past due" : "") : "—"}</td>
                       <td style={S.td}>{(j.crew_id && crewById[j.crew_id] && crewById[j.crew_id].name) || nameOf[j.assignee_user_id] || "—"}</td>
                       <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
                     </tr>
@@ -695,8 +701,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
 
       {/* ── CALENDAR — real dates, one build date per card, per-crew calendars ── */}
       {data && view === "calendar" && (() => {
-        const DAY = 86400000;
-        const isoLocal = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        const isoLocal = schedLocalIso;   // the shared LOCAL day key (see the top of the file)
         const todayIso = isoLocal(new Date());
         const cur = new Date(cursorMs); cur.setHours(0, 0, 0, 0);
         const dated = jobs.filter((j) => schedBuildDate(j) && (crewFilter === "all" || j.crew_id === crewFilter));
@@ -704,14 +709,17 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         const stageColor = {}; stages.forEach((s) => { stageColor[s.id] = s.color; });
 
         // SUNDAY-FIRST weeks (Carolyn 2026-08-04); weekends can be toggled off entirely.
+        // Days advance by DATE, never by adding 86,400,000ms: the US fall-back day is 25
+        // hours long, so ms-stepping across it repeats a local date (duplicate keys, jobs
+        // rendered twice) and shifts every later cell back one (audit 2026-08-20).
         const isWknd = (d) => d.getDay() === 0 || d.getDay() === 6;
         const sun = new Date(cur); sun.setDate(sun.getDate() - sun.getDay());
-        let weekDays = []; for (let i = 0; i < 7; i++) weekDays.push(new Date(sun.getTime() + i * DAY));
+        let weekDays = []; for (let i = 0; i < 7; i++) { const d = new Date(sun); d.setDate(d.getDate() + i); weekDays.push(d); }
         const weekLabelDays = weekDays; // full-range label even when weekend columns hide
         if (!showWeekends) weekDays = weekDays.filter((d) => !isWknd(d));
         const m0 = new Date(cur.getFullYear(), cur.getMonth(), 1);
         const gridStart = new Date(m0); gridStart.setDate(gridStart.getDate() - gridStart.getDay());
-        let monthCells = []; for (let i = 0; i < 42; i++) monthCells.push(new Date(gridStart.getTime() + i * DAY));
+        let monthCells = []; for (let i = 0; i < 42; i++) { const d = new Date(gridStart); d.setDate(d.getDate() + i); monthCells.push(d); }
         if (!showWeekends) monthCells = monthCells.filter((d) => !isWknd(d));
         const monthHeads = showWeekends ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["Mon", "Tue", "Wed", "Thu", "Fri"];
         const gridCols = showWeekends ? 7 : 5;
@@ -884,6 +892,17 @@ const REPAIR_STATUS = {
   declined:    { label: "Declined",    bg: "#FEF2F2", fg: "#DC2626" },
 };
 const REPAIR_OPEN = new Set(["requested", "approved", "in_progress"]);
+// Quote money arrives however people type it — "$1,200", "1 200.50" — so strip the
+// dressing before Number(). Blank → null (an intentional clear). Unparseable → NaN,
+// which the caller must REFUSE with a message and never send: quoteCents:null is the
+// server's "clear quote_cents" (update_repair), so mapping a typo like "12o0" to null
+// silently erased a real quote on file (audit 2026-08-20).
+const repairQuoteCents = (raw) => {
+  const s = String(raw ?? "").replace(/[$,\s]/g, "");
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round(n * 100) : NaN;
+};
 
 function RepairsTab({ clientId, canAdmin, access = null }) {
   // repairs:'edit' (migration 100) — the Crew Leader preset carries it. Same reasoning as
@@ -972,14 +991,17 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     if (!intake.customerName.trim() || !intake.description.trim()) {
       setMsg({ err: "Customer name and a description of the problem are required." }); return;
     }
+    const quoteCents = repairQuoteCents(intake.quote);
+    if (Number.isNaN(quoteCents)) {
+      setMsg({ err: `Couldn't read "${intake.quote}" as a dollar amount — try digits, like 1200 or 1,200.50.` }); return;
+    }
     setBusy(true); setMsg(null);
-    const quoteCents = intake.quote.trim() ? Math.round(Number(intake.quote) * 100) : null;
     const r = await call({
       action: "create_repair", customerName: intake.customerName, phone: intake.phone, email: intake.email,
       // Raw — the server decides whether that's a serial or a design code and links the
       // building either way. Parsing it here would drop the code half on the floor.
       buildingRef: intake.serial.trim() || null,
-      description: intake.description, quoteCents: Number.isFinite(quoteCents) ? quoteCents : null,
+      description: intake.description, quoteCents,
     });
     setBusy(false);
     if (r && r.repair) {
@@ -992,11 +1014,14 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   };
   const saveDetail = async () => {
     if (!selected || !detail) return;
+    const quoteCents = repairQuoteCents(detail.quote);
+    if (Number.isNaN(quoteCents)) {
+      setMsg({ err: `Couldn't read "${detail.quote}" as a dollar amount — try digits, like 1200 or 1,200.50.` }); return;
+    }
     setBusy(true); setMsg(null);
-    const quoteCents = detail.quote === "" ? null : Math.round(Number(detail.quote) * 100);
     const r = await call({
       action: "update_repair", repairId: selected.id, status: detail.status,
-      quoteCents: Number.isFinite(quoteCents) ? quoteCents : null, notes: detail.notes,
+      quoteCents, notes: detail.notes,
     }, "Saved.");
     setBusy(false); if (r) load();
   };
@@ -1447,8 +1472,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   loads.forEach((l) => { loadConflicts[l.id] = (stopsByLoad[l.id] || []).some((s) => stopConflict(s, l)); });
   const conflictCount = Object.keys(loadConflicts).filter((k) => loadConflicts[k]).length;
   const wideCount = loads.filter((l) => l.is_wide && l.status !== "delivered").length;
-  const weekAhead = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
-  const todayIso = new Date().toISOString().slice(0, 10);
+  // LOCAL today, not toISOString(): UTC is already tomorrow by ~8pm for US tenants,
+  // which shifted this whole window a day (audit 2026-08-20).
+  const weekAhead = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return schedLocalIso(d); })();
+  const todayIso = schedLocalIso(new Date());
   const thisWeek = loads.filter((l) => l.status !== "delivered" && l.load_date && l.load_date >= todayIso && l.load_date <= weekAhead).length;
 
   const visibleLoads = loads.filter((l) => driverFilter === "all" || ((loadProf(l) || {}).id === driverFilter));
@@ -1574,7 +1601,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
       if (b && b.kind === "done") return <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓</span>;
       const conflict = stopConflict(s, l);
       return <span style={schedChip(conflict ? "#FEF2F2" : "#FFFBEB", conflict ? "#DC2626" : "#B45309")}>
-        {(b && b.stage) || "In build"}{b && b.dueDate ? " · due " + fmtDate(b.dueDate) : ""}{conflict ? " ⚠" : ""}
+        {(b && b.stage) || "In build"}{b && b.dueDate ? " · due " + fmtDate(schedLocalDate(b.dueDate)) : ""}{conflict ? " ⚠" : ""}
       </span>;
     }
     // This used to hard-code "On lot — ready" for EVERY inventory stop, which is a guess: it
@@ -1638,7 +1665,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
         (j.widthFt && j.lengthFt) ? `${Number(j.widthFt)}×${Number(j.lengthFt)}` : "—", j.wide,
         j.buildKind === "done"
           ? <span style={schedChip("#F0FDF4", "#15803D")}>Built ✓{j.completedAt ? " " + fmtDate(j.completedAt) : ""}</span>
-          : <span style={schedChip("#FFFBEB", "#B45309")}>{j.buildStage || "In build"}{j.dueDate ? " · due " + fmtDate(j.dueDate) : ""}</span>,
+          : <span style={schedChip("#FFFBEB", "#B45309")}>{j.buildStage || "In build"}{j.dueDate ? " · due " + fmtDate(schedLocalDate(j.dueDate)) : ""}</span>,
         j.source === "inventory" ? "spec build → haul to the sales lot" : null,
         { source: j.source, buildJobId: j.buildJobId },
         j.customerName || (j.serial ? "#" + j.serial : "Building"),
@@ -1852,7 +1879,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
                       <ul style={{ margin: "0 0 8px 18px", padding: 0 }}>
                         {override.unbuilt.map((u) => (
                           <li key={u.stopId} style={{ fontSize: 12, fontWeight: 600, color: "#7F1D1D" }}>
-                            {u.serial ? "#" + u.serial + " · " : ""}{u.customerName || "stop " + u.stopOrder}{u.buildStage ? " — " + u.buildStage : ""}{u.buildDue ? " · due " + fmtDate(u.buildDue) : ""}
+                            {u.serial ? "#" + u.serial + " · " : ""}{u.customerName || "stop " + u.stopOrder}{u.buildStage ? " — " + u.buildStage : ""}{u.buildDue ? " · due " + fmtDate(schedLocalDate(u.buildDue)) : ""}
                           </li>
                         ))}
                       </ul>
@@ -1975,8 +2002,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
 
       {/* ── CALENDAR VIEW — week at a glance ── */}
       {data && view === "calendar" && (() => {
-        const DAY = 86400000;
-        const isoOf = (d) => d.toISOString().slice(0, 10);
+        // LOCAL day keys, matching the local labels beside them (audit 2026-08-20):
+        // toISOString() is UTC, which rang "today" on tomorrow's cell for US tenants and,
+        // east of UTC, made a drop create the load on the day BEFORE the cell it hit.
+        const isoOf = schedLocalIso;
         const trayItems = [
           ...poolJobs.map((j) => ({ key: "j" + j.buildJobId, building: j.buildingLabel || j.title || "Building", customer: j.customerName || (j.source === "inventory" ? "Spec build" : ""), serial: j.serial ? "#" + j.serial : "", ready: j.buildKind === "done", body: { source: j.source, buildJobId: j.buildJobId }, label: j.customerName || (j.serial ? "#" + j.serial : "Building") })),
           // `ready` drives the visual affordance, so a sold-but-unbuilt unit must stop looking
@@ -1984,7 +2013,12 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           ...poolInv.map((u) => ({ key: "u" + u.inventoryUnitId, building: u.buildingLabel || "Lot building", customer: u.soldFirstName || (u.location ? u.location.name : "Sales lot"), serial: "#" + u.serial, ready: (unitLifecycle[u.inventoryUnitId] && INV_STAGES[unitLifecycle[u.inventoryUnitId].lifecycle] ? INV_STAGES[unitLifecycle[u.inventoryUnitId].lifecycle].rank >= INV_STAGES.built.rank : true), body: { source: "inventory", inventoryUnitId: u.inventoryUnitId }, label: "#" + u.serial })),
           ...poolRepairs.map((rp) => ({ key: "r" + rp.id, building: (rp.description || "Repair").slice(0, 40), customer: rp.customer_name || "", serial: "R-" + rp.repair_no, ready: true, body: { source: "repair", repairId: rp.id }, label: "R-" + rp.repair_no })),
         ];
-        const driverChips = [["all", "All drivers"]].concat(drivers.map((p) => [p.user_id, nameOf[p.user_id] || "Driver"]));
+        // PROFILE ids — the shared visibleLoads filter compares (loadProf(l) || {}).id, and
+        // the Loads-view chips already carry p.id, so user_id values here emptied the
+        // calendar for every driver picked (audit 2026-08-20). Filter to real drivers too:
+        // mapping the whole team rendered key-less duplicate "Driver" chips for name-first
+        // profiles (095).
+        const driverChips = [["all", "All drivers"]].concat(drivers.filter((p) => p.is_driver).map((p) => [p.id, driverLabel(p)]));
         const undated = visibleLoads.filter((l) => !l.load_date && l.status === "planned").length;
 
         const step = (dir) => { if (calView === "month") { const d = new Date(monthCursor); d.setMonth(d.getMonth() + dir); d.setDate(1); setMonthCursor(d.getTime()); } else setWeekOffset(weekOffset + dir); };
@@ -2058,14 +2092,16 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           const m0 = new Date(monthCursor); m0.setDate(1); m0.setHours(0, 0, 0, 0);
           label = m0.toLocaleDateString("en-US", { month: "long", year: "numeric" });
           const gStart = new Date(m0); gStart.setDate(gStart.getDate() - gStart.getDay());
-          let mc = []; for (let i = 0; i < 42; i++) mc.push(new Date(gStart.getTime() + i * DAY));
+          // By DATE, not +86,400,000ms — the DST fall-back day would repeat a local key
+          // (same constraint as the Build Schedule calendar; audit 2026-08-20).
+          let mc = []; for (let i = 0; i < 42; i++) { const d = new Date(gStart); d.setDate(d.getDate() + i); mc.push(d); }
           if (!showWeekends) mc = mc.filter((d) => d.getDay() !== 0 && d.getDay() !== 6);
           cells = mc.map((d) => ({ iso: isoOf(d), d, inMonth: d.getMonth() === m0.getMonth() }));
           cols = showWeekends ? 7 : 5;
           headRow = showWeekends ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["Mon", "Tue", "Wed", "Thu", "Fri"];
         } else {
           const b = new Date(); b.setHours(0, 0, 0, 0); b.setDate(b.getDate() - b.getDay() + weekOffset * 7);
-          let wd = []; for (let i = 0; i < 7; i++) { const d = new Date(b.getTime() + i * DAY); wd.push({ iso: isoOf(d), d, inMonth: true }); }
+          let wd = []; for (let i = 0; i < 7; i++) { const d = new Date(b); d.setDate(d.getDate() + i); wd.push({ iso: isoOf(d), d, inMonth: true }); }
           const wknd = wd[6].d;
           label = b.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " + wknd.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", " + wknd.getFullYear();
           if (!showWeekends) wd = wd.filter(({ d }) => d.getDay() !== 0 && d.getDay() !== 6);
@@ -2184,9 +2220,14 @@ function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "8px 10px" }}>
         <div>
           <span style={lbl}>Driver</span>
+          {/* PROFILE ids, matching the seeded l.driver_id — the server resolves driverId
+              against driver_profiles.id, so user_id values made every reassign fail
+              "Driver not found." and showed a load that HAD a driver as "— No driver —"
+              (audit 2026-08-20). display_name first: name-first drivers (095) may have
+              no login to look up. The new-load form above already did all of this. */}
           <select style={inp} value={f.driverId} onChange={set("driverId")}>
             <option value="">— No driver —</option>
-            {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.user_id} value={p.user_id}>{(nameOf[p.user_id] || "Driver") + (p.truck_name ? " · " + p.truck_name : "")}</option>)}
+            {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.id} value={p.id}>{(p.display_name || nameOf[p.user_id] || "Driver") + (p.truck_name ? " · " + p.truck_name : "")}</option>)}
           </select>
         </div>
         <div><span style={lbl}>Date</span><input type="date" style={inp} value={f.loadDate} onChange={set("loadDate")} /></div>
@@ -2687,22 +2728,34 @@ function ssWarpQuad(img, quad, aspect, maxPx) {
   let w = Math.min(maxPx, img.naturalWidth || img.width);
   let h = Math.round(w / ratio);
   if (h > maxPx) { h = maxPx; w = Math.round(h * ratio); }
+  // The SOURCE is bounded too, not only the maxPx output. Reading the photo at natural
+  // size into ImageData breaks on exactly the phones this feature is for: a 24/48MP
+  // iPhone default blows Safari's ~16.7M-pixel canvas cap — drawImage silently no-ops,
+  // every sample reads fill colour, and the sanity check below hands back the crooked
+  // original — while the full-res buffers can OOM the tab on big Android sensors.
+  // 2×maxPx on the long edge keeps every pixel the bilinear resample can actually use.
+  // The quad corners arrive in natural-image pixels, so they scale down with the source
+  // (audit 2026-08-20).
+  const natW = img.naturalWidth || img.width, natH = img.naturalHeight || img.height;
+  const srcScale = Math.min(1, (maxPx * 2) / Math.max(natW, natH));
   const src = document.createElement("canvas");
-  src.width = img.naturalWidth || img.width; src.height = img.naturalHeight || img.height;
-  src.getContext("2d").drawImage(img, 0, 0);
+  src.width = Math.max(1, Math.round(natW * srcScale));
+  src.height = Math.max(1, Math.round(natH * srcScale));
+  src.getContext("2d").drawImage(img, 0, 0, src.width, src.height);
   const sd = src.getContext("2d").getImageData(0, 0, src.width, src.height);
+  const sq = quad.map(([x, y]) => [x * srcScale, y * srcScale]);
   // Reject a quad that is not a sane convex shape before doing any work. The matrix solve
   // alone does not catch these: a bow-tie (self-crossing) or near-zero-area quad solves
   // fine and warps the photo into garbage, and a hair-thin one samples almost nothing.
   const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
   let area = 0;
-  for (let i = 0; i < 4; i++) { const p = quad[i], q = quad[(i + 1) % 4]; area += p[0] * q[1] - q[0] * p[1]; }
+  for (let i = 0; i < 4; i++) { const p = sq[i], q = sq[(i + 1) % 4]; area += p[0] * q[1] - q[0] * p[1]; }
   area = Math.abs(area) / 2;
-  const signs = [0, 1, 2, 3].map((i) => Math.sign(cross(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4])));
+  const signs = [0, 1, 2, 3].map((i) => Math.sign(cross(sq[i], sq[(i + 1) % 4], sq[(i + 2) % 4])));
   const convex = signs.every((s) => s > 0) || signs.every((s) => s < 0);
-  const minSide = Math.min(...[0, 1, 2, 3].map((i) => Math.hypot(quad[(i + 1) % 4][0] - quad[i][0], quad[(i + 1) % 4][1] - quad[i][1])));
+  const minSide = Math.min(...[0, 1, 2, 3].map((i) => Math.hypot(sq[(i + 1) % 4][0] - sq[i][0], sq[(i + 1) % 4][1] - sq[i][1])));
   if (!convex || minSide < 8 || area < (src.width * src.height) * 0.005) return null;
-  const H = ssSolveHomography([[0, 0], [w, 0], [w, h], [0, h]], quad);
+  const H = ssSolveHomography([[0, 0], [w, 0], [w, h], [0, h]], sq);
   if (!H) return null;
   const out = document.createElement("canvas"); out.width = w; out.height = h;
   const octx = out.getContext("2d");

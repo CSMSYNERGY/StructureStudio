@@ -4,8 +4,8 @@
 # referenced by the app at runtime (grep-verified), and edge-function source,
 # internal docs, and repo tooling do not belong on a public web host.
 #
-# _redirects is deliberately NOT listed: it must upload so the platform parses it,
-# and Cloudflare never serves it publicly.
+# _redirects and _headers are deliberately NOT listed: they must upload so the
+# platform parses them, and Cloudflare never serves either publicly.
 node_modules
 .git
 .gitattributes
@@ -17,12 +17,22 @@ node_modules
 .wrangler
 supabase
 scripts
+# dev/ is the scan-fixture tooling. Both harnesses run against a LOCAL
+# `python -m http.server` (dev/scan-fixtures/README.md), and their .glb fixtures
+# are gitignored, so a deployed copy couldn't even run — nothing needs it served.
+dev
 package.json
 package-lock.json
 deno.lock
 README.md
 CLAUDE.md
 SCHEDULING_SCOPE.md
+# These two postdate the lines above and were serving 200 from every product host
+# (caught 2026-08-20; they name the pilot tenant and internal call links).
+# vendor/README.md is the one internal doc inside a directory that must upload.
+INTERIOR_SCOPE.md
+STRUCTURESTUDIO_3D_PLAN.md
+vendor/README.md
 wrangler.jsonc
 wrangler.beta.jsonc
 .assetsignore

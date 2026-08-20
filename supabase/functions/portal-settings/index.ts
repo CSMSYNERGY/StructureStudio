@@ -1665,9 +1665,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   // Full-replace this tenant's paint palette (Colors tab). Takes the COMPLETE desired list:
   // rows carrying an id are updated, rows without one are inserted, and any existing colour
-  // absent from the list is deleted. clientId is JWT-resolved (own tenant only). The designer
-  // is selection-only today (get_config exposes label/siding/trim/allowCustom/isDefault/swatch,
-  // never a price); rate/pricing_method are persisted here for a later paint-pricing pass.
+  // absent from the list is deleted. A row that FAILS validation is skipped and its colour
+  // kept as-is — a validation error must never escalate into deletion (audit 2026-08-20).
+  // clientId is JWT-resolved (own tenant only). The designer is selection-only today
+  // (get_config exposes label/siding/trim/allowCustom/isDefault/swatch, never a price);
+  // rate/pricing_method are persisted here for a later paint-pricing pass.
   if (action === "save_colors") {
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
@@ -1679,10 +1681,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let saved = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.colors) {
+      // An existing row's id counts as KEPT the moment it appears in the payload — BEFORE any
+      // validation — so the delete sweep below can never turn a skipped row into a deleted
+      // one. keptIds used to be populated only on the update branch, so a colour whose label
+      // was blanked mid-retype was reported "skipped" but silently swept (audit 2026-08-20).
+      const rid = String(row?.id ?? "").trim();
+      const isExisting = rid !== "" && existingIds.has(rid);
+      if (isExisting) keptIds.add(rid);
+      const unchanged = isExisting ? " — existing colour left unchanged" : "";
       const label = String(row?.label ?? "").trim();
-      if (!label) { skipped.push(`row ${i}: blank label`); i++; continue; }
+      if (!label) { skipped.push(`row ${i}: blank label${unchanged}`); i++; continue; }
       const method = String(row?.pricingMethod ?? "each").trim() || "each";
-      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"`); i++; continue; }
+      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"${unchanged}`); i++; continue; }
       const rate = Number(row?.rate);
       const rec: Record<string, unknown> = {
         client_id: clientId,
@@ -1706,9 +1716,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
         rec.image_url = String(row.imageUrl ?? "").trim() || null;
       }
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid))
+      const res = isExisting
+        ? await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid)
         : await admin.from("colors").insert(rec);
       if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
       saved++; i++;
@@ -1737,8 +1746,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // price NULL is legal (NULL-price contract: not-yet-priced = not offered) — never coerce
   // blank to 0. Op exclusivity (Double / Slide up are standalone) is normalized HERE because
   // spreadsheet imports bypass the UI's setOp logic.
+  //
+  // Field-presence contract (audit 2026-08-20): name/size/price are required; every OTHER
+  // field is written only when the caller actually sent it. A trimmed sheet (flag columns
+  // deleted in Excel to bulk-edit prices) used to reset archived/internal-only/active/swing
+  // on every ID-matched row — silently un-archiving retired doors into the customer
+  // designer. The UI's toPayload and a full export round-trip send every field, so those
+  // saves behave exactly as before; inserts get the old defaults via fixtureInsertDefaults.
   const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp"]);
   const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
+    // JSON.stringify drops undefined-valued keys client-side, so "absent key" is the wire
+    // form of "leave this field alone"; the explicit !== undefined guards a hand-built call.
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(row ?? {}, k) && row?.[k] !== undefined;
     const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
     const name = String(row?.name ?? "").trim();
     if (!name) return { err: `row ${i + 1}: blank name` };
@@ -1747,29 +1766,50 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (h === null || Number.isNaN(h) || (h as number) <= 0) return { err: `${name}: invalid ${category === "ramp" ? "length" : "height"}` };
     const price = numOrNull(row?.price);
     if (Number.isNaN(price)) return { err: `${name}: invalid price` };
-    const isDoor = category === "door";
-    const swingIn = isDoor && row?.swingIn === true, swingOut = isDoor && row?.swingOut === true;
-    let opRight = isDoor && row?.opRight === true, opLeft = isDoor && row?.opLeft === true;
-    const opDouble = isDoor && row?.opDouble === true;
-    let opSlideUp = isDoor && row?.opSlideUp === true;
-    if (opDouble && opSlideUp) opSlideUp = false;
-    if (opDouble || opSlideUp) { opRight = false; opLeft = false; }
-    const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
-    const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
     const rec: Record<string, unknown> = {
       client_id: clientId, category, name,
-      plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-      show_image_on_estimate: row?.showImageOnEstimate !== false,
       width_in: w, height_in: h, price,
-      swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
-      op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
-      active: row?.active !== false,
-      archived: row?.archived === true,
-      internal_only: row?.internalOnly === true,
       updated_at: new Date().toISOString(),
     };
-    if (Object.prototype.hasOwnProperty.call(row ?? {}, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+    if (has("planLabel")) rec.plan_label = (String(row?.planLabel ?? "").trim().slice(0, 12)) || null;
+    if (has("showImageOnEstimate")) rec.show_image_on_estimate = row?.showImageOnEstimate !== false;
+    if (has("active")) rec.active = row?.active !== false;
+    if (has("archived")) rec.archived = row?.archived === true;
+    if (has("internalOnly")) rec.internal_only = row?.internalOnly === true;
+    const isDoor = category === "door";
+    // Swing/op travel as a GROUP: the exclusivity normalization is only sound when the whole
+    // group is known, so one present swing/op key means the absent ones read "no" (the old
+    // behavior), while a row carrying NONE of them leaves the stored operation untouched.
+    // Non-doors still force the group false/null unconditionally (invariant above).
+    const swingOpProvided = ["swingIn", "swingOut", "swingDefault", "opRight", "opLeft", "opDouble", "opSlideUp", "opDefault"].some(has);
+    if (!isDoor || swingOpProvided) {
+      const swingIn = isDoor && row?.swingIn === true, swingOut = isDoor && row?.swingOut === true;
+      let opRight = isDoor && row?.opRight === true, opLeft = isDoor && row?.opLeft === true;
+      const opDouble = isDoor && row?.opDouble === true;
+      let opSlideUp = isDoor && row?.opSlideUp === true;
+      if (opDouble && opSlideUp) opSlideUp = false;
+      if (opDouble || opSlideUp) { opRight = false; opLeft = false; }
+      const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
+      const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
+      rec.swing_in = swingIn; rec.swing_out = swingOut; rec.swing_default = swingDefault;
+      rec.op_right = opRight; rec.op_left = opLeft; rec.op_double = opDouble; rec.op_slideup = opSlideUp; rec.op_default = opDefault;
+    }
+    if (has("imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
     return { rec };
+  };
+  // Inserts still need concrete values for whatever the presence contract left out — the
+  // old unconditional defaults, applied only where no key arrived so sent values win.
+  const fixtureInsertDefaults = (rec: Record<string, unknown>) => {
+    if (!("plan_label" in rec)) rec.plan_label = null;
+    if (!("show_image_on_estimate" in rec)) rec.show_image_on_estimate = true;
+    if (!("active" in rec)) rec.active = true;
+    if (!("archived" in rec)) rec.archived = false;
+    if (!("internal_only" in rec)) rec.internal_only = false;
+    if (!("swing_in" in rec)) {
+      rec.swing_in = false; rec.swing_out = false; rec.swing_default = null;
+      rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
+    }
+    return rec;
   };
 
   // Save ONE catalog fixture. Update is IN PLACE by uuid — building_size_inclusions
@@ -1800,7 +1840,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).eq("category", category)
       .order("sort_order", { ascending: false }).limit(1).maybeSingle();
     v.rec!.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
-    const ins = await admin.from("fixture_items").insert(v.rec!).select("id").maybeSingle();
+    const ins = await admin.from("fixture_items").insert(fixtureInsertDefaults(v.rec!)).select("id").maybeSingle();
     if (ins.error) return dbFail(req, clientId, "add that line", ins.error);
     return json({ ok: true, id: ins.data!.id });
   }
@@ -1844,8 +1884,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Spreadsheet import (Export → edit in Excel → re-upload). UPSERT-ONLY by design: rows
   // with a known id update in place, rows without one insert at the end; rows absent from
   // the file are NEVER deleted (a partial or filtered sheet must not wipe the catalog —
-  // deletes happen only in the UI). Image URLs never ride in the sheet, so the
-  // hasOwnProperty gate in validateFixtureRow leaves each row's photo untouched.
+  // deletes happen only in the UI). The same shape holds column-wise (audit 2026-08-20):
+  // the client omits keys for columns the sheet doesn't have, and validateFixtureRow's
+  // presence gate leaves those fields — photos, flags, swing/op — untouched on ID-matched
+  // rows, so a trimmed sheet edits only what it carries.
   if (action === "import_fixtures") {
     const category = String(payload?.category ?? "").trim();
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
@@ -1868,7 +1910,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         saved++;
       } else {
         v.rec!.sort_order = nextSort++;
-        const res = await admin.from("fixture_items").insert(v.rec!);
+        const res = await admin.from("fixture_items").insert(fixtureInsertDefaults(v.rec!));
         if (res.error) { skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${res.error.message}`); i++; continue; }
         added++;
       }
@@ -2502,7 +2544,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .select("short_code, created_at, updated_at, status, selections, items, ghl_estimate_number, ghl_estimate_id")
         .eq("client_id", clientId).in("short_code", codes),
       admin.from("design_versions")
-        .select("short_code, version, created_at, selections, image_url")
+        .select("short_code, version, created_at, selections, paint_colors, image_url")
         .eq("client_id", clientId).in("short_code", codes)
         .order("version", { ascending: true }),
     ]);

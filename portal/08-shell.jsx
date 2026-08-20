@@ -28,18 +28,10 @@ function Dashboard({ session }) {
     } catch (_e) { /* history unavailable — the app still works, the URL just won't track */ }
   }, []);
 
-  // Back/forward. Reads the URL rather than the state object, so a hand-edited address
-  // and a history entry are treated identically.
-  useEffect(() => {
-    const onPop = () => {
-      const p = ssParsePath();
-      wanted.current = p.page && TAB_META[p.page] ? p.page : null;
-      setTab(p.page && TAB_META[p.page] ? p.page : "designs");
-      setSub(p.sub || null);
-    };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  // (Back/forward lives further down, after exitAccount — the popstate handler has to
+  // reconcile `viewing` with the restored URL's ?view=, and up here isOperator/viewing/
+  // setOpenDesign are still var-hoisted `undefined`, silently, never a throw — the
+  // canAdminForUrl comment tells that story.)
 
   // Designer tab: lazy-mount on first open, then KEEP mounted (display toggle below).
   // A conditional {activeTab==="designer" && …} unmount would discard the user's
@@ -73,16 +65,6 @@ function Dashboard({ session }) {
   // loading: we do NOT lock during the fetch, or every page load would flash a
   // paywall at paying customers.
   const [entitlement, setEntitlement] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { data } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
-        if (!cancelled && data && data.entitlement) setEntitlement(data.entitlement);
-      } catch (_e) { /* leave null — never lock someone out because a call failed */ }
-    })();
-    return () => { cancelled = true; };
-  }, [session]);
 
   const [isOperator, setIsOperator] = useState(false);
   useEffect(() => {
@@ -95,6 +77,28 @@ function Dashboard({ session }) {
   // audit-logged); statuses shown are the CACHED values (sync-design-status is
   // owner-JWT-bound and must not run against the operator's own tenant).
   const [viewing, setViewing] = useState(null);
+
+  // Fetches the entitlement declared above — split from its useState and placed BELOW
+  // `viewing` because Babel compiles const to var, so a `viewing` read above its useState
+  // is silently `undefined`, never a throw (the canAdminForUrl comment tells that story).
+  // This state is the OPERATOR's OWN entitlement (gateLocked/featureOn depend on that),
+  // but portal-billing is in SS_TENANT_SCOPED_FNS: with view-as armed the invoke wrapper
+  // injects targetClientId, so a TOKEN_REFRESHED re-render used to store the VIEWED
+  // tenant's entitlement here and lock the operator's own portal after Exit (audit
+  // 2026-08-20). Skipped while viewing; the `viewing` dep refetches on exit, so nothing
+  // goes stale either. Keyed on the token, not the session object — onAuthStateChange
+  // mints a new session object on EVERY auth event, token change or not.
+  useEffect(() => {
+    if (viewing) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
+        if (!cancelled && data && data.entitlement) setEntitlement(data.entitlement);
+      } catch (_e) { /* leave null — never lock someone out because a call failed */ }
+    })();
+    return () => { cancelled = true; };
+  }, [session.access_token, viewing]);
 
   // Keep the address bar honest about where you actually are.
   //
@@ -173,6 +177,33 @@ function Dashboard({ session }) {
     try { window.history.replaceState({ page: "accounts", sub: null }, "", "/portal/accounts"); } catch (_e) {}
   };
 
+  // Back/forward. Reads the URL rather than the state object, so a hand-edited address
+  // and a history entry are treated identically. Every view-as history entry carries its
+  // ?view= (ssPagePath preserves search), so `viewing` has to follow the restored URL too:
+  // without that, Back across a view-as boundary showed one tenant's data under the OTHER
+  // tenant's URL, and ssPagePath then rode the stale ?view= onto every later navigation
+  // (audit 2026-08-20). Restoring an entry with ?view= re-enters view-as exactly as a
+  // reload of that URL would (the boot effect above); an entry without it exits.
+  useEffect(() => {
+    const onPop = () => {
+      const p = ssParsePath();
+      wanted.current = p.page && TAB_META[p.page] ? p.page : null;
+      setTab(p.page && TAB_META[p.page] ? p.page : "designs");
+      setSub(p.sub || null);
+      const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
+      const urlView = (isOperator && v && /^[a-z0-9][a-z0-9-]*$/.test(v)) ? v : null;
+      if (urlView !== (viewing ? viewing.clientId : null)) {
+        setOpenDesign(null);                    // same replay guard as openAccount/exitAccount
+        ssTargetClientId = urlView;             // same tick as the pop, before the re-render
+        // Seeded with the slug; viewingFetch backfills the real company name, exactly as
+        // the ?view= boot effect does. An unchanged tenant keeps its backfilled object.
+        setViewing(urlView ? { clientId: urlView, companyName: urlView } : null);
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [isOperator, viewing]);
+
   // Keep the transport override in lockstep with `viewing`. Assigned during RENDER, not in
   // an effect: React runs CHILD effects before PARENT effects on mount, so an effect here
   // would let the first fetch of a newly-opened account (SettingsView status, PricingCsv
@@ -183,6 +214,17 @@ function Dashboard({ session }) {
   useEffect(() => () => { ssTargetClientId = null; }, []);
 
   useEffect(() => {
+    // `tenant` describes the operator's OWN account, but the `status` call below is
+    // tenant-scoped: with view-as armed the invoke wrapper injects targetClientId, so a
+    // TOKEN_REFRESHED re-render used to overwrite tenant.access with the VIEWED tenant's
+    // resolved map (audit 2026-08-20). Skipped while viewing — the mount-time value stands
+    // — and the `viewing` dep refetches on exit. Token-keyed for the same reason as the
+    // entitlement effect above: every auth event mints a new session object.
+    // Deliberately NOT the `cancelled` pattern of the siblings: a ?view= deep-link boot
+    // sets `viewing` while this run is mid-flight, and cancelling it then would leave
+    // tenant null — "Loading your business…" forever. The run must complete; only the
+    // injectable status call carries the poisoning risk, so it alone is guarded below.
+    if (viewing) return;
     (async () => {
       // limit(1)+array instead of maybeSingle(): maybeSingle() ERRORS when >1 row
       // matches (a duplicate/multi-tenant client_users row), which would lock the
@@ -206,12 +248,18 @@ function Dashboard({ session }) {
       // one that is too strict, and the server refuses the action either way.
       let access = null;
       try {
-        const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
-        if (st && st.access) access = st.access;
+        // The status invoke sits two awaited reads deep, so view-as opened mid-flight can
+        // have armed the injection by now — and this call scoped to the viewed tenant is
+        // exactly the poisoning above. Skip it instead: access stays null (the generous
+        // fallback), and the `viewing` dep refetches the real map on exit.
+        if (!ssTargetClientId) {
+          const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+          if (st && st.access) access = st.access;
+        }
       } catch (_e) { /* keep the fallback */ }
       setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access });
     })();
-  }, [session]);
+  }, [session.access_token, viewing]);
 
   // ── Who the signed-in person is, and the operator's user editor ────────────────
   // `profile` is the caller's own client_users row. needsDetails drives a one-time nudge:
@@ -555,9 +603,12 @@ function Dashboard({ session }) {
           {navItem("delivery-schedule", "Delivery Schedule")}
           {navItem("repairs", "Repairs")}
           {navItem("commissions", "Commissions")}
-          {/* Config surface like Settings, so admin-gated the same way — and kept OUT of
-              NONADMIN_TABS: a "user" role deep-linking /portal/quickbooks clamps to designs. */}
-          {canAdmin && navItem("quickbooks", "QuickBooks")}
+          {/* Config surface like Settings, so gated the same way: admins, plus anyone
+              holding settings_quickbooks (migration 100) — navHidden reads that area via
+              TAB_AREA, the same map the clamp and the content render use, so all three
+              surfaces agree (audit 2026-08-20). Kept OUT of NONADMIN_TABS: a plain
+              "user" role with no area grant still never sees or reaches it. */}
+          {navItem("quickbooks", "QuickBooks")}
         </nav>
 
         <div className="ss-navlabel">Coming Soon</div>
@@ -797,7 +848,12 @@ function Dashboard({ session }) {
               </div>
             )}
             {!gateLocked && activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
-            {!gateLocked && activeTab === "quickbooks" && canAdmin && (
+            {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
+                GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
+                the clamp on that same area — so a settings_quickbooks holder deep-linking
+                /portal/quickbooks got a topbar over an empty body while canAdmin alone
+                gated this render (audit 2026-08-20). */}
+            {!gateLocked && activeTab === "quickbooks" && (canAdmin || ssCanRead(myAccess, "settings_quickbooks")) && (
               qboUnlocked ? (
                 <QuickBooksView key={"t-" + effClientId} clientId={effClientId}
                   viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />
@@ -805,7 +861,12 @@ function Dashboard({ session }) {
                 <QuickBooksLocked canAdmin={canAdmin} onSeeBilling={() => navigate("settings", "billing")} />
               )
             )}
-            {!gateLocked && activeTab === "settings" && canAdmin && (
+            {/* Same admission rule as the nav item and ssClampTab: anyone holding at least
+                one settings area gets the shell (migration 100) — a canAdmin-only gate here
+                left those people a Settings topbar over an empty body (audit 2026-08-20).
+                SettingsShell filters its own sub-tabs by area for non-admins, and
+                portal-settings re-checks every action per-area regardless. */}
+            {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))) && (
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 isOwner={!viewing && tenant.role === "owner"}
@@ -940,8 +1001,24 @@ function Dashboard({ session }) {
                 ]}
               />
             )}
+            {/* Same guard CommissionTeam applies (07-integrations): portal-commissions
+                resolves the tenant from the CALLER's own client_users row and is
+                deliberately outside SS_TENANT_SCOPED_FNS, so from view-as this report
+                would read — and via compute / approve / mark-paid WRITE — the OPERATOR's
+                own ledger under the viewed builder's banner (audit 2026-08-20). A screen
+                that quietly does something other than what it says is worse than one
+                that is absent. */}
             {!gateLocked && activeTab === "commissions" && (
-              <CommissionsReport />
+              viewing ? (
+                <div style={{ ...S.card, maxWidth: 860, color: "#64748B", fontSize: 13, lineHeight: 1.6 }}>
+                  <div style={{ ...S.h2, marginBottom: 6 }}>Commissions</div>
+                  Commissions for <b>{viewing.companyName || viewing.clientId}</b> aren't available
+                  from view-as — this report would show and change your own account's ledger
+                  instead. Ask an owner there to run it, or use the Admin console.
+                </div>
+              ) : (
+                <CommissionsReport />
+              )
             )}
             {!gateLocked && activeTab === "reports" && (
               <ComingSoon

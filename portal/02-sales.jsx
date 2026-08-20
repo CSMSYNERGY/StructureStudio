@@ -301,7 +301,12 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           onDeleted={(res) => {
             const code = delTarget.short_code;
             setDelTarget(null);
-            const base = `Deleted design ${code}` + (res.versionsDeleted ? ` and ${res.versionsDeleted} earlier version(s)` : "");
+            // versionsDeleted counts EVERY design_versions row removed, the current
+            // version included (each save writes one — v1 too), while "earlier" here
+            // must match the row's ▾ expander, which counts only vs.slice(1). One
+            // fewer, and a design saved once has none to mention.
+            const earlier = Math.max(0, Number(res.versionsDeleted || 0) - 1);
+            const base = `Deleted design ${code}` + (earlier ? ` and ${earlier} earlier version(s)` : "");
             // The CRM half is reported separately because it is the half that can partly fail
             // while the design itself is gone — a bare "Deleted." would hide a leftover
             // estimate in someone else's system.
@@ -324,16 +329,28 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
 
 // ─── Contact activity helpers (Contacts tab "Details" drawer) ───
 const fmtWhen = (s) => { try { return new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (_) { return s || ""; } };
-// Human diff between two version snapshots — what the customer changed.
-function diffVersionSelections(a, b) {
-  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"]];
+// Human diff between two version ROWS — what the customer changed. Whole rows, not
+// just `selections`: paint is not a selections key (the designer saves it as the
+// separate p_paint_colors arg, landing in the row's paint_colors column as
+// { body, trim } labels), so a selections-only diff can never see a paint change —
+// one of the most common revisions. Rows without paint_colors diff as empty, never throw.
+function diffVersionSelections(va, vb) {
+  const a = (va && va.selections) || {}, b = (vb && vb.selections) || {};
+  // selections.cladding holds the designer's stable id; show the label the customer
+  // picked (mirrors D3_CLADDING in structure-studio.component.js). Unknown ids pass
+  // through raw — a cryptic diff beats a silent one.
+  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "Metal", batten: "Board & Batten" };
+  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["cladding", "cladding"]];
   const parts = [];
+  const push = (lbl, av, bv) => { if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`); };
   for (const [k, lbl] of KEYS) {
-    const av = String((a && a[k]) || ""), bv = String((b && b[k]) || "");
-    if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`);
+    let av = String(a[k] || ""), bv = String(b[k] || "");
+    if (k === "cladding") { av = CLADDING_LABELS[av] || av; bv = CLADDING_LABELS[bv] || bv; }
+    push(lbl, av, bv);
   }
-  const ap = (a && (a.paintColors || a.paint)) || null, bp = (b && (b.paintColors || b.paint)) || null;
-  if (JSON.stringify(ap) !== JSON.stringify(bp)) parts.push("paint changed");
+  const pa = (va && va.paint_colors) || {}, pb = (vb && vb.paint_colors) || {};
+  push("body color", String(pa.body || ""), String(pb.body || ""));
+  push("trim color", String(pa.trim || ""), String(pb.trim || ""));
   return parts.join(", ");
 }
 // Merge DB history (design versions) + GHL estimate events into one newest-first timeline.
@@ -346,7 +363,7 @@ function buildContactTimeline(act) {
     if (vers.length === 0) ev.push({ t: d.created_at, code: d.short_code, text: `Started ${label}` });
     vers.forEach((v, i) => {
       if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested a quote (v1)` }); return; }
-      const diff = diffVersionSelections(vers[i - 1].selections || {}, v.selections || {});
+      const diff = diffVersionSelections(vers[i - 1], v); // whole rows — paint_colors sits beside selections
       ev.push({ t: v.created_at, code: d.short_code, text: `Changed the design and resubmitted (v${v.version})${diff ? " — " + diff : ""}` });
     });
     const est = d.ghl_estimate_id ? (act.estimates || {})[d.ghl_estimate_id] : null;

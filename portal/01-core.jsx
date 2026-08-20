@@ -307,6 +307,20 @@ function ssCanSeeTab(tab, access) {
   return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
 }
 
+// Where the clamp LANDS someone must itself pass ssCanSeeTab, or the fallback recreates
+// the exact leak the clamp exists to stop: a hardcoded "designs" put every migration-100
+// driver (designs absent from their map = none) on the full customer-designs list at each
+// bare /portal login — a page their own nav hides (audit 2026-08-20). Designs first, so
+// the pre-migration-100 shape lands exactly where it always did; then the first page the
+// person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
+// ssCanSeeTab for everyone and would otherwise win over a page they were granted); then
+// "releases": product news, no tenant data, never refused for any access map.
+function ssFallbackTab(access) {
+  if (ssCanSeeTab("designs", access)) return "designs";
+  const t = NONADMIN_TABS.find((x) => x !== "designs" && TAB_AREA[x] && ssCanSeeTab(x, access));
+  return t || "releases";
+}
+
 // "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
 // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
 // that array is the role escape hatch and would hand the operator console to every team
@@ -317,11 +331,11 @@ function ssCanSeeTab(tab, access) {
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
 function ssClampTab(tab, isOperator, canAdmin, access) {
-  if (tab === "accounts" || tab === "admin") return isOperator ? tab : "designs";
+  if (tab === "accounts" || tab === "admin") return isOperator ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;
-  return ssCanSeeTab(tab, access) ? tab : "designs";
+  return ssCanSeeTab(tab, access) ? tab : ssFallbackTab(access);
 }
 
 const ACCENT = "#3D3672";  // brand purple

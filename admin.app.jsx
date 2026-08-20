@@ -293,13 +293,17 @@ function AdminApp() {
     } catch (e) { flash({ err: e.message }); }
     setEmailTestBusy(false);
   };
-  const loadClient = async (cid) => {
+  // `freshClients` lets a caller that JUST refetched the list pass it in: this closure's
+  // `clients` is the array from the render it was created in, so right after create_client
+  // the new id isn't in it, the billing seed below would read exempt=false / 0%, and one
+  // Save would silently wipe the exemption/discount the create form persisted seconds ago.
+  const loadClient = async (cid, freshClients) => {
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null); setReassignFrom(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
     setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
     setBillOpen(false);
     // Seed the billing editor from the list row so it opens showing what is actually set.
-    const row = clients.find((c) => c.client_id === cid);
+    const row = (freshClients || clients).find((c) => c.client_id === cid);
     setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
     // NULL / empty in the database means "every feature", which is the radio default.
     const scoped = Array.isArray(row?.discountFeatures) ? row.discountFeatures : [];
@@ -319,7 +323,7 @@ function AdminApp() {
       await api("create_client", pwd, { clientId: id, companyName: ncCompany.trim(), templateClientId: ncTemplate, billingExempt: ncExempt, discountPercent: ncExempt ? 0 : (Number(ncDiscount) || 0), discountFeatures: ncAllFeat ? [] : ncFeat });
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setNewOpen(false); setNcId(""); setNcCompany(""); setNcTemplate("__none__"); setNcIdTouched(false); setNcExempt(false); setNcDiscount("0"); setNcAllFeat(true); setNcFeat([]);
-      await loadClient(id);
+      await loadClient(id, c.clients || []); // the refetched list, NOT this closure's stale `clients` — see loadClient
       flash({ ok: `Builder "${id}" created. Next: add styles/items/pricing in the tabs, then create the owner login in Supabase Auth + map client_users.` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);

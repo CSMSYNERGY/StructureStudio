@@ -749,16 +749,33 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const codes = list.map((o) => o.short_code).filter(Boolean);
     // designs + payments are separate reads: orders.short_code is a soft link (a
     // future manual order has none), so there's no FK for PostgREST to embed.
-    const [{ data: dsn }, { data: pays }] = await Promise.all([
+    // ALL payments, voided included — voided rows stay visible in the history (the
+    // void dialog promises exactly that); they're excluded from the math below, not
+    // from the fetch. Paged to the end: a flat .limit() never fails loudly, it just
+    // drops the OLDEST rows (received_at DESC), which understates "paid" and shows
+    // an open balance on orders a large tenant has actually settled.
+    const fetchAllPayments = async () => {
+      const page = 1000; const seen = new Set(); const out = [];
+      for (let from = 0; ; from += page) {
+        const { data, error: pErr } = await sb.from("payments").select("*").eq("client_id", clientId)
+          .order("received_at", { ascending: false }).range(from, from + page - 1);
+        if (pErr) return { error: pErr };
+        // Dedupe by id: a payment landing mid-pagination (the mount-time GHL sync)
+        // shifts the pages and could repeat a row — double-counting real money.
+        (data || []).forEach((p) => { if (!seen.has(p.id)) { seen.add(p.id); out.push(p); } });
+        if (!data || data.length < page) return { data: out };
+      }
+    };
+    const [{ data: dsn }, paysRes] = await Promise.all([
       codes.length
         ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number").in("short_code", codes).limit(2000)
         : Promise.resolve({ data: [] }),
-      // ALL payments, voided included — voided rows stay visible in the history (the
-      // void dialog promises exactly that); they're excluded from the math below, not
-      // from the fetch. Explicit limits so a large tenant fails loudly in testing
-      // rather than silently truncating and understating what a customer still owes.
-      sb.from("payments").select("*").eq("client_id", clientId).order("received_at", { ascending: false }).limit(5000),
+      fetchAllPayments(),
     ]);
+    // A failed payments read must not render every order as unpaid — that's the same
+    // silent understatement the paging above exists to prevent.
+    if (paysRes.error) { setError(paysRes.error.message); setRows([]); return; }
+    const pays = paysRes.data;
     const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
     const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
     setRows(list.map((o) => {
@@ -1040,13 +1057,18 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const recordPayment = async () => {
     const cents = centsFrom(amount);
     if (!Number.isFinite(cents) || cents <= 0) { setMsg({ err: "Enter an amount greater than zero." }); return; }
+    // The date input can be cleared to "" — new Date("T12:00:00") is Invalid, and
+    // .toISOString() on it throws AFTER setBusy(true), wedging the button on
+    // "Saving…" for the rest of the mount. Validate it up front like the amount.
+    const received = new Date(when + "T12:00:00");
+    if (!when || Number.isNaN(received.getTime())) { setMsg({ err: "Pick the date the payment was received." }); return; }
     setBusy(true); setMsg(null);
     let uid = null;
     try { const { data } = await sb.auth.getUser(); uid = data && data.user ? data.user.id : null; } catch (_e) {}
     const { error } = await sb.from("payments").insert({
       client_id: clientId, order_id: o.id, amount_cents: cents, method,
       reference: reference.trim() || null,
-      received_at: new Date(when + "T12:00:00").toISOString(),
+      received_at: received.toISOString(),
       created_by: uid,
     });
     setBusy(false);
