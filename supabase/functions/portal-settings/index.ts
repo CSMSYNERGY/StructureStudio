@@ -758,7 +758,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
       catch { return json({ error: "Invalid logo data." }, 400); }
       if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
-      const path = `${clientId}/logo-${Date.now()}.${ext}`;
+      const path = `${clientId}/logo-${crypto.randomUUID()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
       if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -788,7 +788,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     catch { return json({ error: "Invalid logo data." }, 400); }
     if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
     const prefix = payload.kind === "business" ? "biz-logo" : "logo";
-    const path = `${clientId}/${prefix}-${Date.now()}.${ext}`;
+    const path = `${clientId}/${prefix}-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1054,7 +1054,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       let bytes: Uint8Array;
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      // randomUUID, not Date.now() — timestamps are guessable (audit 2026-08-19)
+      const path = `${clientId}/style-${crypto.randomUUID()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
       if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1113,7 +1114,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-    const path = `${clientId}/layout-${Date.now()}.${ext}`;
+    const path = `${clientId}/layout-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1134,7 +1135,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-    const path = `${clientId}/door-${Date.now()}.${ext}`;
+    const path = `${clientId}/door-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("fixtures").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("fixtures").getPublicUrl(path);
@@ -1391,7 +1392,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       let bytes: Uint8Array;
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      const path = `${clientId}/style-${crypto.randomUUID()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
       if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1564,7 +1565,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-    const path = `${clientId}/style-photo-${Date.now()}.${ext}`;
+    // The REFERENCE-photo class the enumerability audit was about: photos of a builder's
+    // real buildings in a public bucket. randomUUID makes the URL an unguessable
+    // capability; the payload side was already handled (093 keeps d3_photos out of the
+    // anon get_config).
+    const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);

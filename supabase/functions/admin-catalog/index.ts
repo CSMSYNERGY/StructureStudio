@@ -413,7 +413,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         let bytes: Uint8Array;
         try { bytes = Uint8Array.from(atob(rawB64), (c) => c.charCodeAt(0)); } catch { throw new Error("Invalid image data."); }
         if (bytes.length > 3_000_000) throw new Error("Image too large (max 3MB).");
-        const path = `${clientId}/style-${Date.now()}.${ext}`;
+        // crypto.randomUUID(), not Date.now(): clientId is public and a ms timestamp is
+        // guessable, which made every uploaded image enumerable (audit 2026-08-19).
+        const path = `${clientId}/style-${crypto.randomUUID()}.${ext}`;
         const upl = await sb.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
         if (upl.error) throw new Error(`Image upload failed: ${upl.error.message}`);
         const { data: pub } = sb.storage.from("branding").getPublicUrl(path);

@@ -96,6 +96,17 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     if (!clean.ok) return json({ error: clean.error }, 400);
     const photos = sanitizePhotoUrls(d3Photos);
 
+    // Honour the phone-scan LOCK, exactly as portal-settings' builder-facing twin does
+    // (same message, same 409). "locked" means the spec was tuned against a real scanned
+    // mesh and set_style_model_status sealed it; before this check the operator path wrote
+    // straight through the very safeguard built for it (audit 2026-08-19), so the lock
+    // held for builders and not for the people most likely to bulk-edit.
+    const { data: lockRow } = await supabase.from("building_styles")
+      .select("model_status").eq("client_id", clientId.trim()).eq("key", styleValue).maybeSingle();
+    if (lockRow && lockRow.model_status === "locked") {
+      return json({ error: "This style's 3D setup is locked. Unlock it first if you really need to change the shape." }, 409);
+    }
+
     // Matched on the style KEY, which is what the editor knows as `value`;
     // (client_id, key) is unique, so this touches exactly one row.
     const { error: upErr, count } = await supabase
