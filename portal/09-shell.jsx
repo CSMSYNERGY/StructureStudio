@@ -298,6 +298,30 @@ function Dashboard({ session }) {
   // absent entirely — so using it here would leave Settings dead in the viewed account,
   // which is exactly the "only two tabs" symptom Carolyn reported.
   const canAdmin = viewing ? isOperator : isAdmin;
+
+  // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
+  // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
+  // not read a value declared below itself. See the setup3d memo for what that cost.
+  // 3D reads entitlement.GRANTED, not entitlement.features, and that is deliberate.
+  //
+  // `features.view_3d` is computed by portal-billing, where view_3d falls under the
+  // exempt/free-period BLANKET unless that function has the three-branch map (which needs
+  // billing_plans.operator_grantable, migration 109). Every tenant predating the billing gate
+  // is exempt, so gating on features here would show 3D to essentially all of them the moment
+  // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
+  // when this landed on beta before the migration could be applied.
+  //
+  // `granted` is emitted ONLY by the new portal-billing and only for features an operator
+  // actually comped, so this is correct in BOTH worlds: against the old function it is
+  // undefined and only operators see 3D; against the new one it honours real grants. It also
+  // cannot be widened by a blanket, ever, which is the property that matters for a feature
+  // whose whole point is "not all clients need to see it" (Carolyn 2026-08-18).
+  //
+  // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
+  // featureOn, or the blanket returns with it.
+  const view3dUnlocked = isOperator
+    || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
+        && entitlement.granted.indexOf("view_3d") !== -1);
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -313,7 +337,18 @@ function Dashboard({ session }) {
   // returned before reaching it, the render after the tenant resolved called one hook
   // more, and React threw #310 — a blank portal for everyone (app_errors bb53f026,
   // bcfc2007). The early returns now sit below this memo; keep every hook above them.
-  const setup3d = useMemo(() => (!canAdmin ? null : {
+  // `view3dUnlocked` is load-bearing here, not decorative. Without it this memo was gated on
+  // canAdmin ALONE, so any tenant OWNER without a view_3d grant got a non-null setup3d ->
+  // showCal3D true in the designer -> the yellow "3D Style Calibration" bar, whose preview
+  // opens a full editable Structure3DViewer. 3D was reachable by a builder who had not been
+  // granted it (found 2026-08-21; shipped 2026-08-04 in 81299d9, so it predates the dock).
+  //
+  // Operators keep calibration everywhere, which is the point: view3dUnlocked is
+  // `isOperator || (!viewing && granted has view_3d)`, so an operator passes on their own
+  // portal AND while impersonating a tenant. The operator's PUBLIC-page route
+  // (index.html?admin=1) never came through here at all -- showCal3D is `isAdmin ||
+  // Boolean(setup3d)` and isAdmin short-circuits it -- so that flow is untouched.
+  const setup3d = useMemo(() => (!canAdmin || !view3dUnlocked ? null : {
     onSaveSpec: async (styleValue, d3, d3Photos) => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_d3", styleValue, d3, d3Photos } });
       if (error) throw new Error(error.message || "Save failed");
@@ -386,7 +421,7 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
       return data.url;
     },
-  }), [canAdmin, effClientId]);
+  }), [canAdmin, view3dUnlocked, effClientId]);
 
   if (tenant === null) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
@@ -503,26 +538,6 @@ function Dashboard({ session }) {
   // the same way as scheduling (Carolyn 2026-08-08), and PAY-ONLY on the server, so the
   // exempt/free-period blankets don't hand it to grandfathered tenants either.
   const qboUnlocked = featureOn("quickbooks_sync");
-  // 3D reads entitlement.GRANTED, not entitlement.features, and that is deliberate.
-  //
-  // `features.view_3d` is computed by portal-billing, where view_3d falls under the
-  // exempt/free-period BLANKET unless that function has the three-branch map (which needs
-  // billing_plans.operator_grantable, migration 109). Every tenant predating the billing gate
-  // is exempt, so gating on features here would show 3D to essentially all of them the moment
-  // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
-  // when this landed on beta before the migration could be applied.
-  //
-  // `granted` is emitted ONLY by the new portal-billing and only for features an operator
-  // actually comped, so this is correct in BOTH worlds: against the old function it is
-  // undefined and only operators see 3D; against the new one it honours real grants. It also
-  // cannot be widened by a blanket, ever, which is the property that matters for a feature
-  // whose whole point is "not all clients need to see it" (Carolyn 2026-08-18).
-  //
-  // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
-  // featureOn, or the blanket returns with it.
-  const view3dUnlocked = isOperator
-    || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
-        && entitlement.granted.indexOf("view_3d") !== -1);
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
