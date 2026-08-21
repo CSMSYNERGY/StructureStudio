@@ -1808,13 +1808,14 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, access = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, access = null, setup3d = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
     ["structures", "Structures", "Building styles, sizes, and base prices"],
     ["options", "Options", "Add-on items and rates"],
     ["colors", "Colors", "Paint, shingle, and metal palettes"],
+    ["designer", "Designer", "How your styles look in the designer — including their 3D shape"],
     ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
@@ -1878,6 +1879,9 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />}
       {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
+      {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
+          design work, so it lives here now; the tab itself no longer receives setup3d. */}
+      {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "connection" && <SettingsView section="connection" />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one

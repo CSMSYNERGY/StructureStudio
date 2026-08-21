@@ -279,6 +279,10 @@ const TAB_AREA = {
 // missing from this map is not access-controlled.
 const SETTINGS_TAB_AREA = {
   structures: "settings_structures",
+  // Designer -> 3D writes building_styles.d3 (save_style_d3 and friends), and every one of
+  // those actions is gated settings_structures:edit server-side. Mirror that here or the
+  // sub-tab shows up for someone the server will refuse.
+  designer: "settings_structures",
   options: "settings_options",
   colors: "settings_options",
   branding: "settings_branding",

@@ -326,11 +326,14 @@ function Dashboard({ session }) {
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
   const effClientId = viewing ? viewing.clientId : (tenant && tenant !== "none" ? tenant.clientId : null);
-  // 3D setup contract handed to the embedded designer's calibration editor. The editor
-  // itself lives in the designer component (it needs the live 3D preview); the I/O lives
-  // here because THIS is where the signed-in session is — the component's own supabase
-  // client is the anon one and would 401 at resolveTenant. Null unless the user may
-  // administer the tenant, which is what keeps a role-"user" salesperson out of it.
+  // 3D setup contract handed to the calibration editor, which lives in Settings ->
+  // Designer -> 3D since 2026-08-21 (it used to be a bar across the top of the Designer
+  // TAB, over every design anyone opened). The editor itself is still rendered by the
+  // designer component — it needs the live 3D preview — but the component is mounted
+  // there with `calibrationOnly`, so nothing else of the designer comes with it. The I/O
+  // lives here because THIS is where the signed-in session is: the component's own
+  // supabase client is the anon one and would 401 at resolveTenant. Null unless the user
+  // may administer the tenant, which is what keeps a role-"user" salesperson out of it.
   //
   // This is a HOOK, so it must run on EVERY render — same constraint as the replaceState
   // effect above. It used to sit below the tenant-loading early returns: the first render
@@ -339,7 +342,8 @@ function Dashboard({ session }) {
   // bcfc2007). The early returns now sit below this memo; keep every hook above them.
   // `view3dUnlocked` is load-bearing here, not decorative. Without it this memo was gated on
   // canAdmin ALONE, so any tenant OWNER without a view_3d grant got a non-null setup3d ->
-  // showCal3D true in the designer -> the yellow "3D Style Calibration" bar, whose preview
+  // showCal3D true -> the "3D Style Calibration" panel (then a bar across the top of the
+  // Designer tab, now the Settings -> Designer -> 3D section), whose preview
   // opens a full editable Structure3DViewer. 3D was reachable by a builder who had not been
   // granted it (found 2026-08-21; shipped 2026-08-04 in 81299d9, so it predates the dock).
   //
@@ -747,8 +751,11 @@ function Dashboard({ session }) {
               max-width would box the designer in); hidden, never unmounted, off-tab. */}
           {designerOpened && !gateLocked && (
             <div className="ss-designer-host" style={{ display: activeTab === "designer" ? "block" : "none" }}>
+              {/* No setup3d here on purpose (2026-08-21). The calibration editor is the ONLY
+                  thing the designer used it for, and it now lives in Settings -> Designer -> 3D,
+                  so passing it would put the yellow bar back over every design people open. */}
               <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={view3dUnlocked} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
-                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} setup3d={setup3d} />
+                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} />
             </div>
           )}
           <div className="ss-inner">
@@ -889,6 +896,7 @@ function Dashboard({ session }) {
                 access={viewing ? null : myAccess}
                 schedUnlocked={schedUnlocked}
                 qboUnlocked={qboUnlocked}
+                setup3d={setup3d}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {!gateLocked && activeTab === "on-demand-pricing" && (

@@ -1375,9 +1375,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
                     {/* Whether this style has a 3D look of its own yet. Read-only here —
-                        setting one needs the live 3D preview, so it lives in the Designer
-                        tab's 3D Style Calibration panel. */}
-                    <span title={s.d3 ? "This style has its own 3D look — tune it in Designer → 3D Style Calibration" : "No 3D look set yet: 3D falls back to a generic shape. Set one in Designer → 3D Style Calibration."}
+                        setting one needs the live 3D preview, so it lives in
+                        Settings → Designer → 3D. */}
+                    <span title={s.d3 ? "This style has its own 3D look — tune it in Settings → Designer → 3D" : "No 3D look set yet: 3D falls back to a generic shape. Set one in Settings → Designer → 3D."}
                       style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 7px", border: "1px solid " + (s.d3 ? "#A7F3D0" : "#E2E8F0"), background: s.d3 ? "#ECFDF5" : "#F8FAFC", color: s.d3 ? "#047857" : "#94A3B8" }}>
                       {s.d3 ? "3D ✓" : "3D —"}
                     </span>

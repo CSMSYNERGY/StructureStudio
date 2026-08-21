@@ -4615,7 +4615,7 @@ function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
   );
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -8077,110 +8077,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setGateOpen(false);
       }} />
   ) : null;
-  return (
-    <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
-      {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
-      {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
-      {/* Size change refused: something on the plan has nowhere to go in the smaller
-          building. The size is ALREADY back to what it was (the reflow is computed before
-          anything is committed), so this only has to explain and get out of the way. */}
-      {sizeBlock && createPortal(
-        <div onClick={() => setSizeBlock(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(520px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
-            <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>
-              {sizeBlock.items.length === 1 ? "One item won't fit" : `${sizeBlock.items.length} items won't fit`} in a {sizeBlock.to}
-            </div>
-            <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, marginBottom: 14 }}>
-              Everything else would have moved across fine, but there's nowhere to put:
-            </div>
-            <ul style={{ margin: "0 0 16px", paddingLeft: 20, fontSize: 13.5, color: "#1E293B", lineHeight: 1.7 }}>
-              {sizeBlock.items.map((e) => <li key={e.id}><b>{e.label}</b></li>)}
-            </ul>
-            <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, marginBottom: 16 }}>
-              Your building is still <b>{sizeBlock.from}</b> and nothing on the plan has changed.
-              Delete {sizeBlock.items.length === 1 ? "it" : "them"} — or make room by removing something
-              else — then pick the size again.
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button type="button" onClick={() => setSizeBlock(null)} style={{ background: accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Got it</button>
-            </div>
-          </div>
-        </div>, document.body)}
-      {/* Header — suppressed when embedded (the portal supplies its own topbar). The
-          public page is customers-only: no Business Login link (Carolyn 2026-07-24);
-          instead a gate identity chip shows who this browser is remembered as. */}
-      {!embedded && (
-      <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
-        {C.branding.logo
-          ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
-          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
-          {gatePassed && !isAdmin && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
-              <span style={{ fontSize: 12, color: "#E2E8F0" }}>{gateName ? `Designing as ${gateName}` : "Welcome back"}</span>
-              <button type="button" onClick={resetGate} title="Clear this browser's saved visitor and start fresh"
-                style={{ fontSize: 11, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "4px 10px", cursor: "pointer" }}>
-                Not you? Start over
-              </button>
-            </div>
-          )}
-          <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
-        </div>
-      </div>
-      )}
-
-      {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
-          The API key is stored in Supabase (RLS-locked) and only ever read by the submit-estimate Edge Function. */}
-      {isAdmin && (
-        <div style={{ background: "#FEF3C7", borderBottom: "2px solid #F59E0B", padding: "14px 20px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <span style={{ fontWeight: 700, fontSize: 14, color: "#92400E" }}>🔒 GHL Integration — Admin</span>
-            <span style={{ fontSize: 11, color: "#92400E" }}>Client: <code>{C.clientId}</code></span>
-          </div>
-          <p style={{ margin: "0 0 10px", fontSize: 12, color: "#92400E" }}>
-            Set the GHL Location ID and Private Integration Token for this client. Once saved, credentials live in Supabase and are only read server-side — they never reach customer browsers.
-          </p>
-          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
-            <PasswordInput value={adminPwd} onChange={(e) => setAdminPwd(e.target.value)} placeholder="Admin password" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-            <input type="text" value={adminLocId} onChange={(e) => setAdminLocId(e.target.value)} placeholder="GHL Location ID" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-            <PasswordInput value={adminApiKey} onChange={(e) => setAdminApiKey(e.target.value)} placeholder="GHL API Key (pit-…)" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-            <button onClick={saveAdminSettings} disabled={adminBusy} style={{ ...S.btn(adminBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 18px", fontSize: 13, cursor: adminBusy ? "wait" : "pointer" }}>
-              {adminBusy ? "Saving…" : "Save GHL Settings"}
-            </button>
-            <button onClick={checkAdminStatus} disabled={adminBusy || !adminPwd} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>
-              Check status
-            </button>
-            {adminStatus && adminStatus.configured && (
-              <span style={{ fontSize: 12, color: "#166534", fontWeight: 600 }}>
-                ✓ Configured — Loc {adminStatus.ghlLocationIdMasked}, saved {new Date(adminStatus.updatedAt).toLocaleString()}
-              </span>
-            )}
-            {adminStatus && !adminStatus.configured && (
-              <span style={{ fontSize: 12, color: "#92400E", fontWeight: 600 }}>Not yet configured for this client.</span>
-            )}
-          </div>
-          {adminMsg && (
-            <div style={{ marginTop: 8, fontSize: 12, color: adminMsg.ok ? "#166534" : "#DC2626", fontWeight: 600 }}>
-              {adminMsg.msg}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 3D Style Calibration. Two ways in: the operator panel on the public page
-          (?admin=1), and -- through the setup3d contract -- the BUILDER inside their own
-          portal, which is the point of the feature. Deliberately a sibling of the admin
-          panel rather than a child: that panel also carries the GHL credentials, which
-          must never surface inside a tenant portal. */}
-      {showCal3D && (
+  // ── 3D Style Calibration ───────────────────────────────────────────────
+  // 3D Style Calibration. Two ways in: the operator panel on the public page
+  //     (?admin=1), and -- through the setup3d contract -- the BUILDER inside their own
+  //     portal, which is the point of the feature. Deliberately a sibling of the admin
+  //     panel rather than a child: that panel also carries the GHL credentials, which
+  //     must never surface inside a tenant portal.
+  // Held in a variable rather than written inline: Settings → Designer → 3D mounts
+  // this component with `calibrationOnly` and renders ONLY this panel, so the panel
+  // has to be reachable from two different returns.
+  const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
           <span style={{ fontSize: 11, color: "#92400E", marginLeft: 8 }}>
@@ -8394,7 +8300,139 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )}
         </div>
+  );
+  // Operator calibration preview: the current layout rendered with the
+  //     DRAFT spec being edited — tune numbers against the reference photos.
+  const cal3dPreview = showCal3D && adminCal && adminCalPreview && (
+        <Structure3DViewer
+          bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+          styleValue={adminCal.styleValue} frontWall={frontWall}
+          painted={false} paintBody="" paintTrim=""
+          scale={scale} mgX={mgX} mgY={mgY} accent={accent}
+          style3d={adminCal.spec}
+          fixtures={C.fixtures}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
+          placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
+          paintEnabled={false}
+          onSnapshot={() => {}}
+          onClose={() => setAdminCalPreview(false)}
+        />
+  );
+
+  // Settings → Designer → 3D. The calibration editor needs everything this component
+  // already computes (the style list, the resolved config, the live 3D preview), so the
+  // portal mounts the whole component and takes just this surface — no toolbar, no
+  // canvas, no estimate. Every hook above still runs, which is what keeps hook order
+  // identical between this return and the full designer below.
+  if (calibrationOnly) {
+    return (
+      <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+        {showCal3D
+          ? cal3dPanel
+          : <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>}
+        {cal3dPreview}
+      </div>
+    );
+  }
+  return (
+    <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
+      {gateEl && createPortal(gateEl, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
+      {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {/* Size change refused: something on the plan has nowhere to go in the smaller
+          building. The size is ALREADY back to what it was (the reflow is computed before
+          anything is committed), so this only has to explain and get out of the way. */}
+      {sizeBlock && createPortal(
+        <div onClick={() => setSizeBlock(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(520px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>
+              {sizeBlock.items.length === 1 ? "One item won't fit" : `${sizeBlock.items.length} items won't fit`} in a {sizeBlock.to}
+            </div>
+            <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, marginBottom: 14 }}>
+              Everything else would have moved across fine, but there's nowhere to put:
+            </div>
+            <ul style={{ margin: "0 0 16px", paddingLeft: 20, fontSize: 13.5, color: "#1E293B", lineHeight: 1.7 }}>
+              {sizeBlock.items.map((e) => <li key={e.id}><b>{e.label}</b></li>)}
+            </ul>
+            <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, marginBottom: 16 }}>
+              Your building is still <b>{sizeBlock.from}</b> and nothing on the plan has changed.
+              Delete {sizeBlock.items.length === 1 ? "it" : "them"} — or make room by removing something
+              else — then pick the size again.
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" onClick={() => setSizeBlock(null)} style={{ background: accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Got it</button>
+            </div>
+          </div>
+        </div>, document.body)}
+      {/* Header — suppressed when embedded (the portal supplies its own topbar). The
+          public page is customers-only: no Business Login link (Carolyn 2026-07-24);
+          instead a gate identity chip shows who this browser is remembered as. */}
+      {!embedded && (
+      <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
+        {C.branding.logo
+          ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
+          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          {gatePassed && !isAdmin && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
+              <span style={{ fontSize: 12, color: "#E2E8F0" }}>{gateName ? `Designing as ${gateName}` : "Welcome back"}</span>
+              <button type="button" onClick={resetGate} title="Clear this browser's saved visitor and start fresh"
+                style={{ fontSize: 11, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "4px 10px", cursor: "pointer" }}>
+                Not you? Start over
+              </button>
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
+        </div>
+      </div>
       )}
+
+      {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
+          The API key is stored in Supabase (RLS-locked) and only ever read by the submit-estimate Edge Function. */}
+      {isAdmin && (
+        <div style={{ background: "#FEF3C7", borderBottom: "2px solid #F59E0B", padding: "14px 20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontWeight: 700, fontSize: 14, color: "#92400E" }}>🔒 GHL Integration — Admin</span>
+            <span style={{ fontSize: 11, color: "#92400E" }}>Client: <code>{C.clientId}</code></span>
+          </div>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: "#92400E" }}>
+            Set the GHL Location ID and Private Integration Token for this client. Once saved, credentials live in Supabase and are only read server-side — they never reach customer browsers.
+          </p>
+          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
+            <PasswordInput value={adminPwd} onChange={(e) => setAdminPwd(e.target.value)} placeholder="Admin password" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+            <input type="text" value={adminLocId} onChange={(e) => setAdminLocId(e.target.value)} placeholder="GHL Location ID" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+            <PasswordInput value={adminApiKey} onChange={(e) => setAdminApiKey(e.target.value)} placeholder="GHL API Key (pit-…)" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+            <button onClick={saveAdminSettings} disabled={adminBusy} style={{ ...S.btn(adminBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 18px", fontSize: 13, cursor: adminBusy ? "wait" : "pointer" }}>
+              {adminBusy ? "Saving…" : "Save GHL Settings"}
+            </button>
+            <button onClick={checkAdminStatus} disabled={adminBusy || !adminPwd} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>
+              Check status
+            </button>
+            {adminStatus && adminStatus.configured && (
+              <span style={{ fontSize: 12, color: "#166534", fontWeight: 600 }}>
+                ✓ Configured — Loc {adminStatus.ghlLocationIdMasked}, saved {new Date(adminStatus.updatedAt).toLocaleString()}
+              </span>
+            )}
+            {adminStatus && !adminStatus.configured && (
+              <span style={{ fontSize: 12, color: "#92400E", fontWeight: 600 }}>Not yet configured for this client.</span>
+            )}
+          </div>
+          {adminMsg && (
+            <div style={{ marginTop: 8, fontSize: 12, color: adminMsg.ok ? "#166534" : "#DC2626", fontWeight: 600 }}>
+              {adminMsg.msg}
+            </div>
+          )}
+        </div>
+      )}
+
+      {cal3dPanel}
 
       {/* Inventory estimate: the building already exists, so the plan is read-only. The
           money lines below (custom options, discount, delivery) stay fully editable —
@@ -9841,23 +9879,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       )}
 
-      {/* Operator calibration preview: the current layout rendered with the
-          DRAFT spec being edited — tune numbers against the reference photos. */}
-      {showCal3D && adminCal && adminCalPreview && (
-        <Structure3DViewer
-          bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
-          styleValue={adminCal.styleValue} frontWall={frontWall}
-          painted={false} paintBody="" paintTrim=""
-          scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={adminCal.spec}
-          fixtures={C.fixtures}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
-          placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
-          paintEnabled={false}
-          onSnapshot={() => {}}
-          onClose={() => setAdminCalPreview(false)}
-        />
-      )}
+      {cal3dPreview}
 
       {show3D && (
         <Structure3DViewer
@@ -9962,7 +9984,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false }) {
+export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -10103,5 +10125,5 @@ export default function StructureStudio({ config: configProp = null, clientId: c
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} /></DesignerErrorBoundary>;
 }

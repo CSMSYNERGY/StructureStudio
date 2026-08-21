@@ -273,7 +273,7 @@ function SSStraightenPhoto({ file, aspect, onCancel, onDone }) {
 // 3D Design tab. Replaced a "3rd Qtr" coming-soon panel: 3D ships, so this reports the
 // only thing a builder can act on — which of their styles has a 3D look of its own, and
 // which is still falling back to a generic shape. Read-only by design; setting a look
-// needs the live 3D preview, which lives in the Designer tab's calibration panel.
+// needs the live 3D preview, which lives in Settings -> Designer -> 3D.
 function Studio3DStatus({ clientId, canAdmin, navigate }) {
   const [state, setState] = useState({ loading: true, err: null, styles: [] });
   useEffect(() => {
@@ -339,7 +339,7 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
                     </div>
                   </div>
                   {canAdmin && (
-                    <button type="button" onClick={() => navigate("designer")}
+                    <button type="button" onClick={() => navigate("settings", "designer")}
                       style={{ flexShrink: 0, background: s.d3 ? "#F1F5F9" : "#7C3AED", color: s.d3 ? "#334155" : "#FFF", border: s.d3 ? "1px solid #E2E8F0" : "none", borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer" }}>
                       {s.d3 ? "Adjust" : "Set up 3D"}
                     </button>
@@ -350,12 +350,55 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
           </div>
           {canAdmin && (
             <p style={{ margin: "14px 0 0", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
-              Setting a style's 3D look happens in the <strong>Designer</strong> tab, under <strong>🧊 3D Style Calibration</strong> —
+              Setting a style's 3D look happens in <strong>Settings → Designer → 3D</strong> —
               it needs the live 3D preview so you can see each change on a real building as you make it.
             </p>
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// Settings -> Designer. Everything that CONFIGURES the designer, as opposed to using it.
+// Today that is one section: 3D Style Calibration, which used to ride at the top of the
+// Designer tab as a full-bleed yellow bar sitting over every design anyone opened. It is a
+// setup surface -- done once per style, then never again -- so it belongs with the rest of
+// the setup rather than over the tool the sales team uses all day (Ahsan, 2026-08-21).
+//
+// The panel itself still lives INSIDE the designer component, because it needs the live 3D
+// preview and the resolved style list. `calibrationOnly` mounts that component for this one
+// surface: no toolbar, no canvas, no estimate. `setup3d` is the same contract PortalApp
+// already builds -- it is null unless the caller may administer the tenant AND the tenant
+// holds the view_3d grant, so this tab degrades to an explanation rather than an empty box.
+function DesignerSettings({ clientId, setup3d = null }) {
+  const SS = window.StructureStudio;
+  const card = { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "16px 18px", marginBottom: 14 };
+  return (
+    <div style={{ maxWidth: 1080 }}>
+      <div style={card}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>3D</div>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
+          Give each building style its own 3D look so what customers spin on screen matches the
+          buildings you actually sell. Set once per style — the designer picks it up everywhere.
+        </p>
+        {!SS && (
+          <div style={{ fontSize: 13, color: "#64748B" }}>
+            The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)
+          </div>
+        )}
+        {SS && !setup3d && (
+          <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.55 }}>
+            3D isn't turned on for this account yet. Once it is, each of your building styles can be
+            tuned here against a live 3D preview.
+          </div>
+        )}
+        {SS && setup3d && (
+          <div style={{ border: "1px solid #FCD34D", borderRadius: 10, overflow: "hidden" }}>
+            <SS clientId={clientId} embedded calibrationOnly setup3d={setup3d} view3d />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
