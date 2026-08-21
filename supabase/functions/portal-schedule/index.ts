@@ -440,6 +440,53 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         }]));
       }
 
+      // ── Per-job scheduled VALUE, for the calendar's day totals ──
+      // `build_jobs` carries no price column and deliberately gets none: an order's total is
+      // routinely set AFTER the build job exists (the "Set total" flow — GHL often gives us
+      // no number), so a snapshot taken at job creation would be null exactly when it matters
+      // and would never catch up. Read from whichever source row owns the money instead.
+      // NULL stays NULL all the way to the screen — the caller must never render a missing
+      // total as $0 (Orders' rule: "we never show a guessed number"). A manual job has no
+      // value and never will, which is not the same thing as a missing one.
+      const valueByJob: Record<string, number | null> = {};
+      {
+        const orderCodes = [...new Set((jobs ?? [])
+          .filter((j) => j.source === "order" && j.design_short_code)
+          .map((j) => j.design_short_code as string))];
+        const { data: ords } = orderCodes.length
+          ? await admin.from("orders").select("short_code, total_cents")
+              .eq("client_id", clientId).in("short_code", orderCodes)
+          : { data: [] };
+        const orderTotal: Record<string, number | null> = {};
+        for (const o of ords ?? []) orderTotal[String(o.short_code)] = o.total_cents ?? null;
+
+        const unitIds = [...new Set((jobs ?? [])
+          .filter((j) => j.inventory_unit_id).map((j) => j.inventory_unit_id as string))];
+        const { data: unitRows } = unitIds.length
+          ? await admin.from("inventory_units").select("id, asking_price_cents")
+              .eq("client_id", clientId).in("id", unitIds)
+          : { data: [] };
+        const unitPrice: Record<string, number | null> = {};
+        for (const u of unitRows ?? []) unitPrice[String(u.id)] = u.asking_price_cents ?? null;
+
+        const repairIds = [...new Set((jobs ?? [])
+          .filter((j) => j.repair_id).map((j) => j.repair_id as string))];
+        const { data: repairRows } = repairIds.length
+          ? await admin.from("repairs").select("id, quote_cents")
+              .eq("client_id", clientId).in("id", repairIds)
+          : { data: [] };
+        const repairQuote: Record<string, number | null> = {};
+        for (const rq of repairRows ?? []) repairQuote[String(rq.id)] = rq.quote_cents ?? null;
+
+        for (const j of jobs ?? []) {
+          let v: number | null = null;
+          if (j.source === "order") v = orderTotal[String(j.design_short_code ?? "")] ?? null;
+          else if (j.source === "inventory") v = unitPrice[String(j.inventory_unit_id ?? "")] ?? null;
+          else if (j.source === "repair") v = repairQuote[String(j.repair_id ?? "")] ?? null;
+          valueByJob[String(j.id)] = v;
+        }
+      }
+
       // Unscheduled tray: sold orders / APPROVED units / open repairs with no job yet.
       const haveDesign = new Set((jobs ?? []).map((j) => j.design_short_code).filter(Boolean));
       const haveUnit = new Set((jobs ?? []).map((j) => j.inventory_unit_id).filter(Boolean));
@@ -493,7 +540,8 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           description: rp.description, serial: rp.serial, status: rp.status,
         })),
       };
-      return json({ stages, jobs: jobs ?? [], stopByJob, tray, team: await getTeam(), crews: await getCrews() });
+      const jobsOut = (jobs ?? []).map((j) => ({ ...j, valueCents: valueByJob[String(j.id)] ?? null }));
+      return json({ stages, jobs: jobsOut, stopByJob, tray, team: await getTeam(), crews: await getCrews() });
     }
 
     if (action === "loads") {

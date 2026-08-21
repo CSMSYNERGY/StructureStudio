@@ -33,6 +33,30 @@ const schedPastDue = (job, kind) => {
   return d < schedLocalIso(new Date());
 };
 const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
+// React `key` for an open SchedJobEditor. It seeds its form state from the job ONCE, and
+// React preserves that state across re-renders — so a refresh that brought newer values left
+// the open fields showing the old ones. Keying on updated_at remounts the editor exactly when
+// the row really changed, which re-seeds the form and re-reads the history in one step.
+const schedEditorKey = (j) => j.id + ":" + (j.updated_at || "");
+// The building STYLE, which has no column of its own: `building_label` is the composed
+// "<Style> <Size>" string that portal-schedule's buildingLabelFrom() writes, and the size half
+// is always parseSize's shape (12x24 / 12×24 / 12 X 24). Stripping that token leaves the
+// style — the same pattern the server already trusts, with no migration and no backfill.
+const schedStyle = (j) => String(j.building_label || "")
+  .replace(/\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?/i, "").trim();
+// How the Table view can be cut into sections. Module-level so the remembered choice can be
+// validated before the component's first render.
+const SCHED_SEGMENTS = [
+  ["none", "No segments — one list"],
+  ["crew", "Crew"],
+  ["date", "Build date"],
+  ["week", "Week"],
+  ["style", "Building style"],
+  ["size", "Size"],
+  ["source", "Order / Inventory / Repair"],
+  ["stage", "Stage"],
+];
+const SCHED_SEGMENT_KEYS = new Set(SCHED_SEGMENTS.map(([k]) => k));
 
 // The read side of schedule_activity. The edge function has written a row on every move,
 // note and completion since day one, and NOTHING displayed them — so "Add note", which is
@@ -65,7 +89,7 @@ function SchedJobHistory({ jobId, refreshKey = 0 }) {
       <span style={{ ...S.lbl, marginBottom: 4, color: "#94A3B8" }}>History</span>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {rows.map((a) => (
-          <div key={a.id} style={{ fontSize: 11, color: "#64748B", fontWeight: 600, lineHeight: 1.45 }}>
+          <div key={a.id} style={{ fontSize: 11, color: "#64748B", fontWeight: 600, lineHeight: 1.45, overflowWrap: "anywhere" }}>
             <span style={{ color: "#334155", fontWeight: 800 }}>{a.userName || "Someone"}</span>
             {" "}{SCHED_ACT_VERB[a.action] || a.action}
             {a.action === "moved" && a.toStage ? <> to <strong>{a.toStage}</strong></> : null}
@@ -101,20 +125,27 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComp
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
+  // A grid item's automatic minimum size is its MIN-CONTENT size, and an <input>'s
+  // min-content is its intrinsic ~20-character width (~170px) — so a `1fr` track refused to
+  // shrink below that, the two-column form demanded ~350px, and it overflowed any narrower
+  // container. That is how the expanded card ran off the edge of a 218px week-view day
+  // column. `width:100%` on the input cannot fix it: the TRACK was too wide. minWidth:0
+  // makes the track the floor instead of the input's intrinsic width.
+  const cell = { minWidth: 0 };
   return (
     <div style={{ borderTop: "1px solid #F1F5F9", marginTop: 8, paddingTop: 9 }} onClick={(e) => e.stopPropagation()}>
       {canEdit && (<>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 10px", marginBottom: 8 }}>
-          <div><span style={lbl}>Customer</span><input style={inp} value={f.customerName} onChange={set("customerName")} /></div>
-          <div><span style={lbl}>Building</span><input style={inp} value={f.buildingLabel} onChange={set("buildingLabel")} /></div>
-          <div><span style={lbl}>Build date</span><input type="date" style={inp} value={f.buildDate} onChange={set("buildDate")} /></div>
-          <div><span style={lbl}>Crew</span>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: "8px 10px", marginBottom: 8 }}>
+          <div style={cell}><span style={lbl}>Customer</span><input style={inp} value={f.customerName} onChange={set("customerName")} /></div>
+          <div style={cell}><span style={lbl}>Building</span><input style={inp} value={f.buildingLabel} onChange={set("buildingLabel")} /></div>
+          <div style={cell}><span style={lbl}>Build date</span><input type="date" style={inp} value={f.buildDate} onChange={set("buildDate")} /></div>
+          <div style={cell}><span style={lbl}>Crew</span>
             <select style={inp} value={f.crewId} onChange={set("crewId")}>
               <option value="">— No crew —</option>
               {crews.filter((c) => c.active !== false || c.id === job.crew_id).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
-          <div style={{ gridColumn: "1 / -1" }}><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
         </div>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
           <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={() => onSave({
@@ -126,16 +157,20 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComp
           {job.design_short_code && onOpenDesign && (
             <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => onOpenDesign(job.design_short_code)}>Open design</button>
           )}
-          <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), marginLeft: "auto" }} onClick={onDelete}>Delete</button>
+          {/* "Remove", not "Delete" — the confirm, the toast and the activity verb all
+              already say remove, and it is the honest word: the job leaves the board and the
+              order/design/inventory unit is untouched. (Repairs and Loads keep "Delete";
+              those really do destroy the record.) */}
+          <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), marginLeft: "auto" }} onClick={onDelete}>Remove</button>
         </div>
       </>)}
       {/* Stage move without drag — the touch/keyboard path, and the crew path on phones. */}
       {canEdit && (
         <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          <select style={{ ...inp, width: "auto" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
+          <select style={{ ...inp, width: "auto", maxWidth: "100%" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
             {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <input style={{ ...inp, flex: 1, minWidth: 120 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
+          <input style={{ ...inp, flex: "1 1 100px", minWidth: 0 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
           <button type="button" disabled={busy || !note.trim()} style={S.btn("#F1F5F9", "#334155")}
             onClick={async () => {
               if (!note.trim()) return;
@@ -232,6 +267,28 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const [stageFilter, setStageFilter] = useState("all");
   const [sortKey, setSortKey] = useState("due_date");
   const [sortDir, setSortDir] = useState("asc");
+  // Table SEGMENTING — one labelled section per group, and every job still on screen.
+  // Deliberately NOT `crewFilter`, which filters and belongs to the calendar: Carolyn asked
+  // to "see the ENTIRE LIST, but segmented by crews", so a segment must never drop a row.
+  // Remembered per browser like showWeekends — a dispatcher who works by crew wants it to stick.
+  const [segment, setSegment] = useState(() => {
+    // Validate what comes back out: localStorage can hold a mode this build no longer has
+    // (a renamed or removed option from another version), and an unrecognised mode would
+    // fall through segmentOf's switch to null and throw while bucketing.
+    try {
+      const v = window.localStorage.getItem("ss_sched_segment");
+      return SCHED_SEGMENT_KEYS.has(v) ? v : "none";
+    } catch (_e) { return "none"; }
+  });
+  const chooseSegment = (next) => {
+    setSegment(next);
+    try { window.localStorage.setItem("ss_sched_segment", next); } catch (_e) { /* private mode */ }
+  };
+  // Refresh feedback. `load` used to be wired straight to onClick with no busy state, so on a
+  // board that hadn't changed the screen was byte-identical before and after — the button
+  // looked dead. `refreshedAt` drives a short-lived "Updated just now" note.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState(0);
   const [msg, setMsg] = useState(null);          // { ok } | { err }
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
@@ -253,6 +310,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   };
   const load = useCallback(async () => {
     setError(null);
+    // Clear the banner too, not just the error. A stale "Saved."/"That didn't work." sitting
+    // above the board through a refresh is itself evidence that nothing happened.
+    setMsg(null);
     const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body: { action: "build_board" } });
     if (err || !d || d.error) {
       setError((d && d.error) || (err ? await fnError(err) : "Could not load the build schedule."));
@@ -262,6 +322,24 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     setData(d);
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
+  // What the ↻ Refresh button calls. `load` alone gives no sign it ran: it sets no busy
+  // state, `data` stays populated for the whole flight, and the button never disables — so
+  // on an unchanged board there was nothing to see and it read as a dead control. It also
+  // let a double-click fire two concurrent fetches.
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+    setRefreshedAt(Date.now());
+  };
+  // The confirmation is deliberately short-lived — it answers "did my click register?", and
+  // a note that never leaves becomes furniture nobody reads.
+  useEffect(() => {
+    if (!refreshedAt) return undefined;
+    const t = setTimeout(() => setRefreshedAt(0), 4000);
+    return () => clearTimeout(t);
+  }, [refreshedAt]);
 
   const stages = (data && data.stages) || [];
   const jobs = (data && data.jobs) || [];
@@ -274,7 +352,20 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const crewById = {}; crews.forEach((c) => { crewById[c.id] = c; });
   const kindOf = {}; stages.forEach((s) => { kindOf[s.id] = s.kind; });
   const stageName = {}; stages.forEach((s) => { stageName[s.id] = s.name; });
+  // Board position, for sorting and segmenting by stage. Keyed on sort_order because names
+  // are tenant-editable and alphabetical is meaningless here (Built < In Build < Queue).
+  const stageOrder = {}; stages.forEach((s, i) => { stageOrder[s.id] = s.sort_order == null ? i : s.sort_order; });
   const nameOf = {}; team.forEach((m) => { nameOf[m.userId] = m.name; });
+  // A job's crew, and its load — display and sort read the same derivation, so the column and
+  // its sort order can never disagree. Crew (094) wins; a legacy individual assignee still
+  // names old cards.
+  const crewNameOf = (j) => (j.crew_id && crewById[j.crew_id] && crewById[j.crew_id].name) || nameOf[j.assignee_user_id] || "";
+  const deliveryOf = (j) => {
+    const link = stopByJob[j.id];
+    if (!link || !link.load) return null;
+    // Date first so Delivery sorts by when it goes out, with the load number breaking ties.
+    return (link.load.load_date || "") + " " + String(link.load.load_no || "").padStart(6, "0");
+  };
   const visibleStages = stages.filter((s) => !s.archived);
   const trayCount = tray.orders.length + tray.inventory.length + tray.repairs.length;
 
@@ -406,7 +497,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         onClick={() => setExpandedId(open ? null : job.id)}
         onKeyDown={(e) => { if (e.key === "Enter") setExpandedId(open ? null : job.id); }}
         style={{ background: "#FFF", border: "1px solid " + (open ? "#B9C4D6" : "#E2E8F0"), borderRadius: 10, padding: "9px 11px",
-          cursor: open ? "default" : "grab", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)" }}>
+          cursor: open ? "default" : "grab", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)",
+          // With the detail in a panel below, the card is the only thing tying the panel to a
+          // day — so say which card the panel is showing.
+          ...(open && opts.detailInPanel ? { outline: `2px solid ${ACCENT}`, outlineOffset: -1 } : null) }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{job.serial ? "#" + job.serial : (job.source === "repair" ? "Repair" : "—")}</span>
           <span style={{ ...schedChip(src.bg, src.fg), marginLeft: "auto" }}>{src.label}</span>
@@ -459,12 +553,81 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           </div>
         ) : null}
         {job.notes && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600, marginTop: 6, whiteSpace: "pre-wrap" }}>{job.notes}</div>}
-        {open && (
-          <SchedJobEditor job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+        {/* On the CALENDAR the detail lives in one full-width panel below the grid
+            (`detailInPanel`), never inside the card: a week day column is a fixed 218px and a
+            month cell is narrower still, so the form had nowhere to go and its right-hand
+            fields ran off the edge. The panel is inline on the page, not a modal, so the
+            no-popouts rule (SCHEDULING_SCOPE.md decision 6) still holds. The BOARD keeps
+            expanding in place — its columns are wide enough. */}
+        {open && !opts.detailInPanel && (
+          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
             onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
             onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
         )}
       </div>
+    );
+  };
+  // The full-width detail panel — one instance, under whichever calendar grid is showing.
+  // Keyed on updated_at so a Refresh (or any save) REMOUNTS it: SchedJobEditor seeds its form
+  // state from the job prop once, and React keeps that state across re-renders, so without
+  // the key an open card kept showing pre-refresh values. Remounting also re-reads the
+  // history, which had the same staleness for the same reason.
+  const detailPanel = () => {
+    const job = jobs.find((j) => j.id === expandedId);
+    if (!job) return null;
+    return (
+      <div style={{ marginTop: 12, border: "1px solid #C3D9F7", borderRadius: 12, background: "#FFF", padding: "11px 13px", boxShadow: "0 1px 3px rgba(15,23,42,.08)" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap", marginBottom: 2 }}>
+          <span style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B" }}>
+            {job.building_label || job.title || (job.source === "repair" ? "Repair" : "Job")}
+          </span>
+          {job.serial != null && <span style={{ fontSize: 11.5, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>#{job.serial}</span>}
+          {job.customer_name && <span style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>{job.customer_name}</span>}
+          {/* Month view used to jump to the week on click; that navigation is now an explicit
+              control instead of a side effect of opening a card. */}
+          {calView === "month" && schedBuildDate(job) && (
+            <button type="button" onClick={() => { setCursorMs(schedLocalDate(schedBuildDate(job)).getTime()); setCalView("week"); }}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11.5 }}>Open that week</button>
+          )}
+          <button type="button" onClick={() => setExpandedId(null)} aria-label="Close details"
+            style={{ ...S.btn("#F1F5F9", "#475569"), marginLeft: "auto", padding: "4px 11px", fontSize: 11.5 }}>Close</button>
+        </div>
+        <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+          onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
+          onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
+      </div>
+    );
+  };
+
+  // One table row + its expanded editor. Extracted so the flat list and every segment group
+  // render the identical row — a second copy for the grouped path is how the two drift.
+  const tableRow = (j) => {
+    const kind = kindOf[j.stage_id] || "queue";
+    const late = schedPastDue(j, kind);
+    const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
+    const stg = stages.find((s) => s.id === j.stage_id);
+    const open = expandedId === j.id;
+    return (
+      <React.Fragment key={j.id}>
+        <tr onClick={() => setExpandedId(open ? null : j.id)} style={{ cursor: "pointer", background: open ? "#F7F9FF" : "transparent" }}>
+          <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
+          <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
+          <td style={S.td}>{j.building_label || j.title || "—"}</td>
+          <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
+          <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
+          <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
+          <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedLocalDate(schedBuildDate(j))) + (late ? " · past due" : "") : "—"}</td>
+          <td style={S.td}>{crewNameOf(j) || "—"}</td>
+          <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
+        </tr>
+        {open && (
+          <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
+            <SchedJobEditor key={schedEditorKey(j)} job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+              onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
+              onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
+          </td></tr>
+        )}
+      </React.Fragment>
     );
   };
 
@@ -475,8 +638,82 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     return rowMatchesQuery(j, query,
       (stageName[j.stage_id] || "") + " " + (nameOf[j.assignee_user_id] || "") + " #" + (j.serial || ""));
   });
-  const sorted = sortRows(tableRows, (j) => j[sortKey], sortDir);
+  // Every column sorts, which a raw `j[sortKey]` read cannot do — Size, Source, Stage, Crew
+  // and Delivery are all derived. sortRows/SortTh/makeOnSort are unchanged (blanks already
+  // sort last in both directions, collation is already numeric-aware); only the accessor moves.
+  const SCHED_SORT = {
+    serial: (j) => j.serial,
+    customer_name: (j) => j.customer_name || j.title,
+    building_label: (j) => j.building_label || j.title,
+    // WIDTH-major, length as the tie-break — the order the visible "12×24" column already
+    // reads in, and how sheds are quoted (width first; see parseSize in portal-schedule).
+    // Not area: 10×30 (300 sq ft) would then sort after 12×24 (288), so the Size column would
+    // display out of order and look broken. Not the raw display string either — sortRows
+    // collates numerically, so "8×10" vs "12×24" would order correctly by width but a
+    // string can't express the length tie-break cleanly. One number does both.
+    size: (j) => (j.width_ft && j.length_ft) ? Number(j.width_ft) * 10000 + Number(j.length_ft) : null,
+    source: (j) => (SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual).label,
+    // BOARD order, never the name. Alphabetical would read Built → In Build → Queue, i.e.
+    // backwards, and stage names are tenant-editable (the Monday label-rename lesson).
+    stage: (j) => stageOrder[j.stage_id],
+    due_date: (j) => schedBuildDate(j),
+    crew: crewNameOf,
+    delivery: deliveryOf,
+  };
+  const sorted = sortRows(tableRows, SCHED_SORT[sortKey] || ((j) => j[sortKey]), sortDir);
   const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
+
+  // ── Table SEGMENTING — labelled sections, with every row still present ──
+  // The chosen sort applies WITHIN a group; group order comes from the mode, never from
+  // sortKey — sorting the groups themselves would dissolve the segmentation.
+  const weekStartIso = (iso) => {
+    const d = new Date(iso + "T12:00:00");
+    d.setDate(d.getDate() - d.getDay());   // Sunday-first, matching the calendar
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  };
+  // key: what buckets a row. rank: how the buckets themselves order (blank keys last).
+  const segmentOf = (j) => {
+    const bd = schedBuildDate(j);
+    switch (segment) {
+      // A job pointing at a crew that no longer exists must land in "No crew yet" with the
+      // rest, not in its own same-named bucket — so the KEY falls back too, not just the label.
+      case "crew": { const named = crewNameOf(j);
+                     return { key: named ? (j.crew_id || j.assignee_user_id || "") : "", label: named || "No crew yet",
+                              rank: j.crew_id && crewById[j.crew_id] ? crews.findIndex((c) => c.id === j.crew_id) : 9999 }; }
+      // schedLocalDate, not the bare ISO string: fmtDate would parse "2026-08-12" as UTC
+      // midnight and render the day before it west of Greenwich.
+      case "date":   return { key: bd || "", label: bd ? fmtDate(schedLocalDate(bd)) : "No build date", rank: bd || "9999" };
+      case "week":   return bd
+                        ? { key: weekStartIso(bd), label: "Week of " + fmtDate(schedLocalDate(weekStartIso(bd))), rank: weekStartIso(bd) }
+                        : { key: "", label: "No build date", rank: "9999" };
+      case "style": { const s = schedStyle(j); return { key: s, label: s || "No style", rank: s || "zzzz" }; }
+      // Same width-major key as the Size column's sort, so groups and rows agree on "bigger".
+      case "size":   return { key: schedDims(j), label: schedDims(j) === "—" ? "Size not known" : schedDims(j),
+                              rank: (j.width_ft && j.length_ft) ? Number(j.width_ft) * 10000 + Number(j.length_ft) : 99999999 };
+      case "source": { const c = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
+                       return { key: j.source || "manual", label: c.label, rank: ["order", "inventory", "repair", "manual"].indexOf(j.source) }; }
+      case "stage": { const s = stages.find((x) => x.id === j.stage_id);
+                      return { key: j.stage_id || "", label: (s && s.name) || "No stage", color: s && s.color,
+                               rank: stageOrder[j.stage_id] == null ? 9999 : stageOrder[j.stage_id] }; }
+      // Unreachable for a known mode, and deliberately a real bucket rather than null: a
+      // caller that somehow passes an unknown mode gets one undivided list, never a crash.
+      default:       return { key: "", label: "All jobs", rank: 0 };
+    }
+  };
+  const segmentGroups = (() => {
+    if (segment === "none") return null;
+    const buckets = new Map();
+    sorted.forEach((j) => {
+      const g = segmentOf(j);
+      if (!buckets.has(g.key)) buckets.set(g.key, { ...g, rows: [] });
+      buckets.get(g.key).rows.push(j);
+    });
+    return [...buckets.values()].sort((a, b) => {
+      const ar = a.rank, br = b.rank;
+      if (typeof ar === "number" && typeof br === "number") return ar - br;
+      return String(ar).localeCompare(String(br), undefined, { numeric: true });
+    });
+  })();
 
   // In calendar view a tray item is DRAGGABLE — drop it on a date and the job is created
   // with that build date (addFromTrayDated). The + button still adds it unscheduled.
@@ -513,7 +750,12 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
               </button>
             ))}
           </div>
-          <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          <button type="button" onClick={refresh} disabled={refreshing} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: refreshing ? 0.6 : 1, cursor: refreshing ? "default" : "pointer" }}>
+            {refreshing ? "↻ Refreshing…" : "↻ Refresh"}
+          </button>
+          {refreshedAt > 0 && !refreshing && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#15803D" }}>Updated just now</span>
+          )}
           {canEdit && <button type="button" onClick={() => setEditingStages(true)} style={S.btn("#FFF", "#475569")}>Edit stages</button>}
           {canEdit && <button type="button" onClick={() => setAddOpen(!addOpen)} style={S.btn(ACCENT, "#FFF")}>+ Add job</button>}
         </>} />
@@ -637,7 +879,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       {data && view === "table" && (<>
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search — serial, customer, building, stage…"
           style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 10 }} />
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
           <button type="button" onClick={() => setStageFilter("all")} style={{ ...S.btn(stageFilter === "all" ? "#1E293B" : "#FFF", stageFilter === "all" ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (stageFilter === "all" ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>All {jobs.length}</button>
           {visibleStages.map((s) => {
             const n = jobs.filter((j) => j.stage_id === s.id).length;
@@ -649,6 +891,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
               </button>
             );
           })}
+          {/* SEGMENT, not filter: the whole list stays on screen, cut into labelled sections.
+              The stage chips beside it are the filter; these two are deliberately different
+              controls and must not be conflated. */}
+          <label style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B" }}>Segment by</span>
+            <select value={segment} onChange={(e) => chooseSegment(e.target.value)} aria-label="Segment the list"
+              style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }}>
+              {SCHED_SEGMENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </label>
         </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -656,43 +908,34 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
               <SortTh label="Serial" col="serial" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Customer" col="customer_name" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Building" col="building_label" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-              <th style={S.th}>Size</th>
-              <th style={S.th}>Source</th>
-              <th style={S.th}>Stage</th>
+              <SortTh label="Size" col="size" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Source" col="source" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Stage" col="stage" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Build date" col="due_date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-              <th style={S.th}>Crew</th>
-              <th style={S.th}>Delivery</th>
+              <SortTh label="Crew" col="crew" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Delivery" col="delivery" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             </tr></thead>
+            {/* ONE table whether segmented or not, so the nine columns stay aligned across
+                sections — the delivery pool's table-per-group pattern would give each group
+                its own widths, which is worse than no grouping on a table this wide. Group
+                headers are full-width rows, the same idiom as the expanded editor row. */}
             <tbody>
-              {sorted.map((j) => {
-                const kind = kindOf[j.stage_id] || "queue";
-                const late = schedPastDue(j, kind);
-                const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
-                const stg = stages.find((s) => s.id === j.stage_id);
-                const open = expandedId === j.id;
-                return (
-                  <React.Fragment key={j.id}>
-                    <tr onClick={() => setExpandedId(open ? null : j.id)} style={{ cursor: "pointer", background: open ? "#F7F9FF" : "transparent" }}>
-                      <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
-                      <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
-                      <td style={S.td}>{j.building_label || j.title || "—"}</td>
-                      <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
-                      <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
-                      <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
-                      <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedLocalDate(schedBuildDate(j))) + (late ? " · past due" : "") : "—"}</td>
-                      <td style={S.td}>{(j.crew_id && crewById[j.crew_id] && crewById[j.crew_id].name) || nameOf[j.assignee_user_id] || "—"}</td>
-                      <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
+              {segmentGroups === null
+                ? sorted.map((j) => tableRow(j))
+                : segmentGroups.map((g) => (
+                  <React.Fragment key={"seg:" + g.key}>
+                    <tr>
+                      <td colSpan={9} style={{ padding: "12px 10px 5px", borderBottom: "2px solid #E2E8F0" }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#334155" }}>
+                          {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
+                          {g.label}
+                        </span>
+                        <span style={{ ...schedChip("#F1F5F9", "#475569"), marginLeft: 8 }}>{g.rows.length}</span>
+                      </td>
                     </tr>
-                    {open && (
-                      <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
-                        <SchedJobEditor job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
-                          onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
-                          onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
-                      </td></tr>
-                    )}
+                    {g.rows.map((j) => tableRow(j))}
                   </React.Fragment>
-                );
-              })}
+                ))}
             </tbody>
           </table>
         </div>
@@ -707,6 +950,34 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         const dated = jobs.filter((j) => schedBuildDate(j) && (crewFilter === "all" || j.crew_id === crewFilter));
         const byDate = {}; dated.forEach((j) => { const k = schedBuildDate(j); (byDate[k] = byDate[k] || []).push(j); });
         const stageColor = {}; stages.forEach((s) => { stageColor[s.id] = s.color; });
+
+        // ── The $ scheduled for a day, with that crew ──
+        // `dated` is ALREADY crew-scoped by the crewFilter above, so a sum over byDate[iso] is
+        // "that day with that crew" with no extra filtering; on "all crews" it is the day's
+        // whole total. `valueCents` is computed server-side per job (an order's total, a unit's
+        // asking price, a repair's quote) — build_jobs carries no price column of its own.
+        const dayMoney = (rows) => {
+          let cents = 0, priced = 0, unpriced = 0;
+          (rows || []).forEach((j) => {
+            // A MANUAL job ("shop maintenance day") has no value and never will — it is not a
+            // gap in the data, so it must not be counted as one.
+            if (j.source === "manual") return;
+            if (j.valueCents == null) { unpriced++; return; }
+            cents += Number(j.valueCents); priced++;
+          });
+          return { cents, priced, unpriced };
+        };
+        // Whole dollars: a day header is 218px at its widest and cents buy nothing there.
+        // (`money()` stays the formatter anywhere there is room for it.)
+        const moneyShort = (cents) => "$" + Math.round(cents / 100).toLocaleString("en-US");
+        // NEVER print a confident figure that silently counts a missing total as zero — an
+        // order's total_cents is routinely NULL until someone sets it (Orders' own rule:
+        // "we never show a guessed number"). Say what is known and flag what isn't.
+        const dayMoneyLabel = (m) => {
+          if (!m.priced && !m.unpriced) return null;
+          if (!m.priced) return { text: m.unpriced === 1 ? "no total yet" : m.unpriced + " no total", muted: true };
+          return { text: moneyShort(m.cents), gap: m.unpriced };
+        };
 
         // SUNDAY-FIRST weeks (Carolyn 2026-08-04); weekends can be toggled off entirely.
         // Days advance by DATE, never by adding 86,400,000ms: the US fall-back day is 25
@@ -806,16 +1077,28 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     const isToday = iso === todayIso;
                     const wknd = d.getDay() === 0 || d.getDay() === 6;
                     const dayJobs = byDate[iso] || [];
+                    const wkMoney = dayMoneyLabel(dayMoney(dayJobs));
                     return (
                       <div key={iso} {...dropProps(iso)}
                         style={{ width: 218, flex: "0 0 218px", background: isToday ? "#E9F0FF" : wknd ? "#F4F6F9" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 190, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2, ...dropGlow(iso) }}>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "1px 3px 8px" }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "1px 3px 2px" }}>
                           <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: isToday ? ACCENT : "#64748B" }}>{d.toLocaleDateString("en-US", { weekday: "short" })}</span>
                           <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
                           <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px", fontVariantNumeric: "tabular-nums" }}>{dayJobs.length}</span>
                         </div>
+                        {/* The day's scheduled value, for whichever crew's calendar is showing. */}
+                        {wkMoney && (
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 5, flexWrap: "wrap", padding: "0 3px 8px" }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 800, color: wkMoney.muted ? "#94A3B8" : "#15803D", fontVariantNumeric: "tabular-nums" }}>{wkMoney.text}</span>
+                            {wkMoney.gap > 0 && (
+                              <span style={{ fontSize: 10, fontWeight: 700, color: "#B45309" }} title="Some jobs on this day have no total yet, so they are not in this figure">
+                                · {wkMoney.gap} no total
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div style={{ display: "flex", flexDirection: "column", gap: 7, minHeight: 40 }}>
-                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true }))}
+                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true, detailInPanel: true }))}
                         </div>
                       </div>
                     );
@@ -827,7 +1110,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             {/* MONTH — the planning radar */}
             {calView === "month" && (
               <div style={{ overflowX: "auto", paddingBottom: 6 }}>
-                <div style={{ display: "grid", gridTemplateColumns: `repeat(${gridCols}, minmax(120px, 1fr))`, gap: 6, minWidth: gridCols === 7 ? 880 : 640 }}>
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${gridCols}, minmax(150px, 1fr))`, gap: 6, minWidth: gridCols === 7 ? 1080 : 780 }}>
                   {monthHeads.map((h) => (
                     <div key={h} style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8", padding: "0 4px 2px" }}>{h}</div>
                   ))}
@@ -837,18 +1120,43 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     const isToday = iso === todayIso;
                     const dayJobs = byDate[iso] || [];
                     const shown = dayJobs.slice(0, 3);
+                    const mMoney = dayMoneyLabel(dayMoney(dayJobs));
                     return (
                       <div key={iso} {...dropProps(iso)}
-                        style={{ background: inMonth ? "#FFF" : "#F8FAFC", opacity: inMonth ? 1 : 0.55, border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 92, padding: "6px 7px", outline: isToday ? `2px solid ${ACCENT}` : "none", outlineOffset: -2, ...dropGlow(iso) }}>
-                        <div style={{ fontSize: 11.5, fontWeight: 800, color: isToday ? ACCENT : "#475569", marginBottom: 5 }}>{d.getDate()}</div>
-                        {shown.map((j) => (
-                          <div key={j.id} title={(j.customer_name || j.title || "") + " · " + (j.building_label || "")}
-                            onClick={() => { setCursorMs(d.getTime()); setCalView("week"); }}
-                            style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 700, background: "#F1F5F9", borderRadius: 6, padding: "3px 6px", marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", cursor: "pointer" }}>
-                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: stageColor[j.stage_id] || "#94A3B8", flexShrink: 0 }}></span>
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{j.serial ? "#" + j.serial + " " : ""}{j.customer_name || j.title || ""}</span>
-                          </div>
-                        ))}
+                        style={{ background: inMonth ? "#FFF" : "#F8FAFC", opacity: inMonth ? 1 : 0.55, border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 150, padding: "6px 7px", outline: isToday ? `2px solid ${ACCENT}` : "none", outlineOffset: -2, ...dropGlow(iso) }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 5 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, color: isToday ? ACCENT : "#475569" }}>{d.getDate()}</span>
+                          {mMoney && (
+                            <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: mMoney.muted ? "#94A3B8" : "#15803D", fontVariantNumeric: "tabular-nums" }}
+                              title={mMoney.gap > 0 ? mMoney.gap + " job(s) on this day have no total yet, so they are not in this figure" : undefined}>
+                              {mMoney.text}{mMoney.gap > 0 ? "*" : ""}
+                            </span>
+                          )}
+                        </div>
+                        {/* Two lines, building first (SCHEDULING_SCOPE.md decision 14), and
+                            DRAGGABLE: the day cells were already drop targets via dropProps, so
+                            month view had a drop but no drag — the loop was only half wired. */}
+                        {shown.map((j) => {
+                          const open = expandedId === j.id;
+                          const line1 = j.building_label || j.title || (j.source === "repair" ? "Repair" : "—");
+                          const line2 = [j.serial ? "#" + j.serial : null, j.customer_name || (j.source === "inventory" ? "Spec build" : null)].filter(Boolean).join(" ");
+                          return (
+                            <div key={j.id} title={line1 + (line2 ? " · " + line2 : "")}
+                              draggable={canEdit}
+                              onDragStart={(e) => { setDragId(j.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
+                              onDragEnd={() => { setDragId(null); setDropStage(null); }}
+                              onClick={() => setExpandedId(open ? null : j.id)}
+                              style={{ display: "flex", alignItems: "flex-start", gap: 5, background: open ? "#E9F0FF" : "#F1F5F9", borderRadius: 6, padding: "4px 6px", marginBottom: 4,
+                                cursor: canEdit ? "grab" : "pointer", opacity: dragId === j.id ? 0.45 : 1,
+                                outline: open ? `2px solid ${ACCENT}` : "none", outlineOffset: -1, overflow: "hidden" }}>
+                              <span style={{ width: 8, height: 8, borderRadius: "50%", background: stageColor[j.stage_id] || "#94A3B8", flexShrink: 0, marginTop: 4 }}></span>
+                              <span style={{ minWidth: 0, overflow: "hidden" }}>
+                                <span style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#1E293B", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{line1}</span>
+                                {line2 && <span style={{ display: "block", fontSize: 9.5, fontWeight: 700, color: "#64748B", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{line2}</span>}
+                              </span>
+                            </div>
+                          );
+                        })}
                         {dayJobs.length > 3 && (
                           <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94A3B8", cursor: "pointer" }}
                             onClick={() => { setCursorMs(d.getTime()); setCalView("week"); }}>+{dayJobs.length - 3} more</div>
@@ -859,8 +1167,12 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 </div>
               </div>
             )}
+            {/* The one detail panel, full width, under whichever grid is showing — week and
+                month alike. Neither a 218px day column nor a 150px month cell can hold the
+                form, and it stays inline rather than becoming a popout. */}
+            {detailPanel()}
             <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
-              One build date per card — dropping a card on a day IS the reschedule. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a month pill to open that week. Rescheduling from the calendar is admin-only.
+              One build date per card — dropping a card on a day IS the reschedule, in week and month view alike. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a card to open its details below the calendar. Each day shows what is scheduled for it; a <strong>*</strong> or "no total" means some jobs on that day have no price yet and are not in the figure. Rescheduling from the calendar is admin-only.
             </p>
           </div>
         );
