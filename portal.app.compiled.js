@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 b71a0e5f2b6d)
+// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 0288067a9b1f)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag

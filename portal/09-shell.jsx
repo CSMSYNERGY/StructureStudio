@@ -1001,7 +1001,7 @@ function Dashboard({ session }) {
                 ]}
               />
             )}
-            {/* Same guard CommissionTeam applies (07-integrations): portal-commissions
+            {/* Same guard CommissionTeam applies (08-integrations): portal-commissions
                 resolves the tenant from the CALLER's own client_users row and is
                 deliberately outside SS_TENANT_SCOPED_FNS, so from view-as this report
                 would read — and via compute / approve / mark-paid WRITE — the OPERATOR's

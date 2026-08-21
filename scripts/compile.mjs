@@ -86,18 +86,27 @@ const RUNNER_OPTIONS = {
 //
 // ORDER IS LOAD-BEARING and must stay source order: `const` does not hoist, so moving a part
 // changes evaluation order. Parts are contiguous slices of the original file, cut only at
-// top-level boundaries (never inside a function), which is why 08-shell holds Dashboard and
+// top-level boundaries (never inside a function), which is why 09-shell holds Dashboard and
 // PortalApp together — Dashboard's hook order and its render-time ssTargetClientId
 // assignment are documented hazards and nothing about them moves.
+//
+// THE NUMERIC PREFIX IS THE CONCATENATION INDEX, not a filing label. When a part is inserted,
+// every later part is renumbered so a directory listing and this array can never disagree —
+// a file numbered 09 that evaluates sixth is a trap, and the one thing a reader checks is the
+// number. That is why 06-3d.jsx pushed admin/integrations/shell up by one (2026-08-21) rather
+// than being appended as "09-3d.jsx": appended, it would land AFTER 09-shell's
+// `ReactDOM.createRoot(…).render(<PortalApp/>)` and after the `__ssAppBooted` sentinel, which
+// is defined as the last statement that runs.
 export const PORTAL_PARTS = [
   "portal/01-core.jsx",          // supabase client, ssFetch/ssLogError, tenant scoping, routing, S/ACCENT, UI atoms
   "portal/02-sales.jsx",         // DesignsTable, contact timeline, LeadsTable
   "portal/03-catalog.jsx",       // SettingsView, csv/xlsx, BillingView, PricingCsv, LayoutPricing, fixtures, colors
   "portal/04-orders.jsx",        // feedback + releases, ComingSoon, Orders, OrderDetail, Inventory
-  "portal/05-schedule.jsx",      // build + delivery schedule, repairs, drivers, locations, 3D status, DesignerTab
-  "portal/06-admin.jsx",         // AccountsTab, BillingGate, the operator admin console (Adm*)
-  "portal/07-integrations.jsx",  // QuickBooks, email sending, commissions, per-person access, SettingsShell
-  "portal/08-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
+  "portal/05-schedule.jsx",      // build + delivery schedule, repairs, drivers, locations
+  "portal/06-3d.jsx",            // Studio3DStatus, DesignerTab, fixture-photo straightening (ssWarpQuad et al)
+  "portal/07-admin.jsx",         // AccountsTab, BillingGate, the operator admin console (Adm*)
+  "portal/08-integrations.jsx",  // QuickBooks, email sending, commissions, per-person access, SettingsShell
+  "portal/09-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
 ];
 
 // source → artifact. The component's artifact name is load-bearing in preflight

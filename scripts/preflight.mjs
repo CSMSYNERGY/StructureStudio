@@ -529,7 +529,7 @@ const load = () => Object.fromEntries([
   ...["index.html", "portal.html", "admin.html"].map((f) => [f, read(f)]),
   // Every compile target, under its reported name and with its parts already assembled --
   // so `files["portal.app.jsx"]` is the exact text that gets compiled even though no such
-  // file exists on disk anymore (it is portal/01-core.jsx ... 08-shell.jsx since 2026-08-19).
+  // file exists on disk anymore (it is portal/01-core.jsx ... 09-shell.jsx since 2026-08-19).
   ...TARGETS.map((t) => [targetName(t), readTarget(t)]),
   ["StructureStudio.jsx", read("StructureStudio.jsx")],
 ]);
