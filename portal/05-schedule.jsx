@@ -44,6 +44,65 @@ const schedEditorKey = (j) => j.id + ":" + (j.updated_at || "");
 // style — the same pattern the server already trusts, with no migration and no backfill.
 const schedStyle = (j) => String(j.building_label || "")
   .replace(/\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?/i, "").trim();
+
+// ── What a set of jobs is worth, and how much building it is ──────────────────────────────
+// ONE computation, at module scope, because four places need it: the calendar's day headers,
+// its week strip, the month grid's week column, and the table's segment headings. It used to
+// live inside the calendar's render closure, where the table could not reach it.
+//
+// `valueCents` is computed per job by portal-schedule's build_board from whichever source row
+// owns the money; square footage comes from the width/length snapshot on the job itself.
+const schedSummary = (rows) => {
+  let cents = 0, priced = 0, unpriced = 0, sqft = 0, sized = 0, unsized = 0;
+  (rows || []).forEach((j) => {
+    // A MANUAL job ("shop maintenance day") has no building and no value, and never will —
+    // that is not a gap in the data, so it must not be counted as one in either direction.
+    if (j.source === "manual") return;
+    if (j.valueCents == null) unpriced++; else { cents += Number(j.valueCents); priced++; }
+    if (j.width_ft && j.length_ft) { sqft += Number(j.width_ft) * Number(j.length_ft); sized++; }
+    else unsized++;
+  });
+  return { cents, priced, unpriced, sqft, sized, unsized };
+};
+// Whole dollars and whole feet: a day header is 218px at its widest and the decimals buy
+// nothing there. (`money()` stays the formatter anywhere there is room for it.)
+const schedMoneyShort = (cents) => "$" + Math.round(cents / 100).toLocaleString("en-US");
+const schedSqftShort = (sqft) => Math.round(sqft).toLocaleString("en-US") + " sq ft";
+// NEVER print a confident figure that silently counts a missing value as zero — an order's
+// total_cents is routinely NULL until someone sets it (Orders' rule: "we never show a guessed
+// number"), and a repair usually carries no dimensions. Say what is known and flag the rest.
+// Returns null when there is genuinely nothing to say, so a caller can render nothing at all.
+const schedSummaryLabel = (s) => {
+  const out = { money: null, sqft: null };
+  if (s.priced) out.money = { text: schedMoneyShort(s.cents), gap: s.unpriced };
+  else if (s.unpriced) out.money = { text: s.unpriced === 1 ? "no total yet" : s.unpriced + " no total", muted: true };
+  if (s.sized) out.sqft = { text: schedSqftShort(s.sqft), gap: s.unsized };
+  else if (s.unsized) out.sqft = { text: s.unsized === 1 ? "no size yet" : s.unsized + " no size", muted: true };
+  return (out.money || out.sqft) ? out : null;
+};
+// The one way a summary is drawn, so a day header, the week strip, the month grid's week
+// column and a table segment heading cannot drift apart. `stack` puts sqft on its own line
+// for the narrow spots (month cells); everything else runs it inline.
+function SchedSummary({ rows, stack = false, size = 12.5, align = "left" }) {
+  const label = schedSummaryLabel(schedSummary(rows));
+  if (!label) return null;
+  const part = (p, color) => p && (
+    <span style={{ display: "inline-flex", alignItems: "baseline", gap: 4 }}>
+      <span style={{ fontSize: size, fontWeight: 800, color: p.muted ? "#94A3B8" : color, fontVariantNumeric: "tabular-nums" }}>{p.text}</span>
+      {p.gap > 0 && (
+        <span style={{ fontSize: Math.max(9.5, size - 2.5), fontWeight: 700, color: "#B45309" }}
+          title={p.gap + " job(s) here are missing that figure, so they are not in this total"}>· {p.gap} missing</span>
+      )}
+    </span>
+  );
+  return (
+    <span style={{ display: "inline-flex", flexDirection: stack ? "column" : "row", alignItems: stack ? (align === "right" ? "flex-end" : "flex-start") : "baseline", gap: stack ? 1 : 9 }}>
+      {part(label.money, "#15803D")}
+      {part(label.sqft, "#475569")}
+    </span>
+  );
+}
+
 // How the Table view can be cut into sections. Module-level so the remembered choice can be
 // validated before the component's first render.
 const SCHED_SEGMENTS = [
@@ -663,14 +722,33 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     );
   };
 
+  // The seven days of a week group, for the in-week drop chips. Counts come from the jobs
+  // already on screen, so a chip says how busy that day is before you aim at it.
+  const weekDayChips = (weekStart) => {
+    const start = schedLocalDate(weekStart);
+    const byDay = {};
+    tableRows.forEach((j) => { const d = schedBuildDate(j); if (d) byDay[d] = (byDay[d] || 0) + 1; });
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(start); d.setDate(d.getDate() + i);
+      const iso = schedLocalIso(d);
+      return { iso, count: byDay[iso] || 0,
+        label: d.toLocaleDateString("en-US", { weekday: "short" }) + " " + d.getDate() };
+    });
+  };
+
   // Drop handlers shared by a group's header row and every data row inside it, so the whole
   // band is one target. `preventDefault` on dragOver is what makes an element droppable at
   // all — without it the browser refuses the drop and the gesture silently fails.
+  // stopPropagation is LOAD-BEARING, not tidiness: the day chips sit inside the group header
+  // row, which is itself a drop target, so without it every chip event bubbles to the row and
+  // the row's handler wins. That made the highlight track the week instead of the chip, and —
+  // worse — a drop on ANOTHER week's chip fired twice: the chip set the exact date, then the
+  // bubbled week handler overwrote it with the same-weekday rule. The innermost target must win.
   const groupDropProps = (group) => ({
-    onDragOver: (e) => { e.preventDefault(); setDropGroup(group.key); },
-    onDragEnter: (e) => { e.preventDefault(); setDropGroup(group.key); },
+    onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(group.key); },
+    onDragEnter: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(group.key); },
     onDrop: (e) => {
-      e.preventDefault();
+      e.preventDefault(); e.stopPropagation();
       const job = jobs.find((j) => j.id === dragRowId);
       setDropGroup(null); setDragRowId(null);
       if (job) dropIntoSegment(job, group);
@@ -827,7 +905,19 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // field write — the same actions the popup and the calendar already use, so a table drop is
   // logged and permission-checked identically.
   const dropIntoSegment = async (job, group) => {
-    if (!job || !group || segmentOf(job).key === group.key) return;
+    if (!job || !group) return;
+    // A day chip carries an EXACT date and short-circuits the week rule below — that is the
+    // whole point of it: the week group can only say "same weekday, different week", and this
+    // is how Friday moves to Tuesday inside one week.
+    if (group.exactDate) {
+      if (schedBuildDate(job) === group.key) return;
+      setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, scheduled_start: group.key, due_date: group.key } : j) }));
+      await call({ action: "update_job", jobId: job.id, scheduledStart: group.key, dueDate: group.key },
+        `Moved to ${fmtDate(schedLocalDate(group.key))}.`);
+      load();
+      return;
+    }
+    if (segmentOf(job).key === group.key) return;
     if (segment === "crew") {
       const crewId = group.key || null;
       setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, crew_id: crewId } : j) }));
@@ -1075,15 +1165,41 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     <tr {...(canDragRows ? groupDropProps(g) : {})}
                       style={dropGroup === g.key && dragRowId ? { background: "#EEF4FF" } : undefined}>
                       <td colSpan={9} style={{ padding: "12px 10px 5px", borderBottom: "2px solid " + (dropGroup === g.key && dragRowId ? ACCENT : "#E2E8F0") }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#334155" }}>
-                          {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
-                          {g.label}
-                        </span>
-                        <span style={{ ...schedChip("#F1F5F9", "#475569"), marginLeft: 8 }}>{g.rows.length}</span>
-                        {/* An empty crew/stage exists ONLY so it can be dropped into — say so,
-                            rather than leaving a bare zero that reads like a rendering bug. */}
-                        {g.rows.length === 0 && (
-                          <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8", marginLeft: 8 }}>drop a job here to move it</span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#334155" }}>
+                            {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
+                            {g.label}
+                          </span>
+                          <span style={schedChip("#F1F5F9", "#475569")}>{g.rows.length}</span>
+                          {/* An empty crew/stage exists ONLY so it can be dropped into — say so,
+                              rather than leaving a bare zero that reads like a rendering bug. */}
+                          {g.rows.length === 0 && (
+                            <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8" }}>drop a job here to move it</span>
+                          )}
+                          {/* What this section is worth and how much building it is — the same
+                              component the calendar's day headers use. */}
+                          <span style={{ marginLeft: "auto" }}><SchedSummary rows={g.rows} size={12} /></span>
+                        </div>
+                        {/* WEEK mode only: a chip per day of that week, so a job can be moved
+                            WITHIN the week (Friday → Tuesday), which a single week-sized target
+                            cannot express. Each chip resolves to a `date` drop, reusing the
+                            write path the date segment already uses. */}
+                        {canDragRows && segment === "week" && g.key && (
+                          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
+                            {weekDayChips(g.key).map((c) => {
+                              const on = dropGroup === c.iso && dragRowId;
+                              return (
+                                <span key={c.iso} {...groupDropProps({ key: c.iso, exactDate: true })}
+                                  title={"Drop a job here to move it to " + fmtDate(schedLocalDate(c.iso))}
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 28, padding: "4px 10px", borderRadius: 8,
+                                    border: "1px solid " + (on ? ACCENT : "#E2E8F0"), background: on ? "#EEF4FF" : "#FBFCFE",
+                                    fontSize: 11, fontWeight: 700, color: on ? ACCENT : "#475569", cursor: dragRowId ? "copy" : "default" }}>
+                                  {c.label}
+                                  {c.count > 0 && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#64748B", background: "#EEF2F8", borderRadius: 999, padding: "1px 6px", fontVariantNumeric: "tabular-nums" }}>{c.count}</span>}
+                                </span>
+                              );
+                            })}
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -1102,7 +1218,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             {canDragRows
               ? (segment === "crew" ? "Drag a row onto another crew to hand the job over — onto “No crew yet” to unassign it."
                 : segment === "date" ? "Drag a row onto another day to reschedule it — onto “No build date” to send it back to the Unscheduled tray."
-                : segment === "week" ? "Drag a row onto another week to reschedule it; it keeps the same weekday. Drop it on “No build date” to send it back to the Unscheduled tray."
+                : segment === "week" ? "Drag a row onto another week to reschedule it; it keeps the same weekday. To move it WITHIN a week, drop it on one of the day chips in that week’s heading. Drop it on “No build date” to send it back to the Unscheduled tray."
                 : "Drag a row onto another stage to move it there.")
               : (canEdit
                 ? "Dragging is off in this view: " + (segment === "source" ? "an order does not become an inventory build" : "size and style come from the building’s own design") + ", so there is nothing a drop could change. Segment by crew, build date, week or stage to drag."
@@ -1125,28 +1241,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         // "that day with that crew" with no extra filtering; on "all crews" it is the day's
         // whole total. `valueCents` is computed server-side per job (an order's total, a unit's
         // asking price, a repair's quote) — build_jobs carries no price column of its own.
-        const dayMoney = (rows) => {
-          let cents = 0, priced = 0, unpriced = 0;
-          (rows || []).forEach((j) => {
-            // A MANUAL job ("shop maintenance day") has no value and never will — it is not a
-            // gap in the data, so it must not be counted as one.
-            if (j.source === "manual") return;
-            if (j.valueCents == null) { unpriced++; return; }
-            cents += Number(j.valueCents); priced++;
-          });
-          return { cents, priced, unpriced };
-        };
-        // Whole dollars: a day header is 218px at its widest and cents buy nothing there.
-        // (`money()` stays the formatter anywhere there is room for it.)
-        const moneyShort = (cents) => "$" + Math.round(cents / 100).toLocaleString("en-US");
-        // NEVER print a confident figure that silently counts a missing total as zero — an
-        // order's total_cents is routinely NULL until someone sets it (Orders' own rule:
-        // "we never show a guessed number"). Say what is known and flag what isn't.
-        const dayMoneyLabel = (m) => {
-          if (!m.priced && !m.unpriced) return null;
-          if (!m.priced) return { text: m.unpriced === 1 ? "no total yet" : m.unpriced + " no total", muted: true };
-          return { text: moneyShort(m.cents), gap: m.unpriced };
-        };
+        // (dayMoney / moneyShort / dayMoneyLabel used to live here. They are module-level now
+        // as schedSummary / SchedSummary, because the table's segment headings need the same
+        // figures and could not reach into this closure.)
 
         // SUNDAY-FIRST weeks (Carolyn 2026-08-04); weekends can be toggled off entirely.
         // Days advance by DATE, never by adding 86,400,000ms: the US fall-back day is 25
@@ -1159,8 +1256,15 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         if (!showWeekends) weekDays = weekDays.filter((d) => !isWknd(d));
         const m0 = new Date(cur.getFullYear(), cur.getMonth(), 1);
         const gridStart = new Date(m0); gridStart.setDate(gridStart.getDate() - gridStart.getDay());
-        let monthCells = []; for (let i = 0; i < 42; i++) { const d = new Date(gridStart); d.setDate(d.getDate() + i); monthCells.push(d); }
-        if (!showWeekends) monthCells = monthCells.filter((d) => !isWknd(d));
+        // Chunked into WEEKS rather than a flat 42, so each row can carry its own total in a
+        // trailing column. Weekend filtering happens per week so a row still knows which days
+        // it is hiding.
+        const monthWeeks = [];
+        for (let w = 0; w < 6; w++) {
+          const all = [];
+          for (let i = 0; i < 7; i++) { const d = new Date(gridStart); d.setDate(d.getDate() + w * 7 + i); all.push(d); }
+          monthWeeks.push({ all, days: showWeekends ? all : all.filter((d) => !isWknd(d)) });
+        }
         const monthHeads = showWeekends ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["Mon", "Tue", "Wed", "Thu", "Fri"];
         const gridCols = showWeekends ? 7 : 5;
         const fmtShort = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
@@ -1238,15 +1342,36 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 unscheduled renders inside the calendar itself (Carolyn 2026-08-04). */}
 
             {/* WEEK — the kanban feel, with days as the columns */}
-            {calView === "week" && (
+            {calView === "week" && (() => {
+              // The week's own totals. Summed over the days actually RENDERED, then the
+              // hidden ones are named rather than folded in: with weekends off, a Saturday
+              // job stays scheduled (the toggle's tooltip says so), so counting it silently
+              // makes the arithmetic not add up on screen, and dropping it silently
+              // understates the week. Same honesty rule as the "missing" flags.
+              const shownJobs = weekDays.flatMap((d) => byDate[isoLocal(d)] || []);
+              const hiddenJobs = showWeekends ? [] :
+                weekLabelDays.filter(isWknd).flatMap((d) => byDate[isoLocal(d)] || []);
+              return (
               <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+                {(shownJobs.length > 0 || hiddenJobs.length > 0) && (
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", padding: "7px 11px", marginBottom: 9, background: "#F7F9FF", border: "1px solid #E2E8F0", borderRadius: 10 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#64748B" }}>This week</span>
+                    <span style={{ ...schedChip("#FFF", "#475569"), fontVariantNumeric: "tabular-nums" }}>{shownJobs.length} job{shownJobs.length === 1 ? "" : "s"}</span>
+                    <SchedSummary rows={shownJobs} size={13.5} />
+                    {hiddenJobs.length > 0 && (
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309" }}
+                        title="Turn weekends back on to see them — they are still scheduled">
+                        · {hiddenJobs.length} more on hidden weekend day{hiddenJobs.length === 1 ? "" : "s"}, not counted
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
                   {weekDays.map((d) => {
                     const iso = isoLocal(d);
                     const isToday = iso === todayIso;
                     const wknd = d.getDay() === 0 || d.getDay() === 6;
                     const dayJobs = byDate[iso] || [];
-                    const wkMoney = dayMoneyLabel(dayMoney(dayJobs));
                     return (
                       <div key={iso} {...dropProps(iso)}
                         style={{ width: 218, flex: "0 0 218px", background: isToday ? "#E9F0FF" : wknd ? "#F4F6F9" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 190, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2, ...dropGlow(iso) }}>
@@ -1255,16 +1380,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                           <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
                           <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px", fontVariantNumeric: "tabular-nums" }}>{dayJobs.length}</span>
                         </div>
-                        {/* The day's scheduled value, for whichever crew's calendar is showing. */}
-                        {wkMoney && (
-                          <div style={{ display: "flex", alignItems: "baseline", gap: 5, flexWrap: "wrap", padding: "0 3px 8px" }}>
-                            <span style={{ fontSize: 12.5, fontWeight: 800, color: wkMoney.muted ? "#94A3B8" : "#15803D", fontVariantNumeric: "tabular-nums" }}>{wkMoney.text}</span>
-                            {wkMoney.gap > 0 && (
-                              <span style={{ fontSize: 10, fontWeight: 700, color: "#B45309" }} title="Some jobs on this day have no total yet, so they are not in this figure">
-                                · {wkMoney.gap} no total
-                              </span>
-                            )}
-                          </div>
+                        {/* The day's scheduled value and floor area, for whichever crew's
+                            calendar is showing. */}
+                        {dayJobs.length > 0 && (
+                          <div style={{ padding: "0 3px 8px" }}><SchedSummary rows={dayJobs} /></div>
                         )}
                         <div style={{ display: "flex", flexDirection: "column", gap: 7, minHeight: 40 }}>
                           {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true, detailInPanel: true }))}
@@ -1274,31 +1393,34 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                   })}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {/* MONTH — the planning radar */}
             {calView === "month" && (
               <div style={{ overflowX: "auto", paddingBottom: 6 }}>
-                <div style={{ display: "grid", gridTemplateColumns: `repeat(${gridCols}, minmax(150px, 1fr))`, gap: 6, minWidth: gridCols === 7 ? 1080 : 780 }}>
-                  {monthHeads.map((h) => (
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${gridCols}, minmax(150px, 1fr)) minmax(118px, .8fr)`, gap: 6, minWidth: (gridCols === 7 ? 1080 : 780) + 130 }}>
+                  {monthHeads.concat(["Week"]).map((h) => (
                     <div key={h} style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8", padding: "0 4px 2px" }}>{h}</div>
                   ))}
-                  {monthCells.map((d) => {
+                  {monthWeeks.map((wk) => (
+                  <React.Fragment key={"wk:" + isoLocal(wk.all[0])}>
+                  {wk.days.map((d) => {
                     const iso = isoLocal(d);
                     const inMonth = d.getMonth() === cur.getMonth();
                     const isToday = iso === todayIso;
                     const dayJobs = byDate[iso] || [];
                     const shown = dayJobs.slice(0, 3);
-                    const mMoney = dayMoneyLabel(dayMoney(dayJobs));
                     return (
                       <div key={iso} {...dropProps(iso)}
                         style={{ background: inMonth ? "#FFF" : "#F8FAFC", opacity: inMonth ? 1 : 0.55, border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 150, padding: "6px 7px", outline: isToday ? `2px solid ${ACCENT}` : "none", outlineOffset: -2, ...dropGlow(iso) }}>
                         <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 5 }}>
                           <span style={{ fontSize: 11.5, fontWeight: 800, color: isToday ? ACCENT : "#475569" }}>{d.getDate()}</span>
-                          {mMoney && (
-                            <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: mMoney.muted ? "#94A3B8" : "#15803D", fontVariantNumeric: "tabular-nums" }}
-                              title={mMoney.gap > 0 ? mMoney.gap + " job(s) on this day have no total yet, so they are not in this figure" : undefined}>
-                              {mMoney.text}{mMoney.gap > 0 ? "*" : ""}
+                          {/* Stacked: a month cell is ~150px, so money and sq ft go on their
+                              own lines rather than fighting for one. */}
+                          {dayJobs.length > 0 && (
+                            <span style={{ marginLeft: "auto", textAlign: "right" }}>
+                              <SchedSummary rows={dayJobs} stack align="right" size={10.5} />
                             </span>
                           )}
                         </div>
@@ -1333,6 +1455,36 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                       </div>
                     );
                   })}
+                  {/* This row's total. Same rule as the week strip: it sums the days actually
+                      shown, and names any weekend days it is hiding rather than folding them
+                      in silently. */}
+                  {(() => {
+                    const rows = wk.days.flatMap((d) => byDate[isoLocal(d)] || []);
+                    const hidden = showWeekends ? [] : wk.all.filter(isWknd).flatMap((d) => byDate[isoLocal(d)] || []);
+                    const inThisMonth = wk.all.some((d) => d.getMonth() === cur.getMonth());
+                    return (
+                      <div key={"tot:" + isoLocal(wk.all[0])}
+                        style={{ background: "#F7F9FF", border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 150, padding: "6px 8px", opacity: inThisMonth ? 1 : 0.55 }}>
+                        <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 0.7, textTransform: "uppercase", color: "#94A3B8", marginBottom: 5 }}>
+                          Week of {fmtDate(schedLocalDate(isoLocal(wk.all[0])))}
+                        </div>
+                        {rows.length === 0 && hidden.length === 0
+                          ? <div style={{ fontSize: 10.5, fontWeight: 700, color: "#CBD5E1" }}>—</div>
+                          : (<>
+                            <div style={{ fontSize: 10.5, fontWeight: 800, color: "#64748B", marginBottom: 3, fontVariantNumeric: "tabular-nums" }}>{rows.length} job{rows.length === 1 ? "" : "s"}</div>
+                            <SchedSummary rows={rows} stack size={11.5} />
+                            {hidden.length > 0 && (
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: "#B45309", marginTop: 4 }}
+                                title="Turn weekends back on to see them — they are still scheduled">
+                                +{hidden.length} on hidden weekend day{hidden.length === 1 ? "" : "s"}, not counted
+                              </div>
+                            )}
+                          </>)}
+                      </div>
+                    );
+                  })()}
+                  </React.Fragment>
+                  ))}
                 </div>
               </div>
             )}
