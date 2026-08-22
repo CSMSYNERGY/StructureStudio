@@ -244,6 +244,12 @@ const SS_PAGE = { W: 850, H: 1100, TEXT_AREA_H: 340, TOP_LABEL_PAD: 30, BOT_LABE
 // viewport but ~832px at 900px — a viewport threshold would switch the dock ON for
 // the narrower layout and OFF for the wider one.
 const SS_DOCK_MIN_ROW_W = 960;
+// Settings -> Designer -> 3D docks the same panel beside a FORM, not beside a building plan,
+// and a form needs less room to stay usable: the calibration grids are
+// repeat(auto-fit, minmax(150px,1fr)) and still give two columns at ~390px, whereas the plan
+// SVG has a real drawing to keep legible. 960 would refuse to dock on a 1280px window (the
+// Settings row measures ~954 there), which is most of the laptops a style gets calibrated on.
+const SS_DOCK_MIN_CAL_W = 760;
 function pageGeom(bldgW, bldgH) {
   const visibleH = SS_PAGE.H - SS_PAGE.TEXT_AREA_H;
   const scale = Math.min(
@@ -4134,7 +4140,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -4144,7 +4150,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // during render (not in an effect) so a flush scheduled this frame already
   // sees this frame's values — this is what avoids the frozen-props trap.
   const pRef = useRef(null);
-  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures };
+  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt };
 
   // Every geometry input that is NOT `items`, flattened to a scalar string.
   // d3ResolveStyleSpec returns a fresh object (with fresh nested roof/colors)
@@ -4156,7 +4162,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // The hand-picked version silently missed roofMaterial, roof.overhang and the gambrel
   // knee numbers, so two styles differing only in those left a stale roof standing beside
   // a corrected plan until some unrelated edit happened to force a full rebuild.
-  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY]);
+  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0]);
 
   useEffect(() => {
     let disposed = false;
@@ -4200,11 +4206,20 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
 
       // Camera framing — identical maths to the modal so the docked view and the
       // full-screen view read as the same building from the same angle. Every
-      // constant below derives ONLY from bldgW/bldgH, which is exactly why the
-      // parent remounts this component on a size change and on nothing else.
+      // constant below derives ONLY from bldgW/bldgH and the fit height, which is
+      // exactly why the parent remounts this component on a size change and on nothing
+      // else -- a height change re-aims in place via applyFraming instead.
+      //
+      // fitHeightFt is the VERTICAL half of the framing, and it is opt-in. The designer's
+      // dock passes nothing, so fitH is exactly D3.WALL_H and every number below is the
+      // arithmetic it always was. Settings -> Designer -> 3D passes the DRAFT wall height,
+      // because there the wall height is the number being typed: framed for 8ft, a 16ft
+      // wall puts the ridge outside the frustum, and this panel has no pan to recover it.
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw0] || [0.35, 1];
-      const R = Math.max(p0.bldgW, p0.bldgH) * 0.5 + D3.WALL_H;
-      const dist = R * 3.66;
+      const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0);
+      const frameFor = (p) => { const r = Math.max(p.bldgW, p.bldgH) * 0.5 + fitH(p); return { R: r, dist: r * 3.66 }; };
+      const f0 = frameFor(p0);
+      const R = f0.R, dist = f0.dist;
       const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
       const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
 
@@ -4234,7 +4249,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       if (sky) { sky.position.y = -0.5; scene.add(sky); }
 
       const controls = new OrbitControls(camera, canvas);
-      controls.target.set(0, D3.WALL_H * 0.45, 0);
+      controls.target.set(0, fitH(p0) * 0.45, 0);
       controls.maxPolarAngle = Math.PI * 0.495;   // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -4321,6 +4336,28 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
           if (scope) queue(scope);
         },
         applyFull: () => { builtItems = pRef.current.items; queue({ full: true }); },
+        // Re-frame WITHOUT rebuilding and WITHOUT remounting. Only reachable when the
+        // caller passes fitHeightFt, so the designer's dock keeps its documented "never
+        // re-aim the camera under someone who has just orbited" behaviour -- nothing there
+        // changes the building's height without also changing bldgW/bldgH, which remounts.
+        // The camera is NOT moved by hand: re-pointing controls.target re-aims in place and
+        // controls.update() clamps the orbit radius into the new [min,max] itself, so a
+        // building that grew pushes the camera out and one that shrank does not jump. The
+        // orbit ANGLE survives; only the look-at height and the distance clamps move.
+        // No render() here -- the applyFull() that always accompanies this queues one.
+        applyFraming: () => {
+          const p = pRef.current;
+          const f = frameFor(p);
+          controls.target.set(0, fitH(p) * 0.45, 0);
+          controls.minDistance = f.R * 1.1;
+          controls.maxDistance = f.dist * 2.5;
+          // Grow-only: the sky dome was sized dist*6.5 from the MOUNT-time distance and is
+          // never rebuilt here, so pulling far back in after a big height is dialled down
+          // again could clip the dome and leave a green disc in flat grey.
+          camera.far = Math.max(camera.far, f.dist * 10);
+          camera.updateProjectionMatrix();
+          controls.update();
+        },
       };
       canvas.addEventListener("webglcontextlost", (ev) => { ev.preventDefault(); setPhase("error"); });
       // preventDefault above is what asks the browser to restore the context. Without a
@@ -4379,7 +4416,11 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // free-text roof colour cannot churn a WebGL context per keystroke.
   useEffect(() => {
     const e = engineRef.current;
-    if (e) e.applyFull();
+    if (!e) return;
+    // Framing first: applyFull queues the rAF that actually paints, so this costs no
+    // frame. Guarded on fitHeightFt so a caller that never passes one is untouched.
+    if (fitHeightFt) e.applyFraming();
+    e.applyFull();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geomSig]);
 
@@ -5348,10 +5389,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // {!(show3D || adminCalPreview)} guard below, so two live WebGL contexts are
   // structurally impossible rather than merely avoided.
   const [dock3D, setDock3D] = useState(false);
+  // The CALIBRATION dock's own visibility (Settings -> Designer -> 3D). Defaults ON: Carolyn
+  // asked for the preview to just be there beside the settings, not behind a button. The ✕ on
+  // the panel header hides it and the toggle in the panel's button row brings it back.
+  // Separate state from dock3D, not a shared one: DesignerTab and DesignerSettings each mount
+  // their OWN <SS/> instance, so these two docks never see each other's state anyway.
+  const [calDock3D, setCalDock3D] = useState(true);
   // Boolean only. Storing the measured width would setState on every frame of a
   // window drag, on top of the SVG re-render that already costs.
   const [dockCapable, setDockCapable] = useState(false);
   const canvasRowObsRef = useRef(null);
+  // Which threshold this mount measures against. `calibrationOnly` is a prop that is fixed for
+  // a mount's lifetime, so the callback identity below never actually changes at runtime and
+  // no observer churn happens -- the dep is there because the closure reads it.
+  const dockMinW = calibrationOnly ? SS_DOCK_MIN_CAL_W : SS_DOCK_MIN_ROW_W;
   // Callback ref, NOT useEffect([]) — the observed row unmounts whenever the
   // full-screen 3D opens, and an effect-attached observer would keep watching a
   // detached node, freezing dockCapable after the first trip through the editor.
@@ -5370,7 +5421,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (!w) return;
       // 40px of hysteresis on the way down, so an appearing scrollbar cannot
       // oscillate the rule at the threshold.
-      setDockCapable((prev) => !coarse && (prev ? w >= SS_DOCK_MIN_ROW_W - 40 : w >= SS_DOCK_MIN_ROW_W));
+      setDockCapable((prev) => !coarse && (prev ? w >= dockMinW - 40 : w >= dockMinW));
     };
     // Measure SYNCHRONOUSLY here, and let the observer handle changes after.
     // ResizeObserver delivery rides the rendering steps, so its first callback is
@@ -5381,7 +5432,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const ro = new ResizeObserver(measure);
     ro.observe(node);
     canvasRowObsRef.current = ro;
-  }, []);
+  }, [dockMinW]);
   useEffect(() => () => { if (canvasRowObsRef.current) canvasRowObsRef.current.disconnect(); }, []);
   // Narrowing collapses the dock. Deliberately does NOT open the full-screen modal
   // instead: a modal appearing because someone dragged a window edge is hostile,
@@ -7257,6 +7308,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // workflow): a human — or the calibrate-style function — reads the roof/
   // siding/color parameters off them into the style's d3 spec; the parametric
   // engine renders from the spec, never from the photos.
+  // The size labels available for the style being calibrated. Same precedence the scan's
+  // closest-match list uses (a style's own `sizes`, falling back to the tenant default set)
+  // and the same tolerance for string-or-{label} entries, because both read the same
+  // catalog shape. Keyed off adminCal.styleValue rather than sel.style: on this surface the
+  // calibrated style and the "selected" style are the same thing, and reading sel.style
+  // would make the list empty until a size had already been picked.
+  const calSizeOpts = () => {
+    const st = ((C && C.buildingStyles) || []).find((x) => x.value === (adminCal && adminCal.styleValue));
+    const labels = st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []);
+    return labels.map((l) => (typeof l === "string" ? l : (l && l.label))).filter(Boolean);
+  };
+  // The sample building the calibration preview renders on. Writes sel, which the [sel.size]
+  // effect turns into bldgW/bldgH -- so the 3D panel remounts and re-frames for the new
+  // footprint. Only ever called from the calibrationOnly surface: in the full designer this
+  // same panel sits over a customer's plan, and moving their style/size would clear it.
+  const calSetSize = (label) => setSel((p) => ({ ...p, style: adminCal.styleValue, size: label }));
+  // The size closest to the middle of the list by floor area — a fairer test of a roof pitch
+  // or a gambrel knee than the component's 10x12 default, which is the smallest thing anyone
+  // sells. Median rather than mean so one 14x40 in the list cannot drag the pick to the end.
+  const calMidSize = (styleValue) => {
+    const st = ((C && C.buildingStyles) || []).find((x) => x.value === styleValue);
+    const labels = st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []);
+    const sized = labels
+      .map((l) => (typeof l === "string" ? l : (l && l.label)))
+      .filter(Boolean)
+      .map((label) => ({ label, p: parseSize(label) }))
+      .filter((x) => x.p)
+      .sort((a, b) => (a.p.w * a.p.h) - (b.p.w * b.p.h));
+    return sized.length ? sized[Math.floor((sized.length - 1) / 2)].label : "";
+  };
   const openCalEditor = (s) => {
     setAdminCalMsg(null);
     setAdminCalPreview(false);
@@ -7269,6 +7350,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // session below; the standalone ?admin=1 path has no session and so starts blank.
       photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
     });
+    // Put the preview on a representative building instead of the component's 10x12 default
+    // (sel.size starts "", so the [sel.size] effect has never fired on this surface and
+    // bldgW/bldgH sit at their useState values). calibrationOnly ONLY: this same panel also
+    // renders over the full designer on the ?admin=1 operator path, where writing sel would
+    // change the style and size out from under a customer's plan and clear it.
+    if (calibrationOnly) {
+      const mid = calMidSize(s.value);
+      if (mid) setSel((p) => ({ ...p, style: s.value, size: mid }));
+    }
     setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
     // Reset with the scan: cached frame URLs belong to the style they were filmed for, and
     // carrying them across would draft the next style from the previous building.
@@ -7581,7 +7671,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return out.filter((s) => s.score <= 4).slice(0, 3);
   };
   const scanApplySize = (label) => {
-    setSel((p) => ({ ...p, style: adminCal.styleValue, size: label }));
+    calSetSize(label);
     setAdminCalMsg({ ok: true, msg: `Canvas set to ${label} on this style — the resize cleared any placed items.` });
   };
   // Store the scan against the style so it can be re-measured later (an algorithm improvement
@@ -8613,7 +8703,37 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button onClick={() => setAdminCalPreview(true)} style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>🧊 Preview in 3D</button>
+                {/* The sample building the preview renders on. calibrationOnly ONLY, for the
+                    same reason calSetSize is: over the full designer this row sits above a
+                    customer's plan, and a size change there would clear it. A pitch or a
+                    gambrel knee reads completely differently on a 10x12 than on a 12x32, so
+                    calibrating against one fixed small shell was the actual problem. */}
+                {calibrationOnly && calSizeOpts().length > 0 && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#92400E" }}>
+                    Preview on
+                    <select value={sel.size || ""} onChange={(e) => calSetSize(e.target.value)}
+                      style={{ ...S.sel, minWidth: 110, border: "1px solid #FCD34D" }}>
+                      {calSizeOpts().map((sz) => <option key={sz} value={sz}>{sz}</option>)}
+                    </select>
+                  </label>
+                )}
+                {/* Full screen stays even with the dock up: it is the ONLY 3D on a narrow or
+                    touch screen (where dockOn is false), and the bigger view on a wide one. */}
+                <button onClick={() => setAdminCalPreview(true)}
+                  title={calibrationOnly && dockOn ? "Open the 3D at full screen" : "Preview this style in 3D"}
+                  style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>
+                  {calibrationOnly && dockOn ? "⛶ Full screen 3D" : "🧊 Preview in 3D"}
+                </button>
+                {/* Without this the ✕ on the docked panel's header would be a one-way door.
+                    Same wording as the designer toolbar's dock toggle, deliberately. dockOn
+                    requires `embedded`, so this never appears on the ?admin=1 page, which
+                    renders this same const from the full return. */}
+                {calibrationOnly && dockOn && (
+                  <button onClick={() => setCalDock3D((v) => !v)}
+                    style={{ ...S.btn("#FFF", "#7C3AED"), border: "1px solid #DDD6FE", fontSize: 12 }}>
+                    {calDock3D ? "🧊 Hide 3D" : "🧊 Show 3D"}
+                  </button>
+                )}
                 {/* Copy-JSON is the operator's escape hatch when a save path is down; a
                     builder has no use for it and no place to paste it. */}
                 {!setup3d && <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>}
@@ -8662,10 +8782,65 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // canvas, no estimate. Every hook above still runs, which is what keeps hook order
   // identical between this return and the full designer below.
   if (calibrationOnly) {
+    // Side-by-side since 2026-08-22 (Carolyn): "in the same way that the designer Tab now has
+    // the 3D view on the side of the layout, I want that same thing happening in the designer
+    // settings so as we change the view settings we can immediately see what it is doing in
+    // the 3D and adjust accordingly." Same Structure3DPanel, same dock-capability rule, one
+    // different width threshold, and the DRAFT spec instead of the saved one.
+    //
+    // `adminCal` is in the term because the form body only renders once a style is picked —
+    // a 3D panel beside nothing but the style chips is a WebGL context spent on decoration.
+    const calDock = Boolean(adminCal) && view3dOn && dockOn && calDock3D;
     return (
       <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
         {showCal3D
-          ? cal3dPanel
+          ? (
+            /* Measured on the ROW, like the designer's canvas row, for the same reason: the
+               portal sidebar collapses from 240px to 68px at max-width:900px, so a viewport
+               threshold would switch the dock ON for the narrower layout and OFF for the
+               wider one. alignItems:"flex-start" is also what leaves the sticky column room
+               to move — the flex default (stretch) makes it full-height and inert. */
+            <div ref={canvasRowRef} style={{ display: "flex", alignItems: "flex-start", gap: !adminCalPreview && calDock ? 12 : 0 }}>
+              {/* minWidth:0 is load-bearing, same as the canvas row: the form's auto-fit grids
+                  have an intrinsic min-content width, so without it the row overflows
+                  sideways instead of reflowing six columns down to three. */}
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>{cal3dPanel}</div>
+              {/* The `!adminCalPreview` term sits ON the render site and is never read from a
+                  variable — that is what makes the docked panel and the full-screen viewer
+                  below structurally unable to hold two WebGL contexts at once, the same
+                  guarantee {!(show3D || adminCalPreview)} gives the full designer. React runs
+                  this subtree's cleanup (dispose + forceContextLoss) before mounting the
+                  modal in the same commit. */}
+              {!adminCalPreview && calDock && (
+                /* top:74, not the designer's 12: this mounts inside the portal's NORMALLY
+                   SCROLLING .ss-inner, under a position:sticky .ss-topbar ~62px tall. top:12
+                   would park the panel behind it. */
+                <div style={{ flex: "0 0 clamp(320px, 34%, 480px)", height: "min(560px, 72vh)", position: "sticky", top: 74, marginTop: 12, marginRight: 12 }}>
+                  <Structure3DPanel
+                    /* Remount on the sample building's size and nothing else — same rule as
+                       the designer. Wall height deliberately does NOT remount: fitHeightFt
+                       re-frames in place, because here the height is what is being typed. */
+                    key={`${bldgW}x${bldgH}`}
+                    bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+                    /* The DRAFT spec, NOT d3ResolveStyleSpec(...) — an unsaved slider showing
+                       up here is the whole feature. painted/roofType/roofColorHex are pinned
+                       to what cal3dPreview passes, so the docked view and the full-screen one
+                       cannot disagree about what a style looks like. */
+                    style3d={adminCal.spec}
+                    fitHeightFt={adminCal.spec.wallHeightFt || 0}
+                    painted={false} paintBody="" paintTrim=""
+                    roofType="" roofColorHex=""
+                    frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
+                    fixtures={C.fixtures}
+                    /* Nothing drags on this surface, and no canEdit: there is no plan to edit
+                       here, so the panel's "⛶ Edit in 3D" footer never renders. */
+                    suspended={false}
+                    onClose={() => setCalDock3D(false)}
+                  />
+                </div>
+              )}
+            </div>
+          )
           : <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>}
         {cal3dPreview}
       </div>

@@ -375,7 +375,10 @@ function DesignerSettings({ clientId, setup3d = null }) {
   const SS = window.StructureStudio;
   const card = { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "16px 18px", marginBottom: 14 };
   return (
-    <div style={{ maxWidth: 1080 }}>
+    // 1240 matches .ss-inner's own cap (portal.html), so this reads "as wide as every other
+    // settings page" rather than a number of its own. It was 1080, which cost the calibration
+    // form ~160px it now needs: since 2026-08-22 the 3D preview docks BESIDE the form.
+    <div style={{ maxWidth: 1240 }}>
       <div style={card}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>3D</div>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
@@ -393,11 +396,12 @@ function DesignerSettings({ clientId, setup3d = null }) {
             tuned here against a live 3D preview.
           </div>
         )}
-        {SS && setup3d && (
-          <div style={{ border: "1px solid #FCD34D", borderRadius: 10, overflow: "hidden" }}>
-            <SS clientId={clientId} embedded calibrationOnly setup3d={setup3d} view3d />
-          </div>
-        )}
+        {/* No wrapper here on purpose. The calibration row's 3D column is position:sticky, and
+            an overflow:hidden ancestor becomes that child's SCROLLPORT — which never scrolls,
+            so sticky silently does nothing at all and the panel just scrolls away with the
+            form. The card above already frames this section, and the panel supplies its own
+            #FFFBEB fill and #FCD34D bottom rule. */}
+        {SS && setup3d && <SS clientId={clientId} embedded calibrationOnly setup3d={setup3d} view3d />}
       </div>
     </div>
   );
