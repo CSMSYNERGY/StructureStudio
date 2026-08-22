@@ -297,6 +297,11 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // A failed save has to report itself INSIDE the editor: the tab's `msg` banner sits behind
   // the modal overlay, so an error there is invisible exactly when it matters.
   const [saveErr, setSaveErr] = useState(null);
+  // Table drag: which row is moving, and which segment group is under it. Separate from the
+  // calendar's dragId/dropStage so a half-finished drag in one view can never be read by the
+  // other.
+  const [dragRowId, setDragRowId] = useState(null);
+  const [dropGroup, setDropGroup] = useState(null);
   const [msg, setMsg] = useState(null);          // { ok } | { err }
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
@@ -658,6 +663,20 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     );
   };
 
+  // Drop handlers shared by a group's header row and every data row inside it, so the whole
+  // band is one target. `preventDefault` on dragOver is what makes an element droppable at
+  // all — without it the browser refuses the drop and the gesture silently fails.
+  const groupDropProps = (group) => ({
+    onDragOver: (e) => { e.preventDefault(); setDropGroup(group.key); },
+    onDragEnter: (e) => { e.preventDefault(); setDropGroup(group.key); },
+    onDrop: (e) => {
+      e.preventDefault();
+      const job = jobs.find((j) => j.id === dragRowId);
+      setDropGroup(null); setDragRowId(null);
+      if (job) dropIntoSegment(job, group);
+    },
+  });
+
   // One table row + its expanded editor. Extracted so the flat list and every segment group
   // render the identical row — a second copy for the grouped path is how the two drift.
   const tableRow = (j) => {
@@ -666,9 +685,18 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
     const stg = stages.find((s) => s.id === j.stage_id);
     const open = expandedId === j.id;
+    // A row is both a drag SOURCE and a drop target — dropping onto any row lands in that
+    // row's group, so you can aim at the rows you can see rather than hunting the header.
+    const rowGroup = segmentGroups ? segmentOf(j) : null;
     return (
       <React.Fragment key={j.id}>
-        <tr onClick={() => setExpandedId(open ? null : j.id)} style={{ cursor: "pointer", background: open ? "#F7F9FF" : "transparent" }}>
+        <tr onClick={() => setExpandedId(open ? null : j.id)}
+          draggable={canDragRows}
+          onDragStart={canDragRows ? (e) => { setDragRowId(j.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} } : undefined}
+          onDragEnd={canDragRows ? () => { setDragRowId(null); setDropGroup(null); } : undefined}
+          {...(canDragRows && rowGroup ? groupDropProps(rowGroup) : {})}
+          style={{ cursor: canDragRows ? "grab" : "pointer", background: open ? "#F7F9FF" : (dropGroup === (rowGroup && rowGroup.key) && dragRowId && dragRowId !== j.id ? "#F0F5FF" : "transparent"),
+            opacity: dragRowId === j.id ? 0.45 : 1 }}>
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
           <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
           <td style={S.td}>{j.building_label || j.title || "—"}</td>
@@ -759,6 +787,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       default:       return { key: "", label: "All jobs", rank: 0 };
     }
   };
+  // ── Dragging a row between segment groups ──
+  // Only four of the eight modes have a group key you can ASSIGN. Crew, build date, week and
+  // stage are all editable fields, so dropping a row into another group means something.
+  // Style, size and source are NOT: style and size are snapshots of the design's own
+  // geometry, and source is what the job IS (an order does not become an inventory build by
+  // being dragged). Offering a drag that silently does nothing is worse than offering none,
+  // so rows are only draggable in the four modes where the drop can be honoured.
+  const SEGMENT_ASSIGNABLE = { crew: true, date: true, week: true, stage: true };
+  const canDragRows = canEdit && !!SEGMENT_ASSIGNABLE[segment];
+
   const segmentGroups = (() => {
     if (segment === "none") return null;
     const buckets = new Map();
@@ -767,12 +805,63 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       if (!buckets.has(g.key)) buckets.set(g.key, { ...g, rows: [] });
       buckets.get(g.key).rows.push(j);
     });
+    // EMPTY groups matter once you can drop into them: with only the occupied groups
+    // rendered, a crew or stage that currently holds nothing has no row to drop onto — so the
+    // first job could never be moved there, which is exactly when you most want to. Only for
+    // the two ENUMERABLE dimensions; there is no list of every possible date to pad out.
+    if (canDragRows && segment === "crew") {
+      activeCrews.forEach((c, i) => { if (!buckets.has(c.id)) buckets.set(c.id, { key: c.id, label: c.name, rank: i, rows: [] }); });
+      if (!buckets.has("")) buckets.set("", { key: "", label: "No crew yet", rank: 9999, rows: [] });
+    }
+    if (canDragRows && segment === "stage") {
+      visibleStages.forEach((s) => { if (!buckets.has(s.id)) buckets.set(s.id, { key: s.id, label: s.name, color: s.color, rank: stageOrder[s.id], rows: [] }); });
+    }
     return [...buckets.values()].sort((a, b) => {
       const ar = a.rank, br = b.rank;
       if (typeof ar === "number" && typeof br === "number") return ar - br;
       return String(ar).localeCompare(String(br), undefined, { numeric: true });
     });
   })();
+
+  // The drop: what "put this row in that group" means, per mode. Each one is an ordinary
+  // field write — the same actions the popup and the calendar already use, so a table drop is
+  // logged and permission-checked identically.
+  const dropIntoSegment = async (job, group) => {
+    if (!job || !group || segmentOf(job).key === group.key) return;
+    if (segment === "crew") {
+      const crewId = group.key || null;
+      setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, crew_id: crewId } : j) }));
+      const r = await call({ action: "update_job", jobId: job.id, crewId },
+        crewId ? `Moved to ${group.label}.` : "Crew cleared.");
+      load();   // either way: the board must show what actually landed, not what was dropped
+      return;
+    }
+    if (segment === "stage") { await moveJob(job, group.key); return; }
+    // date | week — both end in a build date. Dropping on "No build date" CLEARS it, which
+    // sends the job back to the Unscheduled tray; that is the table's equivalent of dragging
+    // a calendar card off the grid, and it reads the same way.
+    let iso = null;
+    if (group.key) {
+      if (segment === "date") iso = group.key;
+      else {
+        // Into another WEEK: keep the weekday. A Tuesday build dropped on next week stays
+        // Tuesday rather than collapsing to Sunday — the crew's week has a shape, and the
+        // group only says which week, not which day.
+        const cur = schedBuildDate(job);
+        const dow = cur ? schedLocalDate(cur).getDay() : 1;
+        const d = schedLocalDate(group.key);
+        d.setDate(d.getDate() + dow);
+        iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+      }
+    }
+    setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, scheduled_start: iso, due_date: iso } : j) }));
+    // Deliberately NOT moveJobDate(): that one also hands the job to whichever crew's
+    // calendar is showing, which is right on the calendar and wrong here — the table has no
+    // crew filter, so a date drop must never quietly reassign the crew as a side effect.
+    const r = await call({ action: "update_job", jobId: job.id, scheduledStart: iso, dueDate: iso },
+      iso ? `Moved to ${fmtDate(schedLocalDate(iso))}.` : "Build date cleared — back in the tray.");
+    load();   // either way: the board must show what actually landed, not what was dropped
+  };
 
   // In calendar view a tray item is DRAGGABLE — drop it on a date and the job is created
   // with that build date (addFromTrayDated). The + button still adds it unscheduled.
@@ -983,13 +1072,19 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 ? sorted.map((j) => tableRow(j))
                 : segmentGroups.map((g) => (
                   <React.Fragment key={"seg:" + g.key}>
-                    <tr>
-                      <td colSpan={9} style={{ padding: "12px 10px 5px", borderBottom: "2px solid #E2E8F0" }}>
+                    <tr {...(canDragRows ? groupDropProps(g) : {})}
+                      style={dropGroup === g.key && dragRowId ? { background: "#EEF4FF" } : undefined}>
+                      <td colSpan={9} style={{ padding: "12px 10px 5px", borderBottom: "2px solid " + (dropGroup === g.key && dragRowId ? ACCENT : "#E2E8F0") }}>
                         <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#334155" }}>
                           {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
                           {g.label}
                         </span>
                         <span style={{ ...schedChip("#F1F5F9", "#475569"), marginLeft: 8 }}>{g.rows.length}</span>
+                        {/* An empty crew/stage exists ONLY so it can be dropped into — say so,
+                            rather than leaving a bare zero that reads like a rendering bug. */}
+                        {g.rows.length === 0 && (
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8", marginLeft: 8 }}>drop a job here to move it</span>
+                        )}
                       </td>
                     </tr>
                     {g.rows.map((j) => tableRow(j))}
@@ -999,6 +1094,21 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           </table>
         </div>
         {sorted.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No jobs match.</p>}
+        {/* Say plainly whether dragging does anything in the current mode. The four modes
+            below are the ones whose group is an editable field; in the others a drop would
+            have nothing to write, so rows are not draggable at all. */}
+        {segment !== "none" && sorted.length > 0 && (
+          <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
+            {canDragRows
+              ? (segment === "crew" ? "Drag a row onto another crew to hand the job over — onto “No crew yet” to unassign it."
+                : segment === "date" ? "Drag a row onto another day to reschedule it — onto “No build date” to send it back to the Unscheduled tray."
+                : segment === "week" ? "Drag a row onto another week to reschedule it; it keeps the same weekday. Drop it on “No build date” to send it back to the Unscheduled tray."
+                : "Drag a row onto another stage to move it there.")
+              : (canEdit
+                ? "Dragging is off in this view: " + (segment === "source" ? "an order does not become an inventory build" : "size and style come from the building’s own design") + ", so there is nothing a drop could change. Segment by crew, build date, week or stage to drag."
+                : "You have view-only access to the build schedule.")}
+          </p>
+        )}
       </>)}
 
       {/* ── CALENDAR — real dates, one build date per card, per-crew calendars ── */}
