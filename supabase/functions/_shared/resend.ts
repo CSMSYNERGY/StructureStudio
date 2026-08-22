@@ -201,12 +201,40 @@ export function rsDomainVerified(d: RsDomain): boolean {
   return d.status === "verified";
 }
 
-/** Build the absolute record name from Resend's relative one. Defensive on both ends: an
- *  already-absolute name is not double-appended, and ""/"@" (apex) resolves to the domain. */
+/**
+ * Build the absolute record name from Resend's relative one.
+ *
+ * ⚠️ Resend's `name` is relative to the ZONE APEX, not to the sending domain. For the
+ * sending domain mail.example.com the DKIM row comes back as "resend._domainkey.mail" and
+ * the SPF rows as "send.mail" — because that is what a DNS panel's Name field wants, and
+ * that panel is scoped to the zone example.com. Appending the whole sending domain would
+ * DOUBLE the "mail" label and hand the tenant a record that lands at the wrong node.
+ * (Observed live 2026-08-21 against a real create-domain response, not inferred.)
+ *
+ * It matters twice: our own platform domain is a subdomain, and Resend explicitly
+ * recommends builders send from a subdomain rather than their root domain.
+ *
+ * So: strip the overlap. Find the longest label-aligned suffix of `host` that is also a
+ * label-aligned PREFIX of `domain`, and append only the remainder. Longest-first, because
+ * a shorter accidental match would leave a duplicated label behind. Root domains have no
+ * overlap and fall through to plain concatenation, which is why this was invisible until a
+ * subdomain was tried.
+ */
 function toFqdn(host: string, domain: string): string {
   if (!domain) return host;
   if (!host || host === "@") return domain;
   if (host === domain || host.endsWith(`.${domain}`)) return host;
+
+  const hostLabels = host.split(".");
+  const domainLabels = domain.split(".");
+  for (let n = Math.min(hostLabels.length, domainLabels.length); n > 0; n--) {
+    const hostTail = hostLabels.slice(hostLabels.length - n).join(".");
+    const domainHead = domainLabels.slice(0, n).join(".");
+    if (hostTail === domainHead) {
+      const rest = domainLabels.slice(n).join(".");
+      return rest ? `${host}.${rest}` : host;
+    }
+  }
   return `${host}.${domain}`;
 }
 

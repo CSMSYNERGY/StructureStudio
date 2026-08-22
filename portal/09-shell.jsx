@@ -406,6 +406,21 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Drafting failed");
       return data.d3;
     },
+    // Frames the browser cut out of a walk-around video. Same action, same gate, same
+    // 10/day meter as the photo draft — `source` only picks the shape-first prompt and
+    // raises the frame cap from four to eight.
+    //
+    // Deliberately a SEPARATE capability rather than an options argument on the call
+    // above: this one returns the whole envelope (`frames` proves nothing was silently
+    // truncated, `observed` carries what the video showed about doors and vents), and the
+    // photo caller wants a bare spec. One function returning two shapes is how the wrong
+    // one gets read.
+    onDraftFromVideo: async (frameUrls, styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video" } });
+      if (error) throw new Error(error.message || "Reading the video failed");
+      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Reading the video failed");
+      return { d3: data.d3, frames: data.frames || 0, observed: data.observed || null };
+    },
     // Signed URL (10 min) for the style's stored scan — the re-measure path:
     // an algorithm improvement should never require walking the lot again.
     onLoadModelUrl: async (styleValue) => {

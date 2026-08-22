@@ -561,6 +561,21 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   const platformReady = status.platformReady !== false;
   const st = status.domainStatus || "not_configured";
   const dns = Array.isArray(status.dnsRecords) ? status.dnsRecords : [];
+  // Resend returns SPF + DKIM and NEVER a DMARC record, but a domain with no sending
+  // history that publishes only SPF + DKIM goes to Gmail spam — verified live 2026-08-21.
+  // So the table shows a fourth, advisory row. `advisory` keeps it out of the verified
+  // tally: Resend does not check DMARC, so it can never report this one as verified, and a
+  // permanent grey dot next to a correct record would read as broken.
+  const dnsAdvisory = dns.length > 0 && status.domain
+    ? [{
+      type: "TXT",
+      host: "_dmarc." + status.domain,
+      value: "v=DMARC1; p=none; rua=mailto:" + (status.fromAddress || "you@" + status.domain),
+      verified: false,
+      advisory: true,
+    }]
+    : [];
+  const dnsRows = dns.concat(dnsAdvisory);
   const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
   const fromAddress = status.fromAddress || (status.fromLocal && status.domain ? `${status.fromLocal}@${status.domain}` : "");
 
@@ -636,7 +651,15 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               The records are being prepared — check again in a moment.
             </p>
           )}
-          {dns.length > 0 && (
+          {dnsAdvisory.length > 0 && (
+            <p style={{ fontSize: 12, color: "#92400E", marginTop: 10, marginBottom: 0, lineHeight: 1.55 }}>
+              ★ The <strong>_dmarc</strong> record is strongly recommended but not required to
+              verify. Without it many inboxes — Gmail especially — send mail from a new domain
+              straight to spam. <strong>p=none</strong> only asks for reports; it never blocks
+              your mail.
+            </p>
+          )}
+          {dnsRows.length > 0 && (
             <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #FDE68A", borderRadius: 8 }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
                 <thead>
@@ -649,14 +672,25 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {dns.map((r, i) => (
+                  {dnsRows.map((r, i) => (
                     <tr key={i}>
                       <td style={{ ...S.td, textAlign: "center" }}>
-                        {r.verified
+                        {r.advisory
+                          ? <span title="Recommended, not checked by us" style={{ color: "#B45309", fontWeight: 800 }}>★</span>
+                          : r.verified
                           ? <span title="Verified" style={{ color: "#16A34A", fontWeight: 800 }}>✓</span>
                           : <span title="Not verified yet" style={{ color: "#CBD5E1" }}>•</span>}
                       </td>
-                      <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>{r.type}</td>
+                      <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>
+                        {r.type}
+                        {/* An MX WITHOUT its priority cannot be created — the tenant DNS panel refuses
+                            it, so the number has to sit on screen next to the type. */}
+                        {r.priority != null && (
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#B45309" }}>
+                            priority {r.priority}
+                          </span>
+                        )}
+                      </td>
                       <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.host}</td>
                       <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.value}</td>
                       <td style={{ ...S.td, whiteSpace: "nowrap" }}>

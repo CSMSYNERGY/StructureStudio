@@ -12,10 +12,10 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// SEND ROUTING (step 10, 2026-08-10 — Postmark integration). Two paths, routed per tenant
+// SEND ROUTING (step 10; Postmark 2026-08-10, moved to Resend 2026-08-21). Two paths, routed per tenant
 // by `client_settings.email_provider`:
 //
-//  • 'postmark' — the GHL send is called with action:"send_manually" (live-verified
+//  • 'resend' — the GHL send is called with action:"send_manually" (live-verified
 //    2026-08-10 on the test location: 201, flips the estimate to 'sent' so the hosted
 //    Accept/Reject page and sync-design-status derivation stay intact, sends NO email,
 //    and a repeat call is idempotent; the send body REQUIRES userId — 422 without it).
@@ -31,7 +31,7 @@ const cors = {
 //    path only; its failure never blocks the email.
 //
 //  • 'ghl' (the default) — today's GHL action:"email" send, byte-identical to the
-//    pre-Postmark behavior. On THIS path the beta redirect happens right in step 10 by
+//    pre-own-domain behavior. On THIS path the beta redirect happens right in step 10 by
 //    replacing the recipient list.
 //
 // BETA MODE REDIRECT (restored 2026-08-07, Carolyn's call).
@@ -1392,7 +1392,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
   // style id is stored once at the top level (every building/layout line shares it) and the
   // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
-  // Built BEFORE step 10 because the Postmark path's formal estimate PDF renders from this
+  // Built BEFORE step 10 because the own-domain path's formal estimate PDF renders from this
   // same snapshot — the emailed document and the persisted books lines can never disagree.
   const estimateLines = {
     version: 1,
@@ -1419,22 +1419,22 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   };
 
   // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
-  //     email_provider='postmark' get action:"send_manually" + our own Postmark email;
-  //     everyone else (and every Postmark failure) gets today's GHL action:"email" send.
+  //     email_provider='resend' get action:"send_manually" + our own Resend email;
+  //     everyone else (and every Resend failure) gets today's GHL action:"email" send.
   //     Recipient is the tenant's test inbox when beta mode is on, otherwise the customer
   //     — see the header for where each path implements that. `betaEmail` was already
   //     validated above, so by here beta mode implies a usable address. We capture the GHL
   //     response (status + body) and return it as `sendDebug` so failures don't hide
   //     behind a generic 200 — the React app or curl caller can inspect what GHL rejected,
   //     `sentTo` says who actually received it, `provider` says which sender delivered it,
-  //     and `postmark` carries the ledger outcome whenever the Postmark path was attempted.
+  //     and `provider` carries the ledger outcome whenever the own-domain path was attempted.
   let sendDebug: {
     status: number | null;
     ok: boolean;
     body: string;
     sentTo: string[];
-    provider: "postmark" | "ghl";
-    postmark?: { sent: boolean; messageId?: string; reason?: string; error?: string };
+    provider: "resend" | "ghl";
+    ownDomain?: { sent: boolean; messageId?: string; reason?: string; error?: string };
   } = {
     status: null,
     ok: false,
@@ -1446,14 +1446,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (estimateId) {
       const hostedUrl = estimateUrl(estimateId);
       const intendedTo = String(contact?.email || "").trim();
-      let postmarkHandled = false;
+      let ownDomainHandled = false;
 
-      // Postmark path. Routes on the provider flag + a buildable hosted-page link + having
+      // Own-domain path. Routes on the provider flag + a buildable hosted-page link + having
       // somewhere to send (the customer's address, or beta mode's guaranteed test inbox).
       // Deliberately NOT on email_domain_status: sendTenantEmail owns From resolution
       // (verified tenant domain vs the platform domain) and goes dark on its own when
       // neither is usable — that dark verdict lands us on the GHL fallback below.
-      if (settings.email_provider === "postmark" && hostedUrl && (intendedTo || redirectToTestInbox)) {
+      if (settings.email_provider === "resend" && hostedUrl && (intendedTo || redirectToTestInbox)) {
         // (a) Flip the estimate to 'sent' in GHL WITHOUT GHL emailing anyone.
         // action:"send_manually", live-verified 2026-08-10: 201, estimateStatus 'sent',
         // no email, idempotent on a repeat call. Same body as the email send otherwise —
@@ -1474,7 +1474,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         sendDebug.body = (await mr.text()).slice(0, 2000); // cap to avoid huge responses
 
         if (mr.ok) {
-          // (b) Formal estimate PDF — BEST-EFFORT, Postmark path only. Any failure here
+          // (b) Formal estimate PDF — BEST-EFFORT, own-domain path only. Any failure here
           // logs and proceeds without the link; a cosmetic document must never block the
           // estimate email.
           let formalPdfUrl: string | null = null;
@@ -1548,16 +1548,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             text: content.text,
           });
           if (outcome.sent) {
-            postmarkHandled = true;
-            sendDebug.provider = "postmark";
+            ownDomainHandled = true;
+            sendDebug.provider = "resend";
             sendDebug.sentTo = [outcome.to];
-            sendDebug.postmark = { sent: true, messageId: outcome.messageId };
+            sendDebug.ownDomain = { sent: true, messageId: outcome.messageId };
           } else {
             // not_active or failed → fall through to the GHL email send below. GHL accepts
             // a second send call on an already-'sent' estimate (double-send verified safe
             // 2026-08-10), so the recovery path is today's exact sender. The failed
-            // attempt stays inspectable in sendDebug.postmark.
-            sendDebug.postmark = {
+            // attempt stays inspectable in sendDebug.ownDomain.
+            sendDebug.ownDomain = {
               sent: false,
               reason: outcome.reason,
               ...(outcome.error ? { error: outcome.error } : {}),
@@ -1570,8 +1570,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         }
       }
 
-      if (!postmarkHandled) {
-        // GHL path — byte-identical to the pre-Postmark behavior for 'ghl' tenants.
+      if (!ownDomainHandled) {
+        // GHL path — byte-identical to the pre-own-domain behavior for 'ghl' tenants.
         // Beta mode redirects to the tenant's own test inbox. Not a filter over the
         // customer's address — a REPLACEMENT, so the customer is never a recipient of a
         // test estimate even if their address is also on the design.

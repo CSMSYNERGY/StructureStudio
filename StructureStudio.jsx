@@ -4615,6 +4615,192 @@ function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
   );
 }
 
+// ── Walk-around video → the frames a vision model can read the SHAPE from ──────────
+// A builder films one slow lap of a real building and we draft that style's d3 spec from
+// it. The video NEVER leaves the device: it is decoded by a <video> element, sampled onto
+// a <canvas>, and only the handful of JPEGs below are ever uploaded. That is not just a
+// privacy nicety — a 190MB phone video cannot go through an edge function, and the
+// existing photo path already accepts exactly this kind of JPEG.
+//
+// The hard part is WHICH frames. Sampling at equal time intervals looks obvious and is
+// wrong: people pause at the corners (where two faces and the roof rake are visible at
+// once — the most shape-informative viewpoint there is) and hurry along the flat sides, so
+// equal-time sampling spends its budget wherever the operator dawdled and can miss a whole
+// elevation. Sampling at equal CUMULATIVE VISUAL CHANGE self-corrects: standing still
+// accumulates nothing and costs nothing.
+//
+// The probe pass that measures change also gets sharpness for free — it has already
+// decoded those frames — so each chosen viewpoint can be nudged to whichever of its
+// neighbours is least motion-blurred without spending another seek.
+const SS_VID_FRAMES = 8;          // four elevations + four corners, whatever the pacing
+const SS_VID_PROBE_MAX = 36;      // seeks are ~50-100ms; this bounds the probe at ~3s
+const SS_VID_LONG_EDGE = 1280;    // ~1200 image tokens per frame, ~200KB of JPEG
+const SS_VID_QUALITY = 0.8;
+
+// 'seeked' can fire before the new frame is actually painted into the element, so a
+// drawImage on that tick can copy the PREVIOUS one. requestVideoFrameCallback is the API
+// built for exactly this — but like requestAnimationFrame it is driven by the compositor,
+// and NEITHER fires in a backgrounded tab. That is not hypothetical: an early cut of this
+// used a double-rAF barrier and a 20-second clip took 124 SECONDS to sample with the tab
+// in the background, versus under two in the foreground. (Same class of trap as the 3D
+// photo-arrival repaint, which is a direct render() for this reason.)
+//
+// So the barrier races the callback against a timer and takes whichever lands first, and
+// it is only asked for on the eight CAPTURE seeks. The probe pass skips it: a probe frame
+// one behind shifts the change curve imperceptibly, and paying a throttled timer on all
+// thirty-odd of them is what made the background case pathological.
+function ssSettleFrame(v) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    if (typeof v.requestVideoFrameCallback === "function") {
+      try { v.requestVideoFrameCallback(finish); } catch (_) { /* fall through to the timer */ }
+    }
+    setTimeout(finish, 40);
+  });
+}
+
+function ssSeekTo(v, t, settle) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; cleanup(); reject(new Error("The video stalled while seeking.")); } }, 8000);
+    const onSeeked = () => {
+      if (done) return;
+      done = true; cleanup();
+      if (settle) ssSettleFrame(v).then(resolve);
+      else resolve();
+    };
+    const onErr = () => { if (!done) { done = true; cleanup(); reject(new Error("The video could not be decoded.")); } };
+    function cleanup() {
+      clearTimeout(timer);
+      v.removeEventListener("seeked", onSeeked);
+      v.removeEventListener("error", onErr);
+    }
+    v.addEventListener("seeked", onSeeked);
+    v.addEventListener("error", onErr);
+    try { v.currentTime = Math.max(0, t); } catch (e) { done = true; cleanup(); reject(e); }
+  });
+}
+
+// Mean absolute difference between two luma signatures, 0..255. Cheap, and insensitive to
+// the exposure drift a phone does continuously while walking.
+function ssLumaDelta(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+  return s / a.length;
+}
+
+// Sum of horizontal neighbour differences: a blurred frame has fewer hard edges, so a
+// lower score. Only ever compared against its own neighbours, so the absolute value and
+// the tiny probe resolution do not matter.
+function ssLumaSharpness(luma, w, h) {
+  let s = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 1; x < w; x++) s += Math.abs(luma[y * w + x] - luma[y * w + x - 1]);
+  }
+  return s / (w * h);
+}
+
+async function ssExtractOrbitFrames(file, onStep) {
+  const url = URL.createObjectURL(file);
+  const v = document.createElement("video");
+  v.muted = true;
+  v.playsInline = true;
+  v.preload = "auto";
+  v.crossOrigin = "anonymous";
+  v.src = url;
+  const done = () => { try { v.removeAttribute("src"); v.load(); } catch (_) {} URL.revokeObjectURL(url); };
+  try {
+    if (onStep) onStep("Opening the video…");
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("That video took too long to open. Try a shorter clip.")), 20000);
+      v.addEventListener("loadedmetadata", () => { clearTimeout(timer); resolve(); }, { once: true });
+      v.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Your browser could not read that video file.")); }, { once: true });
+    });
+    // A zero width after metadata means the container parsed but the codec did not — the
+    // usual culprit is an iPhone .mov in HEVC opened on a browser without the licence.
+    if (!v.videoWidth || !v.videoHeight) {
+      throw new Error("Your browser cannot decode that video. On an iPhone, set Camera → Formats → Most Compatible and film it again.");
+    }
+    const dur = Number(v.duration);
+    if (!isFinite(dur) || dur < 4) throw new Error("That clip is too short — walk one slow lap, about 30 to 60 seconds.");
+    if (dur > 300) throw new Error("That video is over 5 minutes. One slow lap of the building is all we need.");
+
+    // ── probe: low-res luma at ~1.2 samples/second, capped ─────────────────────────
+    const N = Math.max(12, Math.min(SS_VID_PROBE_MAX, Math.round(dur * 1.2)));
+    const pw = 32, ph = 18;
+    const pc = document.createElement("canvas");
+    pc.width = pw; pc.height = ph;
+    const pctx = pc.getContext("2d", { willReadFrequently: true });
+    const probes = [];
+    let prev = null;
+    for (let i = 0; i < N; i++) {
+      if (onStep && i % 6 === 0) onStep(`Looking through the video… ${Math.round((i / N) * 100)}%`);
+      const t = dur * ((i + 0.5) / N);
+      await ssSeekTo(v, t, false);
+      pctx.drawImage(v, 0, 0, pw, ph);
+      const d = pctx.getImageData(0, 0, pw, ph).data;
+      const luma = new Float32Array(pw * ph);
+      for (let p = 0, q = 0; p < d.length; p += 4, q++) luma[q] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph) });
+      prev = luma;
+    }
+
+    // ── choose viewpoints at equal cumulative change ──────────────────────────────
+    const cum = [];
+    let run = 0;
+    for (const p of probes) { run += p.change; cum.push(run); }
+    const total = run;
+    let picks;
+    if (total < 1e-3) {
+      // Nothing moved: a tripod shot, or a probe that read the same frame every time.
+      // Equal time is the only meaningful fallback, and it is what the caller expects.
+      picks = Array.from({ length: SS_VID_FRAMES }, (_, k) => Math.min(probes.length - 1, Math.round(((k + 0.5) / SS_VID_FRAMES) * (probes.length - 1))));
+    } else {
+      picks = [];
+      let at = 0;
+      for (let k = 0; k < SS_VID_FRAMES; k++) {
+        const want = ((k + 0.5) / SS_VID_FRAMES) * total;
+        while (at < cum.length - 1 && cum[at] < want) at++;
+        picks.push(at);
+      }
+    }
+    // Nudge each pick to the sharpest of itself and its immediate neighbours. Free: those
+    // frames were already decoded during the probe.
+    picks = picks.map((i) => {
+      let best = i;
+      for (const j of [i - 1, i + 1]) {
+        if (j >= 0 && j < probes.length && probes[j].sharp > probes[best].sharp) best = j;
+      }
+      return best;
+    });
+    // De-duplicate while keeping walk order — two targets can land on one probe when the
+    // operator swung round a corner fast.
+    const seen = new Set();
+    picks = picks.filter((i) => (seen.has(i) ? false : (seen.add(i), true)));
+
+    // ── capture at full resolution ────────────────────────────────────────────────
+    const scale = Math.min(1, SS_VID_LONG_EDGE / Math.max(v.videoWidth, v.videoHeight));
+    const cw = Math.max(2, Math.round(v.videoWidth * scale));
+    const ch = Math.max(2, Math.round(v.videoHeight * scale));
+    const cv = document.createElement("canvas");
+    cv.width = cw; cv.height = ch;
+    const cctx = cv.getContext("2d");
+    const out = [];
+    for (let k = 0; k < picks.length; k++) {
+      if (onStep) onStep(`Capturing view ${k + 1} of ${picks.length}…`);
+      await ssSeekTo(v, probes[picks[k]].t, true);
+      cctx.drawImage(v, 0, 0, cw, ch);
+      out.push({ t: probes[picks[k]].t, dataUrl: cv.toDataURL("image/jpeg", SS_VID_QUALITY) });
+    }
+    if (!out.length) throw new Error("No usable frames came out of that video.");
+    return out;
+  } finally {
+    done();
+  }
+}
+
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -5276,6 +5462,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [adminCalMsg, setAdminCalMsg] = useState(null);  // {ok, msg} | null
   const [adminCalBusy, setAdminCalBusy] = useState(false);
   const [adminCalPreview, setAdminCalPreview] = useState(false);
+  // Walk-around video → shape. `urls` caches the uploaded frames so a re-draft re-spends
+  // the one metered AI call and not eight uploads; `observed` is what the video showed
+  // about doors, windows and vents, which the spec has no field for.
+  const [adminCalVideo, setAdminCalVideo] = useState({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
   // Building scan (094): { busy, step, err, measured, file, status } for the selected style.
   const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
   // Prevents the size-change effect from clearing items when we're rehydrating
@@ -7080,6 +7270,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
     });
     setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
+    // Reset with the scan: cached frame URLs belong to the style they were filmed for, and
+    // carrying them across would draft the next style from the previous building.
+    setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
     // One authenticated read gives everything the customer config deliberately does not carry:
     // the reference photos (a builder's own buildings — see 093), this style's scan status, and
     // whether AI drafting is even configured on the server.
@@ -7109,6 +7302,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       wallHeightFt: d3.wallHeightFt || p.spec.wallHeightFt,
     },
   }));
+
+  // The SHAPE-only merge, for a draft read off a walk-around video. It deliberately does
+  // NOT reuse applyDraftedSpec above: sanitizeD3Spec ALWAYS emits `siding` — line 69 of
+  // _shared/styleD3.ts collapses anything it does not recognise to null — so
+  // `d3.siding !== undefined` is true even when the model said nothing about cladding, and
+  // the builder's setting would be silently reset to plain on every video draft. A
+  // shape-only feature that quietly wipes cladding is exactly the kind of bug that ships
+  // unnoticed, because the roof it was asked to fix does get better.
+  //
+  // Colours are left alone for the same reason plus a better one: the customer repaints the
+  // building in the configurator anyway, so a colour averaged off one overcast clip is not
+  // worth overwriting a deliberate choice with.
+  const applyDraftedShape = (d3) => setAdminCal((p) => ({
+    ...p,
+    spec: {
+      ...p.spec,
+      roof: { ...p.spec.roof, ...((d3 && d3.roof) || {}) },
+      siding: (d3 && (d3.siding === "batten" || d3.siding === "lap")) ? d3.siding : p.spec.siding,
+      wallHeightFt: (d3 && d3.wallHeightFt) || p.spec.wallHeightFt,
+    },
+  }));
   const copyCalJson = () => {
     const out = JSON.stringify({ d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) }, null, 2);
     try {
@@ -7132,6 +7346,58 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     } catch (e) {
       setAdminCalMsg({ ok: false, msg: e.message || "Upload failed" });
     } finally { setAdminCalBusy(false); }
+  };
+
+  // ─── Walk-around video → this style's shape ───────────────────────────────────────────
+  // The counterpart to the .glb scan below, for the builder who has a phone and no scanning
+  // app. Frames are cut out of the video in the browser (ssExtractOrbitFrames, module
+  // scope) and uploaded as ordinary style photos; the video file itself never leaves the
+  // device. The AI then reads the SHAPE off them — roof type, pitch, overhang, wall height.
+  //
+  // `cachedUrls` is how a re-draft avoids re-uploading: picking a file always passes null
+  // (a new video must not be read from the previous one's frames — the trap scanPick avoids
+  // by clearing renderUrls), and the "Read it again" button passes the cached array. Making
+  // it an argument rather than reading state inside the closure keeps that decision at the
+  // call site, where it is visible.
+  const calibrateFromVideo = async (file, cachedUrls) => {
+    if (!(setup3d && setup3d.onUploadPhoto && setup3d.onDraftFromVideo)) return;
+    if (adminCalVideo.busy || adminCalBusy) return;
+    if (!file && !(cachedUrls && cachedUrls.length)) return;
+    setAdminCalVideo((p) => ({ ...p, busy: true, err: null, step: "Opening the video…" }));
+    setAdminCalBusy(true);
+    setAdminCalMsg(null);
+    try {
+      let urls = cachedUrls;
+      if (!urls) {
+        const frames = await ssExtractOrbitFrames(file, (s) => setAdminCalVideo((p) => ({ ...p, step: s })));
+        urls = [];
+        for (let i = 0; i < frames.length; i++) {
+          setAdminCalVideo((p) => ({ ...p, step: `Sending view ${i + 1} of ${frames.length}…` }));
+          const f = new File([dataUrlToBytes(frames[i].dataUrl)], `walk-${i + 1}.jpg`, { type: "image/jpeg" });
+          const url = await setup3d.onUploadPhoto(f);
+          if (!url) throw new Error("Upload returned no URL.");
+          urls.push(url);
+        }
+        setAdminCalVideo((p) => ({ ...p, urls, count: urls.length }));
+        // Spread the four kept thumbnails ACROSS the walk instead of taking the first four,
+        // so the slots show four different sides rather than four views of the front.
+        const stride = Math.max(1, Math.floor(urls.length / 4));
+        for (let slot = 0; slot < 4; slot++) {
+          const src = urls[Math.min(urls.length - 1, slot * stride)];
+          if (src) calSetPhoto(slot, src);
+        }
+      }
+      setAdminCalVideo((p) => ({ ...p, step: "Reading the shape…" }));
+      const res = await setup3d.onDraftFromVideo(urls, adminCal.styleValue);
+      applyDraftedShape(res && res.d3);
+      const read = (res && res.frames) || urls.length;
+      setAdminCalVideo((p) => ({ ...p, busy: false, step: null, observed: (res && res.observed) || null, read }));
+      setAdminCalMsg({ ok: true, msg: `Shape read from ${read} views of your walk-around. Colours and cladding are untouched — preview it, adjust anything, then Save.` });
+    } catch (e) {
+      setAdminCalVideo((p) => ({ ...p, busy: false, step: null, err: (e && e.message) || "Could not read that video." }));
+    } finally {
+      setAdminCalBusy(false);
+    }
   };
 
   // ─── Building scan: read it, measure it, then drive the parametric model from the numbers ──
@@ -8086,6 +8352,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Held in a variable rather than written inline: Settings → Designer → 3D mounts
   // this component with `calibrationOnly` and renders ONLY this panel, so the panel
   // has to be reachable from two different returns.
+  // Frames from a walk-around are views 1-4 of one lap, not four staged elevations —
+  // labelling them Front/Back/Left/Right would be a guess about where the walk started.
+  // A plain const, deliberately: everything from here down is JSX held in a variable, and
+  // a hook below the calibrationOnly early return would change hook order between the two
+  // returns (React #310 — this file has form for it).
+  const photoLabels = adminCalVideo.count ? ["View 1", "View 2", "View 3", "View 4"] : ["Front", "Back", "Left", "Right"];
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
@@ -8108,6 +8380,71 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   upload into a private bucket, and a scan is theirs, not ours. The scan is a
                   REFERENCE — we measure it and build the parametric model from the numbers,
                   because the mesh itself cannot be edited, priced or quoted. ── */}
+              {/* ── Walk-around video. The low-friction path: any phone, no app, no
+                  export step. It reads the SHAPE only — size, colour and material are
+                  settings the customer changes afterwards, so nothing here needs to be
+                  measured. Gated on onUploadPhoto/onDraftFromVideo rather than
+                  onUploadModel: this path needs no `models` bucket at all. ── */}
+              {setup3d && setup3d.onUploadPhoto && setup3d.onDraftFromVideo && (
+                <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>🎥 Walk-around video</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>easiest</span>
+                  </div>
+                  <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
+                    Film one slow lap of a real building — phone sideways, whole building in frame, about 30 to 60 seconds.
+                    We read the roof shape, pitch, overhang and wall height off it and set this style up to match.
+                    <b> The video stays on your phone</b> — only a few still frames are sent.
+                  </p>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalVideo.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
+                      {adminCalVideo.busy ? (adminCalVideo.step || "Working…") : "Choose a walk-around video"}
+                      <input type="file" accept="video/*" disabled={adminCalVideo.busy || adminCalBusy || scan.status === "locked"}
+                        onChange={(e) => {
+                          const f = e.target.files && e.target.files[0];
+                          e.target.value = "";
+                          if (!f) return;
+                          // A NEW file must never be read from the previous one's frames.
+                          setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
+                          calibrateFromVideo(f, null);
+                        }}
+                        style={{ display: "none" }} />
+                    </label>
+                    {adminCalVideo.urls && !adminCalVideo.busy && (
+                      <button onClick={() => calibrateFromVideo(null, adminCalVideo.urls)}
+                        title="Re-read the same frames. Costs one AI draft, no re-upload."
+                        style={{ ...S.btn("#FFF", "#7C3AED"), border: "1px solid #DDD6FE", fontSize: 12 }}>Read it again</button>
+                    )}
+                  </div>
+                  {adminCalVideo.err && <div style={{ marginTop: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{adminCalVideo.err}</div>}
+                  {adminCalVideo.read > 0 && !adminCalVideo.busy && (
+                    <div style={{ marginTop: 8, fontSize: 12, color: "#0F172A" }}>
+                      <b>{adminCalVideo.read} views</b> read from your walk-around.
+                      {adminCalVideo.observed && (
+                        <div style={{ marginTop: 6, display: "grid", gap: 3, fontSize: 11.5, color: "#334155" }}>
+                          {adminCalVideo.observed.roofNote && <div><b>Roof:</b> {adminCalVideo.observed.roofNote}</div>}
+                          {adminCalVideo.observed.eave && <div><b>Eave:</b> {adminCalVideo.observed.eave}</div>}
+                          {adminCalVideo.observed.doors && <div><b>Doors:</b> {adminCalVideo.observed.doors}</div>}
+                          {adminCalVideo.observed.windows && <div><b>Windows:</b> {adminCalVideo.observed.windows}</div>}
+                          {adminCalVideo.observed.vents && <div><b>Vents:</b> {adminCalVideo.observed.vents}</div>}
+                          {adminCalVideo.observed.confidence && (
+                            <div style={{ color: adminCalVideo.observed.confidence === "low" ? "#B45309" : "#64748B" }}>
+                              Confidence: <b>{adminCalVideo.observed.confidence}</b>
+                              {adminCalVideo.observed.confidence !== "high" ? " — check the roof numbers below against the building." : ""}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {/* Said every time, not only on low confidence: a ground-level camera
+                          NEVER sees the roof planes, and the two roof shapes the spec cannot
+                          express are the two a builder is most likely to film. */}
+                      <div style={{ marginTop: 6, fontSize: 11.5, color: "#B45309", lineHeight: 1.5 }}>
+                        Roofs are read from the ground, so check the pitch below. Doors, windows and vents are placed in the designer — the video only sets the building's shape.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {setup3d && setup3d.onUploadModel && (
                 <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -8256,7 +8593,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ))}
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
-                {["Front", "Back", "Left", "Right"].map((side, i) => (
+                {photoLabels.map((side, i) => (
                   <label key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{side} photo{setup3d ? "" : " URL"}
                     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                       <input type="text" placeholder="https://…" value={adminCal.photos[i] || ""} onChange={(e) => calSetPhoto(i, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />

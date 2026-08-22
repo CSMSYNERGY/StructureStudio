@@ -8,13 +8,13 @@ import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
-  pmCreateDomain, pmDeleteDomain, pmGetDomain, pmVerifyDomain,
-  postmarkConfigured, PostmarkApiError, PostmarkNotConfigured, type PmDomain,
-} from "../_shared/postmark.ts";
+  rsCreateDomain, rsDeleteDomain, rsGetDomain, rsVerifyDomain, rsDomainVerified,
+  resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
+} from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, SPEC_PROMPT } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -117,7 +117,7 @@ const GATES: GateTable = {
   retry_qbo_push:  { area: "settings_quickbooks", level: "edit" },
 
   // ── Email sending (Settings → Email Sending) ─────────────────────────────
-  // Own-domain estimate/invoice email (Postmark-backed). The area is admin-preset only
+  // Own-domain estimate/invoice email (Resend-backed). The area is admin-preset only
   // (deny-by-default for every staff title — intended: connecting a domain changes what
   // every customer-facing email looks like).
   email_status:         { area: "settings_email", level: "view" },
@@ -232,41 +232,54 @@ function maskId(v: string | null): string | null {
 
 // ── Email sending helpers ───────────────────────────────────────────────────────
 // The Settings → Email DNS table's rows, snapshotted onto client_settings.email_dns_records
-// so email_status can render without a Postmark round trip. Shape is the EmailSendingView
-// contract: [{type, host, value, verified}] — DKIM is the TXT record, Return-Path the CNAME.
-function dnsRecordsOf(d: PmDomain): { type: string; host: string; value: string; verified: boolean }[] {
-  const rows = [
-    { type: "TXT", host: d.dkimHost, value: d.dkimValue, verified: d.dkimVerified },
-    { type: "CNAME", host: d.returnPathHost, value: d.returnPathValue, verified: d.returnPathVerified },
-  ];
-  // A row with no host is a shape we can't render or copy — drop it rather than showing
-  // an empty record a tenant would dutifully paste into their DNS.
-  return rows.filter((r) => r.host && r.value);
+// so email_status can render without a Resend round trip. Shape is the EmailSendingView
+// contract: [{type, host, value, verified}] plus an optional MX priority. Resend's set is DKIM TXT + SPF TXT + SPF MX.
+type DnsRow = { type: string; host: string; value: string; verified: boolean; priority?: number };
+function dnsRecordsOf(d: RsDomain): DnsRow[] {
+  // Resend returns a VARIABLE list (today: DKIM TXT + SPF TXT + SPF MX), not a fixed pair,
+  // so this maps rather than hand-builds. resend.ts already normalised the shape.
+  //
+  // USE r.fqdn, NEVER r.host: Resend's name is relative to the ZONE APEX ("send.mail"), so a
+  // UI rendering it verbatim hands the tenant a record that lands at the wrong node.
+  //
+  // priority is carried because an MX WITHOUT one cannot be created — dropping it would hand
+  // the tenant a record their DNS panel refuses.
+  return d.records
+    .map((r) => ({
+      type: r.type,
+      host: r.fqdn,
+      value: r.value,
+      verified: r.verified,
+      ...(r.priority != null ? { priority: r.priority } : {}),
+    }))
+    // A row with no host is a shape we can't render or copy — drop it rather than showing
+    // an empty record a tenant would dutifully paste into their DNS.
+    .filter((r) => r.host && r.value);
 }
 
 /**
- * A Postmark call failed. Two authored outcomes, never a 500 and never provider text:
- *   - PostmarkNotConfigured is the platform-not-ready state, not an incident — the tenant
+ * A Resend call failed. Two authored outcomes, never a 500 and never provider text:
+ *   - ResendNotConfigured is the platform-not-ready state, not an incident — the tenant
  *     gets the same friendly sentence the platformReady:false card shows.
- *   - PostmarkApiError carries only enum-ish fields by construction (postmark.ts strips
+ *   - ResendApiError carries only enum-ish fields by construction (resend.ts strips
  *     the provider Message because it can echo recipient addresses). The status/errorCode
  *     go to app_errors under the same `where` label the caller is shown — dbFail's
  *     correlation posture applied to a third-party API.
  */
-function pmFail(req: Request, clientId: string | null, where: string, e: unknown) {
-  if (e instanceof PostmarkNotConfigured) {
+function rsFail(req: Request, clientId: string | null, where: string, e: unknown) {
+  if (e instanceof ResendNotConfigured) {
     return json({ error: "Email sending isn't available yet — it's still being set up. Please try again later." }, 503);
   }
-  const detail = e instanceof PostmarkApiError
-    ? `postmark ${e.status}/${e.errorCode}${e.permanent ? " permanent" : ""}`
+  const detail = e instanceof ResendApiError
+    ? `resend ${e.status}/${e.name_ || "unknown"}${e.permanent ? " permanent" : ""}`
     : String((e as Error)?.message ?? e ?? "unknown error").slice(0, 300);
   logEdgeError({
     fn: "portal-settings",
     req,
     clientId,
-    code: e instanceof PostmarkApiError ? e.status || 502 : 502,
+    code: e instanceof ResendApiError ? e.status || 502 : 502,
     message: `${where}: ${detail}`,
-    context: { where, postmarkErrorCode: e instanceof PostmarkApiError ? e.errorCode : null },
+    context: { where, resendErrorName: e instanceof ResendApiError ? e.name_ : null },
   }).catch(() => {});
   return json({
     error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
@@ -1584,7 +1597,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // is written BEFORE the model call on purpose: a failing style would otherwise be a free
   // retry loop against our API key.
   if (action === "calibrate_style_ai") {
-    const photoUrls = sanitizePhotoUrls(payload.photoUrls);
+    // Two callers, one action, one gate, one meter. `source: "video"` means the URLs are
+    // frames the browser cut out of a walk-around video (the file itself never leaves the
+    // phone) rather than four staged photos — so it takes eight of them and a prompt that
+    // knows the roof was only ever seen from the ground.
+    //
+    // The cap is a PARAMETER and not a bigger default because sanitizePhotoUrls slices
+    // silently: send eight against the 4-default and you get HTTP 200, a full-price ledger
+    // row, and a spec drafted from the first half of the walk. The response reports
+    // `frames` for exactly that reason — a truncation that shows up in the UI is a bug you
+    // can see, and this one otherwise looks like the model simply reading the shed wrong.
+    const fromVideo = payload.source === "video";
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls, fromVideo ? 8 : 4);
     if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
     if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
@@ -1618,14 +1642,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
         body: JSON.stringify({
           model: "claude-sonnet-5",
-          max_tokens: 700,
+          // The video prompt asks for an `observed` block on top of the spec, so it needs
+          // the headroom. A truncated reply is unparseable, not partially useful.
+          max_tokens: fromVideo ? 900 : 700,
           messages: [{
             role: "user",
             content: [
               // URL sources: the photos live in public buckets, so Anthropic can fetch them
               // and we never proxy the bytes through this function.
               ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
-              { type: "text", text: SPEC_PROMPT },
+              { type: "text", text: fromVideo ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
             ],
           }],
         }),
@@ -1641,7 +1667,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const text = data?.content?.[0]?.text ?? "";
     const drafted = parseModelSpec(text);
     if (!drafted.ok) return json({ error: drafted.error }, 502);
-    return json({ ok: true, d3: drafted.d3 });
+    // `frames` makes a silent truncation visible; `observed` is the builder-facing note
+    // about doors, windows and vents, which the spec has no field for.
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, observed: fromVideo ? parseObservedNotes(text) : null });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
@@ -2956,10 +2984,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   }
 
   // ── Email sending (Settings → Email Sending) ────────────────────────────────────
-  // Own-domain estimate/invoice email, Postmark-backed — the provider never appears in
+  // Own-domain estimate/invoice email, Resend-backed — the provider never appears in
   // tenant-facing copy. Connection state lives on client_settings (migration 107):
   // not_configured → pending (connect: domain created, DNS records handed out) →
-  // verified (BOTH records seen). `active` (email_provider = 'postmark') is a SEPARATE
+  // verified (the domain-level status). `active` (email_provider = 'resend') is a SEPARATE
   // explicit switch — a verify never auto-flips it, and turning it off is the instant
   // per-tenant rollback to the GHL sender. Response field names are the EmailSendingView
   // contract (portal.html ~10504) — change both or neither.
@@ -2982,7 +3010,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
     return json({
       clientId, // operator view-as tripwire (the qbo_status pattern)
-      platformReady: postmarkConfigured(),
+      platformReady: resendConfigured(),
       domainStatus: s?.email_domain_status ?? "not_configured",
       domain,
       fromName: s?.email_from_name ?? null,
@@ -2990,7 +3018,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       fromAddress: domain ? `${fromLocal}@${domain}` : null,
       verifiedAt: s?.email_verified_at ?? null,
       lastError: s?.email_last_error ?? null,
-      active: s?.email_provider === "postmark",
+      active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
       // deno-lint-ignore no-explicit-any
       recentSends: (sends ?? []).map((r: any) => ({
@@ -3034,26 +3062,26 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (holder) return json({ error: "That domain is already connected to another account." }, 409);
 
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("email_domain, postmark_domain_id")
+      .from("client_settings").select("email_domain, resend_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
 
-    let d: PmDomain;
+    let d: RsDomain;
     try {
       // Reconnect reuse: this tenant's same domain already exists on the provider —
       // re-read its records rather than erroring on a duplicate create.
-      d = cur?.postmark_domain_id && cur?.email_domain === domain
-        ? await pmGetDomain(Number(cur.postmark_domain_id))
-        : await pmCreateDomain(domain);
+      d = cur?.resend_domain_id && cur?.email_domain === domain
+        ? await rsGetDomain(String(cur.resend_domain_id))
+        : await rsCreateDomain(domain);
     } catch (e) {
-      return pmFail(req, clientId, "connect that domain", e);
+      return rsFail(req, clientId, "connect that domain", e);
     }
 
     const dnsRecords = dnsRecordsOf(d);
     const { error: upErr } = await admin.from("client_settings").upsert({
       client_id: clientId,
       email_domain: domain,
-      postmark_domain_id: d.id,
+      resend_domain_id: d.id,
       email_domain_status: "pending",
       email_dns_records: dnsRecords,
       email_from_local: fromLocal,
@@ -3075,14 +3103,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   if (action === "email_verify_domain") {
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("postmark_domain_id")
+      .from("client_settings").select("resend_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
-    if (!cur?.postmark_domain_id) return json({ error: "Connect a domain first." }, 400);
+    if (!cur?.resend_domain_id) return json({ error: "Connect a domain first." }, 400);
 
-    let d: PmDomain;
+    let d: RsDomain;
     try {
-      d = await pmVerifyDomain(Number(cur.postmark_domain_id));
+      d = await rsVerifyDomain(String(cur.resend_domain_id));
     } catch (e) {
       // Park an authored note on the card (the UI's failed/pending panel renders
       // lastError) — never provider text. Best-effort: the response already says it.
@@ -3090,13 +3118,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         email_last_error: "The verification check couldn't run — try again in a few minutes.",
         updated_at: new Date().toISOString(),
       }).eq("client_id", clientId);
-      return pmFail(req, clientId, "check your domain's DNS records", e);
+      return rsFail(req, clientId, "check your domain's DNS records", e);
     }
 
-    // "Verified" means BOTH records (postmark.ts: DKIM alone leaks the provider's return
+    // "Verified" is the domain-level status, never a per-record AND (resend.ts: DKIM alone leaks the provider's return
     // path into customer-visible headers). A check that simply finds the records absent
     // is NOT an error — the per-record flags refresh and the status stays pending.
-    const verified = d.dkimVerified && d.returnPathVerified;
+    const verified = rsDomainVerified(d);
     const dnsRecords = dnsRecordsOf(d);
     const domainStatus = verified ? "verified" : "pending";
     const { error: upErr } = await admin.from("client_settings").update({
@@ -3123,7 +3151,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: "Verify your domain's DNS records before turning this on." }, 409);
     }
     const { error: upErr } = await admin.from("client_settings").update({
-      email_provider: enabled ? "postmark" : "ghl",
+      email_provider: enabled ? "resend" : "ghl",
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your email sending switch", upErr);
@@ -3138,7 +3166,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("email_provider, email_domain_status, email_domain, email_from_local, business_name")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
-    if (cur?.email_domain_status !== "verified" || cur?.email_provider !== "postmark") {
+    if (cur?.email_domain_status !== "verified" || cur?.email_provider !== "resend") {
       return json({ error: "Verify your domain and turn sending on before sending a test email." }, 409);
     }
     const fromLocal = (typeof cur.email_from_local === "string" && cur.email_from_local.trim()) || "info";
@@ -3161,21 +3189,21 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   if (action === "email_disconnect") {
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("postmark_domain_id")
+      .from("client_settings").select("resend_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
-    if (cur?.postmark_domain_id) {
+    if (cur?.resend_domain_id) {
       // Best-effort on the provider side: whatever happens there, the tenant's OWN reset
       // below must land — a stuck provider must not trap a tenant on a domain they are
       // trying to leave. An orphaned provider domain is inert (nothing sends from it once
       // email_provider is back on 'ghl') and shows in the provider dashboard for cleanup.
       try {
-        await pmDeleteDomain(Number(cur.postmark_domain_id));
+        await rsDeleteDomain(String(cur.resend_domain_id));
       } catch (e) {
         logEdgeError({
           fn: "portal-settings", req, clientId, code: "email_disconnect_provider",
-          message: `provider domain delete failed (id ${cur.postmark_domain_id}): ${
-            e instanceof PostmarkApiError ? `postmark ${e.status}/${e.errorCode}` : String((e as Error)?.message ?? e)
+          message: `provider domain delete failed (id ${cur.resend_domain_id}): ${
+            e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
           }`,
         }).catch(() => {});
       }
@@ -3186,7 +3214,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       email_from_local: "info",
       email_from_name: null,
       email_provider: "ghl",
-      postmark_domain_id: null,
+      resend_domain_id: null,
       email_domain_status: "not_configured",
       email_dns_records: null,
       email_verified_at: null,
@@ -3254,7 +3282,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { data: cur, error: curErr } = await admin
       .from("client_settings")
       // email_* + business_* ride along for the own-domain email branch below — the
-      // Postmark-active check and the branded invoice email's identity fields.
+      // Resend-active check and the branded invoice email's identity fields.
       .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
@@ -3286,7 +3314,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     };
     const STALE_CLAIM_MS = 3 * 60 * 1000;
 
-    // ── Own-domain email branch (Postmark-active tenants) ────────────────────────
+    // ── Own-domain email branch (Resend-active tenants) ────────────────────────
     // When the tenant has flipped the provider AND verified their domain AND the hosted
     // invoice link is buildable AND we know the customer's address, the GHL send call
     // flips to action:"send_manually" — GHL marks the invoice sent (hosted page live,
@@ -3298,15 +3326,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // action:"email" GHL send unchanged, so an email problem can never strand a sent
     // invoice. email_sends rows are additional telemetry — the invoice_sends claim
     // machinery above stays untouched and authoritative for convert-idempotency.
-    const pmActive = postmarkConfigured() &&
-      cur.email_provider === "postmark" && cur.email_domain_status === "verified";
+    const rsActive = resendConfigured() &&
+      cur.email_provider === "resend" && cur.email_domain_status === "verified";
     const tryOwnDomainEmail = async (
       invId: string,
       invNumber: string | null,
       senderUserId: string,
       knownTotal: number | null,
     ): Promise<boolean> => {
-      if (!pmActive) return false;
+      if (!rsActive) return false;
       const hosted = invoiceUrl(invId);
       if (!hosted) return false;
       // The customer's address, read ONLY here: the design select above deliberately
@@ -3491,7 +3519,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
       // Own-domain branch first here too — the recovery is only ever about the EMAIL
       //  (the invoice already exists), so the same rule applies: our branded send when the
-      //  tenant is Postmark-active, the stock GHL email as the unchanged fallback.
+      //  tenant is Resend-active, the stock GHL email as the unchanged fallback.
       const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, null);
       if (!ownDomainSent) {
         const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {

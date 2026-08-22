@@ -553,3 +553,99 @@ Deno.test("tags are sanitized to Resend's charset — the send survives a dotted
     teardown();
   }
 });
+
+// ── Regression: the ZONE-APEX-relative record names Resend actually returns ──────────
+//
+// ⚠️ The UNVERIFIED_DOMAIN fixture above models a sending domain of mail.example.com whose
+// records come back as "send" and "resend._domainkey" — i.e. relative to the SENDING
+// DOMAIN. That was an assumption, and it is WRONG. A real create-domain call for
+// mail.structurestudiosuite.com on 2026-08-21 returned "send.mail" and
+// "resend._domainkey.mail" — relative to the ZONE APEX, which is what a DNS panel's Name
+// field wants.
+//
+// The distinction is invisible on a root domain (no overlap to strip) and only bites on a
+// SUBDOMAIN — which is both what our own platform domain is and what Resend explicitly
+// recommends builders use. Under the original toFqdn this produced
+// "resend._domainkey.mail.mail.structurestudiosuite.com": a doubled label, and a record the
+// tenant would dutifully paste at the wrong node.
+//
+// This fixture is copied from that live response. Do not "simplify" it back to relative
+// names — the doubling is exactly what it exists to catch.
+const REAL_SUBDOMAIN_DOMAIN = {
+  object: "domain",
+  id: "89addcb7-d5cc-4ef6-a0ba-572543d8c849",
+  name: "mail.structurestudiosuite.com",
+  status: "not_started",
+  records: [
+    {
+      record: "DKIM",
+      name: "resend._domainkey.mail",
+      value: "p=REALKEY",
+      type: "TXT",
+      status: "not_started",
+    },
+    {
+      record: "SPF",
+      name: "send.mail",
+      type: "MX",
+      status: "not_started",
+      value: "feedback-smtp.us-east-1.amazonses.com",
+      priority: 10,
+    },
+    {
+      record: "SPF",
+      name: "send.mail",
+      value: "v=spf1 include:amazonses.com ~all",
+      type: "TXT",
+      status: "not_started",
+    },
+  ],
+};
+
+Deno.test("a SUBDOMAIN sending domain does not double its label (live-captured shape)", async () => {
+  setup();
+  try {
+    stub(() => jsonResponse(REAL_SUBDOMAIN_DOMAIN));
+    const d = await rsGetDomain("89addcb7-d5cc-4ef6-a0ba-572543d8c849");
+
+    const [dkim, mx, spf] = d.records;
+    assertEquals(
+      dkim.fqdn,
+      "resend._domainkey.mail.structurestudiosuite.com",
+      "the 'mail' label must appear ONCE, not twice",
+    );
+    assertEquals(mx.fqdn, "send.mail.structurestudiosuite.com");
+    assertEquals(spf.fqdn, "send.mail.structurestudiosuite.com");
+    assertEquals(mx.priority, 10, "an MX without its priority cannot be created");
+
+    // The relative name is preserved untouched: a DNS panel's Name field wants it, and only
+    // the fqdn is derived.
+    assertEquals(dkim.host, "resend._domainkey.mail");
+    assertEquals(mx.host, "send.mail");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a ROOT sending domain is unaffected by the overlap strip", async () => {
+  setup();
+  try {
+    stub(() =>
+      jsonResponse({
+        object: "domain",
+        id: "root-1",
+        name: "juniorbarns.com",
+        status: "not_started",
+        records: [
+          { record: "DKIM", name: "resend._domainkey", value: "p=K", type: "TXT", status: "not_started" },
+          { record: "SPF", name: "send", value: "v=spf1 include:amazonses.com ~all", type: "TXT", status: "not_started" },
+        ],
+      })
+    );
+    const d = await rsGetDomain("root-1");
+    assertEquals(d.records[0].fqdn, "resend._domainkey.juniorbarns.com");
+    assertEquals(d.records[1].fqdn, "send.juniorbarns.com");
+  } finally {
+    teardown();
+  }
+});
