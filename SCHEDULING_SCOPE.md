@@ -44,10 +44,11 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
     "`<Style> <Size>`" string, so stripping `parseSize`'s shape leaves the style — no
     migration and, unlike a real column, no backfill. Assumes no tenant names a style
     containing `number x number`. If that ever breaks, add the column; don't patch the regex.
-21. **Calendar detail lives in ONE full-width panel below the grid**, week and month alike —
-    a day column is a hard-coded 218px and a month cell narrower still, so the form had
-    nowhere to go. It is inline, not a modal, so decision 6 (no popouts) still holds. Month
-    view no longer navigates away to show detail; "Open that week" is an explicit control.
+21. **Calendar detail is a MODAL** — ~~one full-width panel below the grid~~ **superseded
+    within the day by decision 24 below.** The problem it solves is unchanged: a day column
+    is a hard-coded 218px and a month cell narrower still, so the form had nowhere to go and
+    its right-hand fields ran off the card. Month view no longer navigates away to show
+    detail; "Open that week" is an explicit control (month only).
 22. **Month view is a first-class scheduling surface**: pills drag (the day cells were
     already drop targets — it was half a loop), and read two lines, building first per
     decision 14.
@@ -66,6 +67,24 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
       revenue, where Orders is operator-only and Billing is owner-granted. If that should
       ever change, the hook is one condition on the header plus the `access` prop the tab
       already receives — no migration is stranded by shipping it open.
+
+24. ⚠️ **DECISION 6 IS REVERSED FOR THE CALENDAR: the job detail is a popup.** Carolyn, same
+    day, after using the panel from 21: *"I don't really like the edit field being below the
+    calendars. I think it needs to be a popup screen."* So the calendar's job detail is now a
+    **modal** — centred card, backdrop, closes on ×, Escape, or a click outside — built on
+    the same shell `SchedStageEditor` already uses.
+
+    **Read this before "fixing" it back.** Decision 6 says "Everything at face value — no
+    popouts… detail drawers/modals for job info are out", and that rule is still in this
+    document above. It was set by Carolyn and it has now been narrowed by Carolyn, so the
+    scope is exactly:
+    - **Calendar (week + month): a modal.** The 218px day column could never hold the form;
+      the inline panel fixed the clipping but she did not want the reading order.
+    - **Board and Table: still expand in place.** Their rows are wide enough and she was
+      pointing at the calendar. Do not "make them consistent" without asking her.
+
+    Decision 6 still governs the *card and row faces* — sizes, dates, phones, colours, build
+    status all stay on the face, and no detail lives only behind a click.
 
 Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
 never disabled, and left a stale banner up — so on an unchanged board the screen was

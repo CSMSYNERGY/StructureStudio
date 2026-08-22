@@ -340,6 +340,15 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const t = setTimeout(() => setRefreshedAt(0), 4000);
     return () => clearTimeout(t);
   }, [refreshedAt]);
+  // Escape closes the job modal. Bound only while one is open, and only in calendar view —
+  // the Board and Table views expand in place, where Escape closing a row would be a
+  // surprise. Also skipped while the stage editor is up, so Escape closes the topmost thing.
+  useEffect(() => {
+    if (!expandedId || view !== "calendar" || editingStages) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setExpandedId(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expandedId, view, editingStages]);
 
   const stages = (data && data.stages) || [];
   const jobs = (data && data.jobs) || [];
@@ -567,34 +576,48 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       </div>
     );
   };
-  // The full-width detail panel — one instance, under whichever calendar grid is showing.
+  // The calendar's job detail — a MODAL (Carolyn 2026-08-21: "I don't really like the edit
+  // field being below the calendars. I think it needs to be a popup screen."). This is a
+  // deliberate reversal of SCHEDULING_SCOPE.md decision 6 ("no popouts") for the CALENDAR
+  // only, made by the person who set that rule; the recorded reversal is decision 24. The
+  // Board and Table views still expand in place — their rows are wide enough, and she was
+  // pointing at the calendar.
+  //
   // Keyed on updated_at so a Refresh (or any save) REMOUNTS it: SchedJobEditor seeds its form
   // state from the job prop once, and React keeps that state across re-renders, so without
   // the key an open card kept showing pre-refresh values. Remounting also re-reads the
   // history, which had the same staleness for the same reason.
-  const detailPanel = () => {
+  const detailModal = () => {
     const job = jobs.find((j) => j.id === expandedId);
     if (!job) return null;
+    const close = () => setExpandedId(null);
     return (
-      <div style={{ marginTop: 12, border: "1px solid #C3D9F7", borderRadius: 12, background: "#FFF", padding: "11px 13px", boxShadow: "0 1px 3px rgba(15,23,42,.08)" }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap", marginBottom: 2 }}>
-          <span style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B" }}>
-            {job.building_label || job.title || (job.source === "repair" ? "Repair" : "Job")}
-          </span>
-          {job.serial != null && <span style={{ fontSize: 11.5, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>#{job.serial}</span>}
-          {job.customer_name && <span style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>{job.customer_name}</span>}
-          {/* Month view used to jump to the week on click; that navigation is now an explicit
-              control instead of a side effect of opening a card. */}
-          {calView === "month" && schedBuildDate(job) && (
-            <button type="button" onClick={() => { setCursorMs(schedLocalDate(schedBuildDate(job)).getTime()); setCalView("week"); }}
-              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11.5 }}>Open that week</button>
-          )}
-          <button type="button" onClick={() => setExpandedId(null)} aria-label="Close details"
-            style={{ ...S.btn("#F1F5F9", "#475569"), marginLeft: "auto", padding: "4px 11px", fontSize: 11.5 }}>Close</button>
+      <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.38)", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+        onClick={close} role="dialog" aria-modal="true" aria-label="Job details">
+        <div style={{ background: "#FFF", borderRadius: 14, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto", padding: "16px 20px 18px", boxShadow: "0 18px 44px rgba(15,23,42,.28)" }}
+          onClick={(e) => e.stopPropagation()}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap", marginBottom: 4 }}>
+            <span style={{ fontSize: 15, fontWeight: 800, color: "#1E293B" }}>
+              {job.building_label || job.title || (job.source === "repair" ? "Repair" : "Job")}
+            </span>
+            {job.serial != null && <span style={{ fontSize: 12, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>#{job.serial}</span>}
+            {job.customer_name && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#475569" }}>{job.customer_name}</span>}
+            {schedBuildDate(job) && (
+              <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{fmtDate(schedLocalDate(schedBuildDate(job)))}</span>
+            )}
+            {/* Month view used to jump to the week on click; that navigation is an explicit
+                control rather than a side effect of opening a card. */}
+            {calView === "month" && schedBuildDate(job) && (
+              <button type="button" onClick={() => { setCursorMs(schedLocalDate(schedBuildDate(job)).getTime()); setCalView("week"); close(); }}
+                style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11.5 }}>Open that week</button>
+            )}
+            <button type="button" onClick={close} aria-label="Close details"
+              style={{ ...S.btn("#F1F5F9", "#64748B"), marginLeft: "auto", padding: "4px 11px" }}>×</button>
+          </div>
+          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+            onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
+            onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
         </div>
-        <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
-          onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-          onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
       </div>
     );
   };
@@ -1170,9 +1193,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             {/* The one detail panel, full width, under whichever grid is showing — week and
                 month alike. Neither a 218px day column nor a 150px month cell can hold the
                 form, and it stays inline rather than becoming a popout. */}
-            {detailPanel()}
+            {detailModal()}
             <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
-              One build date per card — dropping a card on a day IS the reschedule, in week and month view alike. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a card to open its details below the calendar. Each day shows what is scheduled for it; a <strong>*</strong> or "no total" means some jobs on that day have no price yet and are not in the figure. Rescheduling from the calendar is admin-only.
+              One build date per card — dropping a card on a day IS the reschedule, in week and month view alike. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a card to open its details; Esc or a click outside closes it. Each day shows what is scheduled for it; a <strong>*</strong> or "no total" means some jobs on that day have no price yet and are not in the figure. Rescheduling from the calendar is admin-only.
             </p>
           </div>
         );
