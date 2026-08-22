@@ -110,18 +110,20 @@ function SchedJobHistory({ jobId, refreshKey = 0 }) {
 // linked role may move a card" — which was true under the old STAFF tier and is not true
 // now: move_job and add_note both require build_schedule:'edit', so a view-only member was
 // being offered two controls the server refuses.
-function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComplete, onDelete, onMove, onNote, onOpenDesign }) {
+function SchedJobEditor({ job, stages, crews = [], canEdit, busy, error, onSave, onComplete, onDelete, onOpenDesign }) {
   // ONE build date (Carolyn 2026-08-04: most builds finish within a day). It writes both
   // date columns so every existing check (past due, delivery conflicts, pool) keys off it.
+  //
+  // ONE SAVE, and it closes (Carolyn 2026-08-22: "we need it to be a one and done save and
+  // when we click saved the popup should close"). The stage dropdown and the crew note used
+  // to be separate immediate writes — three ways to change a job, two of which gave no hint
+  // they had already committed. They are form state now; Save commits all of it.
   const [f, setF] = useState({
     title: job.title || "", customerName: job.customer_name || "", buildingLabel: job.building_label || "",
     buildDate: job.due_date || job.scheduled_start || "",
     crewId: job.crew_id || "", notes: job.notes || "",
+    stageId: job.stage_id || "", note: "",
   });
-  const [note, setNote] = useState("");
-  // Bumped after a note lands so the history below re-reads it — the note is stored as an
-  // activity row, so without this the writer sees nothing happen.
-  const [historyKey, setHistoryKey] = useState(0);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
@@ -145,14 +147,32 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComp
               {crews.filter((c) => c.active !== false || c.id === job.crew_id).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
-          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
+          {/* The two note fields do DIFFERENT things, and the old labels ("Job notes" /
+              "Add a note for the crew…") did not say so — Carolyn asked what the difference
+              was, which is the label's fault, not hers. THIS one is a single editable field
+              on the job that renders on the card; saving replaces it. */}
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Stage</span>
+            <select style={inp} value={f.stageId} onChange={set("stageId")} aria-label="Stage">
+              {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Note on the card</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Standing note — shows on the card until you change it" /></div>
+          {/* …and THIS one appends a timestamped, attributed line to the history below. It
+              never appears on the card and cannot be edited afterwards. */}
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Add to history</span><input style={inp} value={f.note} onChange={set("note")} placeholder="Logged with your name and the date — not shown on the card" /></div>
         </div>
+        {error && (
+          <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "7px 10px", color: "#DC2626", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{error}</div>
+        )}
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
+          {/* ONE Save: fields, stage and the history line all commit together, then the
+              popup closes. Nothing here writes before you press it. */}
           <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={() => onSave({
             customerName: f.customerName, buildingLabel: f.buildingLabel, title: f.title,
             scheduledStart: f.buildDate || null, dueDate: f.buildDate || null,
             crewId: f.crewId || null, notes: f.notes,
-          })}>Save</button>
+            stageId: f.stageId || null, note: f.note,
+          })}>{busy ? "Saving…" : "Save"}</button>
           <button type="button" disabled={busy} style={S.btn("#F0FDF4", "#15803D")} onClick={onComplete}>✓ Mark built</button>
           {job.design_short_code && onOpenDesign && (
             <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => onOpenDesign(job.design_short_code)}>Open design</button>
@@ -164,25 +184,10 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComp
           <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), marginLeft: "auto" }} onClick={onDelete}>Remove</button>
         </div>
       </>)}
-      {/* Stage move without drag — the touch/keyboard path, and the crew path on phones. */}
-      {canEdit && (
-        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          <select style={{ ...inp, width: "auto", maxWidth: "100%" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
-            {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          <input style={{ ...inp, flex: "1 1 100px", minWidth: 0 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
-          <button type="button" disabled={busy || !note.trim()} style={S.btn("#F1F5F9", "#334155")}
-            onClick={async () => {
-              if (!note.trim()) return;
-              await onNote(note.trim());
-              setNote(""); setHistoryKey((k) => k + 1);
-            }}>Add note</button>
-        </div>
-      )}
       {/* History — every move, note and completion, with who and when. This is the read side
           of schedule_activity, which the edge function has always written and nothing ever
           showed: a crew note went into the log and vanished from the screen. */}
-      <SchedJobHistory jobId={job.id} refreshKey={historyKey} />
+      <SchedJobHistory jobId={job.id} />
     </div>
   );
 }
@@ -289,6 +294,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // looked dead. `refreshedAt` drives a short-lived "Updated just now" note.
   const [refreshing, setRefreshing] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState(0);
+  // A failed save has to report itself INSIDE the editor: the tab's `msg` banner sits behind
+  // the modal overlay, so an error there is invisible exactly when it matters.
+  const [saveErr, setSaveErr] = useState(null);
   const [msg, setMsg] = useState(null);          // { ok } | { err }
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
@@ -310,9 +318,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   };
   const load = useCallback(async () => {
     setError(null);
-    // Clear the banner too, not just the error. A stale "Saved."/"That didn't work." sitting
-    // above the board through a refresh is itself evidence that nothing happened.
-    setMsg(null);
+    // Deliberately does NOT clear `msg`. It used to, to kill a stale banner across a
+    // Refresh — but EVERY mutation here ends with load(), so clearing it here wiped the
+    // "Saved." / "marked built" / "added to the board" toast each of them had just set, a
+    // second before the user could read it. The refresh path clears the banner itself now.
     const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body: { action: "build_board" } });
     if (err || !d || d.error) {
       setError((d && d.error) || (err ? await fnError(err) : "Could not load the build schedule."));
@@ -328,6 +337,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // let a double-click fire two concurrent fetches.
   const refresh = async () => {
     if (refreshing) return;
+    // Clearing the banner is the REFRESH's job, not load()'s: a stale "Saved." sitting above
+    // the board through a refresh is itself evidence that nothing happened.
+    setMsg(null);
     setRefreshing(true);
     await load();
     setRefreshing(false);
@@ -340,6 +352,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const t = setTimeout(() => setRefreshedAt(0), 4000);
     return () => clearTimeout(t);
   }, [refreshedAt]);
+  // A save error belongs to the job that failed — opening a different card, or closing and
+  // reopening, must not greet you with the last one's message.
+  useEffect(() => { setSaveErr(null); }, [expandedId]);
   // Escape closes the job modal. Bound only while one is open, and only in calendar view —
   // the Board and Table views expand in place, where Escape closing a row would be a
   // surprise. Also skipped while the stage editor is up, so Escape closes the topmost thing.
@@ -429,10 +444,29 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     setBusy(false);
     if (r) { setManual({ title: "", customerName: "", dueDate: "" }); setAddOpen(false); load(); }
   };
+  // ONE save (Carolyn 2026-08-22). The editor no longer writes the stage or the history line
+  // as you touch them — they arrive here with the fields and commit together, then the popup
+  // closes. Three server actions, in the order that leaves the least mess if one fails:
+  // fields, then the stage move, then the append-only history line.
+  //
+  // On failure the popup STAYS OPEN carrying the error, because the tab's own banner renders
+  // *behind* the modal overlay — closing on a failure would drop her edits and show the
+  // reason somewhere she can't see it. `load()` runs either way so the screen reflects what
+  // actually landed rather than what was typed.
   const saveJob = async (job, patch) => {
-    setBusy(true); setMsg(null);
-    const r = await call({ action: "update_job", jobId: job.id, ...patch }, "Saved.");
-    setBusy(false); if (r) load();
+    const { stageId, note, ...fields } = patch;
+    setBusy(true); setMsg(null); setSaveErr(null);
+    let r = await call({ action: "update_job", jobId: job.id, ...fields });
+    if (r && stageId && stageId !== job.stage_id) {
+      r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+    }
+    if (r && note && note.trim()) {
+      r = await call({ action: "add_note", jobId: job.id, note: note.trim() });
+    }
+    setBusy(false);
+    if (r) { setMsg({ ok: "Saved." }); setExpandedId(null); }
+    else setSaveErr("That didn't save. Nothing was closed — check the fields and try again.");
+    load();
   };
   const completeJob = async (job) => {
     setBusy(true); setMsg(null);
@@ -457,11 +491,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const r = await call({ action: "delete_job", jobId: job.id }, "Removed from the board.");
     setBusy(false); if (r) { setExpandedId(null); load(); }
   };
-  const addNote = async (job, text) => {
-    setBusy(true); setMsg(null);
-    await call({ action: "add_note", jobId: job.id, note: text }, "Note added.");
-    setBusy(false);
-  };
+  // (addNote used to live here. The history line is part of the ONE save now, so saveJob
+  // calls `add_note` itself and a second entry point would just be a way for the two to
+  // drift.)
   const saveStages = async (rows) => {
     setBusy(true); setMsg(null);
     const r = await call({ action: "save_stages", stages: rows.map((x) => ({ id: x.id, name: x.name, color: x.color, kind: x.kind, archived: x.archived })) }, "Stages saved.");
@@ -569,9 +601,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             no-popouts rule (SCHEDULING_SCOPE.md decision 6) still holds. The BOARD keeps
             expanding in place — its columns are wide enough. */}
         {open && !opts.detailInPanel && (
-          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
             onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-            onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
+            onOpenDesign={onOpenDesign} />
         )}
       </div>
     );
@@ -601,7 +633,11 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
               {job.building_label || job.title || (job.source === "repair" ? "Repair" : "Job")}
             </span>
             {job.serial != null && <span style={{ fontSize: 12, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>#{job.serial}</span>}
-            {job.customer_name && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#475569" }}>{job.customer_name}</span>}
+            {/* The customer reads nearly as large and as heavy as the building (Carolyn
+                2026-08-22) — 14/800 against the building's 15/800. Still a step down, so the
+                building keeps the headline that decision 14 gives it, but the name is no
+                longer the smallest thing on the row. */}
+            {job.customer_name && <span style={{ fontSize: 14, fontWeight: 800, color: "#334155" }}>{job.customer_name}</span>}
             {schedBuildDate(job) && (
               <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{fmtDate(schedLocalDate(schedBuildDate(job)))}</span>
             )}
@@ -614,9 +650,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             <button type="button" onClick={close} aria-label="Close details"
               style={{ ...S.btn("#F1F5F9", "#64748B"), marginLeft: "auto", padding: "4px 11px" }}>×</button>
           </div>
-          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
             onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-            onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
+            onOpenDesign={onOpenDesign} />
         </div>
       </div>
     );
@@ -645,9 +681,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         </tr>
         {open && (
           <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
-            <SchedJobEditor key={schedEditorKey(j)} job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
+            <SchedJobEditor key={schedEditorKey(j)} job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
               onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
-              onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
+              onOpenDesign={onOpenDesign} />
           </td></tr>
         )}
       </React.Fragment>
