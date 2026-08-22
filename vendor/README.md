@@ -1,7 +1,12 @@
-# vendor/ — the four browser dependencies, self-hosted
+# vendor/ — the browser dependencies, self-hosted
 
-`index.html`, `portal.html` and `admin.html` load these four files and nothing else. There is no
-build step, so they are the whole dependency graph of the product's front end.
+`index.html`, `portal.html` and `admin.html` load **three** of these files (React, ReactDOM,
+supabase-js) and nothing else from here. **`babel-standalone-7.23.9.min.js` is no longer served
+to visitors (2026-08-13): it is the OFFLINE COMPILER** — `scripts/compile.mjs` loads it in Node
+with the exact options its in-browser script-tag runner used, and compiles the `.jsx` app
+sources into the committed `*.compiled.js` artifacts (`npm run compile`). **Do not delete it**,
+and know that bumping it now changes compiled output: a Babel bump requires a full recompile
+plus the render-parity re-verification described in CLAUDE.md's "Compiled artifacts" section.
 
 ## Why they are here and not on a CDN
 

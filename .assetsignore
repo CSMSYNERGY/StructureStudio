@@ -4,8 +4,8 @@
 # referenced by the app at runtime (grep-verified), and edge-function source,
 # internal docs, and repo tooling do not belong on a public web host.
 #
-# _redirects is deliberately NOT listed: it must upload so the platform parses it,
-# and Cloudflare never serves it publicly.
+# _redirects and _headers are deliberately NOT listed: they must upload so the
+# platform parses them, and Cloudflare never serves either publicly.
 node_modules
 .git
 .gitattributes
@@ -17,17 +17,35 @@ node_modules
 .wrangler
 supabase
 scripts
+# dev/ is the scan-fixture tooling. Both harnesses run against a LOCAL
+# `python -m http.server` (dev/scan-fixtures/README.md), and their .glb fixtures
+# are gitignored, so a deployed copy couldn't even run — nothing needs it served.
+dev
 package.json
 package-lock.json
 deno.lock
 README.md
 CLAUDE.md
 SCHEDULING_SCOPE.md
+# These two postdate the lines above and were serving 200 from every product host
+# (caught 2026-08-20; they name the pilot tenant and internal call links).
+# vendor/README.md is the one internal doc inside a directory that must upload.
+INTERIOR_SCOPE.md
+STRUCTURESTUDIO_3D_PLAN.md
+vendor/README.md
 wrangler.jsonc
 wrangler.beta.jsonc
 .assetsignore
-# Dev-only source mirrors — the browser loads structure-studio.component.js; these
-# two are never fetched at runtime (FeedbackWidget import removed 2026-07-26).
+# Dev-only source mirrors — the browser loads the COMPILED artifacts; these are
+# never fetched at runtime (FeedbackWidget import removed 2026-07-26; the per-page
+# .jsx app sources compile to *.compiled.js via `npm run compile`, 2026-08-13).
+# structure-studio.component.js stays SERVED on purpose: dev/scan-fixtures'
+# measure-shipped.html slices the scan functions out of it, and the artifact
+# drift gate proves it compiles byte-exactly into what customers run.
 StructureStudio.jsx
 FeedbackWidget.jsx
+index.mount.jsx
+portal/
+admin.app.jsx
+wrangler.beta2.jsonc
 # First Workers Builds trigger: 2026-08-05 (deploy-freshness verification)

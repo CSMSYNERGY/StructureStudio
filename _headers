@@ -1,0 +1,32 @@
+# Parsed by Cloudflare Workers static assets (same format as _redirects — the platform
+# reads it, never serves it; .assetsignore documents why neither file is listed there).
+# Conservative additions ONLY: every header below is safe for every path it matches.
+# There is deliberately NO Content-Security-Policy here — the pages load vendored
+# scripts, Supabase, esm.sh (three.js), and tenant integrations, and a CSP written
+# without a full inventory of those origins would blank real customer traffic.
+#
+# Rules match the REQUESTED path, before _redirects rewrites — so the pretty routes
+# (/admin, /portal, /portal/*) need their own rules alongside the .html filenames.
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# index.html (the public designer) is deliberately NOT frame-blocked: tenant host
+# pages embed it, and the origin-gated postMessage listener in index.mount.jsx
+# ("structureConfig" via ssAllowedOrigin) exists precisely for pages that frame the
+# designer. An X-Frame-Options on / would blank every tenant embed — do not add one.
+
+# The portal and the operator console have no framing use left: the Admin-in-portal
+# iframe is gone (native since 2026-07-30 — see portal/01-core.jsx, "ADMIN_URL is
+# gone"), and admin.html survives only as the standalone break-glass route.
+/admin
+  X-Frame-Options: DENY
+/admin.html
+  X-Frame-Options: DENY
+/portal
+  X-Frame-Options: DENY
+/portal.html
+  X-Frame-Options: DENY
+/portal/*
+  X-Frame-Options: DENY

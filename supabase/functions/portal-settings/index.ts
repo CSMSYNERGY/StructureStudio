@@ -8,12 +8,13 @@ import { pushQboInvoice } from "../_shared/qboInvoice.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
-  pmCreateDomain, pmDeleteDomain, pmGetDomain, pmVerifyDomain,
-  postmarkConfigured, PostmarkApiError, PostmarkNotConfigured, type PmDomain,
-} from "../_shared/postmark.ts";
+  rsCreateDomain, rsDeleteDomain, rsGetDomain, rsVerifyDomain, rsDomainVerified,
+  resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
+} from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -49,6 +50,20 @@ const GATES: GateTable = {
   reorder_styles:            { area: "settings_structures", level: "edit" },
   set_style_active:          { area: "settings_structures", level: "edit" },
   set_style_estimate_image:  { area: "settings_structures", level: "edit" },
+
+  // ── Per-style 3D appearance (the `d3` spec, photos and phone-scan model) ──
+  // Grafted from beta-2.0 in the 3D merge. These write `building_styles.d3` /
+  // `.d3_photos` / `model_*`, which `get_config` emits to every ANON browser, so they are
+  // structure edits and gate exactly like every other style writer above. They arrived
+  // with no GATES lines at all: the dispatcher fails closed, so they would have 403'd on
+  // a real builder rather than shipping open -- and preflight's cross-check is what named
+  // them here instead of letting that surface as "the 3D calibration button is broken".
+  save_style_d3:             { area: "settings_structures", level: "edit" },
+  calibrate_style_ai:        { area: "settings_structures", level: "edit" },
+  upload_style_photo:        { area: "settings_structures", level: "edit" },
+  save_style_model:          { area: "settings_structures", level: "edit" },
+  set_style_model_status:    { area: "settings_structures", level: "edit" },
+  style_model_url:           { area: "settings_structures", level: "edit" },
 
   // ── Options & colours ────────────────────────────────────────────────────
   save_colors:                    { area: "settings_options", level: "edit" },
@@ -102,7 +117,7 @@ const GATES: GateTable = {
   retry_qbo_push:  { area: "settings_quickbooks", level: "edit" },
 
   // ── Email sending (Settings → Email Sending) ─────────────────────────────
-  // Own-domain estimate/invoice email (Postmark-backed). The area is admin-preset only
+  // Own-domain estimate/invoice email (Resend-backed). The area is admin-preset only
   // (deny-by-default for every staff title — intended: connecting a domain changes what
   // every customer-facing email looks like).
   email_status:         { area: "settings_email", level: "view" },
@@ -217,41 +232,54 @@ function maskId(v: string | null): string | null {
 
 // ── Email sending helpers ───────────────────────────────────────────────────────
 // The Settings → Email DNS table's rows, snapshotted onto client_settings.email_dns_records
-// so email_status can render without a Postmark round trip. Shape is the EmailSendingView
-// contract: [{type, host, value, verified}] — DKIM is the TXT record, Return-Path the CNAME.
-function dnsRecordsOf(d: PmDomain): { type: string; host: string; value: string; verified: boolean }[] {
-  const rows = [
-    { type: "TXT", host: d.dkimHost, value: d.dkimValue, verified: d.dkimVerified },
-    { type: "CNAME", host: d.returnPathHost, value: d.returnPathValue, verified: d.returnPathVerified },
-  ];
-  // A row with no host is a shape we can't render or copy — drop it rather than showing
-  // an empty record a tenant would dutifully paste into their DNS.
-  return rows.filter((r) => r.host && r.value);
+// so email_status can render without a Resend round trip. Shape is the EmailSendingView
+// contract: [{type, host, value, verified}] plus an optional MX priority. Resend's set is DKIM TXT + SPF TXT + SPF MX.
+type DnsRow = { type: string; host: string; value: string; verified: boolean; priority?: number };
+function dnsRecordsOf(d: RsDomain): DnsRow[] {
+  // Resend returns a VARIABLE list (today: DKIM TXT + SPF TXT + SPF MX), not a fixed pair,
+  // so this maps rather than hand-builds. resend.ts already normalised the shape.
+  //
+  // USE r.fqdn, NEVER r.host: Resend's name is relative to the ZONE APEX ("send.mail"), so a
+  // UI rendering it verbatim hands the tenant a record that lands at the wrong node.
+  //
+  // priority is carried because an MX WITHOUT one cannot be created — dropping it would hand
+  // the tenant a record their DNS panel refuses.
+  return d.records
+    .map((r) => ({
+      type: r.type,
+      host: r.fqdn,
+      value: r.value,
+      verified: r.verified,
+      ...(r.priority != null ? { priority: r.priority } : {}),
+    }))
+    // A row with no host is a shape we can't render or copy — drop it rather than showing
+    // an empty record a tenant would dutifully paste into their DNS.
+    .filter((r) => r.host && r.value);
 }
 
 /**
- * A Postmark call failed. Two authored outcomes, never a 500 and never provider text:
- *   - PostmarkNotConfigured is the platform-not-ready state, not an incident — the tenant
+ * A Resend call failed. Two authored outcomes, never a 500 and never provider text:
+ *   - ResendNotConfigured is the platform-not-ready state, not an incident — the tenant
  *     gets the same friendly sentence the platformReady:false card shows.
- *   - PostmarkApiError carries only enum-ish fields by construction (postmark.ts strips
+ *   - ResendApiError carries only enum-ish fields by construction (resend.ts strips
  *     the provider Message because it can echo recipient addresses). The status/errorCode
  *     go to app_errors under the same `where` label the caller is shown — dbFail's
  *     correlation posture applied to a third-party API.
  */
-function pmFail(req: Request, clientId: string | null, where: string, e: unknown) {
-  if (e instanceof PostmarkNotConfigured) {
+function rsFail(req: Request, clientId: string | null, where: string, e: unknown) {
+  if (e instanceof ResendNotConfigured) {
     return json({ error: "Email sending isn't available yet — it's still being set up. Please try again later." }, 503);
   }
-  const detail = e instanceof PostmarkApiError
-    ? `postmark ${e.status}/${e.errorCode}${e.permanent ? " permanent" : ""}`
+  const detail = e instanceof ResendApiError
+    ? `resend ${e.status}/${e.name_ || "unknown"}${e.permanent ? " permanent" : ""}`
     : String((e as Error)?.message ?? e ?? "unknown error").slice(0, 300);
   logEdgeError({
     fn: "portal-settings",
     req,
     clientId,
-    code: e instanceof PostmarkApiError ? e.status || 502 : 502,
+    code: e instanceof ResendApiError ? e.status || 502 : 502,
     message: `${where}: ${detail}`,
-    context: { where, postmarkErrorCode: e instanceof PostmarkApiError ? e.errorCode : null },
+    context: { where, resendErrorName: e instanceof ResendApiError ? e.name_ : null },
   }).catch(() => {});
   return json({
     error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
@@ -743,7 +771,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
       catch { return json({ error: "Invalid logo data." }, 400); }
       if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
-      const path = `${clientId}/logo-${Date.now()}.${ext}`;
+      const path = `${clientId}/logo-${crypto.randomUUID()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
       if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -773,7 +801,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     catch { return json({ error: "Invalid logo data." }, 400); }
     if (bytes.length > 2_000_000) return json({ error: "Logo too large (max 2MB)." }, 400);
     const prefix = payload.kind === "business" ? "biz-logo" : "logo";
-    const path = `${clientId}/${prefix}-${Date.now()}.${ext}`;
+    const path = `${clientId}/${prefix}-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return dbFail(req, clientId, "upload that logo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -784,7 +812,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate").eq("client_id", clientId).order("sort_order"),
+      // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
+      // styles are calibrated and the editor can reopen one for tuning.
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -810,7 +840,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings });
+    // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
+    // builder click a button that can only fail: the Anthropic key is an edge secret, so the
+    // browser has no other way to know whether the feature is configured.
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -1034,7 +1067,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       let bytes: Uint8Array;
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      // randomUUID, not Date.now() — timestamps are guessable (audit 2026-08-19)
+      const path = `${clientId}/style-${crypto.randomUUID()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
       if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1093,7 +1127,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-    const path = `${clientId}/layout-${Date.now()}.${ext}`;
+    const path = `${clientId}/layout-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1114,7 +1148,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
     if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-    const path = `${clientId}/door-${Date.now()}.${ext}`;
+    const path = `${clientId}/door-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("fixtures").upload(path, bytes, { contentType: ct, upsert: true });
     if (up.error) return dbFail(req, clientId, "upload that image", up.error);
     const { data: pub } = admin.storage.from("fixtures").getPublicUrl(path);
@@ -1371,7 +1405,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       let bytes: Uint8Array;
       try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
       if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
-      const path = `${clientId}/style-${Date.now()}.${ext}`;
+      const path = `${clientId}/style-${crypto.randomUUID()}.${ext}`;
       const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
       if (up.error) return dbFail(req, clientId, "upload that image", up.error);
       const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
@@ -1385,6 +1419,257 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (error) return dbFail(req, clientId, "save that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
+  }
+
+  // ─── 3D setup (086): the builder calibrates how their buildings look in 3D ───
+  // These three replace an operator-only path that could not work: admin-save-settings'
+  // save_style_d3 wrote client_configs.config, a column dropped in 020, so every save
+  // 404'd. Doing it here instead means the BUILDER can do it themselves against their own
+  // JWT — which is the whole product bet (no setup fees, no work queued on us).
+
+  // Save one style's 3D appearance spec. Keyed on styleValue (the style `key`) because
+  // that is all the embedded designer knows — get_config emits `value`, never the row id —
+  // and (client_id, key) is unique. styleId is accepted too for callers that have it.
+  // Resolve one of this tenant's styles by key-or-id, and report whether its 3D setup is
+  // LOCKED. Shared by every write below so the lock cannot be enforced in one place and
+  // forgotten in another.
+  const findStyleFor3D = async (styleValue: string, styleId: string) => {
+    let q = admin.from("building_styles").select("id, key, model_status, model_url").eq("client_id", clientId);
+    q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
+    const { data, error } = await q.maybeSingle();
+    if (error) return { err: json({ error: error.message }, 500) };
+    if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
+    return { style: data as { id: string; key: string; model_status: string; model_url: string | null } };
+  };
+  // The lock freezes SETUP only. Prices, sizes, active/hidden and the estimate-image flag stay
+  // editable on a locked style on purpose: those are commercial decisions a builder makes every
+  // week, while the geometry is the thing that must stop moving once it matches a real building
+  // customers are being quoted against.
+  const LOCKED_MSG = "This style's 3D setup is locked. Unlock it first if you really need to change the shape.";
+
+  if (action === "save_style_d3") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    const clean = sanitizeD3Spec(payload.d3);
+    if (!clean.ok) return json({ error: clean.error }, 400);
+    const photos = sanitizePhotoUrls(payload.d3Photos);
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    const { error, count } = await admin.from("building_styles")
+      .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
+      .eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, d3: clean.d3, d3Photos: photos });
+  }
+
+  // ─── Building scan (094) ───────────────────────────────────────────────────────────────
+  // The browser uploads the .glb straight into the PRIVATE `models` bucket with its own
+  // session (the same route portal.html already uses for feedback attachments) — a 10-40 MB
+  // mesh cannot go through an edge function, which would have to buffer it as base64 inside a
+  // 256 MB / 2 s worker. These actions therefore handle the metadata and the lifecycle, and
+  // one of them hands back a short-lived signed URL so the editor can load a mesh that is
+  // deliberately not public.
+
+  // Record an uploaded scan against a style. `modelPath` is an object path, never a URL, and
+  // it is re-derived from the tenant here so a caller cannot point a style at another
+  // tenant's object by sending a crafted path.
+  if (action === "save_style_model") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const rawPath = String(payload.modelPath ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    if (!rawPath) return json({ error: "modelPath is required." }, 400);
+    if (!rawPath.startsWith(`${clientId}/`) || rawPath.includes("..") || !/\.glb$/i.test(rawPath)) {
+      return json({ error: "That scan path does not belong to this builder." }, 400);
+    }
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    // Confirm the object really is there and really is a GLB before pointing a style at it:
+    // catches a failed upload, a renamed file, or anything that is not glTF, instead of
+    // storing a reference that breaks later. Deliberately a RANGE request rather than
+    // storage.download(): the client SDK has no range option, so downloading would pull the
+    // whole 10-40 MB mesh into a 256 MB worker to read twelve bytes.
+    const sbUrl = Deno.env.get("SUPABASE_URL");
+    const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!sbUrl || !svcKey) return json({ error: "Storage is not configured on the server." }, 500);
+    let magic: Uint8Array;
+    try {
+      const headRes = await fetch(`${sbUrl}/storage/v1/object/models/${rawPath.split("/").map(encodeURIComponent).join("/")}`, {
+        headers: { Authorization: `Bearer ${svcKey}`, apikey: svcKey, Range: "bytes=0-11" },
+      });
+      if (!headRes.ok && headRes.status !== 206) {
+        return json({ error: "That scan is not in storage — the upload did not finish. Try uploading it again." }, 400);
+      }
+      magic = new Uint8Array(await headRes.arrayBuffer());
+    } catch (e) {
+      return json({ error: `Could not read that scan: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+    // "glTF" — the GLB container magic. Anything else is a renamed .obj/.usdz/.zip.
+    const isGlb = magic.length >= 4 && magic[0] === 0x67 && magic[1] === 0x6C && magic[2] === 0x54 && magic[3] === 0x46;
+    if (!isGlb) return json({ error: "That file is not a .glb scan — its header does not say glTF. Re-export it as GLB." }, 400);
+    const meta = (payload.modelMeta && typeof payload.modelMeta === "object" && !Array.isArray(payload.modelMeta))
+      ? payload.modelMeta : null;
+    if (meta && JSON.stringify(meta).length > 4096) return json({ error: "Those scan measurements are implausibly large." }, 400);
+    const { error, count } = await admin.from("building_styles").update({
+      model_url: rawPath, model_status: "uploaded", model_uploaded_at: new Date().toISOString(),
+      model_meta: meta, model_locked_at: null, updated_at: new Date().toISOString(),
+    }, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, modelPath: rawPath });
+  }
+
+  // Move a style through the scan lifecycle. `locked` is what Carolyn asked for: once the 3D
+  // matches the real building, stop the shape moving. Unlocking is allowed — a builder who
+  // rebuilds a model or re-scans must not need us — but it is an explicit act, which is the
+  // whole point of the state.
+  if (action === "set_style_model_status") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const status = String(payload.status ?? "").trim();
+    if (!["none", "uploaded", "calibrated", "locked"].includes(status)) {
+      return json({ error: `Unknown 3D status "${status}".` }, 400);
+    }
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (status !== "none" && !found.style!.model_url && status !== "calibrated") {
+      return json({ error: "There is no scan on this style yet." }, 400);
+    }
+    const patch: Record<string, unknown> = { model_status: status, updated_at: new Date().toISOString() };
+    patch.model_locked_at = status === "locked" ? new Date().toISOString() : null;
+    if (status === "none") { patch.model_url = null; patch.model_meta = null; patch.model_uploaded_at = null; }
+    const { error, count } = await admin.from("building_styles")
+      .update(patch, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return json({ error: error.message }, 500);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true, status });
+  }
+
+  // Short-lived signed URL so the editor can load a scan out of the private bucket. Ten
+  // minutes is long enough to download and parse a 40 MB mesh and short enough that a URL
+  // pasted somewhere by accident stops working.
+  if (action === "style_model_url") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    const path = found.style!.model_url;
+    if (!path) return json({ ok: true, url: null, status: found.style!.model_status });
+    const signed = await admin.storage.from("models").createSignedUrl(path, 600);
+    if (signed.error || !signed.data) return json({ error: `Could not open that scan: ${signed.error?.message ?? "unknown"}` }, 500);
+    return json({ ok: true, url: signed.data.signedUrl, status: found.style!.model_status });
+  }
+
+  // Upload-only: a reference photo of a real building, stored beside the style images in
+  // `branding` and handed back as a URL for a d3Photos slot. Mirrors upload_fixture_image.
+  // (Repo migration 041 proposed putting these in floor-plans; that bucket has been
+  // PDF-only since 071, so 041 is dead and must not be applied.)
+  if (action === "upload_style_photo") {
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+    // The REFERENCE-photo class the enumerability audit was about: photos of a builder's
+    // real buildings in a public bucket. randomUUID makes the URL an unguessable
+    // capability; the payload side was already handled (093 keeps d3_photos out of the
+    // anon get_config).
+    const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
+  // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the
+  // result before anything is saved — this only ever returns a draft.
+  //
+  // Capped per tenant per day because it spends real money per call and is now reachable
+  // by any owner/admin rather than by whoever holds the operator password. The ledger row
+  // is written BEFORE the model call on purpose: a failing style would otherwise be a free
+  // retry loop against our API key.
+  if (action === "calibrate_style_ai") {
+    // Two callers, one action, one gate, one meter. `source: "video"` means the URLs are
+    // frames the browser cut out of a walk-around video (the file itself never leaves the
+    // phone) rather than four staged photos — so it takes eight of them and a prompt that
+    // knows the roof was only ever seen from the ground.
+    //
+    // The cap is a PARAMETER and not a bigger default because sanitizePhotoUrls slices
+    // silently: send eight against the 4-default and you get HTTP 200, a full-price ledger
+    // row, and a spec drafted from the first half of the walk. The response reports
+    // `frames` for exactly that reason — a truncation that shows up in the UI is a bug you
+    // can see, and this one otherwise looks like the model simply reading the shed wrong.
+    const fromVideo = payload.source === "video";
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls, fromVideo ? 8 : 4);
+    if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
+
+    const DAILY_CAP = 10;
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count: used, error: capErr } = await admin.from("ai_style_calls")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId).gt("called_at", since);
+    // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
+    // not brick calibration, and the per-call cost is cents.
+    if (capErr) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+        message: `AI calibration cap count failed, allowing the call: ${capErr.message}`,
+      });
+    } else if ((used ?? 0) >= DAILY_CAP) {
+      return json({ error: `Daily limit reached (${DAILY_CAP} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+    }
+    // CHECKED on purpose: this row IS the spend cap. Unchecked, a failed insert (table
+    // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
+    // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
+    // cap query above already failed soft for the read case.
+    const { error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null });
+    if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
+
+    let res: Response;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "claude-sonnet-5",
+          // The video prompt asks for an `observed` block on top of the spec, so it needs
+          // the headroom. A truncated reply is unparseable, not partially useful.
+          max_tokens: fromVideo ? 900 : 700,
+          messages: [{
+            role: "user",
+            content: [
+              // URL sources: the photos live in public buckets, so Anthropic can fetch them
+              // and we never proxy the bytes through this function.
+              ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
+              { type: "text", text: fromVideo ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
+            ],
+          }],
+        }),
+      });
+    } catch (e) {
+      return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 300);
+      return json({ error: `AI service returned ${res.status}: ${body}` }, 502);
+    }
+    const data = await res.json().catch(() => null) as any;
+    const text = data?.content?.[0]?.text ?? "";
+    const drafted = parseModelSpec(text);
+    if (!drafted.ok) return json({ error: drafted.error }, 502);
+    // `frames` makes a silent truncation visible; `observed` is the builder-facing note
+    // about doors, windows and vents, which the spec has no field for.
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, observed: fromVideo ? parseObservedNotes(text) : null });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
@@ -1408,9 +1693,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   // Full-replace this tenant's paint palette (Colors tab). Takes the COMPLETE desired list:
   // rows carrying an id are updated, rows without one are inserted, and any existing colour
-  // absent from the list is deleted. clientId is JWT-resolved (own tenant only). The designer
-  // is selection-only today (get_config exposes label/siding/trim/allowCustom/isDefault/swatch,
-  // never a price); rate/pricing_method are persisted here for a later paint-pricing pass.
+  // absent from the list is deleted. A row that FAILS validation is skipped and its colour
+  // kept as-is — a validation error must never escalate into deletion (audit 2026-08-20).
+  // clientId is JWT-resolved (own tenant only). The designer is selection-only today
+  // (get_config exposes label/siding/trim/allowCustom/isDefault/swatch, never a price);
+  // rate/pricing_method are persisted here for a later paint-pricing pass.
   if (action === "save_colors") {
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
@@ -1422,10 +1709,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     let saved = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.colors) {
+      // An existing row's id counts as KEPT the moment it appears in the payload — BEFORE any
+      // validation — so the delete sweep below can never turn a skipped row into a deleted
+      // one. keptIds used to be populated only on the update branch, so a colour whose label
+      // was blanked mid-retype was reported "skipped" but silently swept (audit 2026-08-20).
+      const rid = String(row?.id ?? "").trim();
+      const isExisting = rid !== "" && existingIds.has(rid);
+      if (isExisting) keptIds.add(rid);
+      const unchanged = isExisting ? " — existing colour left unchanged" : "";
       const label = String(row?.label ?? "").trim();
-      if (!label) { skipped.push(`row ${i}: blank label`); i++; continue; }
+      if (!label) { skipped.push(`row ${i}: blank label${unchanged}`); i++; continue; }
       const method = String(row?.pricingMethod ?? "each").trim() || "each";
-      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"`); i++; continue; }
+      if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"${unchanged}`); i++; continue; }
       const rate = Number(row?.rate);
       const rec: Record<string, unknown> = {
         client_id: clientId,
@@ -1449,9 +1744,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
         rec.image_url = String(row.imageUrl ?? "").trim() || null;
       }
-      const rid = String(row?.id ?? "").trim();
-      const res = (rid && existingIds.has(rid))
-        ? (keptIds.add(rid), await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid))
+      const res = isExisting
+        ? await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid)
         : await admin.from("colors").insert(rec);
       if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
       saved++; i++;
@@ -1480,8 +1774,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // price NULL is legal (NULL-price contract: not-yet-priced = not offered) — never coerce
   // blank to 0. Op exclusivity (Double / Slide up are standalone) is normalized HERE because
   // spreadsheet imports bypass the UI's setOp logic.
+  //
+  // Field-presence contract (audit 2026-08-20): name/size/price are required; every OTHER
+  // field is written only when the caller actually sent it. A trimmed sheet (flag columns
+  // deleted in Excel to bulk-edit prices) used to reset archived/internal-only/active/swing
+  // on every ID-matched row — silently un-archiving retired doors into the customer
+  // designer. The UI's toPayload and a full export round-trip send every field, so those
+  // saves behave exactly as before; inserts get the old defaults via fixtureInsertDefaults.
   const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp"]);
   const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
+    // JSON.stringify drops undefined-valued keys client-side, so "absent key" is the wire
+    // form of "leave this field alone"; the explicit !== undefined guards a hand-built call.
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(row ?? {}, k) && row?.[k] !== undefined;
     const numOrNull = (v: unknown) => { const s = String(v ?? "").replace(/[$,\s]/g, ""); if (s === "") return null; const n = Number(s); return Number.isFinite(n) ? n : NaN; };
     const name = String(row?.name ?? "").trim();
     if (!name) return { err: `row ${i + 1}: blank name` };
@@ -1490,29 +1794,50 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (h === null || Number.isNaN(h) || (h as number) <= 0) return { err: `${name}: invalid ${category === "ramp" ? "length" : "height"}` };
     const price = numOrNull(row?.price);
     if (Number.isNaN(price)) return { err: `${name}: invalid price` };
-    const isDoor = category === "door";
-    const swingIn = isDoor && row?.swingIn === true, swingOut = isDoor && row?.swingOut === true;
-    let opRight = isDoor && row?.opRight === true, opLeft = isDoor && row?.opLeft === true;
-    const opDouble = isDoor && row?.opDouble === true;
-    let opSlideUp = isDoor && row?.opSlideUp === true;
-    if (opDouble && opSlideUp) opSlideUp = false;
-    if (opDouble || opSlideUp) { opRight = false; opLeft = false; }
-    const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
-    const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
     const rec: Record<string, unknown> = {
       client_id: clientId, category, name,
-      plan_label: (String(row?.planLabel ?? "").trim().slice(0, 12)) || null,
-      show_image_on_estimate: row?.showImageOnEstimate !== false,
       width_in: w, height_in: h, price,
-      swing_in: swingIn, swing_out: swingOut, swing_default: swingDefault,
-      op_right: opRight, op_left: opLeft, op_double: opDouble, op_slideup: opSlideUp, op_default: opDefault,
-      active: row?.active !== false,
-      archived: row?.archived === true,
-      internal_only: row?.internalOnly === true,
       updated_at: new Date().toISOString(),
     };
-    if (Object.prototype.hasOwnProperty.call(row ?? {}, "imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+    if (has("planLabel")) rec.plan_label = (String(row?.planLabel ?? "").trim().slice(0, 12)) || null;
+    if (has("showImageOnEstimate")) rec.show_image_on_estimate = row?.showImageOnEstimate !== false;
+    if (has("active")) rec.active = row?.active !== false;
+    if (has("archived")) rec.archived = row?.archived === true;
+    if (has("internalOnly")) rec.internal_only = row?.internalOnly === true;
+    const isDoor = category === "door";
+    // Swing/op travel as a GROUP: the exclusivity normalization is only sound when the whole
+    // group is known, so one present swing/op key means the absent ones read "no" (the old
+    // behavior), while a row carrying NONE of them leaves the stored operation untouched.
+    // Non-doors still force the group false/null unconditionally (invariant above).
+    const swingOpProvided = ["swingIn", "swingOut", "swingDefault", "opRight", "opLeft", "opDouble", "opSlideUp", "opDefault"].some(has);
+    if (!isDoor || swingOpProvided) {
+      const swingIn = isDoor && row?.swingIn === true, swingOut = isDoor && row?.swingOut === true;
+      let opRight = isDoor && row?.opRight === true, opLeft = isDoor && row?.opLeft === true;
+      const opDouble = isDoor && row?.opDouble === true;
+      let opSlideUp = isDoor && row?.opSlideUp === true;
+      if (opDouble && opSlideUp) opSlideUp = false;
+      if (opDouble || opSlideUp) { opRight = false; opLeft = false; }
+      const swingDefault = (swingIn && swingOut && (row?.swingDefault === "in" || row?.swingDefault === "out")) ? row.swingDefault : null;
+      const opDefault = (opRight && opLeft && (row?.opDefault === "right" || row?.opDefault === "left")) ? row.opDefault : null;
+      rec.swing_in = swingIn; rec.swing_out = swingOut; rec.swing_default = swingDefault;
+      rec.op_right = opRight; rec.op_left = opLeft; rec.op_double = opDouble; rec.op_slideup = opSlideUp; rec.op_default = opDefault;
+    }
+    if (has("imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
     return { rec };
+  };
+  // Inserts still need concrete values for whatever the presence contract left out — the
+  // old unconditional defaults, applied only where no key arrived so sent values win.
+  const fixtureInsertDefaults = (rec: Record<string, unknown>) => {
+    if (!("plan_label" in rec)) rec.plan_label = null;
+    if (!("show_image_on_estimate" in rec)) rec.show_image_on_estimate = true;
+    if (!("active" in rec)) rec.active = true;
+    if (!("archived" in rec)) rec.archived = false;
+    if (!("internal_only" in rec)) rec.internal_only = false;
+    if (!("swing_in" in rec)) {
+      rec.swing_in = false; rec.swing_out = false; rec.swing_default = null;
+      rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
+    }
+    return rec;
   };
 
   // Save ONE catalog fixture. Update is IN PLACE by uuid — building_size_inclusions
@@ -1543,7 +1868,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .eq("client_id", clientId).eq("category", category)
       .order("sort_order", { ascending: false }).limit(1).maybeSingle();
     v.rec!.sort_order = ((maxRow?.sort_order as number) ?? -1) + 1;
-    const ins = await admin.from("fixture_items").insert(v.rec!).select("id").maybeSingle();
+    const ins = await admin.from("fixture_items").insert(fixtureInsertDefaults(v.rec!)).select("id").maybeSingle();
     if (ins.error) return dbFail(req, clientId, "add that line", ins.error);
     return json({ ok: true, id: ins.data!.id });
   }
@@ -1587,8 +1912,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Spreadsheet import (Export → edit in Excel → re-upload). UPSERT-ONLY by design: rows
   // with a known id update in place, rows without one insert at the end; rows absent from
   // the file are NEVER deleted (a partial or filtered sheet must not wipe the catalog —
-  // deletes happen only in the UI). Image URLs never ride in the sheet, so the
-  // hasOwnProperty gate in validateFixtureRow leaves each row's photo untouched.
+  // deletes happen only in the UI). The same shape holds column-wise (audit 2026-08-20):
+  // the client omits keys for columns the sheet doesn't have, and validateFixtureRow's
+  // presence gate leaves those fields — photos, flags, swing/op — untouched on ID-matched
+  // rows, so a trimmed sheet edits only what it carries.
   if (action === "import_fixtures") {
     const category = String(payload?.category ?? "").trim();
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
@@ -1611,7 +1938,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         saved++;
       } else {
         v.rec!.sort_order = nextSort++;
-        const res = await admin.from("fixture_items").insert(v.rec!);
+        const res = await admin.from("fixture_items").insert(fixtureInsertDefaults(v.rec!));
         if (res.error) { skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${res.error.message}`); i++; continue; }
         added++;
       }
@@ -2245,7 +2572,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .select("short_code, created_at, updated_at, status, selections, items, ghl_estimate_number, ghl_estimate_id")
         .eq("client_id", clientId).in("short_code", codes),
       admin.from("design_versions")
-        .select("short_code, version, created_at, selections, image_url")
+        .select("short_code, version, created_at, selections, paint_colors, image_url")
         .eq("client_id", clientId).in("short_code", codes)
         .order("version", { ascending: true }),
     ]);
@@ -2657,10 +2984,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   }
 
   // ── Email sending (Settings → Email Sending) ────────────────────────────────────
-  // Own-domain estimate/invoice email, Postmark-backed — the provider never appears in
+  // Own-domain estimate/invoice email, Resend-backed — the provider never appears in
   // tenant-facing copy. Connection state lives on client_settings (migration 107):
   // not_configured → pending (connect: domain created, DNS records handed out) →
-  // verified (BOTH records seen). `active` (email_provider = 'postmark') is a SEPARATE
+  // verified (the domain-level status). `active` (email_provider = 'resend') is a SEPARATE
   // explicit switch — a verify never auto-flips it, and turning it off is the instant
   // per-tenant rollback to the GHL sender. Response field names are the EmailSendingView
   // contract (portal.html ~10504) — change both or neither.
@@ -2683,7 +3010,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
     return json({
       clientId, // operator view-as tripwire (the qbo_status pattern)
-      platformReady: postmarkConfigured(),
+      platformReady: resendConfigured(),
       domainStatus: s?.email_domain_status ?? "not_configured",
       domain,
       fromName: s?.email_from_name ?? null,
@@ -2691,7 +3018,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       fromAddress: domain ? `${fromLocal}@${domain}` : null,
       verifiedAt: s?.email_verified_at ?? null,
       lastError: s?.email_last_error ?? null,
-      active: s?.email_provider === "postmark",
+      active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
       // deno-lint-ignore no-explicit-any
       recentSends: (sends ?? []).map((r: any) => ({
@@ -2735,26 +3062,26 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (holder) return json({ error: "That domain is already connected to another account." }, 409);
 
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("email_domain, postmark_domain_id")
+      .from("client_settings").select("email_domain, resend_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
 
-    let d: PmDomain;
+    let d: RsDomain;
     try {
       // Reconnect reuse: this tenant's same domain already exists on the provider —
       // re-read its records rather than erroring on a duplicate create.
-      d = cur?.postmark_domain_id && cur?.email_domain === domain
-        ? await pmGetDomain(Number(cur.postmark_domain_id))
-        : await pmCreateDomain(domain);
+      d = cur?.resend_domain_id && cur?.email_domain === domain
+        ? await rsGetDomain(String(cur.resend_domain_id))
+        : await rsCreateDomain(domain);
     } catch (e) {
-      return pmFail(req, clientId, "connect that domain", e);
+      return rsFail(req, clientId, "connect that domain", e);
     }
 
     const dnsRecords = dnsRecordsOf(d);
     const { error: upErr } = await admin.from("client_settings").upsert({
       client_id: clientId,
       email_domain: domain,
-      postmark_domain_id: d.id,
+      resend_domain_id: d.id,
       email_domain_status: "pending",
       email_dns_records: dnsRecords,
       email_from_local: fromLocal,
@@ -2776,14 +3103,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   if (action === "email_verify_domain") {
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("postmark_domain_id")
+      .from("client_settings").select("resend_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
-    if (!cur?.postmark_domain_id) return json({ error: "Connect a domain first." }, 400);
+    if (!cur?.resend_domain_id) return json({ error: "Connect a domain first." }, 400);
 
-    let d: PmDomain;
+    let d: RsDomain;
     try {
-      d = await pmVerifyDomain(Number(cur.postmark_domain_id));
+      d = await rsVerifyDomain(String(cur.resend_domain_id));
     } catch (e) {
       // Park an authored note on the card (the UI's failed/pending panel renders
       // lastError) — never provider text. Best-effort: the response already says it.
@@ -2791,13 +3118,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         email_last_error: "The verification check couldn't run — try again in a few minutes.",
         updated_at: new Date().toISOString(),
       }).eq("client_id", clientId);
-      return pmFail(req, clientId, "check your domain's DNS records", e);
+      return rsFail(req, clientId, "check your domain's DNS records", e);
     }
 
-    // "Verified" means BOTH records (postmark.ts: DKIM alone leaks the provider's return
+    // "Verified" is the domain-level status, never a per-record AND (resend.ts: DKIM alone leaks the provider's return
     // path into customer-visible headers). A check that simply finds the records absent
     // is NOT an error — the per-record flags refresh and the status stays pending.
-    const verified = d.dkimVerified && d.returnPathVerified;
+    const verified = rsDomainVerified(d);
     const dnsRecords = dnsRecordsOf(d);
     const domainStatus = verified ? "verified" : "pending";
     const { error: upErr } = await admin.from("client_settings").update({
@@ -2824,7 +3151,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: "Verify your domain's DNS records before turning this on." }, 409);
     }
     const { error: upErr } = await admin.from("client_settings").update({
-      email_provider: enabled ? "postmark" : "ghl",
+      email_provider: enabled ? "resend" : "ghl",
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your email sending switch", upErr);
@@ -2839,7 +3166,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .select("email_provider, email_domain_status, email_domain, email_from_local, business_name")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
-    if (cur?.email_domain_status !== "verified" || cur?.email_provider !== "postmark") {
+    if (cur?.email_domain_status !== "verified" || cur?.email_provider !== "resend") {
       return json({ error: "Verify your domain and turn sending on before sending a test email." }, 409);
     }
     const fromLocal = (typeof cur.email_from_local === "string" && cur.email_from_local.trim()) || "info";
@@ -2862,21 +3189,21 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   if (action === "email_disconnect") {
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("postmark_domain_id")
+      .from("client_settings").select("resend_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
-    if (cur?.postmark_domain_id) {
+    if (cur?.resend_domain_id) {
       // Best-effort on the provider side: whatever happens there, the tenant's OWN reset
       // below must land — a stuck provider must not trap a tenant on a domain they are
       // trying to leave. An orphaned provider domain is inert (nothing sends from it once
       // email_provider is back on 'ghl') and shows in the provider dashboard for cleanup.
       try {
-        await pmDeleteDomain(Number(cur.postmark_domain_id));
+        await rsDeleteDomain(String(cur.resend_domain_id));
       } catch (e) {
         logEdgeError({
           fn: "portal-settings", req, clientId, code: "email_disconnect_provider",
-          message: `provider domain delete failed (id ${cur.postmark_domain_id}): ${
-            e instanceof PostmarkApiError ? `postmark ${e.status}/${e.errorCode}` : String((e as Error)?.message ?? e)
+          message: `provider domain delete failed (id ${cur.resend_domain_id}): ${
+            e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
           }`,
         }).catch(() => {});
       }
@@ -2887,7 +3214,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       email_from_local: "info",
       email_from_name: null,
       email_provider: "ghl",
-      postmark_domain_id: null,
+      resend_domain_id: null,
       email_domain_status: "not_configured",
       email_dns_records: null,
       email_verified_at: null,
@@ -2955,7 +3282,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const { data: cur, error: curErr } = await admin
       .from("client_settings")
       // email_* + business_* ride along for the own-domain email branch below — the
-      // Postmark-active check and the branded invoice email's identity fields.
+      // Resend-active check and the branded invoice email's identity fields.
       .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
@@ -2987,7 +3314,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     };
     const STALE_CLAIM_MS = 3 * 60 * 1000;
 
-    // ── Own-domain email branch (Postmark-active tenants) ────────────────────────
+    // ── Own-domain email branch (Resend-active tenants) ────────────────────────
     // When the tenant has flipped the provider AND verified their domain AND the hosted
     // invoice link is buildable AND we know the customer's address, the GHL send call
     // flips to action:"send_manually" — GHL marks the invoice sent (hosted page live,
@@ -2999,15 +3326,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // action:"email" GHL send unchanged, so an email problem can never strand a sent
     // invoice. email_sends rows are additional telemetry — the invoice_sends claim
     // machinery above stays untouched and authoritative for convert-idempotency.
-    const pmActive = postmarkConfigured() &&
-      cur.email_provider === "postmark" && cur.email_domain_status === "verified";
+    const rsActive = resendConfigured() &&
+      cur.email_provider === "resend" && cur.email_domain_status === "verified";
     const tryOwnDomainEmail = async (
       invId: string,
       invNumber: string | null,
       senderUserId: string,
       knownTotal: number | null,
     ): Promise<boolean> => {
-      if (!pmActive) return false;
+      if (!rsActive) return false;
       const hosted = invoiceUrl(invId);
       if (!hosted) return false;
       // The customer's address, read ONLY here: the design select above deliberately
@@ -3192,7 +3519,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
       // Own-domain branch first here too — the recovery is only ever about the EMAIL
       //  (the invoice already exists), so the same rule applies: our branded send when the
-      //  tenant is Postmark-active, the stock GHL email as the unchanged fallback.
+      //  tenant is Resend-active, the stock GHL email as the unchanged fallback.
       const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, null);
       if (!ownDomainSent) {
         const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {

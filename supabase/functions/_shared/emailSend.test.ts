@@ -1,11 +1,11 @@
 /**
- * Unit tests for sendTenantEmail — the business action over the Postmark transport.
+ * Unit tests for sendTenantEmail — the business action over the Restmark transport.
  *
  * WHY THESE EXIST. The function's whole value is its guarantees: dark until three human
  * switches flip, ledger row before the provider call, beta redirect recorded rather than
  * silent, and a promise that never rejects no matter what the provider or the database
  * does. None of that is observable from a happy-path manual send, so each guarantee is
- * pinned here with BOTH dependencies stubbed: `globalThis.fetch` (the Postmark side) and
+ * pinned here with BOTH dependencies stubbed: `globalThis.fetch` (the Resend side) and
  * a recording fake of the supabase client (the ledger side). No network, no database.
  *
  * Run: deno test --allow-env --node-modules-dir=none supabase/functions/_shared/emailSend.test.ts
@@ -27,7 +27,7 @@ function assertEquals<T>(actual: T, expected: T, msg = ""): void {
   }
 }
 
-// ── Fetch stub (the Postmark side) ─────────────────────────────────────────────────────────
+// ── Fetch stub (the Resend side) ─────────────────────────────────────────────────────────
 
 const realFetch = globalThis.fetch;
 
@@ -55,7 +55,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-const OK_SEND = { MessageID: "pm-msg-1", ErrorCode: 0, Message: "OK" };
+const OK_SEND = { id: "rs-msg-1" };
 
 // ── Admin stub (the ledger side) ───────────────────────────────────────────────────────────
 // Records every .from() chain so a test can assert WHAT was written and in what order.
@@ -156,7 +156,7 @@ const MAIL: TenantMail = {
 };
 
 const VERIFIED = {
-  email_provider: "postmark",
+  email_provider: "resend",
   email_domain_status: "verified",
   email_domain: "mail.example.com",
   email_from_local: "quotes",
@@ -168,8 +168,7 @@ const VERIFIED = {
 const PENDING = { ...VERIFIED, email_domain_status: "pending" };
 
 function setup() {
-  Deno.env.set("POSTMARK_ACCOUNT_TOKEN", "test-account-token");
-  Deno.env.set("POSTMARK_SERVER_TOKEN", "test-server-token");
+  Deno.env.set("RESEND_API_KEY", "test-resend-key");
   // logEdgeError only writes when these are set; deleting them keeps the fallback a
   // deterministic no-op (zero fetches) on every machine, not just ones without a local
   // supabase env.
@@ -179,8 +178,7 @@ function setup() {
 }
 function teardown() {
   globalThis.fetch = realFetch;
-  Deno.env.delete("POSTMARK_ACCOUNT_TOKEN");
-  Deno.env.delete("POSTMARK_SERVER_TOKEN");
+  Deno.env.delete("RESEND_API_KEY");
   Deno.env.delete("PLATFORM_EMAIL_DOMAIN_READY");
 }
 
@@ -203,7 +201,7 @@ Deno.test("provider 'ghl' (the default) → not_active, zero fetches, no ledger 
 
 Deno.test("secrets absent → not_active before even the settings read", async () => {
   setup();
-  Deno.env.delete("POSTMARK_SERVER_TOKEN");
+  Deno.env.delete("RESEND_API_KEY");
   try {
     const fetches = stubFetch(() => jsonResponse(OK_SEND));
     const db = stubAdmin({ settings: VERIFIED });
@@ -256,7 +254,7 @@ Deno.test("pending + PLATFORM_EMAIL_DOMAIN_READY=true → platform From with the
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(res.sent, "the platform-domain path must send");
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.From, '"Example Barns LLC" <no-reply@mail.structurestudiosuite.com>',
+    assertEquals(body.from, '"Example Barns LLC" <no-reply@mail.structurestudiosuite.com>',
       "unverified tenants send from the platform domain, named as the business");
     const row = inserts(db.calls)[0].payload as Record<string, unknown>;
     assertEquals(row.from_email, "no-reply@mail.structurestudiosuite.com");
@@ -273,7 +271,7 @@ Deno.test("verified → tenant From: {email_from_local}@{email_domain}, named em
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(res.sent, "a verified tenant must send");
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.From, '"Example Barns" <quotes@mail.example.com>',
+    assertEquals(body.from, '"Example Barns" <quotes@mail.example.com>',
       "email_from_name wins over business_name; email_from_local over 'info'");
     const row = inserts(db.calls)[0].payload as Record<string, unknown>;
     assertEquals(row.from_email, "quotes@mail.example.com");
@@ -293,7 +291,7 @@ Deno.test("verified with no from-name/local set → info@domain, named business_
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(res.sent, "must send");
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.From, '"Example Barns LLC" <info@mail.example.com>');
+    assertEquals(body.from, '"Example Barns LLC" <info@mail.example.com>');
   } finally {
     teardown();
   }
@@ -309,7 +307,7 @@ Deno.test("the From display name is double-quote-escaped", async () => {
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(res.sent, "must send");
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.From, '"Bob \\"The Builder\\" & Sons" <quotes@mail.example.com>');
+    assertEquals(body.from, '"Bob \\"The Builder\\" & Sons" <quotes@mail.example.com>');
   } finally {
     teardown();
   }
@@ -329,7 +327,7 @@ Deno.test("beta_mode + beta_email → sends to beta_email, records intended_emai
     assertEquals(res.sent && res.to, "owner@example.com", "the result reports the ACTUAL recipient");
     assertEquals(res.sent && res.redirected, true);
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.To, "owner@example.com", "the provider call must go to the test inbox");
+    assertEquals(body.to, "owner@example.com", "the provider call must go to the test inbox");
     const row = inserts(db.calls)[0].payload as Record<string, unknown>;
     assertEquals(row.to_email, "owner@example.com", "to_email records where it really went");
     assertEquals(row.intended_email, "lead@example.net", "intended_email records who it was for");
@@ -347,7 +345,7 @@ Deno.test("beta_mode with NO beta_email does not redirect", async () => {
     assert(res.sent, "must send");
     assertEquals(res.sent && res.redirected, false);
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.To, "lead@example.net");
+    assertEquals(body.to, "lead@example.net");
     assert(!("intended_email" in (inserts(db.calls)[0].payload as Record<string, unknown>)),
       "no redirect → no intended_email");
   } finally {
@@ -357,7 +355,7 @@ Deno.test("beta_mode with NO beta_email does not redirect", async () => {
 
 // ── Ledger transitions ─────────────────────────────────────────────────────────────────────
 
-Deno.test("claimed BEFORE the provider call, then flipped to sent with the MessageID", async () => {
+Deno.test("claimed BEFORE the provider call, then flipped to sent with the provider id", async () => {
   setup();
   try {
     const db = stubAdmin({ settings: VERIFIED });
@@ -368,7 +366,7 @@ Deno.test("claimed BEFORE the provider call, then flipped to sent with the Messa
     });
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(res.sent, "must send");
-    assertEquals(res.sent && res.messageId, "pm-msg-1");
+    assertEquals(res.sent && res.messageId, "rs-msg-1");
     assertEquals(claimedWhenSendFired, 1, "the claim row must exist before Postmark is called");
 
     const row = inserts(db.calls)[0].payload as Record<string, unknown>;
@@ -381,22 +379,26 @@ Deno.test("claimed BEFORE the provider call, then flipped to sent with the Messa
     const upd = updates(db.calls);
     assertEquals(upd.length, 1);
     assertEquals((upd[0].payload as Record<string, unknown>).status, "sent");
-    assertEquals((upd[0].payload as Record<string, unknown>).postmark_message_id, "pm-msg-1",
-      "the MessageID is the webhook's only match key — it must be persisted");
+    assertEquals((upd[0].payload as Record<string, unknown>).provider_message_id, "rs-msg-1",
+      "the provider message id is the webhook's only match key — it must be persisted");
     assertEquals(upd[0].filters.id, "es-row-1", "the update must target the claimed row");
 
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.Tag, CLIENT_ID);
-    assertEquals(body.Metadata.client_id, CLIENT_ID);
-    assertEquals(body.Metadata.short_code, "SS-TEST123456");
-    assertEquals(body.Metadata.kind, "estimate");
-    assertEquals(body.TextBody, "Hi");
+    // Resend has no Tag/Metadata split — one tags array carries both. Read it as a map so
+    // the assertion does not depend on array order.
+    const tags = Object.fromEntries(
+      (body.tags as { name: string; value: string }[]).map((x) => [x.name, x.value]),
+    );
+    assertEquals(tags.client_id, CLIENT_ID);
+    assertEquals(tags.short_code, "SS-TEST123456");
+    assertEquals(tags.kind, "estimate");
+    assertEquals(body.text, "Hi");
   } finally {
     teardown();
   }
 });
 
-Deno.test("kind 'test' with no shortCode → null on the row, '' in Metadata", async () => {
+Deno.test("kind 'test' with no shortCode → null on the row, tag omitted entirely", async () => {
   setup();
   try {
     const fetches = stubFetch(() => jsonResponse(OK_SEND));
@@ -409,8 +411,12 @@ Deno.test("kind 'test' with no shortCode → null on the row, '' in Metadata", a
     assertEquals(row.short_code, null);
     assertEquals(row.kind, "test");
     const body = JSON.parse(fetches[0].body ?? "{}");
-    assertEquals(body.Metadata.short_code, "");
-    assert(!("TextBody" in body), "no text → no TextBody key");
+    const tags2 = Object.fromEntries(
+      (body.tags as { name: string; value: string }[]).map((x) => [x.name, x.value]),
+    );
+    assert(!("short_code" in tags2), "no shortCode → the tag is OMITTED, not sent empty");
+    assertEquals(tags2.kind, "test");
+    assert(!("text" in body), "no text → no text key");
   } finally {
     teardown();
   }
@@ -420,21 +426,22 @@ Deno.test("provider 500 → claimed flips to failed with the capped enum-ish err
   setup();
   try {
     stubFetch(() => new Response(
-      // A realistic Postmark error body echoing the recipient — it must never surface.
-      JSON.stringify({ ErrorCode: 0, Message: "server error for lead@example.net" }),
+      // A realistic Resend error body echoing the recipient — it must never surface.
+      // No usable `name` here, so errText renders "unknown" rather than inventing one.
+      JSON.stringify({ statusCode: 500, message: "server error for lead@example.net" }),
       { status: 500 },
     ));
     const db = stubAdmin({ settings: VERIFIED });
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(!res.sent && res.reason === "failed", "a provider failure is 'failed', not a throw");
-    assertEquals(!res.sent ? res.error : "", "postmark 500/0");
+    assertEquals(!res.sent ? res.error : "", "resend 500/unknown");
 
     const upd = updates(db.calls);
     assertEquals(upd.length, 1);
     const patch = upd[0].payload as Record<string, unknown>;
     assertEquals(patch.status, "failed");
-    assertEquals(patch.error, "postmark 500/0",
-      "the ledger records status/errorCode only — Postmark's Message echoes recipient addresses");
+    assertEquals(patch.error, "resend 500/unknown",
+      "the ledger records status/name only — Resend's message echoes recipient addresses");
     assert(!String(patch.error).includes("lead@example.net"), "a recipient address leaked");
     assertEquals(upd[0].filters.id, "es-row-1");
   } finally {
@@ -442,19 +449,21 @@ Deno.test("provider 500 → claimed flips to failed with the capped enum-ish err
   }
 });
 
-Deno.test("a permanent refusal (422/406) records 'postmark 422/406'", async () => {
+Deno.test("a permanent refusal (422 validation_error) records 'resend 422/validation_error'", async () => {
   setup();
   try {
     stubFetch(() => jsonResponse({
-      ErrorCode: 406,
-      Message: "You tried to send to recipient(s) marked as inactive: lead@example.net",
+      statusCode: 422,
+      name: "validation_error",
+      message: "Invalid recipient: lead@example.net",
     }, 422));
     const db = stubAdmin({ settings: VERIFIED });
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(!res.sent && res.reason === "failed", "must be failed");
-    assertEquals(!res.sent ? res.error : "", "postmark 422/406");
+    assertEquals(!res.sent ? res.error : "", "resend 422/validation_error");
     const patch = updates(db.calls)[0].payload as Record<string, unknown>;
-    assertEquals(patch.error, "postmark 422/406");
+    assertEquals(patch.error, "resend 422/validation_error");
+    assert(!String(patch.error).includes("lead@example.net"), "a recipient address leaked");
   } finally {
     teardown();
   }
@@ -471,7 +480,7 @@ Deno.test("never throws: fetch rejects outright → failed, row flipped, promise
     const db = stubAdmin({ settings: VERIFIED });
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(!res.sent && res.reason === "failed", "a network failure resolves, never rejects");
-    assertEquals(!res.sent ? res.error : "", "postmark 0/0");
+    assertEquals(!res.sent ? res.error : "", "resend 0/unknown");
     const patch = updates(db.calls)[0].payload as Record<string, unknown>;
     assertEquals(patch.status, "failed");
   } finally {
@@ -517,7 +526,7 @@ Deno.test("sent but the 'sent' update fails → STILL sent:true (a 'failed' woul
     const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(res.sent, "the email really went out — reporting failure would push the caller onto "
       + "its GHL fallback and the customer would get the email twice");
-    assertEquals(res.sent && res.messageId, "pm-msg-1");
+    assertEquals(res.sent && res.messageId, "rs-msg-1");
   } finally {
     teardown();
   }

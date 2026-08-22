@@ -9,6 +9,7 @@ import {
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
 import { mintSession, revokeSession } from "../_shared/customerSession.ts";
+import { clientIp } from "../_shared/adminGate.ts";
 
 // customer-auth: phone-OTP sign-in for the customer quote portal — the "proper phone
 // verification" 048's rollback note required before any design may be listed by phone.
@@ -32,16 +33,29 @@ import { mintSession, revokeSession } from "../_shared/customerSession.ts";
 // throttle bucket name embeds the digits, so bucket names never go to logs either.
 
 // ── Throttle (customer_otp_throttle, migration 108) ──────────────────────────────────
-// Two buckets per send: '<clientId>:<digits>' (the target phone, per tenant) and
-// 'ip:<first x-forwarded-for hop>' (the caller). Per-bucket lockout ONLY — never a
-// global lock (053's rationale: one attacker must not be able to lock every legitimate
-// shopper out of every tenant's portal). Send and fail counters share ONE rolling
-// window: a bucket whose window_started_at is older than the window reads as zeroed
-// and resets on its next write.
+// Three buckets per send: '<clientId>:<digits>' (the target phone, per tenant),
+// 'ip:<caller>' (adminGate's clientIp — the leftmost x-forwarded-for hop), and
+// 'sends:tenant:<clientId>' (every send for the tenant — the forge-proof backstop).
+//
+// Why three (audit 2026-08-20): the per-IP bucket is honest attribution and a brake on
+// naive scripts, but a client can PREPEND forged x-forwarded-for values and land every
+// request in a fresh 'ip:<random>' bucket — and parsing a different XFF position is no
+// fix, because on this platform the RIGHTMOST hop is Supabase's own rotating inbound
+// proxy (adminGate.ts, verified empirically 2026-07-26), which would ALSO give every
+// request a fresh bucket. The cap a rotating XFF cannot evade is the tenant-wide send
+// cap: its key is built from the validated clientId, so no request header reaches it.
+// It bounds the Twilio SMS spend an XFF-rotating pumper can bill to one tenant. It is a
+// CAP, never a lock (053's rationale: one attacker must not be able to lock every
+// legitimate shopper out of every tenant's portal): when it trips, sends are refused
+// only until the 15-minute window rolls over — no locked_until is written for it.
+//
+// Send and fail counters share ONE rolling window: a bucket whose window_started_at is
+// older than the window reads as zeroed and resets on its next write.
 const THROTTLE_WINDOW_MS = 15 * 60_000; // counters and the lockout both use 15 minutes
 const LOCKOUT_MS = 15 * 60_000;
 const MAX_SENDS_PER_PHONE = 3; // codes texted to one phone per window (per tenant)
 const MAX_SENDS_PER_IP = 10; // sends one caller may trigger per window, across phones
+const MAX_SENDS_PER_TENANT = 30; // ALL sends for one tenant per window — the XFF-proof backstop
 const MAX_FAILS_PER_PHONE = 5; // wrong codes before checks for that phone are refused
 
 const MSG_TOO_MANY_CODES = "Too many codes requested. Try again in about 15 minutes.";
@@ -170,24 +184,37 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
 
   // ── request_code {clientId, phone, name?} ────────────────────────────────────────────
   if (action === "request_code") {
-    // The caller bucket keys on the FIRST x-forwarded-for hop (the client, per the
-    // platform's proxy chain). Requests carrying no header pool under "unknown" —
-    // acceptable: that pool still gets a cap instead of a bypass.
-    const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
+    // Caller bucket key: adminGate's clientIp — the leftmost x-forwarded-for hop, the only
+    // entry that even resembles the caller on this platform (the rightmost is Supabase's
+    // rotating inbound proxy; see adminGate.ts). A client can forge it, so this bucket is
+    // attribution + a brake on naive scripts — the forge-proof cap is the tenant bucket
+    // below (audit 2026-08-20). Requests carrying no header pool under "unknown".
+    const ip = clientIp(req);
     const phoneBucket = await readBucket(sb, phoneBucketKey);
     const ipBucket = await readBucket(sb, `ip:${ip}`);
+    // 'sends:tenant:<slug>' cannot collide with a phone bucket — even for a tenant whose
+    // slug is literally "sends", a phone key ends in ':<10 digits>' and this one never
+    // does — nor with an 'ip:' bucket.
+    const tenantBucket = await readBucket(sb, `sends:tenant:${clientId}`);
 
-    // An unexpired lockout short-circuits before any count math.
+    // An unexpired lockout short-circuits before any count math. (The tenant bucket never
+    // carries a lock — cap-only, see the header.)
     const now = Date.now();
     if ((phoneBucket?.lockedUntilMs ?? 0) > now || (ipBucket?.lockedUntilMs ?? 0) > now) {
       return json({ error: MSG_TOO_MANY_CODES }, 429);
     }
 
     // Caps: 3 sends to one phone (per tenant) or 10 sends from one caller inside a
-    // window locks the breaching bucket(s) for 15 minutes.
+    // window locks the breaching bucket(s) for 15 minutes. 30 sends tenant-wide refuses
+    // WITHOUT a lock — the un-forgeable backstop (audit 2026-08-20): a caller rotating
+    // x-forwarded-for gets a fresh ip bucket every request, but every send still lands in
+    // this one tenant bucket, so the tenant's Twilio bill is bounded at 30 texts per
+    // 15 minutes however many IPs the attacker claims to be. Legitimate shoppers caught
+    // behind a tripped tenant cap are back the moment the window rolls over.
     const phoneOver = phoneBucket !== null && phoneBucket.sendCount >= MAX_SENDS_PER_PHONE;
     const ipOver = ipBucket !== null && ipBucket.sendCount >= MAX_SENDS_PER_IP;
-    if (phoneOver || ipOver) {
+    const tenantOver = tenantBucket !== null && tenantBucket.sendCount >= MAX_SENDS_PER_TENANT;
+    if (phoneOver || ipOver || tenantOver) {
       if (phoneOver && phoneBucket) await saveBucket(sb, phoneBucket, { lockMs: LOCKOUT_MS });
       if (ipOver && ipBucket) await saveBucket(sb, ipBucket, { lockMs: LOCKOUT_MS });
       return json({ error: MSG_TOO_MANY_CODES }, 429);
@@ -222,9 +249,25 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       throw e; // not a Twilio shape — let withErrorLog record it as unhandled
     }
 
-    // Sent. Count it in BOTH buckets (best-effort — the free-pass rule again).
+    // Sent. Count it in all THREE buckets (best-effort — the free-pass rule again).
     if (phoneBucket) await saveBucket(sb, phoneBucket, { send: phoneBucket.sendCount + 1 });
     if (ipBucket) await saveBucket(sb, ipBucket, { send: ipBucket.sendCount + 1 });
+    if (tenantBucket) await saveBucket(sb, tenantBucket, { send: tenantBucket.sendCount + 1 });
+
+    // Housekeeping (adminGate.ts's pattern, audit 2026-08-20): an XFF-rotating caller
+    // writes one junk 'ip:<forged>' row per request that is never read again — without a
+    // sweep the table grows forever. Runs only when THIS request minted a brand-new ip
+    // bucket (windowStartIso null = no prior row), so steady legitimate traffic never
+    // pays for it, and it is best-effort like every other throttle write. Rows that ever
+    // held a lock are left alone (locked_until stays set after expiry); they are few.
+    if (ipBucket && ipBucket.windowStartIso === null) {
+      try {
+        const stale = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        await sb.from("customer_otp_throttle").delete().lt("updated_at", stale).is("locked_until", null);
+      } catch (e) {
+        console.warn(`customer-auth: throttle housekeeping failed: ${(e as Error).message}`);
+      }
+    }
 
     // {ok:true} whether or not this phone has any quotes — see NO ENUMERATION in the
     // header. `name` deliberately goes nowhere on this action: the client carries it

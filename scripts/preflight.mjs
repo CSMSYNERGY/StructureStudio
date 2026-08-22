@@ -1,44 +1,45 @@
 // Pre-push correctness gate.
 //
-// WHY THIS EXISTS: this product has NO build step — the pages ship JSX that
-// babel-standalone compiles in the browser, so nothing catches a broken reference until a
-// customer's tab throws. On 2026-07-30 a refactor renamed LeadsTable's private RANK to the
-// shared STATUS_RANK but missed one usage; it shipped, load() threw ReferenceError on the
-// first row, and the Contacts tab sat on "Loading…" for every tenant until it was traced
-// through app_errors. ESLint's no-undef catches that class of bug in two seconds, before
-// the push. That incident is also this script's self-test fixture (see --self-test).
+// WHY THIS EXISTS: this product has no compiler in the request path — the pages ship
+// artifacts compiled OFFLINE from hand-maintained sources (scripts/compile.mjs; until
+// 2026-08-13 the JSX compiled in the browser), so nothing catches a broken reference until
+// a customer's tab throws. On 2026-07-30 a refactor renamed LeadsTable's private RANK to
+// the shared STATUS_RANK but missed one usage; it shipped, load() threw ReferenceError on
+// the first row, and the Contacts tab sat on "Loading…" for every tenant until it was
+// traced through app_errors. ESLint's no-undef catches that class of bug in two seconds,
+// before the push. That incident is also this script's self-test fixture (see --self-test).
 //
 // WHAT IT CHECKS
-//   1. Every inline <script type="text/babel"> block in index.html / portal.html /
-//      admin.html, plus structure-studio.component.js and StructureStudio.jsx, is parsed
-//      as JSX and linted with correctness-only rules (no style rules — this gate must
-//      never argue about formatting):
+//   1. The app sources — index.mount.jsx / portal.app.jsx / admin.app.jsx (extracted from
+//      the pages on 2026-08-13) plus structure-studio.component.js and StructureStudio.jsx
+//      — are parsed as JSX and linted with correctness-only rules (no style rules — this
+//      gate must never argue about formatting):
 //        no-undef, no-dupe-keys, no-dupe-args, no-const-assign, no-redeclare,
 //        no-unreachable, no-dupe-else-if, no-self-assign, valid-typeof, use-isnan
-//   2. The vendored-dependency lock (replaced the CDN version lock on 2026-08-06, when the four
-//      libraries moved to /vendor/): all three pages must reference the SAME four /vendor/ files,
-//      every one of those files must exist in the repo, and none of the four may be loaded from a
-//      CDN again. One page moving alone silently changes behaviour, since the same source text is
-//      compiled by whichever Babel that page loaded.
-//   3. Cache-buster lockstep: index.html and portal.html must reference the same
-//      structure-studio.component.js?v=… value.
+//      Plus: no road back to in-browser Babel — no type="text/babel" tags and no served
+//      babel-standalone tag on any page (the vendored Babel is the OFFLINE compiler now).
+//   2. The vendored-dependency lock: all three pages must reference the SAME three /vendor/
+//      library files (React, ReactDOM, supabase-js), every one must exist in the repo, and
+//      none may be loaded from a CDN again.
+//   3. Compiled-tag rules: every *.compiled.js tag is root-absolute, carries `defer`, never
+//      `async`, and the shared component tag precedes the page's own app tag (deferred
+//      scripts run in document order). Cache busters are content hashes kept in lockstep
+//      between index.html and portal.html; whether each hash matches its artifact's real
+//      bytes is checked by the artifact drift gate (recompile-and-diff via compile.mjs),
+//      which also refuses a stale or hand-edited artifact.
 //   4. The dependency boot guard is present on all three pages, byte-identical across them,
-//      linted with the same correctness rules as the babel blocks (its body swallows every
+//      linted with the same correctness rules as the sources (its body swallows every
 //      runtime error by design, so a typo inside is a silent no-op that byte-identity alone
-//      would wave through), and the LAST <script> in each body (hoisted above the vendor tags
-//      it would run before they load and replace every healthy page with the failure screen).
-//      It is what turns a dependency that did not load into a message the visitor can act on
-//      instead of a permanently blank page; the three mount blocks are not twinned, so only
-//      this notices one page drifting.
-//   4b. The one dependency that guard CANNOT see: structure-studio.component.js, which Babel
-//      fetches by XHR after the guard has already run. So index.html's mount block must check
-//      the module global BEFORE rendering it (rendering undefined throws React #130 onto a
-//      blank page — it reached Googlebot on 2026-08-06), the check must sit before that render,
-//      both host pages must still report `boot_component_missing`, and the guard must keep
-//      publishing the failure screen the check reuses. Plus portal.html's module src must stay
-//      ROOT-ABSOLUTE: relative, it resolves under /portal/, the splat answers with portal.html
-//      at HTTP 200, and Babel's throw on that HTML aborts every block — the one failure mode no
-//      in-page check can reach, so the gate is its only defence.
+//      would wave through), the LAST <script> in each body, sets __ssBootBlocked (how
+//      compiled artifacts are neutralised) and checks the __ssAppBooted sentinel at
+//      DOMContentLoaded (how a 404'd/HTML-served app artifact stops being a silent blank
+//      page).
+//   4b. The one dependency the guard cannot check itself: the shared component artifact.
+//      index.mount.jsx must check the module global BEFORE rendering it (rendering
+//      undefined throws React #130 onto a blank page — it reached Googlebot on 2026-08-06),
+//      the check must sit before that render, both hosting app sources must report
+//      `boot_component_missing`, every app source must publish the __ssAppBooted sentinel,
+//      and the guard must keep publishing the failure screen the check reuses.
 //   5. No Intuit API/OAuth host appears in a browser-served file. QuickBooks calls belong in
 //      an edge function (qboFetch) — the client secret lives only there, and "we never call
 //      Intuit from the browser" is an answer we give Intuit in writing. Help links to
@@ -63,6 +64,11 @@
 import { Linter } from "eslint";
 import globalsPkg from "globals";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// The compile targets are the single source of truth for WHICH sources exist and how each
+// one is assembled. Importing them means a new file (or a new portal part) is linted the
+// moment it is compiled -- the alternative, a second hand-kept list here, is precisely how
+// this gate has twice ended up reporting clean while running zero rules.
+import { TARGETS, targetName, readTarget, PORTAL_PARTS } from "./compile.mjs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -79,7 +85,6 @@ const PAGE_GLOBALS = {
   React: "readonly",
   ReactDOM: "readonly",
   supabase: "readonly",          // supabase-js UMD (createClient namespace)
-  Babel: "readonly",
   StructureStudio: "readonly",   // published by the shared module
   ssAllowedOrigin: "readonly",   // published by the shared module
   google: "readonly",            // Maps/Places, loaded at runtime when configured
@@ -125,31 +130,41 @@ function lint(label, code, lineOffset = 0) {
     .map((m) => `${label}:${(m.line || 0) + lineOffset}  ${m.ruleId ?? "fatal"}  ${m.message}`);
 }
 
-// Pull every inline text/babel block with its line offset so reported lines match the
-// real file. The src= module tag has no body and is skipped.
-function babelBlocks(html) {
-  const out = [];
-  const re = /<script[^>]*type="text\/babel"[^>]*>([\s\S]*?)<\/script>/g;
-  let m;
-  while ((m = re.exec(html))) {
-    if (!m[1].trim()) continue;
-    const before = html.slice(0, m.index);
-    out.push({ code: m[1], lineOffset: before.split("\n").length - 1 + 1 });
-  }
-  return out;
-}
+// (babelBlocks() lived here until 2026-08-13 — the pages carry no inline app code now;
+// the extracted .jsx sources are linted as whole files instead.)
 
 function run(files) {
   const errors = [];
 
+  // The app sources: the three per-page .jsx files (extracted from the pages on
+  // 2026-08-13, when in-browser Babel was removed) plus the two component twins.
+  // The pages themselves carry no app code anymore — they get structural rules
+  // below, not a lint.
+  // Derived from TARGETS so a new compile target (or portal part, via readTarget) is
+  // linted the moment it exists -- the hand-kept five-name list this replaces is the same
+  // second-copy-drifts shape the load() comment already warns about (audit 2026-08-19).
+  // StructureStudio.jsx rides along explicitly: it is the component's hand-mirrored twin,
+  // linted but never compiled, so it is not a TARGET.
+  for (const f of [...TARGETS.map((t) => targetName(t)), "StructureStudio.jsx"]) {
+    errors.push(...lint(f, files[f]));
+  }
+
+  // No going back to in-browser compilation. A text/babel tag on a page would
+  // load-bearing-ly do NOTHING now (babel-standalone is not served), and a
+  // babel-standalone tag would hand every visitor a 2.85MB compiler again —
+  // the exact cost the compiled-artifact architecture removed. The vendored
+  // Babel file itself STAYS in /vendor/ as scripts/compile.mjs's compiler.
   for (const f of ["index.html", "portal.html", "admin.html"]) {
-    const html = files[f];
-    for (const [i, b] of babelBlocks(html).entries()) {
-      errors.push(...lint(`${f} <script #${i + 1}>`, b.code, b.lineOffset));
+    if (/type="text\/babel"/.test(files[f])) {
+      errors.push(`${f}: a type="text/babel" tag reappeared — the pages ship compiled artifacts `
+        + "(npm run compile); in-browser Babel was removed 2026-08-13 and is no longer served, "
+        + "so this tag would silently never execute");
+    }
+    if (/<script[^>]*src="[^"]*babel-standalone/.test(files[f])) {
+      errors.push(`${f}: a babel-standalone script tag reappeared — the vendored Babel is the `
+        + "OFFLINE compiler (scripts/compile.mjs), never served to visitors");
     }
   }
-  errors.push(...lint("structure-studio.component.js", files["structure-studio.component.js"]));
-  errors.push(...lint("StructureStudio.jsx", files["StructureStudio.jsx"]));
 
   // Vendored-dependency lock. Replaced the old CDN version lock when React / ReactDOM /
   // supabase-js / babel-standalone moved to /vendor/ (2026-08-06) — a blocked third-party request
@@ -269,13 +284,32 @@ function run(files) {
       + "it to show the same failure screen when the shared component module is the thing that did "
       + "not load, so without it that path throws instead of reporting");
   }
+  // The guard's two compiled-world invariants (added 2026-08-13, when in-browser Babel left
+  // the pages). __ssBootBlocked is the neutralise mechanism now — every compiled artifact
+  // opens with `if (window.__ssBootBlocked) return;`, and the old text/babel type-flip
+  // cannot stop an already-parsed classic script. The __ssAppBooted sentinel is the only
+  // thing that can see a page whose OWN app artifact never ran (404, or served as HTML by
+  // the /portal/* splat) — the failure class the inline-babel world swallowed whole.
+  if (guards["index.html"] !== null) {
+    if (!/__ssBootBlocked\s*=\s*true/.test(guards["index.html"])) {
+      errors.push("index.html: the boot guard no longer sets window.__ssBootBlocked — that flag is "
+        + "how compiled app scripts are stopped from running on top of the failure screen; without "
+        + "it a failed library still gets the old blank-page throw on top of the message");
+    }
+    if (!/__ssAppBooted/.test(guards["index.html"])) {
+      errors.push("index.html: the boot guard no longer checks the __ssAppBooted sentinel at "
+        + "DOMContentLoaded — a 404'd or HTML-served app artifact goes back to being a silent "
+        + "blank page, the one failure class no in-page check could see before");
+    }
+  }
   // Order, not just presence. After the render the throw has already happened, so a check that
   // moved below it would pass a presence-only rule while restoring the exact blank page.
-  const iCheck = files["index.html"].search(/if\s*\(\s*!\s*StructureStudio\s*\)/);
-  const iRender = files["index.html"].search(/root\.render\(\s*<StructureStudio\s*\/>\s*\)/);
-  const iShows = files["index.html"].replace(GUARD_TAG, "").search(/ssBootFail\s*\(/);
+  // Anchored in index.mount.jsx — the page's app SOURCE — since the page carries no app code.
+  const iCheck = files["index.mount.jsx"].search(/if\s*\(\s*!\s*StructureStudio\s*\)/);
+  const iRender = files["index.mount.jsx"].search(/root\.render\(\s*<StructureStudio\s*\/>\s*\)/);
+  const iShows = files["index.mount.jsx"].search(/ssBootFail\s*\(/);
   if (iCheck < 0) {
-    errors.push("index.html: the mount block renders the shared module's component without first "
+    errors.push("index.mount.jsx: the mount renders the shared module's component without first "
       + "checking that it loaded (`if (!StructureStudio)`) — if the module did not load this "
       + "renders undefined, throws React error #130, and leaves the visitor a blank page "
       + "(happened 2026-08-06, to Googlebot)");
@@ -283,33 +317,40 @@ function run(files) {
     // The anchor going blind is this file's signature failure: a rule whose regex stops matching
     // reports clean forever and nobody finds out. If the render is respelled, the ORDER half of
     // this rule silently stops existing, so say so instead of quietly degrading to presence-only.
-    errors.push("index.html: the shared-module check is present but `root.render(<StructureStudio/>)` "
+    errors.push("index.mount.jsx: the shared-module check is present but `root.render(<StructureStudio/>)` "
       + "no longer matches, so the check-before-render half of this rule can no longer be verified — "
       + "re-anchor it in scripts/preflight.mjs rather than leaving it silently inert");
   } else if (iCheck > iRender) {
-    errors.push("index.html: the shared-module check sits AFTER root.render(<StructureStudio/>) — "
+    errors.push("index.mount.jsx: the shared-module check sits AFTER root.render(<StructureStudio/>) — "
       + "by then the #130 throw has already happened, so the check protects nothing");
   }
-  // Reporting is not enough on index.html: there the module IS the page, so the visitor must get
-  // the failure SCREEN, not just a row in our table. Without this, downgrading index.html to
-  // portal.html's deliberate report-only treatment would pass every other rule here while handing
+  // Reporting is not enough on index: there the module IS the page, so the visitor must get
+  // the failure SCREEN, not just a row in our table. Without this, downgrading index to
+  // portal's deliberate report-only treatment would pass every other rule here while handing
   // the visitor back the blank page this whole change exists to remove.
   if (iShows < 0) {
-    errors.push("index.html: nothing outside the boot guard calls ssBootFail() — the check must SHOW "
-      + "the failure screen here, not merely report; on this page the shared module is the entire "
-      + "page, so report-only leaves the visitor the same blank page as before");
+    errors.push("index.mount.jsx: nothing calls ssBootFail() — the check must SHOW the failure "
+      + "screen here, not merely report; on this page the shared module is the entire page, so "
+      + "report-only leaves the visitor the same blank page as before");
   }
-  for (const f of ["index.html", "portal.html"]) {
-    // Searched with the guard body REMOVED, which is the difference between a real rule and a
-    // vacuous one: the guard names this code itself (in the ternary that picks the report
-    // wording) and the guard is on all three pages, so a whole-file search would be satisfied
-    // by the guard alone and pass a page that reports nothing. The --self-test caught exactly
-    // that on this rule's first draft.
-    if (!files[f].replace(GUARD_TAG, "").includes(BOOT_COMPONENT_CODE)) {
-      errors.push(`${f}: nothing outside the boot guard reports "${BOOT_COMPONENT_CODE}" — this page `
-        + "hosts the shared component module, and a module that stops being served must not fail "
-        + "silently (index.html shows the boot guard's screen; portal.html degrades to its Designer "
+  // The app sources carry no copy of the guard, so a plain search is a real rule here (the
+  // old page-level version had to strip the guard body first to avoid a vacuous match).
+  for (const f of ["index.mount.jsx", "portal.app.jsx"]) {
+    if (!files[f].includes(BOOT_COMPONENT_CODE)) {
+      errors.push(`${f}: nothing reports "${BOOT_COMPONENT_CODE}" — this app hosts the shared `
+        + "component module, and a module that stops being served must not fail silently "
+        + "(index.mount shows the boot guard's screen; portal.app degrades to its Designer "
         + "tab message, which is invisible to us unless it reports)");
+    }
+  }
+  // Every app source must end in the sentinel the guard's DOMContentLoaded check reads. An
+  // app artifact that runs to completion without announcing itself makes the sentinel fire
+  // on every healthy load — the catastrophic false positive — and one that never sets it
+  // was the point of the sentinel in the first place.
+  for (const f of ["index.mount.jsx", "portal.app.jsx", "admin.app.jsx"]) {
+    if (!/window\.__ssAppBooted\s*=\s*true/.test(files[f])) {
+      errors.push(`${f}: does not set window.__ssAppBooted — the boot guard would report `
+        + "boot_app_missing on every healthy load of its page");
     }
   }
 
@@ -328,28 +369,52 @@ function run(files) {
   // root-level file, by contrast, 404s cleanly on every host (`not_found_handling: "404-page"`)
   // and the mount block's check handles it. index.html is deliberately exempt — it is only ever
   // served from the root, which is documented at its own tag.
-  // Script ORDERING on these pages is load-bearing in two different ways, and both are now asserted
-  // rather than left to habit. Neither is hypothetical — both were reproduced in a browser against
-  // these exact files.
+  // Script ORDERING on these pages is load-bearing in two different ways, and both are asserted
+  // rather than left to habit.
   //
-  // (1) The shared-module tag must not be async/defer. Babel's runner only holds later blocks back
-  // while an earlier non-async src'd block is PENDING; `async` drops that barrier, so the mount
-  // block runs before the module has defined anything. Note what this is and is not: it does NOT
-  // make the new loaded-check lie about a working page — with async the page is broken either way,
-  // because the module contains no mount of its own (mounting is the host page's job), so a
-  // late-arriving module just declares a function nobody calls. Verified: pre-change + async is a
-  // blank page, post-change + async is the failure screen. The rule earns its place by refusing a
-  // config that silently breaks the page, not by protecting the check.
-  for (const f of ["index.html", "portal.html"]) {
-    const tag = files[f].match(/<script[^>]*structure-studio\.component\.js[^>]*>/);
-    if (tag && /\s(?:async|defer)\b/.test(tag[0])) {
-      errors.push(`${f}: the shared-module tag carries async/defer — that drops Babel's ordering `
-        + "barrier, so the mount block runs before the module defines StructureStudio. The module "
-        + "does not mount itself, so one arriving late cannot recover the page: it is a blank page "
-        + "before this check existed and the boot failure screen after. Load it synchronously");
+  // (1) The compiled app tags. Every *.compiled.js tag must be ROOT-ABSOLUTE (portal.html is
+  // served at /portal/<page>/<sub> too, where a relative src resolves against URL depth and
+  // the /portal/* splat answers with portal.html at HTTP 200 — a classic script handed HTML
+  // is a SyntaxError, and only the guard's sentinel would notice), must carry `defer` (defer
+  // executes after parsing — after the guard has set or not set __ssBootBlocked — and in
+  // DOCUMENT ORDER; a tag without defer executes mid-parse, BEFORE the guard exists), must
+  // NOT carry `async` (async abandons document order, so the mount can run before the
+  // component published anything), and the shared component tag must PRECEDE the page's own
+  // app tag for the same document-order reason.
+  for (const f of ["index.html", "portal.html", "admin.html"]) {
+    const tags = [...files[f].matchAll(/<script([^>]*)src="([^"]*\.compiled\.js[^"]*)"[^>]*>/g)];
+    for (const t of tags) {
+      const attrs = t[1] + " ";
+      if (!t[2].startsWith("/")) {
+        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /portal/* a `
+          + "relative src resolves to portal.html at HTTP 200 and the script dies on HTML with "
+          + "only the sentinel to notice. Use a leading /");
+      }
+      if (!/\sdefer\b/.test(attrs)) {
+        errors.push(`${f}: compiled tag for "${t[2]}" is missing \`defer\` — without it the script `
+          + "executes mid-parse, before the boot guard has run, so a failed library gets the old "
+          + "blank-page throw instead of the failure screen");
+      }
+      if (/\sasync\b/.test(attrs)) {
+        errors.push(`${f}: compiled tag for "${t[2]}" carries \`async\` — async abandons document `
+          + "order, so the page's mount can run before the shared component has published itself");
+      }
     }
   }
-  // (2) The four /vendor/ tags must not be async/defer either — and THIS one is the real
+  for (const f of ["index.html", "portal.html"]) {
+    const comp = files[f].search(/<script[^>]*src="\/structure-studio\.component\.compiled\.js/);
+    const own = files[f].search(f === "index.html"
+      ? /<script[^>]*src="\/index\.mount\.compiled\.js/
+      : /<script[^>]*src="\/portal\.app\.compiled\.js/);
+    if (comp < 0) {
+      errors.push(`${f}: no /structure-studio.component.compiled.js tag — this page mounts the `
+        + "shared module and cannot work without it");
+    } else if (own >= 0 && comp > own) {
+      errors.push(`${f}: the shared component tag sits AFTER the page's own app tag — deferred `
+        + "scripts run in document order, so the mount would run before StructureStudio exists`");
+    }
+  }
+  // (2) The /vendor/ tags must not be async/defer — and THIS one is the real
   // catastrophic false positive, the older hazard, and the one nothing was enforcing. The guard
   // works only because those tags block parsing, so all four have resolved by the time it runs (its
   // own comment says exactly that). Reproduced with `defer` on /vendor/react: React loaded fine and
@@ -367,17 +432,8 @@ function run(files) {
       }
     }
   }
-  const portalModule = files["portal.html"].match(/<script src="([^"]*structure-studio\.component\.js[^"]*)"/);
-  if (!portalModule) {
-    errors.push("portal.html: no structure-studio.component.js tag — the in-portal Designer tab "
-      + "mounts the shared module and cannot work without it");
-  } else if (!portalModule[1].startsWith("/")) {
-    errors.push(`portal.html: the shared-module src "${portalModule[1]}" is not root-absolute — this `
-      + "page is served at /portal/<page>/<sub> too, where a relative src resolves against the URL "
-      + "depth and the /portal/* splat answers with portal.html at HTTP 200; Babel then throws on "
-      + "\"<!DOCTYPE html>\" and aborts every text/babel block, blanking the WHOLE portal with no "
-      + "error reported anywhere (this exact bug shipped once). Use /structure-studio.component.js");
-  }
+  // (The old dedicated portal-module root-absolute rule folded into the compiled-tag rules
+  // above, which assert root-absolute + defer + order for every compiled tag on every page.)
 
   // Intuit API/OAuth hosts must never appear in a browser-served file. Every QuickBooks call
   // goes through qboFetch inside an edge function, and that is load-bearing twice over: the
@@ -422,7 +478,11 @@ function run(files) {
     const end = rest.search(/\n\};/);
     const table = rest.slice(0, end);
     const body = rest.slice(end);
-    const gated = new Set([...table.matchAll(/^\s*([a-z_]+)\s*:/gm)].map((m) => m[1]));
+    // [a-z0-9_] not [a-z_]: an action name carrying a DIGIT (save_style_d3) never matched, so
+    // the table could not satisfy this rule for it by ANY spelling. The only ways out were
+    // renaming a deployed action or --no-verify -- i.e. a correctness gate teaching people to
+    // bypass it. Surfaced by the 3D merge, which grafted six such actions in at once.
+    const gated = new Set([...table.matchAll(/^\s*([a-z0-9_]+)\s*:/gm)].map((m) => m[1]));
     const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
     for (const a of used) {
       if (!gated.has(a)) {
@@ -438,20 +498,58 @@ function run(files) {
     }
   }
 
-  // Cache-buster lockstep between the two hosts of the shared module.
-  const buster = (html) => (html.match(/structure-studio\.component\.js\?v=([a-z0-9]+)/) || [])[1];
+  // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
+  // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
+  // artifact's real bytes is the compile drift gate's job (it recompiles and compares) —
+  // this in-memory rule keeps the two pages honest against each other.
+  const buster = (html) => (html.match(/structure-studio\.component\.compiled\.js\?v=([a-zA-Z0-9]+)/) || [])[1];
   const vi = buster(files["index.html"]);
   const vp = buster(files["portal.html"]);
   if (!vi || !vp || vi !== vp) {
     errors.push(`cache-buster mismatch: index.html has v=${vi ?? "MISSING"}, portal.html has v=${vp ?? "MISSING"}`);
   }
 
+  // No ORPHAN portal part. A .jsx under portal/ that is not in PORTAL_PARTS is not compiled,
+  // not linted and not shipped -- it just silently does nothing, which is the worst possible
+  // failure for a file someone believes they are editing. The reverse (a listed part that is
+  // missing) already fails loudly, because compile.mjs cannot read it.
+  const partSet = new Set(PORTAL_PARTS);
+  for (const f of readdirSync(join(root, "portal")).filter((f) => f.endsWith(".jsx"))) {
+    if (!partSet.has(`portal/${f}`)) {
+      errors.push(`portal/${f}: not listed in PORTAL_PARTS (scripts/compile.mjs) -- it is `
+        + "compiled by nothing, linted by nothing and shipped nowhere. Add it in the right "
+        + "ORDER position, or delete it.");
+    }
+  }
+
   return errors;
 }
 
-const load = () => Object.fromEntries(
-  ["index.html", "portal.html", "admin.html", "structure-studio.component.js", "StructureStudio.jsx"]
-    .map((f) => [f, read(f)]));
+const load = () => Object.fromEntries([
+  ...["index.html", "portal.html", "admin.html"].map((f) => [f, read(f)]),
+  // Every compile target, under its reported name and with its parts already assembled --
+  // so `files["portal.app.jsx"]` is the exact text that gets compiled even though no such
+  // file exists on disk anymore (it is portal/01-core.jsx ... 09-shell.jsx since 2026-08-19).
+  ...TARGETS.map((t) => [targetName(t), readTarget(t)]),
+  ["StructureStudio.jsx", read("StructureStudio.jsx")],
+]);
+
+// ── Compiled artifacts: the drift gate ───────────────────────────────────────────────────
+// The pages ship artifacts compiled OFFLINE from the sources linted above (scripts/
+// compile.mjs, using the vendored babel-standalone as the compiler). Recompile-and-diff is
+// deliberately the freshness rule — strictly stronger than any manifest bookkeeping, since
+// a hand-edited artifact with self-consistent bookkeeping still fails a byte compare. Also
+// covers the content-hash ?v= busters on every page. Runs on real disk files, like the
+// deno steps, so it lives outside run(files).
+async function artifactCheck() {
+  const { checkArtifacts, compileSource } = await import("./compile.mjs");
+  // Vacuity guard, the lesson this script keeps re-learning: a compiler that silently
+  // stopped compiling must not read as "everything is fresh".
+  if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
+    return ["compile self-check failed: the vendored Babel produced no JSX output — the artifact drift gate cannot run"];
+  }
+  return checkArtifacts();
+}
 
 // ── Edge functions: deno check ───────────────────────────────────────────────────────────
 // Deliberately NOT part of run(files): everything above works on an in-memory copy so the
@@ -600,11 +698,11 @@ if (process.argv.includes("--self-test")) {
   // the one-word fix in the current file and expect no-undef to fire.
   const files = load();
   const fixed = "if (STATUS_RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;";
-  if (!files["portal.html"].includes(fixed)) {
-    console.error("self-test: fixture line not found in portal.html — update the self-test");
+  if (!files["portal.app.jsx"].includes(fixed)) {
+    console.error("self-test: fixture line not found in portal.app.jsx — update the self-test");
     process.exit(1);
   }
-  files["portal.html"] = files["portal.html"].replace(fixed,
+  files["portal.app.jsx"] = files["portal.app.jsx"].replace(fixed,
     "if (RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;");
   const errors = run(files);
   const caught = errors.some((e) => e.includes("no-undef") && e.includes("RANK"));
@@ -738,9 +836,9 @@ if (process.argv.includes("--self-test")) {
   // This rule exists because the failure it prevents ALREADY SHIPPED and was crawled by
   // Googlebot (React #130 on a blank designer, app_errors 96ce38ff). Prove all four directions.
   const compCheckGone = load();
-  compCheckGone["index.html"] = compCheckGone["index.html"].replace(/if \(!StructureStudio\) \{/, "if (false) {");
+  compCheckGone["index.mount.jsx"] = compCheckGone["index.mount.jsx"].replace(/if \(!StructureStudio\) \{/, "if (false) {");
   if (!run(compCheckGone).some((e) => e.includes("without first checking that it loaded"))) {
-    console.error("self-test FAILED: index.html rendering the shared module with no loaded-check was "
+    console.error("self-test FAILED: index.mount.jsx rendering the shared module with no loaded-check was "
       + "not caught — that is the exact #130 blank page that reached Googlebot");
     process.exit(1);
   }
@@ -748,11 +846,11 @@ if (process.argv.includes("--self-test")) {
   // same blank page with a rule that still passes.
   const compCheckAfter = load();
   const renderLine = "  root.render(<StructureStudio/>);";
-  if (!compCheckAfter["index.html"].includes(renderLine)) {
-    console.error("self-test: render fixture line not found in index.html — update the self-test");
+  if (!compCheckAfter["index.mount.jsx"].includes(renderLine)) {
+    console.error("self-test: render fixture line not found in index.mount.jsx — update the self-test");
     process.exit(1);
   }
-  compCheckAfter["index.html"] = compCheckAfter["index.html"].replace(renderLine, "")
+  compCheckAfter["index.mount.jsx"] = compCheckAfter["index.mount.jsx"].replace(renderLine, "")
     .replace("if (!StructureStudio) {", renderLine + "\nif (!StructureStudio) {");
   if (!run(compCheckAfter).some((e) => e.includes("sits AFTER root.render"))) {
     console.error("self-test FAILED: a shared-module check moved below the render was not caught");
@@ -767,51 +865,84 @@ if (process.argv.includes("--self-test")) {
       + "the mount blocks' module-missing path would throw instead of showing the message");
     process.exit(1);
   }
-  // The FIRST occurrence in the file is the page's own reporter (the mount block precedes the
-  // guard), so this removes the report while leaving the guard — and therefore the guard's own
-  // mention of the same string — intact. That is the case the first draft of the rule missed.
+  // The sources carry no guard copy, so the plain-search rule is exercised directly.
   const compReportGone = load();
-  compReportGone["portal.html"] = compReportGone["portal.html"].replace("boot_component_missing", "some_other_code");
-  if (!run(compReportGone).some((e) => e.includes("boot_component_missing") && e.includes("portal.html"))) {
-    console.error("self-test FAILED: portal.html no longer reporting a missing shared module was not "
+  compReportGone["portal.app.jsx"] = compReportGone["portal.app.jsx"].replaceAll("boot_component_missing", "some_other_code");
+  if (!run(compReportGone).some((e) => e.includes("boot_component_missing") && e.includes("portal.app.jsx"))) {
+    console.error("self-test FAILED: portal.app.jsx no longer reporting a missing shared module was not "
       + "caught — its Designer tab would degrade silently");
+    process.exit(1);
+  }
+  // The sentinel publish: an app source that stops announcing itself makes the guard report
+  // boot_app_missing on every HEALTHY load of that page — assert the rule sees it gone.
+  const sentinelGone = load();
+  sentinelGone["admin.app.jsx"] = sentinelGone["admin.app.jsx"].replace(/window\.__ssAppBooted\s*=\s*true;/, "");
+  if (!run(sentinelGone).some((e) => e.includes("__ssAppBooted") && e.includes("admin.app.jsx"))) {
+    console.error("self-test FAILED: admin.app.jsx losing its __ssAppBooted sentinel was not caught — "
+      + "the guard would fire on every healthy admin load");
     process.exit(1);
   }
   console.log("self-test passed: the shared-module check must exist, precede the render, keep its "
     + "reporter, and keep the guard's published failure screen");
 
-  // The root-absolute module src on portal.html. This one guards the failure mode that CANNOT be
-  // checked in-page (Babel aborts every block, so the reporter never runs) — the gate is the only
-  // available defence, and until now nothing enforced it.
-  const portalRelSrc = load();
-  portalRelSrc["portal.html"] = portalRelSrc["portal.html"].replace(
-    '<script src="/structure-studio.component.js', '<script src="structure-studio.component.js');
-  if (portalRelSrc["portal.html"] === load()["portal.html"]) {
-    console.error("self-test: portal.html's root-absolute module tag not found — update the self-test");
+  // The compiled-tag rules: root-absolute, defer required, async forbidden, component before
+  // the page's own app tag, and no road back to in-browser Babel. Each direction fires.
+  const relSrc = load();
+  relSrc["portal.html"] = relSrc["portal.html"].replace(
+    'src="/structure-studio.component.compiled.js', 'src="structure-studio.component.compiled.js');
+  if (relSrc["portal.html"] === load()["portal.html"]) {
+    console.error("self-test: portal.html's root-absolute compiled tag not found — update the self-test");
     process.exit(1);
   }
-  if (!run(portalRelSrc).some((e) => e.includes("not root-absolute"))) {
-    console.error("self-test FAILED: portal.html's shared-module src regressing to a relative path was "
-      + "not caught — at /portal/<page>/<sub> that returns portal.html at 200, which blanks the whole "
-      + "portal with zero telemetry (it shipped once)");
+  if (!run(relSrc).some((e) => e.includes("not root-absolute"))) {
+    console.error("self-test FAILED: a compiled src regressing to a relative path was not caught — "
+      + "at /portal/<page>/<sub> that returns portal.html at 200 and the script dies on HTML");
     process.exit(1);
   }
-  console.log("self-test passed: portal.html's shared-module src must stay root-absolute");
+  const deferGone = load();
+  deferGone["index.html"] = deferGone["index.html"].replace(
+    '<script defer src="/index.mount.compiled.js', '<script src="/index.mount.compiled.js');
+  if (!run(deferGone).some((e) => e.includes("missing `defer`"))) {
+    console.error("self-test FAILED: a compiled tag without defer was not caught — it would execute "
+      + "mid-parse, before the boot guard exists");
+    process.exit(1);
+  }
+  const asyncAdded = load();
+  asyncAdded["portal.html"] = asyncAdded["portal.html"].replace(
+    '<script defer src="/portal.app.compiled.js', '<script defer async src="/portal.app.compiled.js');
+  if (!run(asyncAdded).some((e) => e.includes("carries `async`"))) {
+    console.error("self-test FAILED: async on a compiled tag was not caught — document order would be "
+      + "abandoned and the mount could run before the component published");
+    process.exit(1);
+  }
+  const orderSwap = load();
+  {
+    const comp = orderSwap["index.html"].match(/<script defer src="\/structure-studio\.component\.compiled\.js[^>]*><\/script>/)[0];
+    const own = orderSwap["index.html"].match(/<script defer src="\/index\.mount\.compiled\.js[^>]*><\/script>/)[0];
+    orderSwap["index.html"] = orderSwap["index.html"].replace(comp, "@@SWAP@@").replace(own, comp).replace("@@SWAP@@", own);
+  }
+  if (!run(orderSwap).some((e) => e.includes("sits AFTER the page's own app tag"))) {
+    console.error("self-test FAILED: the component tag moved below the page's app tag was not caught — "
+      + "deferred scripts run in document order, so the mount would run first");
+    process.exit(1);
+  }
+  const babelTagBack = load();
+  babelTagBack["admin.html"] = babelTagBack["admin.html"].replace("</body>",
+    '<script src="/vendor/babel-standalone-7.23.9.min.js"></script></body>');
+  if (!run(babelTagBack).some((e) => e.includes("babel-standalone script tag reappeared"))) {
+    console.error("self-test FAILED: a babel-standalone tag reintroduced into admin.html was not caught");
+    process.exit(1);
+  }
+  const babelBlockBack = load();
+  babelBlockBack["index.html"] = babelBlockBack["index.html"].replace("</body>",
+    '<script type="text/babel">const x = 1;</script></body>');
+  if (!run(babelBlockBack).some((e) => e.includes('type="text/babel" tag reappeared'))) {
+    console.error("self-test FAILED: an inline text/babel block reintroduced into index.html was not caught");
+    process.exit(1);
+  }
+  console.log("self-test passed: compiled tags must be root-absolute + defer'd, ordered component-first, "
+    + "async is refused, and both roads back to in-browser Babel are closed");
 
-  // async/defer, on both the module tag and the four library tags. The second is the one that
-  // blanks a page which would otherwise have worked, so prove both fire.
-  const moduleAsync = load();
-  moduleAsync["index.html"] = moduleAsync["index.html"].replace(
-    'src="structure-studio.component.js?v=', 'async src="structure-studio.component.js?v=');
-  if (moduleAsync["index.html"] === load()["index.html"]) {
-    console.error("self-test: index.html's module tag not found — update the self-test");
-    process.exit(1);
-  }
-  if (!run(moduleAsync).some((e) => e.includes("shared-module tag carries async/defer"))) {
-    console.error("self-test FAILED: async on the shared-module tag was not caught — the mount block "
-      + "would run before the module defines anything, and the module cannot recover the page");
-    process.exit(1);
-  }
   const libDefer = load();
   libDefer["portal.html"] = libDefer["portal.html"].replace(
     '<script src="/vendor/react-18.2.0', '<script defer src="/vendor/react-18.2.0');
@@ -825,8 +956,7 @@ if (process.argv.includes("--self-test")) {
       + "the failure screen for every visitor (reproduced in a browser with defer on react)");
     process.exit(1);
   }
-  console.log("self-test passed: neither the shared-module tag nor the /vendor/ library tags may "
-    + "carry async/defer");
+  console.log("self-test passed: the /vendor/ library tags may not carry async/defer");
 
   // ── The vendored-dependency lock ────────────────────────────────────────────
   // This rule REPLACED one that had become vacuous, so proving it actually fires is the whole
@@ -841,11 +971,11 @@ if (process.argv.includes("--self-test")) {
   }
   const libGone = load();
   libGone["index.html"] = libGone["index.html"].replace(
-    "/vendor/babel-standalone-7.23.9.min.js", "/vendor/babel-standalone-7.99.0.min.js");
+    "/vendor/supabase-js-2.112.1.umd.min.js", "/vendor/supabase-js-2.999.0.umd.min.js");
   libGone["portal.html"] = libGone["portal.html"].replace(
-    "/vendor/babel-standalone-7.23.9.min.js", "/vendor/babel-standalone-7.99.0.min.js");
+    "/vendor/supabase-js-2.112.1.umd.min.js", "/vendor/supabase-js-2.999.0.umd.min.js");
   libGone["admin.html"] = libGone["admin.html"].replace(
-    "/vendor/babel-standalone-7.23.9.min.js", "/vendor/babel-standalone-7.99.0.min.js");
+    "/vendor/supabase-js-2.112.1.umd.min.js", "/vendor/supabase-js-2.999.0.umd.min.js");
   if (!run(libGone).some((e) => e.includes("not present in the repo"))) {
     console.error("self-test FAILED: a /vendor/ file referenced by all three pages but missing from "
       + "the repo was not caught — every visitor would get the fallback message");
@@ -859,18 +989,46 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   // The other direction, same reasoning as the Intuit help-link case: exceljs is legitimately
-  // CDN-loaded on demand, and a rule that flags it gets deleted by the next person it annoys.
+  // CDN-loaded on demand (from portal.app.jsx, at runtime — the pages carry no such tag), and
+  // a rule that flags it gets deleted by the next person it annoys. Injected here because the
+  // rule scans PAGES; the injection proves the regex scoping, not repo content.
   const exceljsOk = load();
-  if (!exceljsOk["portal.html"].includes("cdnjs.cloudflare.com/ajax/libs/exceljs/")) {
-    console.error("self-test: exceljs fixture not found in portal.html — update the self-test");
+  exceljsOk["portal.html"] = exceljsOk["portal.html"].replace("</body>",
+    '<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script></body>');
+  const exceljsNoise = run(exceljsOk).filter((e) => e.includes("must come") && e.includes("/vendor/"));
+  if (exceljsNoise.length) {
+    console.error("self-test FAILED: an exceljs CDN tag tripped the vendored-lock rule");
     process.exit(1);
   }
-  if (run(exceljsOk).some((e) => e.includes("must come") && e.includes("/vendor/"))) {
-    console.error("self-test FAILED: the on-demand exceljs CDN load tripped the vendored-lock rule");
-    process.exit(1);
-  }
-  console.log("self-test passed: the four libraries must be vendored, identical, present, and not "
+  console.log("self-test passed: the three libraries must be vendored, identical, present, and not "
     + "CDN-loaded — while exceljs stays allowed");
+
+  // ── The artifact drift gate ────────────────────────────────────────────────
+  // Fire direction: a source edited without recompiling must produce different bytes than
+  // the committed artifact (proven in memory — the real gate does this same compare on
+  // disk). Quiet direction: the pristine repo must check clean. Vacuity direction: the
+  // compiler must actually compile JSX, or "no drift" means "the gate is dead".
+  {
+    const { checkArtifacts, compileSource } = await import("./compile.mjs");
+    if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
+      console.error("self-test FAILED: the vendored Babel produced no JSX output — the drift gate is dead");
+      process.exit(1);
+    }
+    const drifted = compileSource(read("index.mount.jsx") + "\nconsole.log('drift');\n", "index.mount.jsx");
+    if (drifted === read("index.mount.compiled.js").replace(/\r\n/g, "\n")) {
+      console.error("self-test FAILED: an edited source compiled to the same bytes as the committed "
+        + "artifact — the drift compare cannot distinguish stale from fresh");
+      process.exit(1);
+    }
+    const pristine = checkArtifacts();
+    if (pristine.length) {
+      console.error("self-test FAILED: the pristine repo does not pass the artifact drift gate:");
+      for (const p of pristine) console.error("  " + p);
+      process.exit(1);
+    }
+  }
+  console.log("self-test passed: the artifact drift gate compiles for real, flags an edited source, "
+    + "and passes the pristine repo");
 
   // ── The deno step ──────────────────────────────────────────────────────────
   // Asserts the MECHANISM, not a historical bug. A subprocess check whose clean result and
@@ -938,6 +1096,8 @@ if (process.argv.includes("--self-test")) {
 }
 
 const errors = run(load());
+
+errors.push(...await artifactCheck());
 
 const deno = denoCheck();
 errors.push(...deno.errors);

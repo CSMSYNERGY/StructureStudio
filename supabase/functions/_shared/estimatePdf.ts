@@ -330,8 +330,13 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   }
 
   // ── Page numbers (total count only known now) ─────────────────────────────────────────
+  // Annotated because pdf-lib ships CJS and Deno resolves its types inconsistently: with a
+  // cold npm cache `doc` degrades to `any` and these params infer fine, but once the cache is
+  // warm they become implicit-any and `deno check` fails TS7006. Naming them makes the file
+  // check the same either way. `p` is a pdf-lib PDFPage; typing it structurally to the one
+  // method used here avoids importing a type from a module whose resolution is the problem.
   const pages = doc.getPages();
-  pages.forEach((p, i) => {
+  pages.forEach((p: { drawText: (t: string, o: Record<string, unknown>) => void }, i: number) => {
     const label = `Page ${i + 1} of ${pages.length}`;
     const w = helv.widthOfTextAtSize(label, 8);
     p.drawText(label, { x: (PAGE_W - w) / 2, y: MARGIN / 2, size: 8, font: helv, color: GRAY });

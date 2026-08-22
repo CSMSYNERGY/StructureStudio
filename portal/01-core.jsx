@@ -1,0 +1,967 @@
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+const { createClient } = window.supabase;
+
+// ─── StructureStudio Business Portal ───
+// Standalone owner-facing page (login + dashboard). Unlike index.html /
+// StructureStudio.jsx — which are hand-mirrored siblings — this file has no
+// .jsx twin: it is only ever served by Netlify, never embedded by hosts.
+//
+// Auth: Supabase email/password. Each owner account maps to one client via the
+// client_users table; RLS confines every query to that tenant's rows. Secrets
+// (the GHL API key) never reach this page — settings reads/writes go through
+// the portal-settings edge function, which masks on read and is write-only for
+// the key.
+
+const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+// Session-expiry guard: if any authenticated call (PostgREST or an edge
+// function) comes back 401, the login session is dead — most often a
+// refresh-token race between multiple open windows revoking it. The custom
+// fetch spots those 401s and hands off to PortalApp (ssOnSessionExpired), which
+// signs out cleanly and shows a friendly message on the login screen instead of
+// raw "non-2xx" errors in every tab. Auth endpoints (/auth/v1/) are
+// deliberately NOT intercepted — a wrong password legitimately 4xxes and must
+// reach the login form's own error handling.
+let ssOnSessionExpired = null; // installed by PortalApp on mount
+// Requests that carry this header opt OUT of the session-expiry intercept, because a 401 from
+// them means something else entirely. The operator step-up password is the case: since the Admin
+// console became native (c59da3c), a wrong password makes admin-catalog answer 401 (adminGate) with
+// the operator's JWT perfectly valid — indistinguishable here from a dead session. The intercept
+// then signed them out of the whole portal mid-dialog with "Your session expired", discarding every
+// keep-mounted form and any in-progress design, and destroying the in-dialog "2 more attempts locks
+// this IP for 6 hours" warning — so the natural response was to sign back in and blind-retry into
+// the shared 6-hour admin lockout that also disables the /admin break-glass console. The dialog's
+// own "Incorrect admin password" handling never got to render.
+const SS_NO_EXPIRY_HEADER = "x-ss-stepup";
+const ssHasStepUpHeader = (url, opts) => {
+  const read = (h) => {
+    if (!h) return false;
+    if (typeof h.get === "function") return Boolean(h.get(SS_NO_EXPIRY_HEADER));
+    return Object.keys(h).some((k) => k.toLowerCase() === SS_NO_EXPIRY_HEADER);
+  };
+  // supabase-js may hand us either (Request) or (url, init), so check both.
+  return read(opts && opts.headers) || read(url && url.headers);
+};
+const ssFetch = (url, opts) => fetch(url, opts).then((res) => {
+  try {
+    const u = String(url && url.url ? url.url : url);
+    if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1)
+        && !ssHasStepUpHeader(url, opts) && ssOnSessionExpired) ssOnSessionExpired();
+  } catch (_e) { /* the guard must never break the request itself */ }
+  return res;
+});
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFetch } });
+
+// ── Central error logging → Supabase app_errors (via the log_error RPC). Best-effort:
+// never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
+// rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
+// Same permissive shape as portal-settings' and submit-estimate's copies. Kept identical
+// on purpose — this one only decides what the UI lets you SAVE, so if it were looser than
+// the server's the owner would get a rejected save with no explanation, and if it were
+// stricter they could not save a value the server would happily accept.
+const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
+
+const SS_ERR_SOURCE = "portal";
+function ssLogError(source, message, code, context) {
+  try {
+    const params = new URLSearchParams(location.search);
+    fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY },
+      body: JSON.stringify({
+        p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
+        p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
+        p_code: code == null ? null : String(code).slice(0, 100),
+        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_url: location.href.slice(0, 600),
+        p_context: context || null,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* logging must never break the app */ }
+}
+window.ssLogError = ssLogError;
+window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
+  { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
+
+// ── The shared designer module, if it did not load ────────────────────────────
+// REPORT ONLY, deliberately — and this is the opposite treatment from index.html, on
+// purpose. There the module IS the page, so losing it is a blank screen and the boot guard's
+// failure message replaces the page. Here it backs exactly ONE tab: with the module gone the
+// portal still logs in and every other tab (designs, contacts, settings, billing, schedule)
+// works perfectly — VERIFIED, the login screen renders its normal 3,261 chars — and
+// DesignerTab already degrades to its own inline "the designer failed to load" message. So
+// calling window.ssBootFail() here would replace a WORKING portal with an error screen over
+// one optional tab: strictly worse than the bug, and the same catastrophic-false-positive
+// class the guard's position rule in preflight exists to prevent.
+// What was missing is that the degraded tab was SILENT — a tenant loses the designer and
+// nobody finds out. One row, at block scope rather than inside DesignerTab, so it cannot fire
+// twice on a re-render and is not a side effect in render.
+if (!window.StructureStudio) {
+  ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not", "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only" });
+}
+// ── Operator "view as" tenant override (transport-level) ──────────────────────
+// While an operator has another tenant's portal open, every portal-settings /
+// portal-billing / sync-design-status call must act on THAT tenant. This is a property of
+// the transport, not of any component, so it is applied once here rather than threaded
+// through ~23 call sites in six components — five of which take no clientId prop at all.
+//
+// Why not props or context: both need an edit at every call site, and both share one
+// failure mode — a site missed today, or added in six months, silently reads AND WRITES
+// the operator's own tenant. A wrong-tenant save_colors (a full-list replace with a
+// server-side delete) or send_invoice is unrecoverable and invisible. Here, forgetting is
+// impossible. Same module-level-transport-state pattern as ssOnSessionExpired above.
+let ssTargetClientId = null;   // set by Dashboard during render; null when not viewing
+
+// Allow-list, not a deny-list: a function added later gets NO injection until it is named
+// here. operator-portal is deliberately absent — it passes its own explicit clientId, and
+// its list_clients is a cross-tenant listing that must never look tenant-scoped.
+// ⛔ portal-commissions is DELIBERATELY absent and must stay absent. Carolyn, 2026-08-07:
+// "Operators should not be able to change commissions in builders pages." Adding it here
+// would inject targetClientId and hand operators exactly that. The function itself refuses
+// a targetClientId with a 403, so adding it here would break every operator call rather
+// than quietly widening access — that pairing is intentional, not an oversight to fix.
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule"];
+
+// Capture every portal-settings edge-function error in one place by wrapping invoke.
+//
+// ⚠️ `sb.functions` is a GETTER in supabase-js v2 — it mints a NEW FunctionsClient on
+// every access. Assigning onto `sb.functions.invoke` therefore patches a throwaway
+// instance and silently does nothing: that is exactly what happened from 2026-07-30 to
+// 2026-07-31 — the targetClientId injection and the tripwire below never ran, and every
+// portal-settings call in operator view-as resolved the OPERATOR'S OWN tenant. The fix
+// is to mint ONE instance, wrap it, and pin it as an own data property so it shadows
+// the prototype getter (verify in a console: `sb.functions === sb.functions` → true).
+const __ssFunctions = sb.functions;
+const __ssInvoke = __ssFunctions.invoke.bind(__ssFunctions);
+__ssFunctions.invoke = async (name, opts) => {
+  let injected = null;
+  if (
+    ssTargetClientId &&
+    SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 &&
+    opts && opts.body && typeof opts.body === "object" &&
+    !(opts.body instanceof FormData) && !(opts.body instanceof Blob) && !(opts.body instanceof ArrayBuffer) &&
+    opts.body.targetClientId === undefined                       // an explicit value always wins
+  ) {
+    injected = ssTargetClientId;
+    // Never mutate the caller's object — several call sites build a local `body` and reuse it.
+    opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
+  }
+  const res = await __ssInvoke(name, opts);
+  // Recover the SERVER'S message on a non-2xx. supabase-js reports every 4xx/5xx as
+  // FunctionsHttpError("Edge Function returned a non-2xx status code") and leaves the JSON
+  // body — which holds the actual reason — unread on error.context. Every call site here
+  // does `throw new Error(error.message || data.error)`, and because `error` is truthy the
+  // real reason was never even looked at: the builder got "non-2xx", and so did app_errors.
+  // That is how seven fixture failures on 2026-08-05 recorded nothing anyone could act on.
+  // Reading it once, here, fixes the message for every action and every call site at once.
+  if (res && res.error && res.error.context && typeof res.error.context.json === "function"
+      && /non-2xx/i.test(res.error.message || "")) {
+    try {
+      const body = await res.error.context.clone().json();
+      const serverMsg = body && (body.error || body.message);
+      if (serverMsg) {
+        const status = res.error.context.status;
+        res.error.message = String(serverMsg);
+        res.error.ssStatus = status;
+        // 401/403 are the two a builder can act on themselves, so say what to do.
+        if (status === 401) res.error.message += " — sign out and back in.";
+        else if (status === 403) res.error.message += " — ask an owner or admin to do this.";
+      }
+    } catch (_) { /* body already consumed, or not JSON — keep the generic message */ }
+  }
+  try {
+    if (res && (res.error || (res.data && res.data.error))) {
+      ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
+        (res.error && res.error.name) || null,
+        { fn: name, action: opts && opts.body && opts.body.action, target: injected,
+          status: (res.error && res.error.ssStatus) || null });
+    }
+  } catch (_) {}
+  // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
+  // what we asked for, the backend is older than this page and is silently serving the
+  // operator's OWN tenant — so refuse the response instead of rendering someone else's
+  // data under this client's name. This is what makes the deploy order (backend first)
+  // enforce itself rather than depending on anyone remembering it.
+  if (injected && res && res.data && res.data.clientId && res.data.clientId !== injected) {
+    ssLogError(SS_ERR_SOURCE, "operator view: server resolved a different tenant", null,
+      { fn: name, asked: injected, got: res.data.clientId });
+    return { data: null, error: new Error("This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists.") };
+  }
+  return res;
+};
+// Pin the wrapped instance. An own data property shadows the class getter, so every
+// later `sb.functions` access returns THIS client instead of minting an unwrapped one.
+Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: true });
+
+// (ADMIN_URL is gone — the Admin tab no longer iframes /admin. admin.html and its /admin
+// redirect both REMAIN on disk as the break-glass route: if this portal will not load,
+// operators still have a password-only way into the console.)
+
+const TAB_META = {
+  designer: ["Designer", "Design a building and build a quote"],
+  accounts: ["Accounts", "Open any builder's portal — operators only"],
+  admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
+  designs: ["Designs", "Customer designs and submitted quotes"],
+  leads: ["Contacts", "Everyone who has submitted a design"],
+  orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
+  releases: ["What's New", "Latest features and fixes"],
+  settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
+  quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
+  "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
+  "build-schedule": ["Build Schedule", "Track buildings from order to done"],
+  "delivery-schedule": ["Delivery Schedule", "Plan truck loads and manage deliveries"],
+  "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
+  "repairs": ["Repairs", "Manage repair jobs from request to done"],
+  "view-3d": ["3D Design", "Give each building style its own 3D look"],
+  "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
+  "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
+  "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
+  "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
+};
+
+// ── Path routing ─────────────────────────────────────────────────────────────
+// Every page has its own URL: /portal/<page>[/<sub>]. Carolyn, 2026-07-29: "Let's say
+// I'm right here, and I go and refresh the page — it goes back to designs." / "Every page
+// doesn't have its own link. We should, shouldn't we? That's the problem."
+//
+// TAB_META above is the ONE registry — a page is routable because it has an entry, so
+// there is no second list to keep in sync. `sub` is the Settings/Admin sub-tab.
+//
+// Everything is same-document pushState. No anchors, no location.assign: the designer and
+// the admin console are keep-mounted, and a real navigation would throw their state away.
+//
+// `_redirects` needs `/portal/* /portal.html 200` for these to survive a cold load. A plain
+// static server ignores _redirects, so deep links only work on beta/production — locally
+// the app still runs, it just always boots at /portal.html.
+function ssParsePath() {
+  const parts = String(window.location.pathname || "").split("/").filter(Boolean);
+  // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
+  if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
+  return { page: parts[1] || null, sub: parts[2] || null };
+}
+
+// Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
+// every navigation) and drops any hash.
+function ssPagePath(page, sub) {
+  const base = "/portal" + (page ? "/" + page : "") + (page && sub ? "/" + sub : "");
+  return base + (window.location.search || "");
+}
+
+// Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
+// (product news), and the coming-soon teaser tabs (previews, no data). Everything else is
+// admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
+// 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
+const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+
+// Which permission area each page needs to be VISIBLE (migration 100). The server ships the
+// caller's resolved map on the status call and enforces it on every action regardless —
+// this only decides what is worth showing, so that a driver sees a portal made of the four
+// things they do rather than a wall of tabs that 403.
+//
+// A page absent from this map is not access-controlled: "releases" is product news, and the
+// coming-soon teasers render no tenant data at all.
+const TAB_AREA = {
+  designer: "designer",
+  designs: "designs",
+  leads: "contacts",
+  inventory: "inventory",
+  orders: "orders",
+  "build-schedule": "build_schedule",
+  "delivery-schedule": "delivery_schedule",
+  repairs: "repairs",
+  commissions: "commissions",
+  reports: "reports",
+  quickbooks: "settings_quickbooks",
+};
+// Which area each Settings sub-tab needs. Same registry idea as TAB_AREA above: a sub-tab
+// missing from this map is not access-controlled.
+const SETTINGS_TAB_AREA = {
+  structures: "settings_structures",
+  // Designer -> 3D writes building_styles.d3 (save_style_d3 and friends), and every one of
+  // those actions is gated settings_structures:edit server-side. Mirror that here or the
+  // sub-tab shows up for someone the server will refuse.
+  designer: "settings_structures",
+  options: "settings_options",
+  colors: "settings_options",
+  branding: "settings_branding",
+  connection: "settings_crm",
+  quickbooks: "settings_quickbooks",
+  email: "settings_email",
+  commissions: "commissions",
+  team: "settings_team",
+  billing: "settings_billing",
+};
+// Settings is a hub: show it if ANY of its cards is readable, then each card gates itself.
+const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
+  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email"];
+
+// 'own' (commissions) counts as read — see canRead in _shared/access.ts. Kept deliberately
+// tiny and mirrored rather than imported: portal.html has no module loader, and the SERVER
+// is the enforcement point, so a drift here costs a wrong tab and never wrong access.
+function ssCanRead(access, area) {
+  const v = access && access[area];
+  return v === "view" || v === "edit" || v === "own";
+}
+function ssCanSeeTab(tab, access) {
+  if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
+  if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
+  const area = TAB_AREA[tab];
+  return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
+}
+
+// Where the clamp LANDS someone must itself pass ssCanSeeTab, or the fallback recreates
+// the exact leak the clamp exists to stop: a hardcoded "designs" put every migration-100
+// driver (designs absent from their map = none) on the full customer-designs list at each
+// bare /portal login — a page their own nav hides (audit 2026-08-20). Designs first, so
+// the pre-migration-100 shape lands exactly where it always did; then the first page the
+// person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
+// ssCanSeeTab for everyone and would otherwise win over a page they were granted); then
+// "releases": product news, no tenant data, never refused for any access map.
+function ssFallbackTab(access) {
+  if (ssCanSeeTab("designs", access)) return "designs";
+  const t = NONADMIN_TABS.find((x) => x !== "designs" && TAB_AREA[x] && ssCanSeeTab(x, access));
+  return t || "releases";
+}
+
+// "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
+// the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
+// that array is the role escape hatch and would hand the operator console to every team
+// member. Content renders are ALSO gated (and the server re-checks regardless).
+//
+// At module scope so the router's URL-normalising effect can call it too. That effect has
+// to sit ABOVE Dashboard's early returns (tenant loading / no tenant) — a hook below them
+// changes the hook count between renders, which is React error #310 and a blank screen.
+// The comment on `designerOpened` says the same thing; this is the second time it has bitten.
+function ssClampTab(tab, isOperator, canAdmin, access) {
+  if (tab === "accounts" || tab === "admin") return isOperator ? tab : ssFallbackTab(access);
+  // Owners, admins and operators are never clamped — an owner locked out of their own
+  // portal by a permission bug is the one failure this feature must not have.
+  if (canAdmin) return tab;
+  return ssCanSeeTab(tab, access) ? tab : ssFallbackTab(access);
+}
+
+const ACCENT = "#3D3672";  // brand purple
+const S = {
+  page: { minHeight: "100vh", display: "flex", flexDirection: "column" },
+  header: { background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", padding: "16px 24px", display: "flex", alignItems: "center", gap: 12 },
+  badge: { background: "#75E6DA", color: "#3D3672", borderRadius: 8, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16, flexShrink: 0 },
+  card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
+  h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
+  lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
+  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
+  btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
+  err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  th: { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "2px solid #E2E8F0", whiteSpace: "nowrap" },
+  td: { fontSize: 13, color: "#1E293B", padding: "10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "top" },
+};
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+  catch { return iso; }
+}
+// Capitalize each word of a building-style name for display. Designs store the style as
+// either its label ("Farmland") or its lowercase key ("cabin"), so normalize to Title Case.
+function titleCase(s) {
+  return String(s || "").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Password input with a show/hide (eye) toggle. Forwards all input props; `wrapStyle`
+// carries any flex/grid sizing onto the positioned wrapper so layouts are preserved.
+function PasswordInput({ style, wrapStyle, ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%", boxSizing: "border-box", ...wrapStyle }}>
+      <input {...rest} type={show ? "text" : "password"} style={{ ...style, width: "100%", boxSizing: "border-box", paddingRight: 38 }} />
+      <button type="button" tabIndex={-1} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"} onMouseDown={(e) => e.preventDefault()} onClick={() => setShow((v) => !v)} style={{ position: "absolute", top: 0, right: 0, height: "100%", width: 34, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "#64748B" }}>
+        {show ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" /><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" /><line x1="2" x2="22" y1="2" y2="22" /></svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+// ─── Login ───
+function LoginView({ onRecoverySent, notice }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [info, setInfo] = useState(null);
+
+  const signIn = async (e) => {
+    e.preventDefault();
+    setError(null); setInfo(null); setBusy(true);
+    const { error: err } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+    if (err) setError(err.message === "Invalid login credentials" ? "Wrong email or password." : err.message);
+    // success: onAuthStateChange in PortalApp takes over
+  };
+
+  const forgot = async () => {
+    setError(null); setInfo(null);
+    if (!email.trim()) { setError("Enter your email above first, then click “Forgot password” again."); return; }
+    setBusy(true);
+    // Always the canonical production portal, never window.location.origin. Supabase
+    // honours only allow-listed redirects and silently substitutes Site URL otherwise,
+    // so a reset started on beta (or localhost) used to produce a link that bounced to
+    // the apex root — see AUTH_PORTAL_URL in supabase/functions/admin-catalog/index.ts.
+    // Safe because beta and production share one Supabase project: the password set
+    // here works on beta immediately.
+    const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: "https://app.structurestudiosuite.com/portal",
+    });
+    setBusy(false);
+    if (err) setError(err.message);
+    else setInfo("Password reset email sent — check your inbox (it can take a minute).");
+  };
+
+  return (
+    <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
+      <div style={S.card}>
+        <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Business Login</div>
+        <p style={{ fontSize: 12, color: "#64748B", textAlign: "center", marginBottom: 16 }}>Sign in to see your contacts, designs, and settings.</p>
+        {notice && !error && !info && <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{notice}</div>}
+        {error && <div style={S.err}>{error}</div>}
+        {info && <div style={S.okMsg}>{info}</div>}
+        <form onSubmit={signIn}>
+          <div style={{ marginBottom: 12 }}>
+            <span style={S.lbl}>Email</span>
+            <input style={S.input} type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@yourbusiness.com" />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <span style={S.lbl}>Password</span>
+            <PasswordInput style={S.input} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+          </div>
+          <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Signing in…" : "Sign In"}</button>
+        </form>
+        <button onClick={forgot} disabled={busy} style={{ ...S.btn("transparent", "#64748B"), width: "100%", marginTop: 8, fontSize: 12 }}>Forgot password?</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Password reset (arrived via recovery email link) ───
+function ResetPasswordView({ onDone }) {
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (pw1.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (pw1 !== pw2) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    const { error: err } = await sb.auth.updateUser({ password: pw1 });
+    setBusy(false);
+    if (err) setError(err.message);
+    else onDone();
+  };
+
+  return (
+    <div style={{ maxWidth: 380, margin: "60px auto", padding: "0 16px" }}>
+      <div style={S.card}>
+        <div style={{ ...S.h2, fontSize: 18, textAlign: "center" }}>Set a New Password</div>
+        {error && <div style={S.err}>{error}</div>}
+        <form onSubmit={save}>
+          <div style={{ marginBottom: 12 }}>
+            <span style={S.lbl}>New password</span>
+            <PasswordInput style={S.input} autoComplete="new-password" value={pw1} onChange={(e) => setPw1(e.target.value)} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <span style={S.lbl}>Confirm password</span>
+            <PasswordInput style={S.input} autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          </div>
+          <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save Password"}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Share link card ───
+function ShareLinkCard({ clientId }) {
+  const [copied, setCopied] = useState(false);
+  const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}`;
+  const copy = () => {
+    navigator.clipboard.writeText(link).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Your Customer Design Link</div>
+      <p style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Share this link with customers (or embed it on your website). Every design submitted through it lands in your list below.</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input style={{ ...S.input, flex: "1 1 280px", fontFamily: "monospace", fontSize: 12 }} readOnly value={link} onFocus={(e) => e.target.select()} />
+        <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy"}</button>
+        <a href={link} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Open ↗</a>
+      </div>
+    </div>
+  );
+}
+
+// ─── Designs table ───
+// Fulfillment status (read-only badge). Value is a GHL-derived projection cached on
+// designs.status and refreshed by the sync-design-status edge function on load —
+// EXCEPT 'draft' (migration 063): a browsing lead's silently-saved design, written by
+// save_design alone. It has no GHL estimate, so the sync skips it; a real submit is
+// what promotes it to 'sent'.
+const STATUS_LABELS = { draft: "Draft", sent: "Sent", accepted: "Accepted", invoiced: "Invoiced", delivered: "Delivered" };
+const STATUS_COLORS = {
+  draft:     { bg: "#F1F5F9", fg: "#475569" },
+  sent:      { bg: "#EEF2FF", fg: "#3D3672" },
+  accepted:  { bg: "#F0FDF4", fg: "#15803D" },
+  invoiced:  { bg: "#FFFBEB", fg: "#B45309" },
+  delivered: { bg: "#ECFEFF", fg: "#0E7490" },
+};
+// Fulfillment workflow order — used so a Status-column sort follows the pipeline
+// (draft → sent → accepted → invoiced → delivered) rather than sorting alphabetically.
+const STATUS_RANK = { draft: -1, sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+
+// ── Inventory: the TWO axes a lot building has (migrations 102 + 105) ─────────────────────
+//
+// It lives HERE, beside its siblings above, rather than next to InventoryTable 4,600 lines
+// down — which is exactly why no shared map was ever written for it and the Status column was
+// an inline ternary. Four different components read these (InventoryTable, the build tray,
+// the delivery pool, SourceChip), and the first of them appears above the last.
+//
+// ONE object-map, not three parallel ones. Parallel maps are what let RANK → STATUS_RANK ship
+// with a leftover usage and put the Contacts tab on "Loading…" for every tenant: seven rungs
+// across three objects is 21 chances to forget a key, and nothing would fail loudly.
+//
+// The server owns these values (_shared/inventoryLifecycle.ts derives them and list_inventory
+// sends both the key and its label). This map is for PRESENTATION only — colour, rank, and
+// the short label a table cell can hold. There is NO `accepted` rung (migration 105): putting
+// a building on the Build Schedule is the approval, so a unit without a build job simply
+// reads Requested.
+const INV_STAGES = {
+  requested:          { label: "Requested",          group: "production", rank: 0 },
+  in_queue:           { label: "In queue",           group: "production", rank: 1 },
+  scheduled_build:    { label: "Scheduled to build", group: "production", rank: 2 },
+  built:              { label: "Built",              group: "built",      rank: 3 },
+  scheduled_delivery: { label: "Heading to lot",     group: "built",      rank: 4 },
+  at_location:        { label: "At location",        group: "sellable",   rank: 5 },
+  delivered:          { label: "Delivered",          group: "gone",       rank: 6 },
+};
+// Carolyn's full wording, for tooltips and the stage filter where there is room for it.
+const INV_STAGE_LONG = {
+  requested: "Requested",
+  in_queue: "In Queue",
+  scheduled_build: "Scheduled to build",
+  built: "Built",
+  scheduled_delivery: "Scheduled to be brought to location",
+  at_location: "Available to sell at Location",
+  delivered: "Delivered to the buyer",
+};
+// Colour by GROUP, not by stage. Seven badge colours is a rainbow nobody can read, and the
+// question a colour should answer is "roughly where is this?" — the label answers "exactly
+// where". Every pair below is already in use elsewhere in this file, so nothing new enters
+// the palette. GREEN MEANS SELLABLE STOCK AND NOTHING ELSE: that is what makes "sold must be
+// unavailable to sell" something you can check by looking, because a green pill beside a SOLD
+// pill is a contradiction you can spot across the room.
+const INV_GROUP_COLORS = {
+  production: { bg: "#FFFBEB", fg: "#B45309" },   // amber — as invoiced / "In build"
+  built:      { bg: "#ECFEFF", fg: "#0E7490" },   // cyan  — as delivered / the inventory chip
+  sellable:   { bg: "#F0FDF4", fg: "#15803D" },   // green — as accepted / "Built ✓"
+  gone:       { bg: "#F1F5F9", fg: "#475569" },   // slate — as draft / manual
+};
+const INV_SALE_COLORS = { bg: "#EEF2FF", fg: "#3D3672" };
+
+// An unknown stage falls back to `requested` — the BOTTOM rung, so a value nobody recognises
+// can never pass a "is it built yet" test.
+const invStage = (u) => (u && INV_STAGES[u.lifecycle] ? u.lifecycle : "requested");
+const invRank = (u) => INV_STAGES[invStage(u)].rank;
+const invStageMeta = (u) => INV_STAGES[invStage(u)];
+// Sold-ness is now a STORED fact (u.saleState), not a browser derivation. It used to be
+// `stored sold OR any linked estimate accepted+`, computed only here — so a CRM sale showed
+// Sold on this tab while the database still said available, the build board still offered the
+// building as unbuilt stock, and the delivery pool never listed it, meaning a sold building
+// was never scheduled to its buyer. sync-design-status now persists that claim, so keeping
+// the `||` would only hide a stored-vs-derived disagreement.
+const invSold = (u) => !!u && u.saleState === "sold";
+// The one state that means "this is stock a customer can buy today".
+const invSellable = (u) => invStage(u) === "at_location" && !invSold(u);
+// "SOLD — Dave" (Carolyn 2026-08-07). The name is snapshotted on the unit at the sale, so
+// this never has to reach into a customer's design row to render — which is also what lets a
+// future public listing show it.
+const invSoldLabel = (u) => (u && u.soldFirstName ? `SOLD — ${u.soldFirstName}` : "SOLD");
+
+// Only let a design's image_url become a clickable href when it is an https URL on our own
+// origin or Supabase storage. image_url is stored VERBATIM by the anon-granted save_design
+// RPC, so a hostile caller can stash a javascript: or off-site phishing URL against any
+// tenant's design — and this link renders inside the owner's authenticated portal, behind a
+// "PDF" button they have every reason to trust. Returns null if unsafe, so the caller can
+// drop the link entirely rather than render a dead one.
+// This is the twin of ssSafeUrl in StructureStudio.jsx / structure-studio.component.js
+// (audit #F8). portal.html has no .jsx sibling, so it needs its own copy — keep the three
+// in step if the rule changes.
+const ssSafeUrl = (u) => {
+  try {
+    const url = new URL(u, window.location.origin);
+    if (url.protocol !== "https:") return null;
+    const h = url.hostname;
+    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+  } catch { return null; }
+};
+
+// The one place an unrecognised/absent status becomes "sent". This expression was written out
+// by hand in seven places (search, sort, badge, and three times inside the Leads grouping),
+// and LeadsTable additionally kept its own private copy of STATUS_RANK — so a filter deriving
+// counts from one of them could disagree with the rows rendered from another. One function now.
+const normStatus = (s) => (STATUS_LABELS[s] ? s : "sent");
+
+// Unwrap a supabase-js FunctionsHttpError into the message the edge function actually sent.
+// Without this every failure reads "Edge Function returned a non-2xx status code" — the real
+// { error } body is only on error.context, the raw Response. Cloned before reading because a
+// Response body can only be consumed once; the several inline copies of this pattern still
+// scattered through the file omit that, which is latent rather than harmless.
+const fnError = async (err) => {
+  let m = (err && err.message) || "Request failed";
+  try {
+    const ctx = err && err.context;
+    if (ctx && typeof ctx.json === "function") {
+      const b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+      if (b && b.error) m = b.error;
+    }
+  } catch (_e) { /* fall back to the generic message */ }
+  return m;
+};
+
+// ─── Status filter chips (Designs + Contacts) ───
+// Carolyn, 2026-06-18: filters so a client can tell leads from customers at a glance — the
+// urgency came from Junior Barns selling three buildings in one day.
+//
+// Counts come from the SAME rows the table is about to render, so a chip can never promise
+// rows the list won't show. Zero-count chips are omitted rather than greyed: "Delivered" is 0
+// on every tenant today (no tenant has the delivered stage mapped), and a permanently dead
+// chip reads as a broken feature. `extra` carries Contacts' synthetic "browsing" group, which
+// is not a designs.status value at all.
+function StatusChips({ counts, value, onChange, extra = [] }) {
+  const present = Object.keys(STATUS_LABELS).filter((k) => (counts[k] || 0) > 0).map((k) => [k, STATUS_LABELS[k], STATUS_COLORS[k]]);
+  const extras = extra.filter(([k]) => (counts[k] || 0) > 0);
+  const items = extras.concat(present);
+  // One bucket means the chips carry no information — don't spend a row on them.
+  // UNLESS a filter is currently applied: the chip row is the only way to clear it. When the
+  // selected bucket empties after a reload (a delete, a sync promotion, a browsing lead becoming a
+  // design) the zero-count chip is dropped and only one bucket may remain — which used to hide the
+  // whole row INCLUDING "All" while the stale filter stayed active, leaving the table showing "No
+  // designs are Accepted yet." with no control to undo it. Refresh re-ran load() but not the
+  // filter, so recovery meant switching tabs or reloading the page, neither of which was suggested.
+  if (items.length < 2 && (value === "all" || !value)) return null;
+  const total = items.reduce((n, [k]) => n + (counts[k] || 0), 0);
+  const all = [["all", "All", null]].concat(items);
+  return (
+    <div role="group" aria-label="Filter by status" style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "0 0 12px" }}>
+      {all.map(([k, label, color]) => {
+        const on = value === k;
+        const n = k === "all" ? total : (counts[k] || 0);
+        return (
+          <button key={k} type="button" aria-pressed={on} onClick={() => onChange(k)}
+            style={{
+              display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999,
+              border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0",
+              background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+            }}>
+            {color && <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 4, background: color.fg, flexShrink: 0, opacity: on ? 0.9 : 1 }} />}
+            {label}
+            <span style={{ fontSize: 11, fontWeight: 800, color: on ? "#FFF" : "#94A3B8", opacity: on ? 0.85 : 1 }}>{n}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Column sorting (shared by the Designs + Leads tables) ───
+// Clickable header cell. Clicking cycles the direction on the active column and
+// selects a new column (starting ascending). A faded ▲ hints unsorted columns
+// are clickable; the active column shows a solid ▲/▼ in the brand accent.
+function SortTh({ label, col, sortKey, sortDir, onSort, style }) {
+  const active = sortKey === col;
+  return (
+    <th
+      onClick={() => onSort(col)}
+      title={`Sort by ${label}`}
+      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none" }}
+    >
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 9, verticalAlign: "middle", color: active ? ACCENT : "#CBD5E1" }}>
+        {active ? (sortDir === "asc" ? "▲" : "▼") : "▲"}
+      </span>
+    </th>
+  );
+}
+// Stable-ish sort of `rows` by a per-row comparable value. Blanks (null/""/undefined)
+// always sort last regardless of direction; numbers compare numerically and strings
+// case-insensitively (with numeric-aware collation so "2" < "10"). ISO date strings
+// sort chronologically as plain strings, so no special-casing is needed for dates.
+function sortRows(rows, valueOf, dir) {
+  const arr = [...rows];
+  arr.sort((ra, rb) => {
+    const a = valueOf(ra), b = valueOf(rb);
+    const ae = a === null || a === undefined || a === "";
+    const be = b === null || b === undefined || b === "";
+    if (ae && be) return 0;
+    if (ae) return 1;   // blanks last, both directions
+    if (be) return -1;
+    let c;
+    if (typeof a === "number" && typeof b === "number") c = a - b;
+    else c = String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+    return dir === "asc" ? c : -c;
+  });
+  return arr;
+}
+// Toggle helper for a [sortKey,sortDir] pair: same column flips direction, a new
+// column starts ascending.
+function makeOnSort(sortKey, setSortKey, sortDir, setSortDir) {
+  return (col) => {
+    if (col === sortKey) { setSortDir((d) => (d === "asc" ? "desc" : "asc")); }
+    else { setSortKey(col); setSortDir("asc"); }
+  };
+}
+// Lead activity indicator (traffic light) based on the most-recent activity — i.e. the
+// newest design update for that lead. Anon shed-shoppers have no live login/session, so
+// "active" is recency-based, not real-time presence. Thresholds are easy to tune here.
+function activityInfo(lastActivity) {
+  const t = lastActivity ? Date.parse(lastActivity) : NaN;
+  if (!t || isNaN(t)) return { color: "#94A3B8", label: "No activity yet" };
+  const hours = (Date.now() - t) / 3600000;
+  if (hours <= 10)  return { color: "#16A34A", label: "Active recently (within 10 hours)" }; // green
+  if (hours <= 720) return { color: "#F59E0B", label: "Used within the last 30 days" };      // orange (720h = 30d)
+  return { color: "#EF4444", label: "Idle for over a month" };                               // red
+}
+// Case-insensitive "search all fields": deep-collects every value in a row
+// (including nested contact/selections), plus any derived display text passed as
+// `extra`, then requires every whitespace-separated query token to appear
+// somewhere. Empty query matches everything.
+function rowMatchesQuery(row, query, extra) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const vals = [];
+  const walk = (v) => {
+    if (v == null) return;
+    if (typeof v === "object") { for (const k in v) walk(v[k]); }
+    else vals.push(String(v));
+  };
+  walk(row);
+  if (extra) vals.push(String(extra));
+  const hay = vals.join(" ").toLowerCase();
+  return q.split(/\s+/).every((t) => hay.includes(t));
+}
+
+// Search box used by the Designs and Leads tables. Controlled; shows a clear (×) button.
+function SearchInput({ value, onChange, placeholder }) {
+  return (
+    <div style={{ position: "relative", margin: "0 0 12px" }}>
+      <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#94A3B8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={placeholder}
+        style={{ ...S.input, paddingLeft: 32, paddingRight: 30 }} />
+      {value && (
+        <button onClick={() => onChange("")} title="Clear search" aria-label="Clear search"
+          style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", cursor: "pointer", color: "#64748B", fontSize: 18, lineHeight: 1, padding: "2px 6px" }}>×</button>
+      )}
+    </div>
+  );
+}
+
+// ─── Card header ───
+// Deliberately NOT coloured: the brand surface is the gradient topbar, and a second coloured
+// band directly beneath it would restate the page name and description the topbar already
+// carries — the duplication this whole exercise was correcting.
+//
+// What it keeps is what the topbar does not have: the row count (a light blue chip with
+// #3D3672 on it, ~9:1) and the page's own controls. A `desc` is passed only where there is
+// operational detail worth stating that the topbar's one-line label does not cover.
+function CardHead({ title, count, desc, right, children }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#1E293B", letterSpacing: 0.3 }}>{title}</div>
+        {count != null && count !== "" && (
+          <span style={{ fontSize: 12.5, fontWeight: 800, background: "#DBEAFF", color: "#3D3672", borderRadius: 6, padding: "1px 8px" }}>{count}</span>
+        )}
+        {right && <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>{right}</div>}
+      </div>
+      {(desc || children) && (
+        <div style={{ fontSize: 12, color: "#64748B", marginTop: 5, lineHeight: 1.5 }}>
+          {desc}{children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Facet filter bar (Designs / Contacts / Orders) ───
+// Pattern lifted from the Commissions report's filter bar: labeled controls in a wrap row, a
+// red Clear button, and a "Showing N of M" note whenever any facet is active. Facet OPTION
+// LISTS must be derived from ALL loaded rows (never the filtered subset) so a filter can never
+// hide its own options; status-chip counts likewise stay full-list so they don't shuffle.
+const FCTRL = { display: "flex", flexDirection: "column", gap: 3 };
+function FacetSelect({ label, value, onChange, options, allLabel = "All" }) {
+  return (
+    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...S.input, padding: "6px 8px", minWidth: 120 }}>
+        <option value="all">{allLabel}</option>
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
+  );
+}
+function DateRange({ label, from, to, onFrom, onTo }) {
+  return (
+    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+      <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+        <input type="date" value={from} onChange={(e) => onFrom(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} />
+        <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>
+        <input type="date" value={to} onChange={(e) => onTo(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} />
+      </div>
+    </div>
+  );
+}
+// from/to are yyyy-mm-dd strings from <input type=date>; blank = open-ended. `to` is INCLUSIVE
+// of the whole end day (compared against the start of the NEXT local day), matching what a
+// person means by "to Aug 5". Rows with no date only show when no range is set.
+function inDateRange(dateStr, from, to) {
+  if (!from && !to) return true;
+  if (!dateStr) return false;
+  const t = new Date(dateStr).getTime();
+  if (!Number.isFinite(t)) return false;
+  if (from) { const f = new Date(from + "T00:00:00").getTime(); if (t < f) return false; }
+  if (to) { const e = new Date(to + "T00:00:00").getTime() + 86400000; if (t >= e) return false; }
+  return true;
+}
+function FilterBar({ children, hasFilters, onClear, shown, total, noun = "row" }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        {children}
+        {hasFilters && <button onClick={onClear} style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "6px 12px" }}>Clear</button>}
+      </div>
+      {hasFilters && <div style={{ fontSize: 12, color: "#64748B", marginTop: 8 }}>Showing <b>{shown}</b> of {total} {noun}{total === 1 ? "" : "s"}.{shown === 0 ? " Nothing matches — adjust the filters." : ""}</div>}
+    </div>
+  );
+}
+
+// ─── Delete a design ───
+// Carolyn, 2026-06-24: until now a deletion meant going into Supabase by hand.
+//
+// Anything past Sent has a real estimate in the tenant's GHL, so it is a billing record and
+// takes a typed confirmation (Ahsan's call: allow it, but make them type it). Sent designs
+// delete on a single confirm — they cost nothing to recreate.
+//
+// Reuses AdmOverlay (Esc-to-close, overlay-click, aria-modal) from the Admin section further
+// down the file — safe because function declarations hoist, and it means one dialog shell.
+function DeleteDesignDialog({ design, onClose, onDeleted }) {
+  const st = normStatus(design.status);
+  // Drafts are even cheaper than Sent — never submitted, no estimate, no PDF — so they
+  // share the single-confirm path (matches portal-settings, which treats any status
+  // outside its billing list as "sent" for this same check).
+  const needsConfirm = st !== "sent" && st !== "draft";
+  const expected = design.ghl_estimate_number ? String(design.ghl_estimate_number) : design.short_code;
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const ready = !busy && (!needsConfirm || typed.trim() === expected);
+
+  const go = async () => {
+    if (!ready) return;
+    setBusy(true); setErr(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      // deleteEstimate is explicit because the server refuses to touch the CRM without
+      // it — this page's dialog is what tells the operator the estimate goes too, and the
+      // previous build's dialog promised the opposite. The flag is how the server knows
+      // which promise the operator actually read.
+      body: { action: "delete_design", shortCode: design.short_code, deleteEstimate: true, ...(needsConfirm ? { confirmToken: typed.trim() } : {}) },
+    });
+    if (error) { setErr(await fnError(error)); setBusy(false); return; }
+    onDeleted(data || {});
+  };
+
+  return (
+    <AdmOverlay onClose={busy ? () => {} : onClose} maxWidth={460} labelledBy="del-design-ttl">
+      <div id="del-design-ttl" style={{ fontSize: 17, fontWeight: 700, color: "#991B1B", marginBottom: 10 }}>
+        Delete this design?
+      </div>
+      <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 14 }}>
+        <strong>{(design.contact || {}).name || "This customer"}</strong>
+        {design.ghl_estimate_number ? <> · EST-{design.ghl_estimate_number}</> : null} · {STATUS_LABELS[st]}
+        <div style={{ marginTop: 8 }}>
+          Removes the design, its full version history and the saved PDFs. This cannot be undone.
+        </div>
+        {/* The CRM half, stated plainly, because it is the part that reaches outside this
+            app. Three genuinely different outcomes, so this says which one applies to THIS
+            design rather than one sentence that is wrong two-thirds of the time. The server
+            decides for real (it checks the invoice ledger, not just the cached status). */}
+        {design.ghl_estimate_number ? (
+          (st === "invoiced" || st === "delivered") ? (
+            <div style={{ marginTop: 8, color: "#92400E" }}>
+              EST-{design.ghl_estimate_number} is <strong>kept</strong> in your CRM — an invoice was created from it.
+              Void that invoice there if you want the estimate gone too.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, color: "#64748B" }}>
+              EST-{design.ghl_estimate_number} is <strong>also deleted</strong> from your CRM. The customer and their
+              opportunity stay — only the estimate goes.
+            </div>
+          )
+        ) : (
+          <div style={{ marginTop: 8, color: "#64748B" }}>
+            No estimate has been created in your CRM for this design.
+          </div>
+        )}
+      </div>
+      {err && <div style={S.err}>{err}</div>}
+      {needsConfirm && (
+        <>
+          <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", color: "#92400E", fontSize: 12.5, marginBottom: 12, lineHeight: 1.5 }}>
+            This design is <strong>{STATUS_LABELS[st]}</strong> — a billing record.
+          </div>
+          <label style={S.lbl}>Type <code>{expected}</code> to confirm</label>
+          <input value={typed} onChange={(e) => setTyped(e.target.value)} disabled={busy} autoFocus
+            onKeyDown={(e) => { if (e.key === "Enter") go(); }} placeholder={expected}
+            style={{ ...S.input, marginBottom: 16 }} />
+        </>
+      )}
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        <button type="button" onClick={onClose} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+        <button type="button" onClick={go} disabled={!ready}
+          title={!ready ? `Type ${expected} to confirm` : undefined}
+          style={{ ...S.btn(ready ? "#DC2626" : "#FCA5A5", "#FFF"), cursor: ready ? "pointer" : "not-allowed" }}>
+          {busy ? "Deleting…" : "Delete design"}
+        </button>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+// Where a quote's building came from, shown behind the building name (Carolyn, 2026-08-02).
+// PER VERSION, not per design: one customer can be quoted a lot building (v1 = Inventory)
+// and then a fresh custom build (v2 = New) on the same quote.
+function SourceChip({ unitId, serial, lifecycle = null }) {
+  const inv = Boolean(unitId);
+  // "already on the lot" became a lie the day a building could be quoted before it was built,
+  // so say where it actually is when we know. Falls back to the old wording when we don't —
+  // an operator in view-as cannot read inventory_units (owner-select RLS).
+  const stageWord = lifecycle && INV_STAGE_LONG[lifecycle] ? INV_STAGE_LONG[lifecycle] : null;
+  return (
+    <span title={inv
+      ? (stageWord ? `Quoted from building #${serial != null ? serial : "?"} — ${stageWord}` : "Quoted from one of your inventory buildings")
+      : "Designed for this customer"}
+      style={{ marginLeft: 7, background: inv ? "#DBEAFF" : "#F1F5F9", color: inv ? "#3D3672" : "#475569",
+        borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 8px", whiteSpace: "nowrap" }}>
+      {inv ? (serial != null ? `Inventory #${serial}` : "Inventory") : "New"}
+    </span>
+  );
+}
+

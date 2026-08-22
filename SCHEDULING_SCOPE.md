@@ -25,6 +25,56 @@ The entries publish as **status='beta'** ("On beta for testing", migration 103) 
 Monday merge workflow flips them to Live — see CLAUDE.md's release-notes section for the
 process.
 
+## Second beta walkthrough — Carolyn, 2026-08-21 (decisions 18–23)
+
+Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.jsx` except
+23, which also touches `portal-schedule`.
+
+18. **The job card's destructive button says REMOVE.** The confirm, the toast and the
+    activity verb already did, and it is the honest word — the job leaves the board and the
+    order/design/inventory unit is untouched. **Repairs and Loads keep "Delete"** on purpose:
+    those really destroy the record, and softening them would understate what they do.
+19. **The Table view SEGMENTS, and segmenting is not filtering** — "I might want to see the
+    ENTIRE LIST, but segmented by crews". Every job stays on screen, bucketed into labelled
+    sections: crew, build date, week, style, size, source, stage. One table, group headers as
+    full-width rows, so the nine columns stay aligned (deliberately NOT the delivery pool's
+    table-per-group shape). The chosen sort applies *within* a group; group order comes from
+    the mode, never from `sortKey`. **The invariant: no mode may ever drop a row.**
+20. **Building style is DERIVED, not a column.** `building_label` is the composed
+    "`<Style> <Size>`" string, so stripping `parseSize`'s shape leaves the style — no
+    migration and, unlike a real column, no backfill. Assumes no tenant names a style
+    containing `number x number`. If that ever breaks, add the column; don't patch the regex.
+21. **Calendar detail lives in ONE full-width panel below the grid**, week and month alike —
+    a day column is a hard-coded 218px and a month cell narrower still, so the form had
+    nowhere to go. It is inline, not a modal, so decision 6 (no popouts) still holds. Month
+    view no longer navigates away to show detail; "Open that week" is an explicit control.
+22. **Month view is a first-class scheduling surface**: pills drag (the day cells were
+    already drop targets — it was half a loop), and read two lines, building first per
+    decision 14.
+23. **Day headers show the value scheduled for that day and that crew.** Free on the crew
+    axis, because the calendar already buckets *after* the crew filter. Two rules:
+    - **`build_jobs` gets NO price column.** An order's total is routinely set *after* the
+      build job exists, so a creation-time snapshot would be null exactly when it matters and
+      would never catch up. `build_board` computes `valueCents` per read from whichever
+      source row owns the money (`orders.total_cents` / `inventory_units.asking_price_cents`
+      / `repairs.quote_cents`; a manual job never has one).
+    - **A missing total is never rendered as $0.** The known sum shows with an explicit gap
+      marker — Orders' rule, "we never show a guessed number". Treating NULL as zero silently
+      understates the day while looking authoritative.
+    - **Visible to everyone with Build Schedule access — no role gate** (Carolyn's call, made
+      after the trade-off was put to her). A `crew_leader` on the shop floor sees daily
+      revenue, where Orders is operator-only and Billing is owner-granted. If that should
+      ever change, the hook is one condition on the header plus the `access` prop the tab
+      already receives — no migration is stranded by shipping it open.
+
+Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
+never disabled, and left a stale banner up — so on an unchanged board the screen was
+byte-identical and the button read as dead. And an expanded card kept pre-refresh values,
+because `SchedJobEditor` seeds its form state once and React keeps it; it is now keyed on
+`updated_at`, which re-seeds the form and re-reads the history together. ⚠️ The same three
+defects remain in **Repairs, Delivery Schedule and Drivers & Territories** — Carolyn scoped
+this pass to Build Schedule, so they are a known follow-up, not an oversight.
+
 ## Post-launch refinements from beta testing (2026-08-04 → 08-05)
 
 The decisions below supersede parts of the original spec. Migrations 092–095.

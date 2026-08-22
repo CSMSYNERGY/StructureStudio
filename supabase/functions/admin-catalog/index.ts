@@ -234,7 +234,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Money is a separate grant from configuration — 056's own words: "Adding an operator
     // should never silently grant the ability to charge a client's card." set_billing sets
     // the discount and the exemption that every later charge is computed from.
-    if (String(action ?? "") === "set_billing" && !identity.canBill) {
+    if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants")
+        && !identity.canBill) {
       return json({ error: "This operator account cannot change billing." }, 403);
     }
   }
@@ -269,13 +270,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // picker without hardcoding a copy of the catalogue that would drift from
         // billing_plans. One entry per feature (monthly/annual share a feature).
         const { data: planRows } = await sb.from("billing_plans")
-          .select("feature, name, availability, required").eq("active", true).order("sort_order", { ascending: false });
+          .select("feature, name, availability, required, operator_grantable").eq("active", true).order("sort_order", { ascending: false });
         const seenFeature = new Set<string>();
         const features = (planRows ?? []).filter((p: any) => {
           if (!p.feature || seenFeature.has(p.feature)) return false;
           seenFeature.add(p.feature);
           return true;
-        }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required }));
+        }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required, operatorGrantable: Boolean(p.operator_grantable) }));
+        // Operator grants per tenant (migration 109) — the console's "Early access" card.
+        // client_feature_grants is service-role only, so this function is the only reader.
+        const { data: grantRows } = await sb.from("client_feature_grants")
+          .select("client_id, feature, expires_at");
+        const grantsById = new Map<string, any[]>();
+        for (const g of (grantRows ?? []) as any[]) {
+          const arr = grantsById.get(g.client_id) ?? [];
+          arr.push({ feature: g.feature, expiresAt: g.expires_at ?? null });
+          grantsById.set(g.client_id, arr);
+        }
         const clients = (data ?? []).map((c: any) => {
           const s = byId.get(c.client_id);
           return {
@@ -284,6 +295,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             discountPercent: Number(s?.discount_percent) || 0,
             discountFeatures: s?.discount_features ?? null,
             exemptUntil: s?.billing_exempt_until ?? null,
+            grants: grantsById.get(c.client_id) ?? [],
           };
         });
         return json({ ok: true, clients, features });
@@ -401,7 +413,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         let bytes: Uint8Array;
         try { bytes = Uint8Array.from(atob(rawB64), (c) => c.charCodeAt(0)); } catch { throw new Error("Invalid image data."); }
         if (bytes.length > 3_000_000) throw new Error("Image too large (max 3MB).");
-        const path = `${clientId}/style-${Date.now()}.${ext}`;
+        // crypto.randomUUID(), not Date.now(): clientId is public and a ms timestamp is
+        // guessable, which made every uploaded image enumerable (audit 2026-08-19).
+        const path = `${clientId}/style-${crypto.randomUUID()}.${ext}`;
         const upl = await sb.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
         if (upl.error) throw new Error(`Image upload failed: ${upl.error.message}`);
         const { data: pub } = sb.storage.from("branding").getPublicUrl(path);
@@ -637,6 +651,118 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // needs SMTP), and either way we return a one-time set-password link the
       // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
       // Settings) or "user" (Designs & Leads only).
+      case "set_feature_grants": {
+        // EARLY ACCESS: switch a feature on for ONE builder before it goes on sale.
+        // Carolyn 2026-08-18 — "I would like to be able to see the 3D as I'm in beta, but not
+        // all clients need to see it." This is a COMP: it creates no subscription, charges
+        // nothing, and never touches the billing gate (portal-billing keeps requiredFeatures
+        // and entState untouched by grants).
+        //
+        // Replaces the whole set for this tenant, the way the Team screen replaces an access
+        // map: the card sends what should be true now, so an unchecked box is a revoke.
+        const clientId = reqStr(p.clientId, "clientId");
+        const { data: exists } = await sb.from("client_configs")
+          .select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+
+        // TWO SERVER-SIDE GUARDS, both mandatory. The UI only ever offers grantable
+        // features, but the UI is a courtesy and this is the control.
+        const { data: planRows } = await sb.from("billing_plans")
+          .select("feature, operator_grantable");
+        const grantable = new Set((planRows ?? [])
+          .filter((r: any) => r.operator_grantable)
+          .map((r: any) => r.feature));
+        // Mirrors portal-billing's set. Kept here as well rather than imported, because the
+        // two functions are deployed separately and a comp that the reader refuses to honour
+        // is confusing, while a comp this writer refuses is self-explanatory.
+        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync"]);
+
+        const wanted = Array.isArray(p.grants) ? p.grants : [];
+        if (wanted.length > 50) throw new Error("Too many grants in one request.");
+
+        // What this tenant holds NOW. Two reasons (both audit 2026-08-19):
+        //   1. VALIDATION applies only to what is being ADDED. A grant whose feature was
+        //      later un-armed (operator_grantable flipped false) must stay REMOVABLE --
+        //      validating the whole replacement set left stale grants that no UI could
+        //      revoke, because every save carrying the other, legitimate grants was
+        //      refused on the stale one's account.
+        //   2. METADATA on merely-preserved grants must survive. The wipe-and-reinsert
+        //      rewrote granted_by/granted_at and dropped note on every save that touched a
+        //      DIFFERENT feature, erasing the audit trail this table exists to keep.
+        const { data: existingRows } = await sb.from("client_feature_grants")
+          .select("feature, expires_at").eq("client_id", clientId);
+        const existing = new Map((existingRows ?? []).map((r: any) => [r.feature, r.expires_at ?? null]));
+
+        // Last occurrence wins: two rows for one feature share a primary key, so an
+        // un-deduped pair turned the whole save into a constraint violation.
+        const byFeature = new Map<string, any>();
+        for (const g of wanted) {
+          const feature = typeof g?.feature === "string" ? g.feature.trim() : "";
+          if (feature) byFeature.set(feature, g);
+        }
+
+        const rows: Record<string, unknown>[] = [];
+        const refused: string[] = [];
+        for (const [feature, g] of byFeature) {
+          // Refuse LOUDLY rather than dropping silently -- but only for features being
+          // ADDED. A feature the tenant already holds passes through so it can be kept
+          // or revoked regardless of whether it is still grantable today.
+          if (!existing.has(feature) && (!grantable.has(feature) || PAID_ONLY_FEATURES.has(feature))) {
+            refused.push(feature);
+            continue;
+          }
+          // PAID_ONLY is refused even for held grants: a hand-inserted row for
+          // schedule_builds must not be re-writable through this door.
+          if (PAID_ONLY_FEATURES.has(feature)) { refused.push(feature); continue; }
+          let expiresAt: string | null = null;
+          if (g.expiresAt) {
+            const t = Date.parse(String(g.expiresAt));
+            if (!Number.isFinite(t)) throw new Error(`Not a date: ${g.expiresAt}`);
+            expiresAt = new Date(t).toISOString();
+          }
+          rows.push({
+            client_id: clientId,
+            feature,
+            // Only the operator-JWT path has a user id. The ADMIN_PASSWORD break-glass path
+            // has none, and reading userId off it yields undefined — see _shared/adminAuth.ts.
+            granted_by: identity.via === "operator" ? identity.userId : null,
+            expires_at: expiresAt,
+            note: typeof g.note === "string" ? g.note.slice(0, 300) : null,
+          });
+        }
+        if (refused.length) {
+          throw new Error(`Not available for early access: ${refused.join(", ")}. `
+            + "A feature must be marked operator_grantable, and paid-only features never are.");
+        }
+
+        // Write order matters without a transaction: UPSERT the changed/new rows first,
+        // then PRUNE what was un-picked. A failure between the two leaves every feature
+        // either at its old value or its new one -- never the wiped-out nothing that
+        // delete-then-insert left when the insert failed (audit 2026-08-19). Rows whose
+        // expiry is unchanged are skipped entirely, which is what preserves their
+        // granted_by/granted_at/note.
+        const changed = rows.filter((r: any) =>
+          !existing.has(r.feature) || existing.get(r.feature) !== r.expires_at);
+        if (changed.length) {
+          const { error: upErr } = await sb.from("client_feature_grants")
+            .upsert(changed, { onConflict: "client_id,feature" });
+          if (upErr) throw upErr;
+        }
+        const keep = new Set(rows.map((r: any) => r.feature));
+        const drop = [...existing.keys()].filter((f) => !keep.has(f));
+        if (drop.length) {
+          const { error: delErr } = await sb.from("client_feature_grants")
+            .delete().eq("client_id", clientId).in("feature", drop);
+          if (delErr) throw delErr;
+        }
+        return json({
+          ok: true,
+          grants: rows.map((r: any) => ({ feature: r.feature, expiresAt: r.expires_at })),
+          note: rows.length
+            ? `Early access on for ${rows.length} feature(s). This is a comp — no subscription, no charge.`
+            : "Early access cleared for this builder.",
+        });
+      }
       case "set_billing": {
         // Billing posture for an EXISTING tenant: the comp flag and the account discount.
         // Separate from create_client because the customers most likely to need a discount

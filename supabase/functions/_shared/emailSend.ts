@@ -1,5 +1,10 @@
 /**
- * Send one tenant email through Postmark, with the outcome recorded on an email_sends row.
+ * Send one tenant email through Resend, with the outcome recorded on an email_sends row.
+ *
+ * PROVIDER SWAPPED 2026-08-21 (Postmark -> Resend). Postmark's approval review declined the
+ * CSM Synergy account on 2026-08-13; the swap is deliberately confined to the transport
+ * import and the three gates below, which is the whole reason resend.ts was written to
+ * mirror postmark.ts leaf-for-leaf.
  *
  * CONTRACT WITH THE CALLER (submit-estimate / portal-settings): this function NEVER throws
  * and NEVER changes the caller's response. Its result is a plain verdict to branch on —
@@ -10,7 +15,7 @@
  *
  * DARK BY CONSTRUCTION: three independent switches gate the live path, and every one
  * defaults to off — the tenant's `email_provider` flag (migration 107, default 'ghl'), the
- * global Postmark secrets (unset until the account exists), and, for tenants without a
+ * global RESEND_API_KEY (unset until the account exists), and, for tenants without a
  * verified domain, the PLATFORM_EMAIL_DOMAIN_READY env flag (unset until the platform
  * domain's DNS is live and verified). When any guard fires this returns 'not_active'
  * WITHOUT touching the network or writing a ledger row — so deploying it changes nothing
@@ -24,7 +29,7 @@
  * the caller still holds its GHL fallback. The one asymmetry: when the SEND succeeded but
  * the 'sent' update failed, the result is still `{sent:true}` — reporting failure there
  * would push the caller onto its fallback and DOUBLE-email the customer, so the truth
- * goes to app_errors (with the MessageID a human needs to reconcile) and the verdict
+ * goes to app_errors (with the message id a human needs to reconcile) and the verdict
  * stays honest about what the recipient experienced.
  *
  * BETA REDIRECT lives HERE, before the ledger row is composed, so `to_email` always
@@ -32,13 +37,14 @@
  * the tenant's own `beta_mode` + `beta_email` redirect — the submit-estimate rule: a
  * deploy hostname is never an opt-in.
  *
- * Error strings never carry a recipient address: a PostmarkApiError is recorded as
- * `postmark <status>/<errorCode>` (Postmark's Message field echoes recipient addresses —
- * see postmark.ts), and app_errors context sticks to shapes, codes and the short code.
+ * Error strings never carry a recipient address: a ResendApiError is recorded as
+ * `resend <status>/<name>` (Resend's message field echoes recipient addresses — its
+ * testing-mode 403 names the address you may send to; see resend.ts), and app_errors
+ * context sticks to shapes, codes and the short code.
  */
 
 // deno-lint-ignore-file no-explicit-any
-import { pmSendEmail, postmarkConfigured, PostmarkApiError } from "./postmark.ts";
+import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
 import { logEdgeError } from "./logError.ts";
 
 /** The platform-owned fallback sender for tenants whose own domain is not yet verified.
@@ -48,6 +54,18 @@ const PLATFORM_FROM = "no-reply@mail.structurestudiosuite.com";
 
 export type TenantMail = {
   kind: "estimate" | "invoice" | "test";
+  /**
+   * Where a REPLY should go. Optional, and deliberately not defaulted from client_settings:
+   * there is no business_email column to default it FROM (checked 2026-08-21), so inventing
+   * one here would mean guessing.
+   *
+   * It matters most on the platform-fallback path, whose From is no-reply@ on a domain with
+   * no MX — under RFC 5321 an A record with no MX becomes an implicit MX, so a customer who
+   * replies gets a multi-day queue and then a bounce, and the builder never learns they
+   * tried. A tenant on their OWN verified domain needs nothing here: their From is already
+   * a real mailbox.
+   */
+  replyTo?: string;
   /** Design short code; null/absent for kind 'test'. */
   shortCode?: string | null;
   to: string;
@@ -74,12 +92,14 @@ function formatFrom(name: string | null | undefined, addr: string): string {
   return `"${escaped}" <${addr}>`;
 }
 
-/** Ledger-safe error text, capped ~300 chars. A PostmarkApiError becomes the enum-ish
- *  `postmark <status>/<errorCode>` — never the provider message, which can echo the
- *  recipient's address (see postmark.ts's header). */
+/** Ledger-safe error text, capped ~300 chars. A ResendApiError becomes the enum-ish
+ *  `resend <status>/<name>` — never the provider message, which can echo the recipient's
+ *  address (see resend.ts's header; its testing-mode 403 names the address you may send to).
+ *  `name_` is "" when the body carried no name we trust, which is why the slash form is kept
+ *  rather than interpolating a bare empty string. */
 function errText(e: unknown): string {
-  const msg = e instanceof PostmarkApiError
-    ? `postmark ${e.status}/${e.errorCode}`
+  const msg = e instanceof ResendApiError
+    ? `resend ${e.status}/${e.name_ || "unknown"}`
     : String((e as Error)?.message || e || "email send failed");
   return msg.slice(0, 300);
 }
@@ -97,7 +117,7 @@ export async function sendTenantEmail(
   try {
     // ── Dark guards (zero network, zero ledger) ─────────────────────────────────────
     // Secrets first: an unconfigured deployment skips even the settings read.
-    if (!postmarkConfigured()) return { sent: false, reason: "not_active" };
+    if (!resendConfigured()) return { sent: false, reason: "not_active" };
 
     // The one settings read. A missing row or a read error both land on `!s` and go
     // dark — without settings we cannot know the tenant opted in, and dark degrades to
@@ -108,7 +128,7 @@ export async function sendTenantEmail(
           "email_from_name, business_name, beta_mode, beta_email",
       )
       .eq("client_id", clientId).maybeSingle();
-    if (!s || s.email_provider !== "postmark") return { sent: false, reason: "not_active" };
+    if (!s || s.email_provider !== "resend") return { sent: false, reason: "not_active" };
 
     // ── From resolution ─────────────────────────────────────────────────────────────
     const businessName = typeof s.business_name === "string" ? s.business_name : "";
@@ -172,16 +192,23 @@ export async function sendTenantEmail(
     // ── Send, then record the outcome on the claimed row ────────────────────────────
     let messageId: string;
     try {
-      const out = await pmSendEmail({
-        From: from,
-        To: to,
-        Subject: mail.subject,
-        HtmlBody: mail.html,
-        ...(mail.text ? { TextBody: mail.text } : {}),
-        Tag: clientId,
-        Metadata: { client_id: clientId, short_code: mail.shortCode || "", kind: mail.kind },
+      const out = await rsSendEmail({
+        from,
+        to,
+        subject: mail.subject,
+        html: mail.html,
+        ...(mail.text ? { text: mail.text } : {}),
+        ...(mail.replyTo ? { replyTo: mail.replyTo } : {}),
+        // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
+        // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
+        // failing the whole send.
+        tags: [
+          { name: "client_id", value: clientId },
+          { name: "kind", value: mail.kind },
+          ...(mail.shortCode ? [{ name: "short_code", value: mail.shortCode }] : []),
+        ],
       });
-      messageId = out.MessageID;
+      messageId = out.id;
     } catch (e) {
       const err = errText(e);
       const { error: updErr } = await admin.from("email_sends").update({
@@ -207,11 +234,11 @@ export async function sendTenantEmail(
 
     const { error: updErr } = await admin.from("email_sends").update({
       status: "sent",
-      postmark_message_id: messageId || null,
+      provider_message_id: messageId || null,
       updated_at: new Date().toISOString(),
     }).eq("id", rowId);
     if (updErr) {
-      // The email is REAL: Postmark accepted it and handed back a MessageID we now
+      // The email is REAL: Resend accepted it and handed back an id we now
       // cannot persist — which also orphans the delivery/bounce webhook for this send.
       // Log the id a human needs to reconcile, and keep the verdict sent:true — a
       // 'failed' here would push the caller onto its GHL fallback and double-email

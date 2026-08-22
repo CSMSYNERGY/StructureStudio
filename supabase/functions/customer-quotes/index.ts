@@ -67,7 +67,10 @@ function totalFromSnapshot(snap: any): number | null {
   subtotal = round2(subtotal);
   const discount = Number(snap.discount) || 0;
   if (discount > 0) subtotal = round2(subtotal - discount);
-  return subtotal;
+  // Clamped at >= 0 like estimatePdf.ts' Total row: a stale snapshot whose discount
+  // exceeds the line subtotal must not show the customer a negative total the PDF and
+  // the books render as $0.00 (audit 2026-08-20).
+  return Math.max(0, subtotal);
 }
 
 Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {

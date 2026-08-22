@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
@@ -12,10 +12,10 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// SEND ROUTING (step 10, 2026-08-10 — Postmark integration). Two paths, routed per tenant
+// SEND ROUTING (step 10; Postmark 2026-08-10, moved to Resend 2026-08-21). Two paths, routed per tenant
 // by `client_settings.email_provider`:
 //
-//  • 'postmark' — the GHL send is called with action:"send_manually" (live-verified
+//  • 'resend' — the GHL send is called with action:"send_manually" (live-verified
 //    2026-08-10 on the test location: 201, flips the estimate to 'sent' so the hosted
 //    Accept/Reject page and sync-design-status derivation stay intact, sends NO email,
 //    and a repeat call is idempotent; the send body REQUIRES userId — 422 without it).
@@ -31,7 +31,7 @@ const cors = {
 //    path only; its failure never blocks the email.
 //
 //  • 'ghl' (the default) — today's GHL action:"email" send, byte-identical to the
-//    pre-Postmark behavior. On THIS path the beta redirect happens right in step 10 by
+//    pre-own-domain behavior. On THIS path the beta redirect happens right in step 10 by
 //    replacing the recipient list.
 //
 // BETA MODE REDIRECT (restored 2026-08-07, Carolyn's call).
@@ -169,6 +169,70 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     return json({ error: "This design does not belong to the specified client." }, 403);
   }
   const existingEstimateId: string | null = existingDesign.ghl_estimate_id || null;
+
+  // 2c. Staff-only pricing adjustments (audit 2026-08-20). discounts[] and deliveryFee are
+  // body-supplied money on an endpoint reachable with the public anon key, and the only
+  // gate on them used to be the designer's UI (the "+ Add Discount" / "+ Add Delivery Fee"
+  // buttons are embedded-only in structure-studio.component.js). The server never checked,
+  // so an anonymous shopper could POST discounts:[{amount:999999}] and zero their own
+  // quote, opportunity value, and QuickBooks snapshot. The embedded portal designer calls
+  // supabase.functions.invoke with the signed-in rep's JWT (its client shares the portal's
+  // persisted session); the public designer sends the bare anon key. So: honour these
+  // fields only when the Authorization JWT resolves to a real user who is a member of
+  // THIS tenant (client_users) or a platform operator (app_operators — a view-as operator
+  // has no client_users row on the viewed tenant). Otherwise STRIP them and log; the
+  // submission still goes through at full price, because a shopper must never be blocked
+  // by fields they didn't knowingly send. Known, accepted cost: an anonymous re-submit of
+  // a rep-built design loses the rep's delivery fee/discounts until a rep resubmits (the
+  // stored design row is anon-writable too, so it is no stronger a source than the body).
+  const wantsDiscounts = Array.isArray(discounts) && discounts.some((d: any) => Math.abs(Number(d?.amount) || 0) > 0);
+  const wantsDeliveryFee = (Number(deliveryFee) || 0) > 0;
+  let allowedDiscounts: any[] = Array.isArray(discounts) ? discounts : [];
+  let allowedDeliveryFee: number = Number(deliveryFee) || 0;
+  if (wantsDiscounts || wantsDeliveryFee) {
+    let staffCaller = false;
+    try {
+      const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+      if (token) {
+        // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
+        // same primary defence _shared/resolveTenant.ts documents for the portal functions.
+        const { data: userData } = await supabase.auth.getUser(token);
+        const userId = userData?.user?.id;
+        if (userId) {
+          const [memRes, opRes] = await Promise.all([
+            supabase.from("client_users").select("user_id").eq("user_id", userId).eq("client_id", clientId).limit(1),
+            supabase.from("app_operators").select("user_id").eq("user_id", userId).maybeSingle(),
+          ]);
+          staffCaller = Boolean((memRes.data && memRes.data.length) || opRes.data);
+        }
+      }
+    } catch (e) {
+      // A failed staff check treats the caller as anonymous — fail CLOSED on money: the
+      // quote goes out at full price rather than honouring an unverified discount.
+      console.warn("submit-estimate: staff check failed:", (e as Error).message);
+    }
+    if (!staffCaller) {
+      allowedDiscounts = [];
+      allowedDeliveryFee = 0;
+      // Logged (never thrown) so triage can see stripping happen — a legit rep whose
+      // session expired mid-designer shows up here, not as a silently smaller quote.
+      logEdgeError({
+        fn: "submit-estimate",
+        req,
+        clientId,
+        code: "unauthorized_pricing_fields",
+        message: "Anonymous caller sent staff-only pricing fields (discounts/deliveryFee) — stripped; estimate submitted at full price.",
+        context: {
+          designId: String(designId),
+          discountCount: Array.isArray(discounts) ? discounts.length : 0,
+          discountTotal: Array.isArray(discounts)
+            ? discounts.reduce((s: number, d: any) => s + Math.abs(Number(d?.amount) || 0), 0)
+            : 0,
+          deliveryFee: Number(deliveryFee) || 0,
+        },
+      }).catch(() => {});
+    }
+  }
 
   // 2b. Address handling. The React form collects street/city/state/zip optionally
   // (only name/email/phone are required). If the customer filled in any address
@@ -652,25 +716,40 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (summary.singleDoors > 0) pushItem("Single Door", "singleDoor", "", { count: summary.singleDoors });
   if (summary.windows > 0) pushItem("Window", "window", "", { count: summary.windows });
 
-  // Catalog fixture doors (Options → Doors): each carries its OWN price, snapshotted at
-  // placement so re-pricing the catalog never shifts an already-sent estimate. Identical doors
-  // (same name + price) collapse into one line with a qty, matching the designer's live preview.
-  // Unpriced / $0 doors add no line (NULL-price contract = not charged). NOT matched against GHL
-  // products — pushed as ad-hoc lines like custom options.
+  // Catalog fixture doors (Options → Doors): priced SERVER-SIDE from fixture_items by
+  // fixtureItemId, like every other line on this estimate (audit 2026-08-20). The body's
+  // per-door price used to be trusted verbatim ("snapshotted at placement"), which let any
+  // anon caller reprice a $500 door to $1 — and that number flowed into the GHL estimate,
+  // the opportunity value, and the estimate_lines snapshot QuickBooks invoices verbatim.
+  // Identical doors (same name + price) collapse into one line with a qty, matching the
+  // designer's live preview. Unpriced / $0 doors add no line (NULL-price contract = not
+  // charged). NOT matched against GHL products — pushed as ad-hoc lines like custom options.
   if (Array.isArray(doors)) {
     // Sizes are stored in inches; show them as feet/inches on the estimate line.
     const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
-    // Each door's photo + "show on estimate" flag, read live from the catalog by fixtureItemId,
-    // so a door's line attaches its photo only when the owner has that toggle on.
+    // Each door's price, photo + "show on estimate" flag, read live from the catalog by
+    // fixtureItemId — same lookup the declined-fixtures credit below has always done.
     const doorIds = [...new Set(doors.map((d: any) => d && d.fixtureItemId).filter(Boolean))];
-    const fxImg = new Map<string, { url: string | null; show: boolean }>();
+    const fxImg = new Map<string, { url: string | null; show: boolean; price: number | null }>();
     if (doorIds.length) {
-      const fr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
-      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+      const fr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
+      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
     }
     const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const d of doors) {
-      const price = d && d.price != null ? Number(d.price) : 0;
+      // A FOUND catalog row always wins, its NULL/0 price included (the owner's "unpriced =
+      // not charged" contract). The body's snapshot price survives ONLY where there is
+      // genuinely no server source: the row is GONE (portal-settings' delete_fixture
+      // hard-deletes, with the documented contract that "placed instances on saved designs
+      // keep rendering from their own snapshot") or the entry carries no fixtureItemId
+      // (legacy payloads predating the catalog schedule). That fallback hands an attacker
+      // nothing new — doors[] is client-authored, so a forged-id $1 line is no cheaper
+      // than simply omitting the door from the payload.
+      const dFid = d && d.fixtureItemId ? String(d.fixtureItemId) : null;
+      const dFx = dFid ? fxImg.get(dFid) : undefined;
+      const price = dFx !== undefined
+        ? (dFx.price != null ? dFx.price : 0)
+        : (d && d.price != null ? Number(d.price) : 0);
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";
       // Spell swing + operation out the same way the floor-plan PDF does (out-swing, right hinge)
@@ -724,27 +803,43 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     return Number.isFinite(n) && n > 0 ? n : 0;
   })();
   // Ramps (2026-08-01). Two shapes, both from the ramps[] schedule:
-  //  • CUSTOM ramp — a catalog style carrying its OWN snapshot price (like a fixture door):
-  //    grouped by style+price into one line each, photo attached from fixture_items.
-  //  • SIMPLE ramp — the built-in ramp, priced from the tenant's single ramp price on
-  //    client_settings: "each" per ramp, or "per_ft" × the attached door's width (doorWidthFt).
+  //  • CUSTOM ramp — a catalog style (fixtureItemId set): priced server-side from
+  //    fixture_items like fixture doors (audit 2026-08-20), grouped by style+price into
+  //    one line each, photo attached from fixture_items.
+  //  • SIMPLE ramp — the built-in ramp (no fixtureItemId, no price), priced from the
+  //    tenant's single ramp price on client_settings: "each" per ramp, or "per_ft" × the
+  //    attached door's width (doorWidthFt).
   // Legacy builds that don't send ramps[] fall back to the old layout_item_pricing "ramp" rate.
   if (Array.isArray(ramps) && ramps.length) {
     const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
     const sizeStr = (r: any) => (r && r.widthIn && r.heightIn) ? `${fmtFtIn(r.widthIn)}×${fmtFtIn(r.heightIn)}` : "";
-    const customRamps = ramps.filter((r: any) => r && r.price != null);
-    const simpleRamps = ramps.filter((r: any) => !r || r.price == null);
-    // --- custom ramps: priced by snapshot, grouped by style+price ---
+    // Classified by fixtureItemId, not by the body's price (audit 2026-08-20): the designer
+    // always sets fixtureItemId on a catalog ramp, and classifying on the client's price let
+    // a caller send a catalog ramp with price:null and slide it into the settings-priced
+    // simple path (free when no simple ramp price is configured). `price != null` is kept in
+    // the custom filter only so a legacy id-less custom ramp isn't repriced (or dropped)
+    // through the simple path — it falls into the no-server-source snapshot case below.
+    const customRamps = ramps.filter((r: any) => r && (r.fixtureItemId || r.price != null));
+    const simpleRamps = ramps.filter((r: any) => !(r && (r.fixtureItemId || r.price != null)));
+    // --- custom ramps: priced from the tenant's fixture catalog, grouped by style+price ---
     if (customRamps.length) {
       const rampIds = [...new Set(customRamps.map((r: any) => r && r.fixtureItemId).filter(Boolean))];
-      const rImg = new Map<string, { url: string | null; show: boolean }>();
+      const rImg = new Map<string, { url: string | null; show: boolean; price: number | null }>();
       if (rampIds.length) {
-        const rr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", rampIds);
-        for (const r of rr.data ?? []) rImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+        const rr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", rampIds);
+        for (const r of rr.data ?? []) rImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
       }
       const rg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
       for (const r of customRamps) {
-        const price = r && r.price != null ? Number(r.price) : 0;
+        // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
+        // included, no line); the body's snapshot survives only for a hard-deleted fixture
+        // or a legacy id-less entry — genuinely no server source, and no cheaper for an
+        // attacker than omitting the ramp from the client-authored payload.
+        const rFid = r && r.fixtureItemId ? String(r.fixtureItemId) : null;
+        const rFx = rFid ? rImg.get(rFid) : undefined;
+        const price = rFx !== undefined
+          ? (rFx.price != null ? rFx.price : 0)
+          : (r && r.price != null ? Number(r.price) : 0);
         if (!(price > 0)) continue;   // $0 / unpriced = included, no line
         const name = (String(r.name || "Ramp").trim()) || "Ramp";
         const desc = [sizeStr(r), r.wall ? `${r.wall} wall` : null].filter(Boolean).join(" · ");
@@ -793,20 +888,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     pushItem("Ramp", "ramp", "", { count: rampCount });
   }
 
-  // Catalog windows (Options → Windows): each carries its OWN snapshot price (like fixture doors),
-  // grouped by style+price into one line, photo attached from fixture_items when the owner opts in.
-  // Built-in windows are counted in summary.windows and priced via the layout "window" rate above.
+  // Catalog windows (Options → Windows): priced server-side from fixture_items by
+  // fixtureItemId, like fixture doors (audit 2026-08-20 — the body's snapshot price used to
+  // be trusted verbatim). Grouped by style+price into one line, photo attached from
+  // fixture_items when the owner opts in. Built-in windows are counted in summary.windows
+  // and priced via the layout "window" rate above.
   if (Array.isArray(windows) && windows.length) {
     const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
     const winIds = [...new Set(windows.map((w: any) => w && w.fixtureItemId).filter(Boolean))];
-    const wImg = new Map<string, { url: string | null; show: boolean }>();
+    const wImg = new Map<string, { url: string | null; show: boolean; price: number | null }>();
     if (winIds.length) {
-      const wr = await supabase.from("fixture_items").select("id, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", winIds);
-      for (const r of wr.data ?? []) wImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false });
+      const wr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", winIds);
+      for (const r of wr.data ?? []) wImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
     }
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const w of windows) {
-      const price = w && w.price != null ? Number(w.price) : 0;
+      // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
+      // included, no line); the body's snapshot survives only for a hard-deleted fixture or
+      // an id-less entry — genuinely no server source, and no cheaper for an attacker than
+      // omitting the window from the client-authored payload.
+      const wFid = w && w.fixtureItemId ? String(w.fixtureItemId) : null;
+      const wFx = wFid ? wImg.get(wFid) : undefined;
+      const price = wFx !== undefined
+        ? (wFx.price != null ? wFx.price : 0)
+        : (w && w.price != null ? Number(w.price) : 0);
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
       const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
@@ -885,7 +990,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // A placed catalog fixture (its id in doors/windows/ramps) is kept, not credited.
     for (const d of (Array.isArray(doors) ? doors : [])) if (d?.fixtureItemId) placedKeys.add(String(d.fixtureItemId));
     for (const w of (Array.isArray(windows) ? windows : [])) if (w?.fixtureItemId) placedKeys.add(String(w.fixtureItemId));
-    for (const r of (Array.isArray(ramps) ? ramps : [])) if (r?.fixtureItemId && r?.price != null) placedKeys.add(String(r.fixtureItemId));
+    // No price condition on ramps (audit 2026-08-20): a catalog ramp is now server-priced by
+    // its fixtureItemId regardless of the body's price, so any id-carrying ramp is placed =
+    // kept — otherwise a place+decline with price:null would be charged AND credited.
+    for (const r of (Array.isArray(ramps) ? ramps : [])) if (r?.fixtureItemId) placedKeys.add(String(r.fixtureItemId));
     // Declined catalog fixtures aren't in layout_item_pricing — credit the fixture's own price ×
     // included qty. Look up prices for any declined fixture id (a UUID key, not a layout key).
     const declFxPrice = new Map<string, number>();
@@ -963,9 +1071,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // "+ Add Discount" rows — a reduction with a reason. Each shows as a $0 line naming it (so the
   // reason is visible on the estimate) and its amount goes into GHL's invoice discount total below
   // (which prorates across lines, i.e. it reduces tax proportionally). Discounts do NOT touch the
-  // building line.
-  if (Array.isArray(discounts)) {
-    discounts.forEach((d: any) => {
+  // building line. allowedDiscounts, not the raw body field: step 2c empties it for callers who
+  // aren't verified tenant staff (audit 2026-08-20).
+  if (allowedDiscounts.length) {
+    allowedDiscounts.forEach((d: any) => {
       const amt = Math.round(Math.abs(Number(d?.amount) || 0) * 100) / 100;
       if (amt <= 0) return;
       discountTotal += amt;
@@ -1001,9 +1110,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // delivery was still taxed. Assigning the line GHL's global "Non-Taxable Product" category
   // (code NT) is the documented way to exempt a single line while other lines stay taxable.
   // Category id is a GoHighLevel-global value (not per-account) per GHL's "Automatic Tax
-  // Category IDs and Names" support doc. Amount is the designer's optional delivery-fee field;
-  // omitted entirely when 0/blank.
-  const deliveryAmt = Number(deliveryFee) || 0;
+  // Category IDs and Names" support doc. Amount is the designer's optional delivery-fee field —
+  // via allowedDeliveryFee, which step 2c zeroes for callers who aren't verified tenant staff
+  // (audit 2026-08-20); omitted entirely when 0/blank.
+  const deliveryAmt = allowedDeliveryFee;
   if (deliveryAmt > 0) {
     targetItems.push(tagLine({
       name: "Delivery",
@@ -1282,7 +1392,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
   // style id is stored once at the top level (every building/layout line shares it) and the
   // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
-  // Built BEFORE step 10 because the Postmark path's formal estimate PDF renders from this
+  // Built BEFORE step 10 because the own-domain path's formal estimate PDF renders from this
   // same snapshot — the emailed document and the persisted books lines can never disagree.
   const estimateLines = {
     version: 1,
@@ -1309,22 +1419,22 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   };
 
   // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
-  //     email_provider='postmark' get action:"send_manually" + our own Postmark email;
-  //     everyone else (and every Postmark failure) gets today's GHL action:"email" send.
+  //     email_provider='resend' get action:"send_manually" + our own Resend email;
+  //     everyone else (and every Resend failure) gets today's GHL action:"email" send.
   //     Recipient is the tenant's test inbox when beta mode is on, otherwise the customer
   //     — see the header for where each path implements that. `betaEmail` was already
   //     validated above, so by here beta mode implies a usable address. We capture the GHL
   //     response (status + body) and return it as `sendDebug` so failures don't hide
   //     behind a generic 200 — the React app or curl caller can inspect what GHL rejected,
   //     `sentTo` says who actually received it, `provider` says which sender delivered it,
-  //     and `postmark` carries the ledger outcome whenever the Postmark path was attempted.
+  //     and `provider` carries the ledger outcome whenever the own-domain path was attempted.
   let sendDebug: {
     status: number | null;
     ok: boolean;
     body: string;
     sentTo: string[];
-    provider: "postmark" | "ghl";
-    postmark?: { sent: boolean; messageId?: string; reason?: string; error?: string };
+    provider: "resend" | "ghl";
+    ownDomain?: { sent: boolean; messageId?: string; reason?: string; error?: string };
   } = {
     status: null,
     ok: false,
@@ -1336,14 +1446,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (estimateId) {
       const hostedUrl = estimateUrl(estimateId);
       const intendedTo = String(contact?.email || "").trim();
-      let postmarkHandled = false;
+      let ownDomainHandled = false;
 
-      // Postmark path. Routes on the provider flag + a buildable hosted-page link + having
+      // Own-domain path. Routes on the provider flag + a buildable hosted-page link + having
       // somewhere to send (the customer's address, or beta mode's guaranteed test inbox).
       // Deliberately NOT on email_domain_status: sendTenantEmail owns From resolution
       // (verified tenant domain vs the platform domain) and goes dark on its own when
       // neither is usable — that dark verdict lands us on the GHL fallback below.
-      if (settings.email_provider === "postmark" && hostedUrl && (intendedTo || redirectToTestInbox)) {
+      if (settings.email_provider === "resend" && hostedUrl && (intendedTo || redirectToTestInbox)) {
         // (a) Flip the estimate to 'sent' in GHL WITHOUT GHL emailing anyone.
         // action:"send_manually", live-verified 2026-08-10: 201, estimateStatus 'sent',
         // no email, idempotent on a repeat call. Same body as the email send otherwise —
@@ -1364,7 +1474,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         sendDebug.body = (await mr.text()).slice(0, 2000); // cap to avoid huge responses
 
         if (mr.ok) {
-          // (b) Formal estimate PDF — BEST-EFFORT, Postmark path only. Any failure here
+          // (b) Formal estimate PDF — BEST-EFFORT, own-domain path only. Any failure here
           // logs and proceeds without the link; a cosmetic document must never block the
           // estimate email.
           let formalPdfUrl: string | null = null;
@@ -1438,16 +1548,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             text: content.text,
           });
           if (outcome.sent) {
-            postmarkHandled = true;
-            sendDebug.provider = "postmark";
+            ownDomainHandled = true;
+            sendDebug.provider = "resend";
             sendDebug.sentTo = [outcome.to];
-            sendDebug.postmark = { sent: true, messageId: outcome.messageId };
+            sendDebug.ownDomain = { sent: true, messageId: outcome.messageId };
           } else {
             // not_active or failed → fall through to the GHL email send below. GHL accepts
             // a second send call on an already-'sent' estimate (double-send verified safe
             // 2026-08-10), so the recovery path is today's exact sender. The failed
-            // attempt stays inspectable in sendDebug.postmark.
-            sendDebug.postmark = {
+            // attempt stays inspectable in sendDebug.ownDomain.
+            sendDebug.ownDomain = {
               sent: false,
               reason: outcome.reason,
               ...(outcome.error ? { error: outcome.error } : {}),
@@ -1460,8 +1570,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         }
       }
 
-      if (!postmarkHandled) {
-        // GHL path — byte-identical to the pre-Postmark behavior for 'ghl' tenants.
+      if (!ownDomainHandled) {
+        // GHL path — byte-identical to the pre-own-domain behavior for 'ghl' tenants.
         // Beta mode redirects to the tenant's own test inbox. Not a filter over the
         // customer's address — a REPLACEMENT, so the customer is never a recipient of a
         // test estimate even if their address is also on the design.
