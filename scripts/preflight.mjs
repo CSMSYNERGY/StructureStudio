@@ -680,7 +680,23 @@ function denoTest() {
     // --allow-env only: the tests stub globalThis.fetch / inject fake clients, so no network
     // permission is needed — and withholding it means a test that accidentally reaches the real
     // internet fails loudly instead of passing slowly.
-    const args = ["test", "--quiet", "--allow-env", "--node-modules-dir=none"];
+    // `--node-modules-dir=auto` here, unlike the `check` step above, and changed from `none` on
+    // 2026-08-23 because `none` no longer works for TESTS on deno 2.9.4 — the whole test step
+    // was red for every push whatever the code did. Two failures, one cause: npm packages
+    // resolved out of the global deno cache with no node_modules tree to execute them from.
+    //   * `_test_stubs` — estimatePdf_test.ts imports npm:pdf-lib@1.17.1, a CJS package, which
+    //     `none` resolves to a cache path it then refuses to run ("Loading unprepared module").
+    //     `deno cache` / `deno install` do not help; the mode cannot load it.
+    //   * `_shared` — emailSend.test.ts reaches jsr:@supabase/supabase-js@2 transitively
+    //     (emailSend.ts → logError.ts), whose CJS internals die on a `stat` inside node:module
+    //     for want of read access to that same cache. NOTE that this means the group's
+    //     "self-contained, no jsr:/npm: imports" premise has quietly stopped holding — worth
+    //     restoring deliberately, but a red gate came first.
+    // The `check` step KEEPS `none` for the reason stated at line 611 — this changes tests only.
+    // Permissions are unchanged and still tight: --allow-env, no --allow-net, so a test that
+    // reaches the real internet still fails loudly. Verified: _shared 203 passed (was 202 + 1
+    // failed), _test_stubs 23 passed plus the 3 pdf cases that could not run at all before.
+    const args = ["test", "--quiet", "--allow-env", "--node-modules-dir=auto"];
     if (g.importMap) args.push(`--import-map=${g.importMap}`);
     args.push(...g.files);
     const res = runDeno(args, join(root, FUNCTIONS_DIR));
