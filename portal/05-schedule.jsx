@@ -722,16 +722,18 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     );
   };
 
-  // The seven days of a week group, for the in-week drop chips. Counts come from the jobs
-  // already on screen, so a chip says how busy that day is before you aim at it.
-  const weekDayChips = (weekStart) => {
-    const start = schedLocalDate(weekStart);
+  // A week group split into its seven days. All seven, always — an empty day still needs to
+  // exist as a drop target, which is the same reason the empty crew and stage groups are
+  // padded in. The rows come from the GROUP, so whatever filter and sort produced it applies
+  // here unchanged and the day buckets always re-add to the week's own count.
+  const weekDayRows = (g) => {
+    const start = schedLocalDate(g.key);
     const byDay = {};
-    tableRows.forEach((j) => { const d = schedBuildDate(j); if (d) byDay[d] = (byDay[d] || 0) + 1; });
+    g.rows.forEach((j) => { const d = schedBuildDate(j); if (d) (byDay[d] = byDay[d] || []).push(j); });
     return Array.from({ length: 7 }, (_, i) => {
       const d = new Date(start); d.setDate(d.getDate() + i);
       const iso = schedLocalIso(d);
-      return { iso, count: byDay[iso] || 0,
+      return { iso, rows: byDay[iso] || [],
         label: d.toLocaleDateString("en-US", { weekday: "short" }) + " " + d.getDate() };
     });
   };
@@ -757,15 +759,19 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
 
   // One table row + its expanded editor. Extracted so the flat list and every segment group
   // render the identical row — a second copy for the grouped path is how the two drift.
-  const tableRow = (j) => {
+  const tableRow = (j, dayIso = null) => {
     const kind = kindOf[j.stage_id] || "queue";
     const late = schedPastDue(j, kind);
     const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
     const stg = stages.find((s) => s.id === j.stage_id);
     const open = expandedId === j.id;
-    // A row is both a drag SOURCE and a drop target — dropping onto any row lands in that
-    // row's group, so you can aim at the rows you can see rather than hunting the header.
-    const rowGroup = segmentGroups ? segmentOf(j) : null;
+    // A row is both a drag SOURCE and a drop target — dropping onto any row lands where that
+    // row lives, so you can aim at the rows you can see rather than hunting the header. Under
+    // a DAY heading that means the day, not the week: the row sits beneath "Wed 26", so a drop
+    // on it has to mean Wed 26 or the affordance lies.
+    const rowGroup = !segmentGroups ? null
+      : dayIso ? { key: dayIso, exactDate: true }
+      : segmentOf(j);
     return (
       <React.Fragment key={j.id}>
         <tr onClick={() => setExpandedId(open ? null : j.id)}
@@ -1160,52 +1166,61 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             <tbody>
               {segmentGroups === null
                 ? sorted.map((j) => tableRow(j))
-                : segmentGroups.map((g) => (
+                : segmentGroups.map((g) => {
+                  const hot = dropGroup === g.key && dragRowId;
+                  const weekMode = segment === "week" && !!g.key;
+                  return (
                   <React.Fragment key={"seg:" + g.key}>
+                    {/* The WEEK heading is told apart by a blue fill; the day headings under it
+                        by weight and a heavy rule (Carolyn 2026-08-22). Two competing fills
+                        would flatten the hierarchy rather than show it. */}
                     <tr {...(canDragRows ? groupDropProps(g) : {})}
-                      style={dropGroup === g.key && dragRowId ? { background: "#EEF4FF" } : undefined}>
-                      <td colSpan={9} style={{ padding: "12px 10px 5px", borderBottom: "2px solid " + (dropGroup === g.key && dragRowId ? ACCENT : "#E2E8F0") }}>
+                      style={{ background: hot ? "#DCE6FF" : (weekMode ? "#EEF2FF" : "transparent") }}>
+                      <td colSpan={9} style={{ padding: weekMode ? "10px 10px" : "12px 10px 5px", borderBottom: "2px solid " + (hot ? ACCENT : weekMode ? "#C3D9F7" : "#E2E8F0") }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#334155" }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: weekMode ? ACCENT : "#334155" }}>
                             {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
                             {g.label}
                           </span>
-                          <span style={schedChip("#F1F5F9", "#475569")}>{g.rows.length}</span>
+                          <span style={schedChip("#FFF", "#475569")}>{g.rows.length}</span>
                           {/* An empty crew/stage exists ONLY so it can be dropped into — say so,
                               rather than leaving a bare zero that reads like a rendering bug. */}
-                          {g.rows.length === 0 && (
+                          {g.rows.length === 0 && !weekMode && (
                             <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8" }}>drop a job here to move it</span>
                           )}
                           {/* What this section is worth and how much building it is — the same
                               component the calendar's day headers use. */}
                           <span style={{ marginLeft: "auto" }}><SchedSummary rows={g.rows} size={12} /></span>
                         </div>
-                        {/* WEEK mode only: a chip per day of that week, so a job can be moved
-                            WITHIN the week (Friday → Tuesday), which a single week-sized target
-                            cannot express. Each chip resolves to a `date` drop, reusing the
-                            write path the date segment already uses. */}
-                        {canDragRows && segment === "week" && g.key && (
-                          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
-                            {weekDayChips(g.key).map((c) => {
-                              const on = dropGroup === c.iso && dragRowId;
-                              return (
-                                <span key={c.iso} {...groupDropProps({ key: c.iso, exactDate: true })}
-                                  title={"Drop a job here to move it to " + fmtDate(schedLocalDate(c.iso))}
-                                  style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 28, padding: "4px 10px", borderRadius: 8,
-                                    border: "1px solid " + (on ? ACCENT : "#E2E8F0"), background: on ? "#EEF4FF" : "#FBFCFE",
-                                    fontSize: 11, fontWeight: 700, color: on ? ACCENT : "#475569", cursor: dragRowId ? "copy" : "default" }}>
-                                  {c.label}
-                                  {c.count > 0 && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#64748B", background: "#EEF2F8", borderRadius: 999, padding: "1px 6px", fontVariantNumeric: "tabular-nums" }}>{c.count}</span>}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        )}
                       </td>
                     </tr>
-                    {g.rows.map((j) => tableRow(j))}
+                    {/* WEEK mode: a row per DAY of that week — all seven, empty ones included,
+                        because a day you cannot see is a day you cannot drop onto, and moving a
+                        job to a free Friday is exactly the move you want. Each is an exact-date
+                        target, reusing the write path the date segment already uses. */}
+                    {weekMode
+                      ? weekDayRows(g).map((day) => (
+                        <React.Fragment key={"day:" + day.iso}>
+                          <tr {...(canDragRows ? groupDropProps({ key: day.iso, exactDate: true }) : {})}
+                            style={{ background: dropGroup === day.iso && dragRowId ? "#EEF4FF" : "transparent" }}>
+                            <td colSpan={9} style={{ padding: "7px 10px 5px 26px",
+                              borderBottom: "2px solid " + (dropGroup === day.iso && dragRowId ? ACCENT : "#94A3B8") }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 12, fontWeight: 800, color: day.rows.length ? "#334155" : "#94A3B8" }}>{day.label}</span>
+                                {day.rows.length > 0
+                                  ? <span style={schedChip("#F1F5F9", "#475569")}>{day.rows.length}</span>
+                                  : <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8" }}>drop a job here</span>}
+                                <span style={{ marginLeft: "auto" }}><SchedSummary rows={day.rows} size={12} /></span>
+                              </div>
+                            </td>
+                          </tr>
+                          {day.rows.map((j) => tableRow(j, day.iso))}
+                        </React.Fragment>
+                      ))
+                      : g.rows.map((j) => tableRow(j))}
                   </React.Fragment>
-                ))}
+                  );
+                })}
             </tbody>
           </table>
         </div>
@@ -1218,7 +1233,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             {canDragRows
               ? (segment === "crew" ? "Drag a row onto another crew to hand the job over — onto “No crew yet” to unassign it."
                 : segment === "date" ? "Drag a row onto another day to reschedule it — onto “No build date” to send it back to the Unscheduled tray."
-                : segment === "week" ? "Drag a row onto another week to reschedule it; it keeps the same weekday. To move it WITHIN a week, drop it on one of the day chips in that week’s heading. Drop it on “No build date” to send it back to the Unscheduled tray."
+                : segment === "week" ? "Every week is broken into its seven days — drop a row on any day to move it there, including an empty one. Drop on a WEEK heading instead and it keeps the same weekday in that week. Drop on “No build date” to send it back to the Unscheduled tray."
                 : "Drag a row onto another stage to move it there.")
               : (canEdit
                 ? "Dragging is off in this view: " + (segment === "source" ? "an order does not become an inventory build" : "size and style come from the building’s own design") + ", so there is nothing a drop could change. Segment by crew, build date, week or stage to drag."
