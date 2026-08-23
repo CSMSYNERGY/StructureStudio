@@ -1171,22 +1171,27 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                   const weekMode = segment === "week" && !!g.key;
                   return (
                   <React.Fragment key={"seg:" + g.key}>
-                    {/* The WEEK heading is told apart by a blue fill; the day headings under it
-                        by weight and a heavy rule (Carolyn 2026-08-22). Two competing fills
-                        would flatten the hierarchy rather than show it. */}
+                    {/* EVERY segment heading carries the blue (Carolyn 2026-08-22) — it started
+                        as the week's own treatment in week mode and she wanted it everywhere.
+                        The day headings beneath it in week mode stay UNFILLED, told apart by
+                        weight and a heavy rule instead: two competing fills would flatten the
+                        hierarchy rather than show it, so the level with the fill has to stay
+                        the one level. */}
                     <tr {...(canDragRows ? groupDropProps(g) : {})}
-                      style={{ background: hot ? "#DCE6FF" : (weekMode ? "#EEF2FF" : "transparent") }}>
-                      <td colSpan={9} style={{ padding: weekMode ? "10px 10px" : "12px 10px 5px", borderBottom: "2px solid " + (hot ? ACCENT : weekMode ? "#C3D9F7" : "#E2E8F0") }}>
+                      style={{ background: hot ? "#DCE6FF" : "#EEF2FF" }}>
+                      <td colSpan={9} style={{ padding: "10px 10px", borderBottom: "2px solid " + (hot ? ACCENT : "#C3D9F7") }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: weekMode ? ACCENT : "#334155" }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: ACCENT }}>
                             {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
                             {g.label}
                           </span>
                           <span style={schedChip("#FFF", "#475569")}>{g.rows.length}</span>
                           {/* An empty crew/stage exists ONLY so it can be dropped into — say so,
-                              rather than leaving a bare zero that reads like a rendering bug. */}
+                              rather than leaving a bare zero that reads like a rendering bug.
+                              #64748B, not the #94A3B8 it used to be: that was picked to sit on
+                              white and goes soft on the tint. */}
                           {g.rows.length === 0 && !weekMode && (
-                            <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8" }}>drop a job here to move it</span>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: "#64748B" }}>drop a job here to move it</span>
                           )}
                           {/* What this section is worth and how much building it is — the same
                               component the calendar's day headers use. */}
