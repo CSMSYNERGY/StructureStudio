@@ -102,6 +102,33 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
     (table). A tray item has no date/crew/stage yet, so in the table only date-shaped
     targets accept it; others ignore the drop and do not light up during the drag.
 
+26. **FILTERS COMPOSE WITH SEGMENTING** (Carolyn 2026-08-23: *"when I see it by the week I
+    may want to select only one crew… and when I segment by the crew I might want to see a
+    certain week or certain month… I need more flexibility"*). Segmenting arranges the
+    list; filtering narrows it; one tab-level filter row carries both controls:
+    - **Crew chips are ONE control obeyed by every view** — previously calendar-only; now
+      the board's columns, the table's rows, and the summary tiles all read the same
+      `crewFilter`. The tiles follow the filters deliberately: a filtered list under tiles
+      that still count everything reads as a bug.
+    - **The WHEN filter is her full Monday-style condition list, all 16** (screenshot,
+      2026-08-23): Today · Yesterday · This week/month/quarter/year · In month · On ·
+      Between · More than · After date · Less than · Before date · In the next · In the
+      last. Pinned semantics: **More/Less than measure distance FORWARD from today** (a
+      build schedule looks ahead; "In the last" covers looking back), Between is inclusive
+      both ends, weeks are Sunday-first, and **an unfilled parameter filters nothing**
+      rather than blanking the list mid-keystroke. Applies to table + board only — the
+      calendar already navigates by date and a second date control would fight its arrows.
+    - **Undated jobs ALWAYS survive a WHEN filter** — they are the jobs most needing
+      scheduling, so they must never disappear; the "Showing X of Y" line says when it is
+      including them.
+    - The matcher (`schedWhenMatch`) is a pure function of ISO strings with 50 unit
+      assertions over every condition and edge.
+
+    Same round, mockup-chosen: **day headings in the week segment get `#F7F9FF`** and each
+    day's job rows share a faint `#FAFBFE` band, so a day holding one building still reads
+    as a block. Week → day → job is three tints of one family, each a step lighter; this
+    supersedes round 5's "day rows have NO fill" — same person, after living with it.
+
 Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
 never disabled, and left a stale banner up — so on an unchanged board the screen was
 byte-identical and the button read as dead. And an expanded card kept pre-refresh values,
