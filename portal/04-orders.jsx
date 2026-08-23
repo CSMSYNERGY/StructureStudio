@@ -405,7 +405,7 @@ function ReleasesView({ submissionsKey }) {
     (async () => {
       const { data, error: err } = await sb
         .from("release_notes")
-        .select("id, released_at, version, kind, title, detail, status, sort_order")
+        .select("id, released_at, version, kind, title, detail, status, sort_order, section")
         .order("released_at", { ascending: false })
         .order("sort_order", { ascending: false });
       if (err) { setError(err.message); setRows([]); return; }
@@ -452,9 +452,30 @@ function ReleasesView({ submissionsKey }) {
     return <span style={{ background: m.bg, color: m.fg, fontSize: 10, fontWeight: 800, borderRadius: 999, padding: "2px 8px", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>{m.label}</span>;
   };
 
+  // Which part of the product an entry is about (migration 114). Rendered FIRST on the line so
+  // the eye can run down the left edge and skip whole areas — the list is 88 entries and
+  // growing, and a label at the end of the title would have to be read to be used.
+  //
+  // Neutral slate on purpose: the status badges beside it are the coloured ones because they say
+  // how real the entry is yet, which is the more urgent fact. A second coloured chip would
+  // compete with them and make every row shout. An entry with no section renders NOTHING here —
+  // '' is the column's default, so an unlabelled entry looks exactly as it did before.
+  const sectionChip = (section) => {
+    const s = String(section || "").trim();
+    if (!s) return null;
+    return (
+      <span style={{
+        background: "#F1F5F9", color: "#475569", fontSize: 10, fontWeight: 800,
+        borderRadius: 5, padding: "2px 7px", letterSpacing: 0.3, whiteSpace: "nowrap",
+        textTransform: "uppercase", flexShrink: 0,
+      }}>{s}</span>
+    );
+  };
+
   const entry = (r) => (
     <div key={r.id} style={{ padding: "12px 0", borderBottom: "1px solid #F1F5F9" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        {sectionChip(r.section)}
         <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{r.title}</span>
         {statusBadge(r.status)}
         <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", whiteSpace: "nowrap" }}>{fmtDT(r.released_at)}</span>
