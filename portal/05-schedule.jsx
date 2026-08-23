@@ -419,15 +419,14 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // A save error belongs to the job that failed — opening a different card, or closing and
   // reopening, must not greet you with the last one's message.
   useEffect(() => { setSaveErr(null); }, [expandedId]);
-  // Escape closes the job modal. Bound only while one is open, and only in calendar view —
-  // the Board and Table views expand in place, where Escape closing a row would be a
-  // surprise. Also skipped while the stage editor is up, so Escape closes the topmost thing.
+  // Escape closes the job popup, in every view — it is the one detail surface now. Skipped
+  // while the stage editor is up, so Escape always closes the topmost thing.
   useEffect(() => {
-    if (!expandedId || view !== "calendar" || editingStages) return undefined;
+    if (!expandedId || editingStages) return undefined;
     const onKey = (e) => { if (e.key === "Escape") setExpandedId(null); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [expandedId, view, editingStages]);
+  }, [expandedId, editingStages]);
 
   const stages = (data && data.stages) || [];
   const jobs = (data && data.jobs) || [];
@@ -596,16 +595,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     ].filter(Boolean);
     const custLine = job.customer_name || (job.source === "inventory" ? "Spec build for the lot" : null);
     return (
-      <div key={job.id} draggable={!open && canEdit} tabIndex={0} role="button" aria-expanded={open}
+      <div key={job.id} draggable={canEdit} tabIndex={0} role="button" aria-expanded={open}
         onDragStart={(e) => { setDragId(job.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
         onDragEnd={() => { setDragId(null); setDropStage(null); }}
         onClick={() => setExpandedId(open ? null : job.id)}
         onKeyDown={(e) => { if (e.key === "Enter") setExpandedId(open ? null : job.id); }}
         style={{ background: "#FFF", border: "1px solid " + (open ? "#B9C4D6" : "#E2E8F0"), borderRadius: 10, padding: "9px 11px",
-          cursor: open ? "default" : "grab", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)",
-          // With the detail in a panel below, the card is the only thing tying the panel to a
-          // day — so say which card the panel is showing.
-          ...(open && opts.detailInPanel ? { outline: `2px solid ${ACCENT}`, outlineOffset: -1 } : null) }}>
+          cursor: canEdit ? "grab" : "pointer", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)",
+          // The card is the only thing tying the popup to its spot on the board or calendar —
+          // so say which card the popup is showing. One treatment in every view.
+          ...(open ? { outline: `2px solid ${ACCENT}`, outlineOffset: -1 } : null) }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{job.serial ? "#" + job.serial : (job.source === "repair" ? "Repair" : "—")}</span>
           <span style={{ ...schedChip(src.bg, src.fg), marginLeft: "auto" }}>{src.label}</span>
@@ -658,17 +657,8 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           </div>
         ) : null}
         {job.notes && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600, marginTop: 6, whiteSpace: "pre-wrap" }}>{job.notes}</div>}
-        {/* On the CALENDAR the detail lives in one full-width panel below the grid
-            (`detailInPanel`), never inside the card: a week day column is a fixed 218px and a
-            month cell is narrower still, so the form had nowhere to go and its right-hand
-            fields ran off the edge. The panel is inline on the page, not a modal, so the
-            no-popouts rule (SCHEDULING_SCOPE.md decision 6) still holds. The BOARD keeps
-            expanding in place — its columns are wide enough. */}
-        {open && !opts.detailInPanel && (
-          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
-            onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-            onOpenDesign={onOpenDesign} />
-        )}
+        {/* No inline editor here any more — clicking ANY card opens the one detail popup,
+            whichever view the card lives in (decision 25). */}
       </div>
     );
   };
@@ -706,8 +696,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
               <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{fmtDate(schedLocalDate(schedBuildDate(job)))}</span>
             )}
             {/* Month view used to jump to the week on click; that navigation is an explicit
-                control rather than a side effect of opening a card. */}
-            {calView === "month" && schedBuildDate(job) && (
+                control rather than a side effect of opening a card. Guarded on the VIEW too,
+                now that the modal serves every view — calView persists while Board/Table show,
+                and "Open that week" from a table row would be a non-sequitur. */}
+            {view === "calendar" && calView === "month" && schedBuildDate(job) && (
               <button type="button" onClick={() => { setCursorMs(schedLocalDate(schedBuildDate(job)).getTime()); setCalView("week"); close(); }}
                 style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11.5 }}>Open that week</button>
             )}
@@ -746,14 +738,28 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // the row's handler wins. That made the highlight track the week instead of the chip, and —
   // worse — a drop on ANOTHER week's chip fired twice: the chip set the exact date, then the
   // bubbled week handler overwrote it with the same-weekday rule. The innermost target must win.
+  // A tray item can only land on a target that IS a date, so only those may light up for it —
+  // a highlight on a target that will ignore the drop is a promise the drop breaks.
+  const acceptsCurrentDrag = (group) =>
+    dragRowId ? true : ((group.exactDate || segment === "date") && !!group.key);
   const groupDropProps = (group) => ({
-    onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(group.key); },
-    onDragEnter: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(group.key); },
+    onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); if (acceptsCurrentDrag(group)) setDropGroup(group.key); },
+    onDragEnter: (e) => { e.preventDefault(); e.stopPropagation(); if (acceptsCurrentDrag(group)) setDropGroup(group.key); },
     onDrop: (e) => {
       e.preventDefault(); e.stopPropagation();
       const job = jobs.find((j) => j.id === dragRowId);
       setDropGroup(null); setDragRowId(null);
-      if (job) dropIntoSegment(job, group);
+      if (job) { dropIntoSegment(job, group); return; }
+      // A TRAY item: it has no crew, stage or date yet, so only a target that IS a date can
+      // honour the drop — a day row, or a date-mode group. Anywhere else the drop is ignored
+      // (no write, no error), the same non-event as dropping a card on itself.
+      if (dragIntake) {
+        const intake = dragIntake;
+        setDragIntake(null);
+        if ((group.exactDate || segment === "date") && group.key) {
+          addFromTrayDated(intake.body, intake.label, group.key);
+        }
+      }
     },
   });
 
@@ -779,7 +785,11 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           onDragStart={canDragRows ? (e) => { setDragRowId(j.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} } : undefined}
           onDragEnd={canDragRows ? () => { setDragRowId(null); setDropGroup(null); } : undefined}
           {...(canDragRows && rowGroup ? groupDropProps(rowGroup) : {})}
-          style={{ cursor: canDragRows ? "grab" : "pointer", background: open ? "#F7F9FF" : (dropGroup === (rowGroup && rowGroup.key) && dragRowId && dragRowId !== j.id ? "#F0F5FF" : "transparent"),
+          style={{ cursor: canDragRows ? "grab" : "pointer",
+            // The open row gets the month pill's open treatment — tint + ACCENT outline — so
+            // "which job is the popup showing" reads the same in every view.
+            background: open ? "#E9F0FF" : (dropGroup === (rowGroup && rowGroup.key) && dragRowId && dragRowId !== j.id ? "#F0F5FF" : "transparent"),
+            outline: open ? `2px solid ${ACCENT}` : "none", outlineOffset: -2,
             opacity: dragRowId === j.id ? 0.45 : 1 }}>
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
           <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
@@ -791,13 +801,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           <td style={S.td}>{crewNameOf(j) || "—"}</td>
           <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
         </tr>
-        {open && (
-          <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
-            <SchedJobEditor key={schedEditorKey(j)} job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
-              onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
-              onOpenDesign={onOpenDesign} />
-          </td></tr>
-        )}
+        {/* No inline editor row any more — clicking opens the one detail popup (decision 25). */}
       </React.Fragment>
     );
   };
@@ -962,11 +966,13 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // In calendar view a tray item is DRAGGABLE — drop it on a date and the job is created
   // with that build date (addFromTrayDated). The + button still adds it unscheduled.
   const trayItem = (key, chipConf, who, what, addBody, label) => {
-    const draggable = canEdit && view === "calendar";
+    // Draggable in EVERY view (decision 25's uniformity pass) — the targets differ by view
+    // (calendar days, board stages, the table's day rows) but the gesture is the same one.
+    const draggable = canEdit;
     return (
       <div key={key} draggable={draggable}
         onDragStart={draggable ? () => setDragIntake({ body: addBody, label }) : undefined}
-        onDragEnd={draggable ? () => { setDragIntake(null); setDropStage(null); } : undefined}
+        onDragEnd={draggable ? () => { setDragIntake(null); setDropStage(null); setDropGroup(null); } : undefined}
         style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", background: "#FBFCFE", cursor: draggable ? "grab" : "default" }}>
         <span style={schedChip(chipConf.bg, chipConf.fg)}>{chipConf.label}</span>
         <div>
@@ -975,7 +981,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         </div>
         {canEdit && (
           <button type="button" disabled={busy} onClick={() => addFromTray(addBody, label)}
-            title={view === "calendar" ? "Add without a date (or drag onto a day below)" : "Add to the board"}
+            title={view === "calendar" ? "Add without a date (or drag onto a day below)"
+              : view === "board" ? "Add to the board (or drag onto a stage column)"
+              : "Add to the board (or drag onto a day row below)"}
             style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
         )}
       </div>
@@ -1093,10 +1101,14 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     e.preventDefault(); setDropStage(null);
                     const job = jobs.find((j) => j.id === dragId);
                     if (job) moveJob(job, s.id);
-                    setDragId(null);
+                    // A TRAY item dropped on a stage: create the job straight into that stage
+                    // (create_job honors stageId server-side) — the board's version of the
+                    // calendar's drop-to-schedule.
+                    else if (dragIntake) addFromTray({ ...dragIntake.body, stageId: s.id }, dragIntake.label);
+                    setDragId(null); setDragIntake(null);
                   }}
                   style={{ width: 268, flex: "0 0 268px", background: "#EEF2F8", borderRadius: 12, padding: 9, outline: dropStage === s.id ? `2px dashed ${ACCENT}` : "none", outlineOffset: -2 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "2px 4px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "2px 4px 3px" }}>
                     <span style={{ width: 9, height: 9, borderRadius: "50%", background: s.color, flexShrink: 0 }}></span>
                     <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 0.3, color: "#334155" }}>{s.name}</span>
                     <span style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8" }}>
@@ -1104,6 +1116,11 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     </span>
                     <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{colJobs.length}</span>
                   </div>
+                  {/* What this column is worth — the same summary every other grouping shows,
+                      so the board can never disagree with the table's stage segments. */}
+                  {colJobs.length > 0 && (
+                    <div style={{ padding: "0 4px 8px" }}><SchedSummary rows={colJobs} size={11.5} /></div>
+                  )}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 36 }}>
                     {colJobs.map((j) => jobCard(j))}
                   </div>
@@ -1406,7 +1423,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                           <div style={{ padding: "0 3px 8px" }}><SchedSummary rows={dayJobs} /></div>
                         )}
                         <div style={{ display: "flex", flexDirection: "column", gap: 7, minHeight: 40 }}>
-                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true, detailInPanel: true }))}
+                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true }))}
                         </div>
                       </div>
                     );
@@ -1508,10 +1525,6 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 </div>
               </div>
             )}
-            {/* The one detail panel, full width, under whichever grid is showing — week and
-                month alike. Neither a 218px day column nor a 150px month cell can hold the
-                form, and it stays inline rather than becoming a popout. */}
-            {detailModal()}
             <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
               One build date per card — dropping a card on a day IS the reschedule, in week and month view alike. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a card to open its details; Esc or a click outside closes it. Each day shows what is scheduled for it; a <strong>*</strong> or "no total" means some jobs on that day have no price yet and are not in the figure. Rescheduling from the calendar is admin-only.
             </p>
@@ -1520,9 +1533,14 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       })()}
 
       <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 12 }}>
-        Drag cards between stages — team members can move cards and add notes; dates, assignments, and new jobs are admin-only. Every move is logged with who and when. Click a card to see and edit everything in place.
+        Drag cards between stages — team members can move cards and add notes; dates, assignments, and new jobs are admin-only. Every move is logged with who and when. Click a card to open its details in the popup; Esc or a click outside closes it.
       </p>
 
+      {/* The job detail popup — mounted at TAB level so it is the one detail surface for
+          every view (Carolyn 2026-08-23: "for uniformity and User experience it is IMPORTANT
+          to have things functioning the same"). It began as the calendar's alone; Board and
+          Table expanded inline until she found the difference from the Table side. */}
+      {detailModal()}
       {editingStages && (
         <SchedStageEditor stages={stages} busy={busy} onClose={() => setEditingStages(false)} onSave={saveStages} />
       )}

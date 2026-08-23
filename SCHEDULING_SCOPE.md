@@ -80,11 +80,27 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
     scope is exactly:
     - **Calendar (week + month): a modal.** The 218px day column could never hold the form;
       the inline panel fixed the clipping but she did not want the reading order.
-    - **Board and Table: still expand in place.** Their rows are wide enough and she was
-      pointing at the calendar. Do not "make them consistent" without asking her.
+    - ~~**Board and Table: still expand in place.**~~ **Superseded by decision 25 below** —
+      she found the difference from the Table side two days later and asked for uniformity.
 
     Decision 6 still governs the *card and row faces* — sizes, dates, phones, colours, build
     status all stay on the face, and no detail lives only behind a click.
+
+25. **THE POPUP IS THE ONE DETAIL SURFACE FOR THE WHOLE BUILD SCHEDULE TAB** (Carolyn
+    2026-08-23: *"For uniformity and User experience it is IMPORTANT to have things
+    functioning the same"* — after clicking to edit in Table view and getting the inline
+    expansion instead of the popup). Board cards and Table rows no longer expand in place;
+    every click opens the same modal, Escape and click-outside close it in every view, and
+    the open card/row is marked the same way everywhere (ACCENT outline; tint on the table
+    row). Decision 6's no-popouts rule is now fully reversed for this tab's JOB DETAIL —
+    the faces still show everything, per decision 6's surviving half.
+
+    The same uniformity pass also: gave the Board's stage columns the $ + sq ft summary the
+    other groupings already had (summary only — no blue tint; the board keeps its kanban
+    gray), and made TRAY items draggable in every view — onto a day (calendar), onto a
+    stage column (board; `create_job` takes `stageId`), onto a day row or date group
+    (table). A tray item has no date/crew/stage yet, so in the table only date-shaped
+    targets accept it; others ignore the drop and do not light up during the drag.
 
 Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
 never disabled, and left a stale banner up — so on an unchanged board the screen was
