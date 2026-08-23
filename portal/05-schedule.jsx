@@ -45,6 +45,71 @@ const schedEditorKey = (j) => j.id + ":" + (j.updated_at || "");
 const schedStyle = (j) => String(j.building_label || "")
   .replace(/\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?/i, "").trim();
 
+// ── The WHEN filter — Carolyn's full condition list (screenshot, 2026-08-23) ──────────────
+// Filtering NARROWS the list; segmenting ARRANGES it; they compose. One condition dropdown
+// plus a contextual parameter input (`param` says which). All date math on ISO strings via
+// schedLocalDate/schedLocalIso; weeks are Sunday-first (the tab's convention throughout);
+// quarters are calendar quarters.
+const SCHED_WHEN = [
+  ["any", "Any date", "none"],
+  ["today", "Today", "none"],
+  ["yesterday", "Yesterday", "none"],
+  ["this_week", "This week", "none"],
+  ["this_month", "This month", "none"],
+  ["this_quarter", "This quarter", "none"],
+  ["in_month", "In month", "month"],
+  ["this_year", "This year", "none"],
+  ["on", "On", "date"],
+  ["between", "Between", "date2"],
+  ["more_than", "More than", "count"],
+  ["after", "After date", "date"],
+  ["less_than", "Less than", "count"],
+  ["before", "Before date", "date"],
+  ["in_next", "In the next", "count"],
+  ["in_last", "In the last", "count"],
+];
+const SCHED_WHEN_PARAM = Object.fromEntries(SCHED_WHEN.map(([k, _l, p]) => [k, p]));
+// ISO date + or - N days/weeks/months, in local time.
+const schedShiftIso = (iso, n, unit) => {
+  const d = schedLocalDate(iso);
+  if (unit === "months") d.setMonth(d.getMonth() + n);
+  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  return schedLocalIso(d);
+};
+// Does a build date pass the condition? Pure function of strings so it unit-tests cleanly.
+// p = { a, b, month, n, unit }. A condition whose parameter is not filled in yet MATCHES
+// EVERYTHING — filtering nothing while she types beats blanking the list mid-keystroke.
+// More than / Less than measure distance FORWARD from today: this is a build schedule, so
+// "more than 30 days" means further out than 30 days ("In the last" covers looking back).
+// Between is inclusive at both ends.
+const schedWhenMatch = (cond, p, iso, todayIso) => {
+  switch (cond) {
+    case "today": return iso === todayIso;
+    case "yesterday": return iso === schedShiftIso(todayIso, -1, "days");
+    case "this_week": {
+      const t = schedLocalDate(todayIso); t.setDate(t.getDate() - t.getDay());
+      const sun = schedLocalIso(t);
+      return iso >= sun && iso <= schedShiftIso(sun, 6, "days");
+    }
+    case "this_month": return iso.slice(0, 7) === todayIso.slice(0, 7);
+    case "this_quarter": {
+      const q = (m) => Math.floor((Number(m.slice(5, 7)) - 1) / 3);
+      return iso.slice(0, 4) === todayIso.slice(0, 4) && q(iso) === q(todayIso);
+    }
+    case "in_month": return !p.month || iso.slice(0, 7) === p.month;
+    case "this_year": return iso.slice(0, 4) === todayIso.slice(0, 4);
+    case "on": return !p.a || iso === p.a;
+    case "between": return (!p.a || iso >= p.a) && (!p.b || iso <= p.b);
+    case "more_than": return !p.n || iso > schedShiftIso(todayIso, Number(p.n), p.unit || "days");
+    case "after": return !p.a || iso > p.a;
+    case "less_than": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "before": return !p.a || iso < p.a;
+    case "in_next": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "in_last": return !p.n || (iso <= todayIso && iso >= schedShiftIso(todayIso, -Number(p.n), p.unit || "days"));
+    default: return true;
+  }
+};
+
 // ── What a set of jobs is worth, and how much building it is ──────────────────────────────
 // ONE computation, at module scope, because four places need it: the calendar's day headers,
 // its week strip, the month grid's week column, and the table's segment headings. It used to
@@ -317,7 +382,15 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const [view, setView] = useState("calendar"); // calendar (main) | board | table
   const [calView, setCalView] = useState("week"); // week | month
   const [cursorMs, setCursorMs] = useState(() => Date.now());
-  const [crewFilter, setCrewFilter] = useState("all"); // "all" | userId — each crew gets their own calendar
+  const [crewFilter, setCrewFilter] = useState("all"); // "all" | crewId — ONE control, obeyed by every view
+  // The WHEN filter (round 8). Transient like crewFilter — filters are a working view, not a
+  // remembered preference (unlike `segment`, which persists deliberately).
+  const [whenCond, setWhenCond] = useState("any");
+  const [whenA, setWhenA] = useState("");       // date (On / Between-from / After / Before)
+  const [whenB, setWhenB] = useState("");       // date (Between-to)
+  const [whenMonth, setWhenMonth] = useState(""); // "YYYY-MM" (In month)
+  const [whenN, setWhenN] = useState("");       // number (More/Less than, In the next/last)
+  const [whenUnit, setWhenUnit] = useState("days");
   // Weekends on/off — remembered per browser; most shops run Mon–Fri (or Mon–Sat).
   const [showWeekends, setShowWeekends] = useState(() => {
     try { return window.localStorage.getItem("ss_sched_weekends") !== "off"; } catch (_e) { return true; }
@@ -456,8 +529,34 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const visibleStages = stages.filter((s) => !s.archived);
   const trayCount = tray.orders.length + tray.inventory.length + tray.repairs.length;
 
+  // ── The filters, applied ONCE, upstream (round 8) ──
+  // Crew + WHEN narrow the set that the table, the board, and the summary tiles all read —
+  // filtering and segmenting compose because the segment groups are built from this. The
+  // calendar keeps its own crew-scoped `dated` and deliberately ignores WHEN: it already
+  // navigates by date, and a date filter there would fight the ‹ › arrows.
+  // An UNDATED job always survives a WHEN filter (Carolyn: they are the jobs most needing
+  // scheduling, so they must never disappear).
+  const whenActive = whenCond !== "any";
+  const whenParams = { a: whenA, b: whenB, month: whenMonth, n: whenN, unit: whenUnit };
+  const todayIso = schedLocalIso(new Date());
+  const filteredJobs = jobs.filter((j) => {
+    if (crewFilter !== "all" && j.crew_id !== crewFilter) return false;
+    if (!whenActive) return true;
+    const bd = schedBuildDate(j);
+    if (!bd) return true;
+    return schedWhenMatch(whenCond, whenParams, bd, todayIso);
+  });
+  const filtersOn = crewFilter !== "all" || whenActive;
+  const undatedShown = whenActive ? filteredJobs.filter((j) => !schedBuildDate(j)).length : 0;
+  const clearFilters = () => {
+    setCrewFilter("all"); setWhenCond("any");
+    setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN(""); setWhenUnit("days");
+  };
+
   const counts = { queue: 0, active: 0, done: 0, pastDue: 0 };
-  jobs.forEach((j) => {
+  // Tiles follow the filters — a filtered list under tiles that still count everything reads
+  // as a bug; the FilterBar's "Showing X of Y" is what makes the narrowing explicit.
+  filteredJobs.forEach((j) => {
     const k = kindOf[j.stage_id] || "queue";
     counts[k] = (counts[k] || 0) + 1;
     if (schedPastDue(j, k)) counts.pastDue++;
@@ -788,7 +887,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           style={{ cursor: canDragRows ? "grab" : "pointer",
             // The open row gets the month pill's open treatment — tint + ACCENT outline — so
             // "which job is the popup showing" reads the same in every view.
-            background: open ? "#E9F0FF" : (dropGroup === (rowGroup && rowGroup.key) && dragRowId && dragRowId !== j.id ? "#F0F5FF" : "transparent"),
+            background: open ? "#E9F0FF" : (dropGroup === (rowGroup && rowGroup.key) && dragRowId && dragRowId !== j.id ? "#F0F5FF" : (dayIso ? "#FAFBFE" : "transparent")),
             outline: open ? `2px solid ${ACCENT}` : "none", outlineOffset: -2,
             opacity: dragRowId === j.id ? 0.45 : 1 }}>
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
@@ -806,8 +905,8 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     );
   };
 
-  // ── Table view rows ──
-  const tableRows = jobs.filter((j) => {
+  // ── Table view rows — from the FILTERED set, so crew + WHEN compose with segmenting ──
+  const tableRows = filteredJobs.filter((j) => {
     if (stageFilter !== "all" && j.stage_id !== stageFilter) return false;
     if (!query.trim()) return true;
     return rowMatchesQuery(j, query,
@@ -1029,6 +1128,83 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       {error && <div style={S.err}>{error}</div>}
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
 
+      {/* ── The FILTER row (round 8) — narrows; the Segment dropdown arranges; they compose.
+          Crew chips are ONE tab-level control obeyed by calendar, board and table alike.
+          The WHEN date filter applies to board + table only: the calendar already navigates
+          by date, and a second date control there would fight the ‹ › arrows. ── */}
+      {data && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 11 }}>
+          <button type="button" onClick={() => setCrewFilter("all")}
+            style={{ ...S.btn(crewFilter === "all" ? "#1E293B" : "#FFF", crewFilter === "all" ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (crewFilter === "all" ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
+            All crews {jobs.length || ""}
+          </button>
+          {activeCrews.map((c) => {
+            const on = crewFilter === c.id;
+            const n = jobs.filter((j) => j.crew_id === c.id).length;
+            return (
+              <button key={c.id} type="button" onClick={() => setCrewFilter(on ? "all" : c.id)}
+                style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.color || ACCENT, display: "inline-block" }}></span>
+                {c.name} {n > 0 ? n : ""}
+              </button>
+            );
+          })}
+          {activeCrews.length === 0 && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
+              No crews yet — add them in Settings → Team.
+            </span>
+          )}
+          {view !== "calendar" && (<>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginLeft: 8 }}>When</span>
+            <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} aria-label="Filter by date"
+              style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }}>
+              {SCHED_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            {SCHED_WHEN_PARAM[whenCond] === "date" && (
+              <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} aria-label="Date"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+            )}
+            {SCHED_WHEN_PARAM[whenCond] === "date2" && (<>
+              <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} aria-label="From date"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+              <span style={{ fontSize: 12, color: "#64748B", fontWeight: 700 }}>–</span>
+              <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} aria-label="To date"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+            </>)}
+            {SCHED_WHEN_PARAM[whenCond] === "month" && (
+              <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} aria-label="Month"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+            )}
+            {SCHED_WHEN_PARAM[whenCond] === "count" && (<>
+              <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} aria-label="How many"
+                style={{ ...S.input, width: 64, padding: "5px 8px", fontSize: 12 }} />
+              <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} aria-label="Unit"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }}>
+                <option value="days">days</option>
+                <option value="weeks">weeks</option>
+                <option value="months">months</option>
+              </select>
+            </>)}
+          </>)}
+          {/* Say what the filters are doing — and that undated jobs are deliberately kept. */}
+          {filtersOn && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#64748B" }}>
+              Showing {filteredJobs.length} of {jobs.length}
+              {undatedShown > 0 ? ` — including ${undatedShown} with no build date` : ""}
+            </span>
+          )}
+          {filtersOn && (
+            <button type="button" onClick={clearFilters}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 11px", fontSize: 11.5 }}>Clear filters</button>
+          )}
+          {view === "calendar" && crewFilter !== "all" && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: ACCENT }}>
+              — {(crewById[crewFilter] || {}).name || "this crew"}'s calendar: dropping a card here schedules it AND assigns it to them
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Manual add (admin) */}
       {addOpen && canEdit && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", border: "1px dashed #B9C4D6", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
@@ -1092,7 +1268,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         <div style={{ overflowX: "auto", paddingBottom: 6 }}>
           <div style={{ display: "flex", gap: 11, alignItems: "flex-start", minWidth: "min-content" }}>
             {visibleStages.map((s) => {
-              const colJobs = jobs.filter((j) => j.stage_id === s.id).sort((a, b) => Number(a.position) - Number(b.position));
+              const colJobs = filteredJobs.filter((j) => j.stage_id === s.id).sort((a, b) => Number(a.position) - Number(b.position));
               return (
                 <div key={s.id} data-stage={s.id}
                   onDragOver={(e) => { e.preventDefault(); setDropStage(s.id); }}
@@ -1224,13 +1400,13 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                       ? weekDayRows(g).map((day) => (
                         <React.Fragment key={"day:" + day.iso}>
                           <tr {...(canDragRows ? groupDropProps({ key: day.iso, exactDate: true }) : {})}
-                            style={{ background: dropGroup === day.iso && dragRowId ? "#EEF4FF" : "transparent" }}>
+                            style={{ background: dropGroup === day.iso && dragRowId ? "#EEF4FF" : "#F7F9FF" }}>
                             <td colSpan={9} style={{ padding: "7px 10px 5px 26px",
                               borderBottom: "2px solid " + (dropGroup === day.iso && dragRowId ? ACCENT : "#94A3B8") }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                 <span style={{ fontSize: 12, fontWeight: 800, color: day.rows.length ? "#334155" : "#94A3B8" }}>{day.label}</span>
                                 {day.rows.length > 0
-                                  ? <span style={schedChip("#F1F5F9", "#475569")}>{day.rows.length}</span>
+                                  ? <span style={schedChip("#FFF", "#475569")}>{day.rows.length}</span>
                                   : <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8" }}>drop a job here</span>}
                                 <span style={{ marginLeft: "auto" }}><SchedSummary rows={day.rows} size={12} /></span>
                               </div>
@@ -1347,33 +1523,8 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 Weekends {showWeekends ? "on" : "off"}
               </button>
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 11, alignItems: "center" }}>
-              <button type="button" onClick={() => setCrewFilter("all")}
-                style={{ ...S.btn(crewFilter === "all" ? "#1E293B" : "#FFF", crewFilter === "all" ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (crewFilter === "all" ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
-                All crews {jobs.filter((j) => schedBuildDate(j)).length || ""}
-              </button>
-              {activeCrews.map((c) => {
-                const on = crewFilter === c.id;
-                const n = jobs.filter((j) => schedBuildDate(j) && j.crew_id === c.id).length;
-                return (
-                  <button key={c.id} type="button" onClick={() => setCrewFilter(on ? "all" : c.id)}
-                    style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16, display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.color || ACCENT, display: "inline-block" }}></span>
-                    {c.name} {n > 0 ? n : ""}
-                  </button>
-                );
-              })}
-              {activeCrews.length === 0 && (
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
-                  No crews yet — add them in Settings → Team to get per-crew calendars.
-                </span>
-              )}
-              {crewFilter !== "all" && (
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: ACCENT }}>
-                  — {(crewById[crewFilter] || {}).name || "this crew"}'s calendar: dropping a card here schedules it AND assigns it to them
-                </span>
-              )}
-            </div>
+            {/* (The crew chips moved to the tab-level FILTER row above — one control for
+                every view. The same crewFilter state still scopes this calendar.) */}
 
             {/* The ONE Unscheduled tray sits above (shared with all views) — nothing
                 unscheduled renders inside the calendar itself (Carolyn 2026-08-04). */}
