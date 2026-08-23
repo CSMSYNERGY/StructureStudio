@@ -456,16 +456,20 @@ function ReleasesView({ submissionsKey }) {
   // the eye can run down the left edge and skip whole areas — the list is 88 entries and
   // growing, and a label at the end of the title would have to be read to be used.
   //
-  // Neutral slate on purpose: the status badges beside it are the coloured ones because they say
-  // how real the entry is yet, which is the more urgent fact. A second coloured chip would
-  // compete with them and make every row shout. An entry with no section renders NOTHING here —
-  // '' is the column's default, so an unlabelled entry looks exactly as it did before.
+  // Brand colours, not neutral grey (Carolyn 2026-08-23): light blue ground, ACCENT purple text.
+  // #DBEAFF is the light blue already used elsewhere in the portal, and ACCENT is the brand
+  // purple from 01-core — the constant rather than a copy of its hex, so a rebrand moves this
+  // with everything else. It reads as OURS rather than as a second status badge, which was the
+  // worry about colouring it at all; the status badges stay distinguishable because they are
+  // orange (beta), indigo (roadmap/planned) and amber (requested), none of which is this blue.
+  // An entry with no section renders NOTHING here — '' is the column's default, so an
+  // unlabelled entry looks exactly as it did before.
   const sectionChip = (section) => {
     const s = String(section || "").trim();
     if (!s) return null;
     return (
       <span style={{
-        background: "#F1F5F9", color: "#475569", fontSize: 10, fontWeight: 800,
+        background: "#DBEAFF", color: ACCENT, fontSize: 10, fontWeight: 800,
         borderRadius: 5, padding: "2px 7px", letterSpacing: 0.3, whiteSpace: "nowrap",
         textTransform: "uppercase", flexShrink: 0,
       }}>{s}</span>
