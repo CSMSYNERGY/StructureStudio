@@ -32,7 +32,8 @@ function SettingsView({ section }) {
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
     // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
     // column has — so a status response that predates the column can't read as "SS issues it".
-    invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "",
+    // Invoices number separately from quotes (migration 125, Carolyn's decision).
+    invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -118,6 +119,8 @@ function SettingsView({ section }) {
         invoiceInGhl: data.invoiceInGhl !== false,
         ssQuoteNext: data.ssQuoteNext == null ? "" : String(data.ssQuoteNext),
         ssQuotePrefix: data.ssQuotePrefix || "",
+        ssInvoiceNext: data.ssInvoiceNext == null ? "" : String(data.ssInvoiceNext),
+        ssInvoicePrefix: data.ssInvoicePrefix || "",
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -169,6 +172,8 @@ function SettingsView({ section }) {
       invoiceInGhl: form.invoiceInGhl,
       ssQuoteNext: form.ssQuoteNext,
       ssQuotePrefix: form.ssQuotePrefix,
+      ssInvoiceNext: form.ssInvoiceNext,
+      ssInvoicePrefix: form.ssInvoicePrefix,
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
@@ -328,15 +333,31 @@ function SettingsView({ section }) {
             <div><span style={S.lbl}>Starting quote number</span>
               <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off. Counts up by one per quote.</div></div>
-            <div><span style={S.lbl}>Prefix (optional)</span>
+            <div><span style={S.lbl}>Quote prefix (optional)</span>
               <input style={S.input} value={form.ssQuotePrefix} onChange={set("ssQuotePrefix")} placeholder="e.g. JB-" maxLength={12} />
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || "1041")}.</div></div>
+            <div><span style={S.lbl}>Starting invoice number</span>
+              <input style={S.input} value={form.ssInvoiceNext} onChange={set("ssInvoiceNext")} placeholder="e.g. 2001" inputMode="numeric" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from quotes — set where they begin.</div></div>
+            <div><span style={S.lbl}>Invoice prefix (optional)</span>
+              <input style={S.input} value={form.ssInvoicePrefix} onChange={set("ssInvoicePrefix")} placeholder="e.g. INV-" maxLength={12} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || "2001")}.</div></div>
           </div>
         )}
-        {!form.invoiceInGhl && !String(form.ssQuoteNext).trim() && (
+        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim()) && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Set a starting quote number before saving. Without one, your first StructureStudio
-            quote would be numbered 1 and clash with the paperwork you already have out.
+            Set {!String(form.ssQuoteNext).trim() && !String(form.ssInvoiceNext).trim() ? "starting quote and invoice numbers" : (!String(form.ssQuoteNext).trim() ? "a starting quote number" : "a starting invoice number")} before
+            saving. Without one, your first StructureStudio document would be numbered 1 and clash with the paperwork you already have out.
+          </div>
+        )}
+        {!form.invoiceInGhl && status && status.emailReady === false && (
+          /* Warn-but-allow (decision 5, 2026-08-23): in StructureStudio mode there is no
+             CRM fallback for sending, so until the sending domain is live, quotes and
+             invoices generate but nobody is emailed. Print / Copy-link still work. */
+          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Heads up: your email sending isn't verified yet (Settings → Email), so customers
+            won't receive quote or invoice emails — you can still print them or copy the
+            customer link. Emails start flowing once your sending domain is verified.
           </div>
         )}
         {invMsg && invMsg.err && <div style={{ ...S.err, marginTop: 10 }}>{invMsg.err}</div>}

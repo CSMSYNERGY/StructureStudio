@@ -64,6 +64,12 @@ export interface EstimatePdfInput {
   discount?: number | null;
   /** client_settings.quote_terms — wrapped as a smaller footer paragraph. */
   quoteTerms?: string | null;
+  /** Which document this renders (migration 125). 'estimate' (default) titles the page
+   *  "Estimate #N" with a validity window; 'invoice' titles it "Invoice #N" and drops the
+   *  "Valid until" line — an invoice is a bill, not an offer that expires. Everything else
+   *  (letterhead, table, totals, terms) is deliberately identical: the SS quote and the SS
+   *  invoice describe the same sale and must not drift apart visually or numerically. */
+  docKind?: "estimate" | "invoice";
 }
 
 // ── Page metrics (US Letter, points) ─────────────────────────────────────────────────────
@@ -247,14 +253,20 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   y -= 18;
 
   // ── Title block ───────────────────────────────────────────────────────────────────────
+  const isInvoice = input?.docKind === "invoice";
+  const docWord = isInvoice ? "Invoice" : "Estimate";
   const numText = sanitizeText(input?.estimateNumber).trim();
-  const title = numText ? `Estimate #${numText}` : "Estimate";
+  const title = numText ? `${docWord} #${numText}` : docWord;
   page.drawText(title, { x: MARGIN, y: y - 14, size: 14, font: bold, color: INK });
   y -= 20;
   page.drawText(`Issued: ${fmtDate(issued)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: INK });
   y -= 14;
-  page.drawText(`Valid until: ${fmtDate(validUntil)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: GRAY });
-  y -= 22;
+  if (!isInvoice) {
+    // An invoice is a bill, not an offer — no validity window.
+    page.drawText(`Valid until: ${fmtDate(validUntil)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: GRAY });
+    y -= 14;
+  }
+  y -= 8;
 
   // ── Line-item table ───────────────────────────────────────────────────────────────────
   tableOpen = true;

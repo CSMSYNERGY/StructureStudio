@@ -105,14 +105,21 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // unambiguous and always exists.
   const sendInvoice = async (r) => {
     const code = r.short_code;
-    const est = r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : code;
+    // An SS-mode design carries its own quote number and no GHL estimate — the invoice is
+    // issued by StructureStudio (migration 125), so the confirm must not promise "in your
+    // CRM" for a document the CRM will never hold.
+    const ssMode = !r.ghl_estimate_number && !!r.ss_quote_number;
+    const est = r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : (r.ss_quote_number || code);
     const who = (r.contact || {}).name || "this customer";
     // Acting as another tenant: name them in the confirm, because this emails a real
     // invoice to THEIR customer, from THEIR account.
     const asOperator = Boolean(viewingLabel);
     const label = asOperator ? `${viewingLabel}'s customer ${who}`.trim() : who;
     const asNote = asOperator ? `\n\nYou are doing this AS ${viewingLabel}.` : "";
-    if (!window.confirm(`Email an invoice to ${label} for ${est}?\n\nThis creates the invoice in your CRM and sends it immediately.${asNote}`)) return;
+    const how = ssMode
+      ? "This issues the invoice from StructureStudio (its own invoice number and PDF) and emails it immediately."
+      : "This creates the invoice in your CRM and sends it immediately.";
+    if (!window.confirm(`Email an invoice to ${label} for ${est}?\n\n${how}${asNote}`)) return;
     setInvBusyKey(code); setInvMsg(null);
     // confirmSend is required server-side in operator mode — the confirm above is
     // client-only, and a mis-scoped script must not be able to email a stranger's customers.

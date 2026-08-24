@@ -7,6 +7,7 @@ import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
+import { deHtml } from "../_shared/estimateLines.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -75,23 +76,8 @@ function json(body: unknown, status = 200) {
 // redirect. Kept in step with portal-settings' save-side check.
 const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
-// estimate_lines.desc carries GHL-flavored HTML in two places (the floor-plan <a> link
-// prepended to the building line, and <br>-joined credit notes, both entity-escaped). Every
-// PDF we render is plain text, so it is de-rendered first: drop anchors whole (a link label
-// with no href is noise on paper), <br> → newline, strip tags, then unescape in reverse of the
-// escape order (&lt;/&gt; before &amp;).
-//
-// Module scope since 2026-08-21, hoisted verbatim out of the own-domain (Resend) branch in
-// step 10: the SS-mode quote renders from the same snapshot and needs the same de-rendering.
-// Two copies of an HTML stripper that must agree is precisely the drift worth avoiding — if
-// one ever learns about a new tag and the other does not, the two documents describing one
-// sale disagree.
-const deHtml = (s: string) =>
-  s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-    .trim();
+// deHtml moved to _shared/estimateLines.ts (2026-08-24): the SS invoice in portal-settings
+// renders the same estimate_lines snapshot and must de-render it identically.
 
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });

@@ -17,6 +17,24 @@
 
 export const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/**
+ * De-render the GHL-flavored HTML that estimate_lines.desc carries (the floor-plan <a>
+ * link prepended to the building line, and <br>-joined credit notes, both entity-escaped)
+ * into the plain text every PDF renders: drop anchors whole (a link label with no href is
+ * noise on paper), <br> → newline, strip tags, then unescape in reverse of the escape
+ * order (&lt;/&gt; before &amp;).
+ *
+ * Shared here (2026-08-24, moved from submit-estimate's module scope) because the SS
+ * invoice renders the same snapshot from portal-settings — two copies of an HTML stripper
+ * that must agree is precisely the drift worth avoiding.
+ */
+export const deHtml = (s: string) =>
+  s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+    .trim();
+
 export function totalFromSnapshot(snap: any): number | null {
   if (!snap || !Array.isArray(snap.lines)) return null;
   let subtotal = 0;

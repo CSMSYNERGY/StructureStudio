@@ -15,7 +15,8 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
@@ -584,7 +585,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -619,6 +620,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         invoiceInGhl: data?.invoice_in_ghl !== false,
         ssQuoteNext: data?.ss_quote_next ?? null,
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
+        ssInvoiceNext: data?.ss_invoice_next ?? null,
+        ssInvoicePrefix: data?.ss_invoice_prefix ?? "",
+        // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
+        // in SS mode there is no GHL fallback, so a tenant without live sending can't
+        // email quotes/invoices at all — the card says so, loudly, without blocking.
+        emailReady: data?.email_provider === "resend" && data?.email_domain_status === "verified",
       }
       : {};
     return json({
@@ -703,19 +710,46 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       }
       updates.ss_quote_prefix = p;
     }
+    // The INVOICE pair (migration 125) — a separate sequence by decision (2026-08-23):
+    // same integer and charset rules as the quote pair above.
+    if ("ssInvoiceNext" in payload) {
+      const raw = String(payload.ssInvoiceNext ?? "").trim();
+      if (!raw) updates.ss_invoice_next = null;
+      else {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1 || n > 2_000_000_000) {
+          return json({ error: "The starting invoice number must be a whole number, 1 or higher." }, 400);
+        }
+        updates.ss_invoice_next = n;
+      }
+    }
+    if ("ssInvoicePrefix" in payload) {
+      const p = String(payload.ssInvoicePrefix ?? "").trim().slice(0, 12);
+      if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
+        return json({ error: "The invoice prefix can only use letters, numbers and dashes — for example INV-." }, 400);
+      }
+      updates.ss_invoice_prefix = p;
+    }
 
-    // Turning CRM invoicing OFF hands the numbering to us, so a start value has to exist
-    // before the switch flips — otherwise the first SS quote would begin at 1 and collide
-    // with the tenant's existing paperwork. Checked against the MERGED state (the two
-    // controls can arrive in separate saves), the same way the beta pair below is.
-    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload) {
+    // Turning CRM invoicing OFF hands the numbering to us, so BOTH start values (quote AND
+    // invoice — separate sequences, migration 125) have to exist before the switch flips —
+    // otherwise the first SS document would begin at 1 and collide with the tenant's
+    // existing paperwork. Checked against the MERGED state (the controls can arrive in
+    // separate saves), the same way the beta pair below is.
+    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload) {
       const { data: curInv } = await admin
-        .from("client_settings").select("invoice_in_ghl, ss_quote_next").eq("client_id", clientId).maybeSingle();
+        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next").eq("client_id", clientId).maybeSingle();
       const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
-      const nextStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
-      if (!nextInGhl && nextStart == null) {
+      const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
+      const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
+      if (!nextInGhl && nextQuoteStart == null) {
         return json({
           error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
+        }, 400);
+      }
+      if (!nextInGhl && nextInvoiceStart == null) {
+        return json({
+          error: "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.",
         }, 400);
       }
     }
@@ -3518,6 +3552,201 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         await auditStrict("operator_send_invoice_attempt", null, `short_code=${shortCode}`);
       } catch (e) {
         return json({ error: (e as Error).message }, 503);
+      }
+    }
+
+    // ── SS MODE (migration 125): StructureStudio issues the invoice ──────────────────
+    // One early-return branch, exactly the submit-estimate 9-ALT pattern: the entire GHL
+    // convert/send machinery below stays byte-identical for every invoice_in_ghl tenant.
+    {
+      const { data: cur0 } = await admin.from("client_settings")
+        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms")
+        .eq("client_id", clientId).maybeSingle();
+      if (cur0?.invoice_in_ghl === false) {
+        // The design: the SS quote is the prerequisite, and the acceptance evidence is OUR
+        // OWN record (designs.status/accepted_at written by customer-accept, migration 124)
+        // — there is no live GHL estimate to check.
+        const { data: d, error: dErr } = await admin.from("designs")
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, inventory_unit_id")
+          .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+        if (dErr) return dbFail(req, clientId, "find that design", dErr);
+        if (!d) return json({ error: "Design not found." }, 404);
+        if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
+        const dStatus = String(d.status || "");
+        if (dStatus === "invoiced" || dStatus === "delivered") {
+          return json({ error: "This design was already invoiced." }, 400);
+        }
+        if (dStatus !== "accepted" && !d.accepted_at) {
+          return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept and sign from their quote page.` }, 400);
+        }
+
+        // Pending change order blocks invoicing (Carolyn 2026-08-23). 42P01 = the
+        // change_orders table hasn't shipped yet — treat as no pending, so this branch and
+        // the change-orders slice can deploy in either order.
+        {
+          const co = await admin.from("change_orders").select("id")
+            .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "pending_ack").limit(1);
+          if (co.error && co.error.code !== "42P01") return dbFail(req, clientId, "check change orders", co.error);
+          if (!co.error && (co.data?.length ?? 0) > 0) {
+            return json({ error: "A change order on this job is awaiting the customer's acknowledgment. Invoice it after they sign, or record their verbal confirmation on the order." }, 409);
+          }
+        }
+
+        const nowIso = () => new Date().toISOString();
+        const setClaim = (patch: Record<string, unknown>) =>
+          admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+            .eq("client_id", clientId).eq("short_code", shortCode);
+        const STALE_CLAIM_MS = 3 * 60 * 1000;
+
+        // Claim — same PK-insert concurrency claim and recovery ladder as the CRM path.
+        let recoveredNumber: string | null = null;
+        let recoveredPdfUrl: string | null = null;
+        const claimIns = await admin.from("invoice_sends").insert({
+          client_id: clientId, short_code: shortCode,
+          issued_by: "structurestudio", status: "claimed", attempts: 1,
+          sent_by_operator: operator ? operator.email : null,
+          invoice_type: invoiceTypeFor(d),
+        });
+        if (claimIns.error) {
+          const { data: prior } = await admin.from("invoice_sends")
+            .select("status, issued_by, invoice_number, invoice_pdf_url, updated_at, attempts")
+            .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+          if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
+          const st = String(prior.status || "");
+          if (st === "sent") {
+            return json({ error: `Invoice ${prior.invoice_number ?? ""} was already sent for this design.` }, 400);
+          }
+          if (st === "created") {
+            // The invoice EXISTS (number + document) but was never emailed → re-send only.
+            recoveredNumber = prior.invoice_number ? String(prior.invoice_number) : null;
+            recoveredPdfUrl = prior.invoice_pdf_url ? String(prior.invoice_pdf_url) : null;
+          } else if (st === "claimed") {
+            const age = Date.now() - new Date(String(prior.updated_at)).getTime();
+            if (age < STALE_CLAIM_MS) {
+              return json({ error: "An invoice for this design is already being sent — give it a moment." }, 409);
+            }
+          }
+          await setClaim({ status: st === "created" ? "created" : "claimed", issued_by: "structurestudio", error: null, attempts: (Number(prior.attempts) || 1) + 1 });
+        }
+
+        // Number — allocated ONCE; the recovery path reuses it, never re-numbers.
+        let invNumber = recoveredNumber;
+        if (!invNumber) {
+          const { data: allocated, error: allocErr } = await admin
+            .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
+          if (allocErr) {
+            await setClaim({ status: "failed", error: `allocate: ${allocErr.message}`.slice(0, 500) });
+            return json({ error: `Could not allocate an invoice number: ${allocErr.message}` }, 502);
+          }
+          invNumber = allocated ? String(allocated) : null;
+          if (!invNumber) {
+            await setClaim({ status: "failed", error: "no invoice starting number" });
+            return json({ error: "No starting invoice number is set. Add one in Settings → CRM Connection → Quotes & Invoices." }, 400);
+          }
+        }
+
+        // The document: the same 3-sheet builder as the quote, titled Invoice (docKind).
+        // Best-effort — a PDF failure records honestly and the invoice still sends, the
+        // same contract as the quote path.
+        let invoicePdfUrl = recoveredPdfUrl;
+        const totalNum = totalFromSnapshot(d.estimate_lines);
+        if (!invoicePdfUrl) {
+          try {
+            const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+            const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+            const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
+            const snapLines = Array.isArray(d.estimate_lines?.lines) ? d.estimate_lines.lines : [];
+            const pdfBytes = await buildQuotePdf({
+              docKind: "invoice",
+              business: {
+                name: String(cur0?.business_name ?? "").trim() || clientId,
+                phone: cur0?.business_phone ?? null,
+                website: cur0?.business_website ?? null,
+                address: cur0?.business_address ?? null,
+              },
+              estimateNumber: invNumber,
+              dateIso: nowIso(),
+              // deno-lint-ignore no-explicit-any
+              lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
+              discount: Number(d.estimate_lines?.discount) || 0,
+              quoteTerms: cur0?.quote_terms ?? null,
+              planPdfUrl: planUrl,
+            });
+            const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
+            const up = await admin.storage.from("floor-plans")
+              .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+            if (!up.error) {
+              const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
+              invoicePdfUrl = pub?.publicUrl || null;
+            } else {
+              console.warn("SS invoice PDF upload failed:", up.error.message);
+            }
+          } catch (e) {
+            console.warn("SS invoice PDF generation failed:", (e as Error).message);
+          }
+        }
+
+        // Record BEFORE the email: from here a retry re-sends this exact number + document.
+        await setClaim({ status: "created", issued_by: "structurestudio", invoice_number: invNumber, invoice_pdf_url: invoicePdfUrl, error: null });
+
+        // The email. Contact read only here (the PII discipline of 2026-08-07). There is
+        // NO GHL fallback in SS mode — there is no GHL invoice object to email — so a
+        // failed/dark send returns the same honest 502 shape as the CRM path's email
+        // failure: created, not sent, retry re-sends.
+        const { data: c } = await admin.from("designs").select("contact")
+          .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+        const to = String((c?.contact as { email?: unknown } | null)?.email ?? "").trim();
+        let sent = false;
+        let sendReason: string | null = null;
+        if (isEmail(to)) {
+          const out = await sendTenantEmail(admin, clientId, {
+            kind: "invoice",
+            shortCode,
+            to,
+            ...invoiceEmail({
+              businessName: String(cur0?.business_name ?? "").trim() || clientId,
+              logoUrl: cur0?.business_logo_url,
+              phone: cur0?.business_phone,
+              website: cur0?.business_website,
+              invoiceNumber: invNumber,
+              total: totalNum == null ? "" : totalNum,
+              invoiceUrl: invoicePdfUrl,
+              quoteTerms: cur0?.quote_terms,
+            }),
+          });
+          sent = out.sent;
+          if (!out.sent) sendReason = out.reason || "failed";
+        } else {
+          sendReason = "no email address on this design";
+        }
+        if (!sent) {
+          await setClaim({ status: "created", error: `send: ${sendReason}`.slice(0, 500) });
+          return json({
+            error: `Invoice ${invNumber} was created but the email didn't go out (${sendReason}). Click Send invoice again to retry — it will NOT create a second invoice. You can also print the invoice PDF from the order.`,
+            invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", created: true, sent: false,
+          }, 502);
+        }
+
+        // Done: ledger sent, design invoiced, unit sold, books pushed — the same tail as
+        // the CRM path, minus GHL.
+        await setClaim({ status: "sent", error: null });
+        await admin.from("designs")
+          .update({ status: "invoiced", updated_at: nowIso() })
+          .eq("client_id", clientId).eq("short_code", shortCode);
+        if (d.inventory_unit_id) {
+          await claimUnitSale(d.inventory_unit_id, shortCode, "invoice");
+        }
+        if (operator) audit("operator_send_invoice_result", null, `short_code=${shortCode} invoice=${invNumber} (structurestudio)`);
+        // qboInvoice.ts never reads GHL (verified 2026-08-23): lines come from the same
+        // estimate_lines snapshot, the customer from designs.contact. `ghlTotal` is a
+        // misnomer here — it only feeds the books' mismatch note.
+        await pushQboInvoice(admin, clientId, {
+          shortCode,
+          docNumber: invNumber,
+          ghlTotal: totalNum,
+        });
+
+        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent: true });
       }
     }
 
