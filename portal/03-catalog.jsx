@@ -1755,6 +1755,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // Door-flagged palette rows (Colors tab → Doors tick), for the color-mode UI. Doors only.
   const [doorColors, setDoorColors] = useState([]);
   const isDoorCat = category === "door";
+  // The client's window colors (Windows section list), for per-window availability
+  // checkboxes. Windows only.
+  const [winColors, setWinColors] = useState([]);
+  const isWindowCat = category === "window";
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -1763,6 +1767,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
     op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
+    // null = comes in ALL window colors (the living default); an array = exactly those.
+    window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
   });
   const load = async () => {
@@ -1772,6 +1778,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Display order = the order drag persists: live items first, archived sink to the bottom.
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
     if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
+    if (isWindowCat) setWinColors((data.windowColors || []).filter((c) => c.active !== false));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
@@ -1786,6 +1793,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
     opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
     ...(isDoorCat ? { colorMode: r.color_mode || "fixed", hasTrimColor: r.has_trim_color === true, fixedColorId: (r.color_mode || "fixed") === "fixed" ? (r.fixed_color_id || null) : null } : {}),
+    // Every box ticked goes over as null ("all colors") so a window-color added later
+    // automatically appears on unrestricted windows.
+    ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
   });
 
@@ -1883,14 +1893,21 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
     ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", "Photo on estimate", "Active", "Internal only", "Archived"];
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
   const fixedColorLabel = (r) => { const fc = doorColors.find((c) => c.id === r.fixed_color_id); return fc ? fc.label : ""; };
+  // The window Colors column carries LABELS too: "all" = every color (a color added later
+  // appears automatically), "none" = no color choice, else a comma-separated subset.
+  const winColorsCell = (r) => {
+    if (r.window_color_ids === null) return "all";
+    const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
+    return names.length ? names.join(", ") : "none";
+  };
   const exportRows = () => rows.map((r) => hasSwingOp
     ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -1952,7 +1969,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iW = col("width"), iH = col(sizeWord === "length" ? "length" : "height", "height", "length"), iPrice = col("price"),
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
-        iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"),
+        iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -1995,6 +2012,17 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
             row.fixedColorId = fc ? fc.id : (lbl ? "unknown:" + lbl : null);
           }
         }
+        if (isWindowCat && iWinColors >= 0) {
+          // "all"/blank = every color (null), "none" = empty list, else labels → ids
+          // (unknown labels are dropped; the server filters again by tenant).
+          const raw = String(cols[iWinColors] == null ? "" : cols[iWinColors]).trim();
+          if (raw === "" || raw.toLowerCase() === "all") row.windowColorIds = null;
+          else if (raw.toLowerCase() === "none") row.windowColorIds = [];
+          else {
+            const names = raw.split(/[,;]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+            row.windowColorIds = winColors.filter((c) => names.includes(String(c.label).trim().toLowerCase())).map((c) => String(c.id));
+          }
+        }
         return row;
       });
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "import_fixtures", category, rows: importRows }) });
@@ -2007,7 +2035,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, image_url: null, active: true, archived: false, internalOnly: false });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -2069,6 +2097,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         const fc = doorColors.find((c) => c.id === r.fixed_color_id);
         parts.push(fc ? `color: ${fc.label}` : "fixed color");
       }
+    }
+    if (isWindowCat && winColors.length > 0 && r.window_color_ids !== null) {
+      const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
+      parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
     }
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
@@ -2154,6 +2186,35 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
                   ? "Starts on the building's body/trim colors; the customer can change either."
                   : "The customer picks from the colors ticked for Doors in the Colors tab."}
           </div>
+        </div>
+      )}
+      {isWindowCat && winColors.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>Colors <span style={{ fontWeight: 400 }}>this window comes in</span></div>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            {winColors.map((c) => {
+              const ids = edit.draft.window_color_ids;
+              const checked = ids === null || ids.includes(String(c.id));
+              const toggle = (on) => {
+                const all = winColors.map((x) => String(x.id));
+                const cur = ids === null ? all : ids.filter((x) => all.includes(x));
+                const next = on ? [...new Set([...cur, String(c.id)])] : cur.filter((x) => x !== String(c.id));
+                // Every box ticked collapses back to null ("all") so colors added later
+                // appear on this window automatically.
+                setDraft({ window_color_ids: next.length === all.length ? null : next });
+              };
+              return (
+                <label key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  <input type="checkbox" checked={checked} onChange={(e) => toggle(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  <span style={{ width: 13, height: 13, borderRadius: 3, background: c.hex || "#CCC", border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                  {c.label}
+                </label>
+              );
+            })}
+          </div>
+          {edit.draft.window_color_ids !== null && winColors.every((c) => !edit.draft.window_color_ids.includes(String(c.id))) && (
+            <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No colors ticked — this window is placed with no color choice.</div>
+          )}
         </div>
       )}
       <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>

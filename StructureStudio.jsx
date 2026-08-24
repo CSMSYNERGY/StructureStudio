@@ -505,6 +505,16 @@ function fixtureWindowColorDefault(windowColors) {
   const list = Array.isArray(windowColors) ? windowColors : [];
   return list.find((c) => c.isDefault) || list[0] || null;
 }
+// Which of the client's window colors THIS window comes in (119): no windowColorIds on
+// the fixture = all of them; an id list = exactly those (a stale/deleted id just never
+// matches). Every window placement path — picker, included chip, 3D — offers/defaults
+// from this filtered list, never the raw one.
+function windowColorsFor(fx, windowColors) {
+  const list = Array.isArray(windowColors) ? windowColors : [];
+  if (!fx || !Array.isArray(fx.windowColorIds)) return list;
+  const s = new Set(fx.windowColorIds.map(String));
+  return list.filter((c) => s.has(String(c.id)));
+}
 // The color fields a PLACED fixture snapshots (ids for server-side price re-resolution,
 // labels for descriptions, hexes for 2D/3D rendering). Every door stamp site — place,
 // swap, included-chip, 3D placement — writes all six so a swap can never leak the old
@@ -3568,7 +3578,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-            ...windowColorStamps(fixtureWindowColorDefault(windowColors)) };
+            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))) };
         } else {
           const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
           const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -4771,10 +4781,15 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
   }, [windows]);
   const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
   const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
-  // The chosen window color (full object) — ONE list serves every window; defaults to the
-  // flagged default. A single-color (or empty) list shows no Color block at all.
-  const colorList = Array.isArray(windowColors) ? windowColors : [];
-  const [color, setColor] = useState(() => fixtureWindowColorDefault(colorList));
+  // The chosen window color (full object). The offered list is PER WINDOW — each catalog
+  // row carries which of the client's colors it comes in (windowColorsFor) — so the
+  // options and the default reset with the selected size, like a door's swing. A
+  // single-color (or empty) list shows no Color block at all.
+  const [color, setColor] = useState(null);
+  const colorOpts = sel ? windowColorsFor(sel, windowColors) : [];
+  useEffect(() => {
+    setColor(sel ? fixtureWindowColorDefault(windowColorsFor(sel, windowColors)) : null);
+  }, [sel]);
   const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
@@ -4816,10 +4831,10 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
           </div>
         )}
-        {colorList.length > 1 && (
+        {sel && colorOpts.length > 1 && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Color</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{colorList.map((c) => colorChip(c, color && color.id === c.id, () => setColor(c)))}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{colorOpts.map((c) => colorChip(c, color && color.id === c.id, () => setColor(c)))}</div>
           </div>
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
@@ -6309,7 +6324,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-          ...windowColorStamps(fixtureWindowColorDefault(windowColorList)) };
+          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))) };
       } else {
         const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
         const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);

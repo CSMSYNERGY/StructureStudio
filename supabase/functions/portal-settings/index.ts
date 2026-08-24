@@ -825,7 +825,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -1895,6 +1895,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (has("hasTrimColor")) rec.has_trim_color = row?.hasTrimColor === true;
       if (has("fixedColorId")) rec.fixed_color_id = String(row?.fixedColorId ?? "").trim() || null;
     }
+    // Window color availability (119): windows only, presence-guarded. null = ALL window
+    // colors (the living default), array = exactly those (empty = none). Non-uuid strings
+    // are dropped here so a malformed id can't fail the whole row at the uuid[] cast; the
+    // CALLERS additionally filter to ids that exist in this tenant's window_colors.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (category !== "window") {
+      rec.window_color_ids = null;
+    } else if (has("windowColorIds")) {
+      if (row.windowColorIds === null) rec.window_color_ids = null;
+      else if (Array.isArray(row.windowColorIds)) {
+        rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
+      }
+    }
     return { rec };
   };
   // Inserts still need concrete values for whatever the presence contract left out — the
@@ -1910,7 +1923,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
     }
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
+    if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     return rec;
+  };
+
+  // Keep only window-color ids that exist in THIS tenant's list (foreign/stale ids buy
+  // nothing in the designer anyway, but a clean row beats a haunted one). null passes
+  // through — it means "all colors", not a list to check.
+  const filterWindowColorIds = async (rec: Record<string, unknown>): Promise<void> => {
+    const ids = rec.window_color_ids;
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    const { data } = await admin.from("window_colors").select("id").eq("client_id", clientId).in("id", ids);
+    const ok = new Set((data ?? []).map((r: any) => String(r.id)));
+    rec.window_color_ids = ids.filter((x) => ok.has(String(x)));
   };
 
   // The FK on fixture_items.fixed_color_id accepts ANY colors row — including another
@@ -1937,6 +1962,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const v = validateFixtureRow(payload, category, 0);
     if (v.err) return json({ error: v.err }, 400);
     { const p = await fixedColorProblem(v.rec!); if (p) return json({ error: p }, 400); }
+    await filterWindowColorIds(v.rec!);
     const id = String(payload?.id ?? "").trim();
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
@@ -2021,6 +2047,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (dc.error) return dbFail(req, clientId, "read your door colors", dc.error);
       doorColorIds = new Set((dc.data ?? []).map((r: any) => String(r.id)));
     }
+    // Same prefetch for window colors: availability lists are filtered per row below.
+    let windowColorIds: Set<string> | null = null;
+    if (category === "window") {
+      const wc = await admin.from("window_colors").select("id").eq("client_id", clientId);
+      if (wc.error) return dbFail(req, clientId, "read your window colors", wc.error);
+      windowColorIds = new Set((wc.data ?? []).map((r: any) => String(r.id)));
+    }
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
@@ -2030,6 +2063,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (doorColorIds && typeof fcId === "string" && fcId && !doorColorIds.has(fcId)) {
         skipped.push(`${String(row?.name ?? "row " + (i + 1))}: fixed color not in your door palette — cleared`);
         v.rec!.fixed_color_id = null;
+      }
+      if (windowColorIds && Array.isArray(v.rec!.window_color_ids)) {
+        const before = (v.rec!.window_color_ids as unknown[]).length;
+        v.rec!.window_color_ids = (v.rec!.window_color_ids as unknown[]).filter((x) => windowColorIds!.has(String(x)));
+        if ((v.rec!.window_color_ids as unknown[]).length < before) {
+          skipped.push(`${String(row?.name ?? "row " + (i + 1))}: some colors aren't in your window color list — dropped`);
+        }
       }
       const rid = String(row?.id ?? "").trim();
       if (rid && existingIds.has(rid)) {
