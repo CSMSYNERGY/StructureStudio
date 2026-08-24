@@ -51,6 +51,22 @@ export interface EstimateEmailInput {
   docWord?: "estimate" | "quote";
 }
 
+export interface ChangeOrderEmailInput {
+  businessName: string;
+  logoUrl?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  quoteNumber: string | number;
+  coNo: number;
+  /** The generated (or rep-typed) description of what changed. Multi-line. */
+  description: string;
+  totalBefore?: string | number | null;
+  totalAfter?: string | number | null;
+  /** The customer portal (my-quotes) — where they review and sign the change. */
+  reviewUrl: string;
+  quoteTerms?: string | null;
+}
+
 export interface AcceptanceEmailInput {
   businessName: string;
   logoUrl?: string | null;
@@ -267,6 +283,57 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
       website: input.website,
       quoteTerms: input.quoteTerms,
       preheader: `Your ${word} from ${name} is ready - ${money}.`,
+      bodyHtml,
+    }),
+    text: text.join("\n") + "\n",
+  };
+}
+
+export function changeOrderEmail(input: ChangeOrderEmailInput): EmailContent {
+  const name = oneLine(input.businessName);
+  const num = oneLine(input.quoteNumber);
+  const co = `CO-${Number(input.coNo) || 0}`;
+  const beforeMoney = input.totalBefore == null || input.totalBefore === "" ? "" : formatMoney(input.totalBefore);
+  const afterMoney = input.totalAfter == null || input.totalAfter === "" ? "" : formatMoney(input.totalAfter);
+  // The description is multi-line generated/typed text — escape it, then honor the line
+  // structure in HTML the same way quote terms do.
+  const descHtml = esc(String(input.description ?? "").replace(/\r\n/g, "\n").trim()).replace(/\n/g, "<br>");
+
+  const rows = [detailRow("Quote #", esc(num)), detailRow("Change order", esc(co))];
+  if (beforeMoney) rows.push(detailRow("Previous total", esc(beforeMoney)));
+  if (afterMoney) rows.push(detailRow("New total", esc(afterMoney)));
+
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">A change to your order from ${esc(name)} needs your approval before it goes ahead.</p>
+            <p style="margin:0 0 16px 0;font-family:${FONT};font-size:14px;line-height:1.7;color:#1F2937;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:12px 14px;">${descHtml}</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+              ${rows.join("\n")}
+            </table>
+            ${ctaButton(input.reviewUrl, "Review & Approve")}`;
+
+  const text: string[] = [
+    name,
+    "",
+    `A change to your order from ${name} needs your approval before it goes ahead.`,
+    "",
+    String(input.description ?? "").replace(/\r\n/g, "\n").trim(),
+    "",
+    `Quote #: ${num}`,
+    `Change order: ${co}`,
+  ];
+  if (beforeMoney) text.push(`Previous total: ${beforeMoney}`);
+  if (afterMoney) text.push(`New total: ${afterMoney}`);
+  text.push("", `Review & approve: ${input.reviewUrl}`);
+  text.push(...textFooter(input));
+
+  return {
+    subject: `A change to your quote ${num} needs your approval`,
+    html: htmlShell({
+      businessName: name,
+      logoUrl: input.logoUrl,
+      phone: input.phone,
+      website: input.website,
+      quoteTerms: input.quoteTerms,
+      preheader: `A change to quote ${num} needs your approval.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",

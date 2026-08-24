@@ -550,6 +550,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       card.appendChild(meta);
     }
 
+    // Pending change orders (SS mode): the builder changed something after the signature —
+    // each one needs its own approval, right under the quote it amends.
+    var cos = Array.isArray(q.changeOrders) ? q.changeOrders : [];
+    for (var ci = 0; ci < cos.length; ci++) {
+      card.appendChild(changeOrderBlock(q, cos[ci] || {}));
+    }
+
     // Accepted already? Say so — the signature happened, no button needed.
     if (q.acceptedAt) {
       var acc = document.createElement("div");
@@ -604,8 +611,41 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     return card;
   }
 
-  // ── The sign panel (SS-mode, migration 124): draw OR type + consent ──
-  function toggleSignPanel(card, q, signBtn) {
+  // A pending change order, rendered inside its quote's card with its own sign flow.
+  function changeOrderBlock(q, co) {
+    var box = document.createElement("div");
+    box.style.cssText = "margin-top:12px;border:1px solid #FDE68A;background:#FFFBEB;border-radius:10px;padding:12px";
+    var head = document.createElement("div");
+    head.style.cssText = "font-size:13px;font-weight:700;color:#B45309";
+    head.textContent = "Change order CO-" + (co.coNo != null ? co.coNo : "?") + " — needs your approval";
+    box.appendChild(head);
+    if (co.description) {
+      var desc = document.createElement("div");
+      desc.style.cssText = "font-size:13px;color:#334155;white-space:pre-wrap;margin-top:6px";
+      desc.textContent = String(co.description);   // textContent — never innerHTML
+      box.appendChild(desc);
+    }
+    var beforeStr = fmtMoney(co.totalBefore);
+    var afterStr = fmtMoney(co.totalAfter);
+    if (beforeStr || afterStr) {
+      var totals = document.createElement("div");
+      totals.style.cssText = "font-size:13px;font-weight:700;margin-top:6px";
+      totals.textContent = (beforeStr || "—") + " → " + (afterStr || "—");
+      box.appendChild(totals);
+    }
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-primary";
+    btn.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px";
+    btn.textContent = "Review & Sign";
+    btn.addEventListener("click", function () { toggleSignPanel(box, q, btn, co); });
+    box.appendChild(btn);
+    return box;
+  }
+
+  // ── The sign panel (SS-mode, migration 124/126): draw OR type + consent.
+  //    With `co` it signs a CHANGE ORDER (ack_change_order); without, the quote itself. ──
+  function toggleSignPanel(card, q, signBtn, co) {
     var existing = card.querySelector(".sign-panel");
     if (existing) { existing.parentNode.removeChild(existing); return; }
 
@@ -728,14 +768,20 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 
     // The consent sentence — composed the same way the server composes (and stores) it.
     var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your quote";
-    var totalText = fmtMoney(q.total);
     var consentRow = document.createElement("label");
     consentRow.className = "consent-row";
     var consentBox = document.createElement("input");
     consentBox.type = "checkbox";
     var consentSpan = document.createElement("span");
-    consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept quote " +
-      numText + (totalText ? " for " + totalText : "") + ".";
+    if (co) {
+      var afterText = fmtMoney(co.totalAfter);
+      consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I approve change order CO-" +
+        (co.coNo != null ? co.coNo : "?") + " to quote " + numText + (afterText ? " for a new total of " + afterText : "") + ".";
+    } else {
+      var totalText = fmtMoney(q.total);
+      consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept quote " +
+        numText + (totalText ? " for " + totalText : "") + ".";
+    }
     consentRow.appendChild(consentBox);
     consentRow.appendChild(consentSpan);
     panel.appendChild(consentRow);
@@ -748,7 +794,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var submit = document.createElement("button");
     submit.type = "button";
     submit.className = "btn btn-primary";
-    submit.textContent = "Sign & Accept";
+    var submitLabel = co ? "Sign & Approve" : "Sign & Accept";
+    submit.textContent = submitLabel;
     submit.style.marginTop = "4px";
     panel.appendChild(submit);
 
@@ -757,14 +804,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var signerName = nameInput.value.trim();
       if (!signerName) { setError(errEl, "Enter your full name."); return; }
       if (!consentBox.checked) { setError(errEl, "Please tick the agreement box to sign."); return; }
-      var payload = {
-        action: "accept_quote",
-        token: token,
-        quoteRef: q.quoteRef,
-        signerName: signerName,
-        consent: true,
-        method: mode
-      };
+      var payload = co
+        ? { action: "ack_change_order", token: token, changeOrderId: co.id, signerName: signerName, consent: true, method: mode }
+        : { action: "accept_quote", token: token, quoteRef: q.quoteRef, signerName: signerName, consent: true, method: mode };
       if (mode === "drawn") {
         if (!hasInk) { setError(errEl, "Draw your signature in the box (or switch to typing your name)."); return; }
         payload.signatureDataUrl = canvas.toDataURL("image/png");
@@ -789,13 +831,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           } else {
             setError(errEl, errText(r, "Couldn't record your signature. Please try again."));
             submit.disabled = false;
-            submit.textContent = "Sign & Accept";
+            submit.textContent = submitLabel;
           }
         })
         .catch(function () {
           setError(errEl, "Couldn't reach the server. Check your connection and try again.");
           submit.disabled = false;
-          submit.textContent = "Sign & Accept";
+          submit.textContent = submitLabel;
         });
     });
 

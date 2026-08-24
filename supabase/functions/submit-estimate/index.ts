@@ -2,12 +2,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { estimateEmail } from "../_shared/emailTemplates.ts";
+import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { deHtml } from "../_shared/estimateLines.ts";
+import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -168,7 +169,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    browser right before calling us, so it must exist here.
   const { data: existingDesign, error: designErr } = await supabase
     .from("designs")
-    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number")
+    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -1502,6 +1503,59 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       console.warn("SS quote PDF generation failed:", (e as Error).message);
     }
 
+    // ── THE CHANGE ORDER (migration 126). A resubmit AFTER the customer signed is a change
+    // to an agreed order, and it needs their acknowledgment — e-signature or the rep's
+    // verbal attestation — before it can be invoiced. The description is GENERATED from the
+    // two snapshots (what the customer signed vs what was just built), never typed: a rep
+    // summarising their own change is how the acknowledgment drifts from reality. One
+    // pending design_edit CO per design, updated in place on every further resubmit so the
+    // customer always sees the CUMULATIVE change against what they signed. An identical
+    // resubmit (null diff) is not a change order.
+    let changeOrder: { coNo: number | null; description: string } | null = null;
+    if (existingDesign.accepted_at) {
+      const coDescription = changeOrderDescription(existingDesign.estimate_lines, estimateLines);
+      if (coDescription) {
+        const oldTotal = totalFromSnapshot(existingDesign.estimate_lines);
+        const newTotal = totalFromSnapshot(estimateLines);
+        // The baseline the customer signed: the latest acceptance's design_version. The
+        // "after" is the version the browser just saved (save_design runs before us).
+        const [{ data: lastAcc }, { data: maxVer }] = await Promise.all([
+          supabase.from("design_acceptances").select("design_version")
+            .eq("client_id", clientId).eq("short_code", designId)
+            .order("accepted_at", { ascending: false }).limit(1).maybeSingle(),
+          supabase.from("design_versions").select("version")
+            .eq("short_code", designId).order("version", { ascending: false }).limit(1).maybeSingle(),
+        ]);
+        const coFields = {
+          description: coDescription,
+          total_before_cents: oldTotal == null ? null : Math.round(oldTotal * 100),
+          total_after_cents: newTotal == null ? null : Math.round(newTotal * 100),
+          version_before: lastAcc?.design_version ?? null,
+          version_after: maxVer?.version ?? null,
+        };
+        const { data: existingCo } = await supabase.from("change_orders")
+          .select("id, co_no, version_before")
+          .eq("client_id", clientId).eq("short_code", designId)
+          .eq("status", "pending_ack").eq("source", "design_edit")
+          .limit(1).maybeSingle();
+        if (existingCo) {
+          // Keep the SIGNED baseline (version_before) — the customer acknowledges the total
+          // change since their signature, not since the previous unacknowledged revision.
+          const { error: coErr } = await supabase.from("change_orders")
+            .update({ ...coFields, version_before: existingCo.version_before ?? coFields.version_before })
+            .eq("id", existingCo.id);
+          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription };
+          else console.warn("change order update failed:", coErr.message);
+        } else {
+          const { data: coRow, error: coErr } = await supabase.from("change_orders")
+            .insert({ client_id: clientId, short_code: designId, source: "design_edit", ...coFields })
+            .select("co_no").maybeSingle();
+          if (!coErr) changeOrder = { coNo: coRow?.co_no ?? null, description: coDescription };
+          else console.warn("change order insert failed:", coErr.message);
+        }
+      }
+    }
+
     // The email. sendTenantEmail owns the beta redirect, the dark-mode guards and the
     // email_sends ledger, and never throws.
     //
@@ -1510,27 +1564,45 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // PDF link and the total (Carolyn 2026-08-23 — the printed quote is first-class; the
     // email must hand her future template everything it needs). docWord flips the copy to
     // "quote", her word for SS-issued paperwork.
+    //
+    // When this resubmit raised a CHANGE ORDER, the customer gets the change-order email
+    // INSTEAD — one email describing what changed with a Review & Approve CTA, not a
+    // routine "your quote is ready" that buries the thing needing their signature.
     const intendedTo = String(contact?.email || "").trim();
     let emailed = false;
     let emailReason: string | null = null;
     if (intendedTo || redirectToTestInbox) {
-      const content = estimateEmail({
-        businessName,
-        logoUrl: businessLogoUrl || null,
-        phone: businessPhone || null,
-        website: businessWebsite || null,
-        estimateNumber: ssQuoteNumber,
-        total: oppValue,
-        styleLabel,
-        sizeLabel: size,
-        estimateUrl: myQuotesUrl(clientId, req),
-        pdfUrl: planUrl,
-        formalPdfUrl: quotePdfUrl,
-        quoteTerms: quoteTerms || null,
-        docWord: "quote",
-      });
+      const content = changeOrder
+        ? changeOrderEmail({
+          businessName,
+          logoUrl: businessLogoUrl || null,
+          phone: businessPhone || null,
+          website: businessWebsite || null,
+          quoteNumber: ssQuoteNumber,
+          coNo: changeOrder.coNo ?? 0,
+          description: changeOrder.description,
+          totalBefore: totalFromSnapshot(existingDesign.estimate_lines),
+          totalAfter: oppValue,
+          reviewUrl: myQuotesUrl(clientId, req),
+          quoteTerms: quoteTerms || null,
+        })
+        : estimateEmail({
+          businessName,
+          logoUrl: businessLogoUrl || null,
+          phone: businessPhone || null,
+          website: businessWebsite || null,
+          estimateNumber: ssQuoteNumber,
+          total: oppValue,
+          styleLabel,
+          sizeLabel: size,
+          estimateUrl: myQuotesUrl(clientId, req),
+          pdfUrl: planUrl,
+          formalPdfUrl: quotePdfUrl,
+          quoteTerms: quoteTerms || null,
+          docWord: "quote",
+        });
       const outcome = await sendTenantEmail(supabase, clientId, {
-        kind: "estimate",
+        kind: changeOrder ? "change_order" : "estimate",
         shortCode: designId,
         to: intendedTo,
         subject: content.subject,
@@ -1555,7 +1627,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         estimate_lines: estimateLines,
         ss_quote_number: ssQuoteNumber,
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
-        ...(emailed ? { ss_quote_sent_at: new Date().toISOString() } : {}),
+        // ss_quote_sent_at means the QUOTE email landed; a change-order email is a
+        // different document and must not masquerade as the quote having been sent.
+        ...(emailed && !changeOrder ? { ss_quote_sent_at: new Date().toISOString() } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq("short_code", designId);
@@ -1580,6 +1654,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // 3D page isn't there".
       sheetsSkipped: skippedSheets,
       updated: Boolean(existingDesign.ss_quote_number),
+      // A resubmit after the customer signed raised (or refreshed) a pending change order —
+      // the designer surfaces "awaiting the customer's approval" instead of a routine
+      // success line.
+      ...(changeOrder ? { changeOrder: { coNo: changeOrder.coNo, pending: true } } : {}),
       betaMode: effectiveBetaMode,
       betaRedirected: redirectToTestInbox,
       betaRedirectedTo: redirectToTestInbox ? betaEmail : null,

@@ -90,17 +90,13 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
 
   const action = typeof body?.action === "string" ? body.action : "";
-  if (action !== "accept_quote") return json({ error: "Unknown action" }, 400);
+  if (action !== "accept_quote" && action !== "ack_change_order") return json({ error: "Unknown action" }, 400);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const admin = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
   const identity = await checkSession(admin, body?.token);
   if (!identity) return json({ error: "Session expired — sign in again." }, 401);
-
-  // ── Input shape ──────────────────────────────────────────────────────────────────────
-  const quoteRef = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
-  if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid quote reference." }, 400);
 
   if (body?.consent !== true) {
     return json({ error: "Please tick the agreement box to sign." }, 400);
@@ -120,6 +116,123 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     typedSignature = typeof body?.typedName === "string" ? body.typedName.trim().slice(0, 120) : "";
     if (!typedSignature) return json({ error: "Type your name to sign." }, 400);
   }
+
+  // ═══ ack_change_order: sign off on a change to an already-accepted order (migration 126) ═══
+  if (action === "ack_change_order") {
+    const coId = typeof body?.changeOrderId === "string" ? body.changeOrderId.trim() : "";
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "Invalid change order reference." }, 400);
+    }
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents")
+      .eq("client_id", identity.clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, identity.clientId, "load the change order", coErr);
+    const notYoursCo = json({ error: "That change order wasn't found on your account." }, 404);
+    if (!co) return notYoursCo;
+
+    // The signature only attaches to a change on a design this verified phone owns.
+    const { data: coDesign, error: coDesignErr } = await admin.from("designs")
+      .select("short_code, contact, ss_quote_number")
+      .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
+    if (coDesignErr) return dbFail(req, identity.clientId, "load the quote", coDesignErr);
+    if (!coDesign) return notYoursCo;
+    const coPhone = String(coDesign?.contact?.phone ?? "").replace(/\D/g, "");
+    if (!coPhone || coPhone !== identity.phoneDigits) return notYoursCo;
+
+    if (co.status === "acknowledged") return json({ ok: true, already: true });
+    if (co.status === "void") return json({ error: "This change was withdrawn by your builder — nothing to sign." }, 409);
+
+    const coLabel = `CO-${co.co_no}`;
+    const quoteNo = String(coDesign.ss_quote_number || co.short_code);
+    const newTotal = co.total_after_cents == null ? null : co.total_after_cents / 100;
+    const coConsent = `I agree that my electronic signature is as binding as a handwritten one, and I approve change order ${coLabel} to quote ${quoteNo}${newTotal == null ? "" : ` for a new total of ${fmtMoney(newTotal)}`}.`;
+    const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || null;
+    const userAgent = (req.headers.get("user-agent") || "").slice(0, 300) || null;
+    const acceptanceId = crypto.randomUUID();
+    const ackAtIso = new Date().toISOString();
+
+    // The record + the claim (partial unique: one acknowledgment per change order).
+    const { error: insErr } = await admin.from("design_acceptances").insert({
+      id: acceptanceId,
+      client_id: identity.clientId,
+      short_code: co.short_code,
+      subject: "change_order",
+      change_order_id: co.id,
+      quote_number: quoteNo,
+      total: newTotal,
+      method,
+      signer_name: signerName,
+      typed_signature: typedSignature,
+      consent_text: coConsent,
+      phone_digits: identity.phoneDigits,
+      session_seen_name: identity.name,
+      ip,
+      user_agent: userAgent,
+      accepted_at: ackAtIso,
+    });
+    if (insErr) {
+      if (String(insErr.code) === "23505") return json({ ok: true, already: true });
+      return dbFail(req, identity.clientId, "record the signature", insErr);
+    }
+
+    if (signaturePng) {
+      const path = `${identity.clientId}/${co.short_code}/${acceptanceId}.png`;
+      const up = await admin.storage.from("signatures").upload(path, signaturePng, { contentType: "image/png" });
+      if (!up.error) await admin.from("design_acceptances").update({ signature_image_path: path }).eq("id", acceptanceId);
+    }
+
+    // Flip the CO — service role, so the guard trigger admits the signature ack.
+    const { error: ackErr } = await admin.from("change_orders")
+      .update({ status: "acknowledged", ack_method: "signature", acceptance_id: acceptanceId, acknowledged_at: ackAtIso })
+      .eq("id", co.id).eq("status", "pending_ack");
+    if (ackErr) {
+      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `CO ack update failed: ${ackErr.message}`, context: { coId } }).catch(() => {});
+      return json({ error: "Your signature was recorded but the change didn't finalize — your builder can see it and will finish up." }, 500);
+    }
+
+    // The acknowledged total becomes the order's total. total_source='manual' also shields
+    // it from sync-design-status' GHL repricer (its step 8 skips manual rows).
+    if (co.total_after_cents != null) {
+      const { error: totErr } = await admin.from("orders")
+        .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: ackAtIso })
+        .eq("client_id", identity.clientId).eq("short_code", co.short_code);
+      if (totErr) {
+        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `CO order-total update failed: ${totErr.message}`, context: { coId } }).catch(() => {});
+      }
+      // NOTE (deliberate): commission_entries computed from the old total are now stale —
+      // the clawback kind (078) exists for exactly this; wiring it is a known follow-up.
+    }
+
+    // Confirmation email, best-effort.
+    const to = String(coDesign?.contact?.email || "").trim();
+    if (to) {
+      const { data: cs } = await admin.from("client_settings")
+        .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+        .eq("client_id", identity.clientId).maybeSingle();
+      const content = acceptanceEmail({
+        businessName: cs?.business_name || identity.clientId,
+        phone: cs?.business_phone || null,
+        website: cs?.business_website || null,
+        logoUrl: cs?.business_logo_url || null,
+        quoteNumber: `${quoteNo} — ${coLabel}`,
+        total: newTotal,
+        signerName,
+        acceptedAtIso: ackAtIso,
+        pdfUrl: null,
+        quoteTerms: cs?.quote_terms || null,
+      });
+      await sendTenantEmail(admin, identity.clientId, {
+        kind: "acceptance", shortCode: co.short_code, to,
+        subject: content.subject, html: content.html, text: content.text,
+      });
+    }
+
+    return json({ ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no });
+  }
+
+  // ═══ accept_quote ═══
+  const quoteRef = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
+  if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid quote reference." }, 400);
 
   // ── The design, owned by this verified phone ────────────────────────────────────────
   const { data: design, error: designErr } = await admin

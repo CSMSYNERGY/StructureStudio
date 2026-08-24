@@ -8360,6 +8360,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         quotePdfUrl: result.quotePdfUrl || null,
         quoteEmailed: result.issuedBy === "structurestudio" ? result.quoteEmailed === true : null,
         quoteEmailReason: result.quoteEmailReason || null,
+        changeOrder: result.changeOrder || null,
       });
       setSubmitted(true);
       // Embedded (in-portal) mounts: tell the host page a design was submitted so it
@@ -10521,6 +10522,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
                 : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`)}
           </p>
+          {savedDesign && savedDesign.changeOrder && (
+            /* This revision changed a SIGNED order (migration 126): the customer must
+               acknowledge it before the order can be invoiced. */
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+              This changes an order the customer already signed — change order
+              {savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} needs their
+              approval (they sign from their quote page, or record their verbal OK on the order). Invoicing
+              waits until it's acknowledged.
+            </div>
+          )}
           {savedDesign && savedDesign.ssQuote && savedDesign.quoteEmailed === false && (
             /* The quote exists but no email went out (no address on file, or the tenant's
                sending domain isn't live). Silence here reads as "the customer got it". */

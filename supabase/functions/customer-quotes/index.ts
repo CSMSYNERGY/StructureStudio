@@ -96,7 +96,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
 
-  const quotes = (rows ?? [])
+  const mine = (rows ?? [])
     .filter((d) => {
       // The verified phone is the identity — only this customer's designs.
       const phone = String(d?.contact?.phone ?? "").replace(/\D/g, "");
@@ -108,6 +108,34 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
       if (d?.status === "inventory" || d?.status === "draft") return false;
       return true;
     })
+    ;
+
+  // Pending change orders (migration 126, SS mode only): one query over this customer's
+  // OWN codes — a change to an agreed order needs their signature, and the card renders
+  // right under the quote it amends. Cents → dollars at the edge, like `total`.
+  // deno-lint-ignore no-explicit-any
+  const cosByCode = new Map<string, any[]>();
+  if (ssMode && mine.length > 0) {
+    const { data: cos } = await admin.from("change_orders")
+      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, created_at")
+      .eq("client_id", identity.clientId)
+      .eq("status", "pending_ack")
+      .in("short_code", mine.map((d) => d.short_code));
+    for (const co of cos ?? []) {
+      const list = cosByCode.get(co.short_code) ?? [];
+      list.push({
+        id: co.id,
+        coNo: co.co_no,
+        description: co.description,
+        totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
+        totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
+        createdAt: co.created_at,
+      });
+      cosByCode.set(co.short_code, list);
+    }
+  }
+
+  const quotes = mine
     // NARROW projection — the migration-048 lesson (a phone number once bridged to full
     // contact PII, and 048's fix was to stop returning it). Never echo `contact` back:
     // the caller already knows their own phone, and a leaked/stolen session token must
@@ -138,6 +166,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           canAccept: String(d?.status) === "sent" && !!d.ss_quote_number && !d.accepted_at,
           acceptedAt: d.accepted_at || null,
           ssQuote: !!d.ss_quote_number,
+          changeOrders: cosByCode.get(d.short_code) ?? [],
         }
         : {}),
     }));

@@ -12,7 +12,7 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
+import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
@@ -160,6 +160,9 @@ const GATES: GateTable = {
   // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
   // email to the design's own customer.
   resend_quote_email: { area: "designs", level: "edit" },
+  // Emails a pending change order to the customer for signature (migration 126). Same
+  // altitude as raising one from the order card: Orders edit.
+  send_change_order: { area: "orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -3529,6 +3532,51 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .update({ ss_quote_sent_at: new Date().toISOString() })
         .eq("client_id", clientId).eq("short_code", shortCode);
     }
+    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+  }
+
+  // ── send_change_order: email a pending change order to the customer (migration 126) ──
+  // The CO row already exists (raised by the SS resubmit path, or by the order card's
+  // form); this only delivers the request-for-signature email. Idempotent — re-sending is
+  // a duplicate email at worst, so it doubles as the "Resend" button.
+  if (action === "send_change_order") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change order", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status !== "pending_ack") {
+      return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided." }, 400);
+    }
+    const { data: d } = await admin.from("designs")
+      .select("contact, ss_quote_number")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    const to = String((d?.contact as { email?: unknown } | null)?.email ?? "").trim();
+    if (!isEmail(to)) return json({ ok: true, sent: false, reason: "no email address on this design" });
+    const { data: cs } = await admin.from("client_settings")
+      .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    const content = changeOrderEmail({
+      businessName: String(cs?.business_name ?? "").trim() || clientId,
+      logoUrl: cs?.business_logo_url,
+      phone: cs?.business_phone,
+      website: cs?.business_website,
+      quoteNumber: String(d?.ss_quote_number || co.short_code),
+      coNo: Number(co.co_no) || 0,
+      description: String(co.description || ""),
+      totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
+      totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
+      reviewUrl: myQuotesUrl(clientId, req),
+      quoteTerms: cs?.quote_terms,
+    });
+    const outcome = await sendTenantEmail(admin, clientId, {
+      kind: "change_order", shortCode: co.short_code, to,
+      subject: content.subject, html: content.html, text: content.text,
+    });
     return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
   }
 
