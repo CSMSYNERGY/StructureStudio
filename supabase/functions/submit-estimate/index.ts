@@ -724,6 +724,20 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Identical doors (same name + price) collapse into one line with a qty, matching the
   // designer's live preview. Unpriced / $0 doors add no line (NULL-price contract = not
   // charged). NOT matched against GHL products — pushed as ad-hoc lines like custom options.
+  // Size-inclusions for CATALOG fixtures are a SHARED POOL per fixture id, consumed across
+  // color-split groups in placement order: a color choice splits one fixture id into several
+  // lines, and netting the full inclusion per line would give it away multiple times. The
+  // designer's computeLayoutPricingRows runs the identical pool in the identical order so
+  // the live preview and this estimate always agree. An included unit nets the whole grouped
+  // (base + color) price — included doors don't pay the color surcharge.
+  const fxIncRemaining = new Map<string, number>();
+  const takeFxIncluded = (fid: string | null, qty: number): number => {
+    if (!fid || !includedMap.get(fid)) return 0;
+    if (!fxIncRemaining.has(fid)) fxIncRemaining.set(fid, includedMap.get(fid) || 0);
+    const take = Math.min(qty, fxIncRemaining.get(fid) || 0);
+    fxIncRemaining.set(fid, (fxIncRemaining.get(fid) || 0) - take);
+    return take;
+  };
   if (Array.isArray(doors)) {
     // Sizes are stored in inches; show them as feet/inches on the estimate line.
     const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
@@ -735,6 +749,22 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const fr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
       for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
     }
+    // Chosen door/trim colors: label + flat per-door rate re-resolved from the tenant's
+    // palette by id — same trust posture as the price re-read above (the body's labels are
+    // fallback display only, its ids buy nothing unless the row is the tenant's AND ticked
+    // for doors; a forged/stale/foreign id prices as $0 with the snapshot label).
+    const colorIds = [...new Set(doors.flatMap((d: any) => [d && d.colorId, d && d.trimColorId]).filter(Boolean).map(String))];
+    const doorColorMap = new Map<string, { label: string; rate: number }>();
+    if (colorIds.length) {
+      const cr = await supabase.from("colors").select("id, label, door, door_rate").eq("client_id", clientId).in("id", colorIds);
+      for (const r of cr.data ?? []) if (r.door === true) doorColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.door_rate) || 0 });
+    }
+    const colorBit = (id: unknown, fallbackLabel: unknown, suffix: string): { text: string | null; rate: number } => {
+      const c = id ? doorColorMap.get(String(id)) : undefined;
+      const label = c ? c.label : (id && fallbackLabel ? String(fallbackLabel) : null);
+      const rate = c ? c.rate : 0;
+      return { text: label ? `${label}${suffix}${rate > 0 ? ` ($${rate})` : ""}` : null, rate };
+    };
     const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const d of doors) {
       // A FOUND catalog row always wins, its NULL/0 price included (the owner's "unpriced =
@@ -747,26 +777,32 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // than simply omitting the door from the payload.
       const dFid = d && d.fixtureItemId ? String(d.fixtureItemId) : null;
       const dFx = dFid ? fxImg.get(dFid) : undefined;
-      const price = dFx !== undefined
+      const basePrice = dFx !== undefined
         ? (dFx.price != null ? dFx.price : 0)
         : (d && d.price != null ? Number(d.price) : 0);
+      // Chosen colors: each adds its flat per-door rate to the line and its name (with the
+      // price when it charges) to the description — "Barn Red ($50) · White trim ($25)".
+      const mainC = colorBit(d && d.colorId, d && d.colorLabel, "");
+      const trimC = colorBit(d && d.trimColorId, d && d.trimColorLabel, " trim");
+      const price = basePrice + mainC.rate + trimC.rate;
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";
       // Spell swing + operation out the same way the floor-plan PDF does (out-swing, right hinge)
       // so the estimate line and the plan read identically.
       const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : null;
       const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : null;
-      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}`;
+      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, mainC.text, trimC.text, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}|${mainC.text || ""}|${trimC.text || ""}`;
       const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
       g.qty++; dg.set(key, g);
     }
     for (const g of dg.values()) {
       // Fixtures-catalog doors (2026-07-30) — their own line kind: they are neither a
       // layout_item (no layout_item_pricing row) nor a custom option (catalog-priced).
-      // Net the size-included qty (building_size_inclusions keyed by the fixture id) — the first N
-      // are covered by the base price (shown as a $0 "(included)" line), extras are charged.
-      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      // Net the size-included qty (building_size_inclusions keyed by the fixture id) — the
+      // first N are covered by the base price (shown as a $0 "(included)" line), extras are
+      // charged. The pool is shared across this fixture's color groups (see takeFxIncluded).
+      const inc = takeFxIncluded(g.fixtureItemId ? String(g.fixtureItemId) : null, g.qty);
       const chargeable = Math.max(0, g.qty - inc);
       const im = g.fixtureItemId ? fxImg.get(String(g.fixtureItemId)) : null;
       const atts = (im && im.show && im.url) ? imgAttachments(im.url) : [];
@@ -901,6 +937,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const wr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", winIds);
       for (const r of wr.data ?? []) wImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
     }
+    // Chosen window colors: label + flat per-window rate re-resolved from window_colors by
+    // id (never the snapshot) — same trust posture as door colors above.
+    const wColorIds = [...new Set(windows.map((w: any) => w && w.colorId).filter(Boolean).map(String))];
+    const winColorMap = new Map<string, { label: string; rate: number }>();
+    if (wColorIds.length) {
+      const wcr = await supabase.from("window_colors").select("id, label, rate").eq("client_id", clientId).in("id", wColorIds);
+      for (const r of wcr.data ?? []) winColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.rate) || 0 });
+    }
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
@@ -909,18 +953,23 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // omitting the window from the client-authored payload.
       const wFid = w && w.fixtureItemId ? String(w.fixtureItemId) : null;
       const wFx = wFid ? wImg.get(wFid) : undefined;
-      const price = wFx !== undefined
+      const basePrice = wFx !== undefined
         ? (wFx.price != null ? wFx.price : 0)
         : (w && w.price != null ? Number(w.price) : 0);
+      const wc = (w && w.colorId) ? winColorMap.get(String(w.colorId)) : undefined;
+      const colorLabel = wc ? wc.label : (w && w.colorId && w.colorLabel ? String(w.colorLabel) : null);
+      const colorRate = wc ? wc.rate : 0;
+      const colorText = colorLabel ? `${colorLabel}${colorRate > 0 ? ` ($${colorRate})` : ""}` : null;
+      const price = basePrice + colorRate;
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}`;
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}|${colorText || ""}`;
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
       g.qty++; wg.set(key, g);
     }
     for (const g of wg.values()) {
-      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      const inc = takeFxIncluded(g.fixtureItemId ? String(g.fixtureItemId) : null, g.qty);
       const chargeable = Math.max(0, g.qty - inc);
       const included = inc > 0 && chargeable <= 0;
       const im = g.fixtureItemId ? wImg.get(String(g.fixtureItemId)) : null;
