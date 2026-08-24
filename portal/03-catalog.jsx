@@ -1810,7 +1810,7 @@ function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number"
 
 // The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
 // ("height" for doors/windows, "length" for ramps — height_in holds the ramp LENGTH).
-function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null }) {
+function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null, refreshKey = 0 }) {
   // Operator "view as": scope EVERY call to the client on screen explicitly, so an item is
   // always read/written for the tenant shown, never silently the operator's own.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -1855,7 +1855,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     if (isWindowCat) setWinColors((data.windowColors || []).filter((c) => c.active !== false));
     setLoaded(true);
   };
-  useEffect(() => { load(); }, []);
+  // refreshKey lets a sibling editor force a reload in place — WindowsView bumps it after
+  // the window-color list saves, so a just-added color shows up in the per-window
+  // checkboxes without a page refresh.
+  useEffect(() => { load(); }, [refreshKey]);
 
   // One line's payload for save_fixture / import_fixtures. Sizes go over as inches.
   // Color keys ride ONLY for doors so the server's presence contract leaves other
@@ -2585,7 +2588,7 @@ function RampsView({ viewingLabel = null, clientId = null }) {
 // builder never enters the same window twice for a second color. rate is a flat $ added
 // per window (0 = included). Full-list replace via save_window_colors (same delete-sweep
 // semantics as the Colors tab, hence the same operator view-as confirm).
-function WindowColorsEditor({ viewingLabel = null, clientId = null }) {
+function WindowColorsEditor({ viewingLabel = null, clientId = null, onSaved = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -2623,6 +2626,9 @@ function WindowColorsEditor({ viewingLabel = null, clientId = null }) {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_window_colors", colors }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
+      // Tell the host a save landed so the window catalog below re-reads — a just-added
+      // color must appear in the per-window checkboxes without a page refresh.
+      if (onSaved) onSaved();
       const skipped = (data && data.skipped) || [];
       setMsg({ ok: `Saved ${data.saved || 0} color(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped: ${skipped.join("; ")}` : "") + "." });
     } catch (e) { setMsg({ err: e.message }); }
@@ -2696,10 +2702,13 @@ function WindowColorsEditor({ viewingLabel = null, clientId = null }) {
 }
 
 function WindowsView({ viewingLabel = null, clientId = null }) {
+  // Bumped when the window-color list saves → remounts the catalog's data (refreshKey), so
+  // a just-added color appears in each window's availability checkboxes immediately.
+  const [colorsSavedAt, setColorsSavedAt] = useState(0);
   return (
     <div style={S.card}>
       <div style={S.h2}>Windows</div>
-      <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} />
+      <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} onSaved={() => setColorsSavedAt((n) => n + 1)} />
       <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Window catalog</div>
       <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
         The windows your customers can add to a building. Each window is <b>one line</b> — click <b>Edit</b> to change it;
@@ -2707,7 +2716,7 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
         (no spaces). <b>Export Excel</b> to edit in bulk and re-import — rows are matched by the ID column, and rows missing
         from the file are never deleted.
       </p>
-      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt} />
     </div>
   );
 }
