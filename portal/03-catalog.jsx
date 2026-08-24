@@ -30,6 +30,10 @@ function SettingsView({ section }) {
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
+    // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
+    // column has — so a status response that predates the column can't read as "SS issues it".
+    // Invoices number separately from quotes (migration 125, Carolyn's decision).
+    invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -112,6 +116,11 @@ function SettingsView({ section }) {
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
         betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
+        invoiceInGhl: data.invoiceInGhl !== false,
+        ssQuoteNext: data.ssQuoteNext == null ? "" : String(data.ssQuoteNext),
+        ssQuotePrefix: data.ssQuotePrefix || "",
+        ssInvoiceNext: data.ssInvoiceNext == null ? "" : String(data.ssInvoiceNext),
+        ssInvoicePrefix: data.ssInvoicePrefix || "",
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -146,6 +155,31 @@ function SettingsView({ section }) {
     if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
     setSaved(true);
     // refresh masked status
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
+  // the three fields are presence-based on the server, so sending only these leaves every
+  // other setting untouched — and this card lives in the CRM section while the page Save
+  // button lives down in Branding.
+  const [invBusy, setInvBusy] = useState(false);
+  const [invMsg, setInvMsg] = useState(null);   // { ok } | { err }
+  const saveInvoicing = async () => {
+    setInvMsg(null); setInvBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: {
+      action: "save",
+      invoiceInGhl: form.invoiceInGhl,
+      ssQuoteNext: form.ssQuoteNext,
+      ssQuotePrefix: form.ssQuotePrefix,
+      ssInvoiceNext: form.ssInvoiceNext,
+      ssInvoicePrefix: form.ssInvoicePrefix,
+    } });
+    setInvBusy(false);
+    if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
+    setInvMsg({ ok: form.invoiceInGhl
+      ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
+      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -271,6 +305,67 @@ function SettingsView({ section }) {
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
         <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against your CRM and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
+      </div>
+
+      {/* Quotes & Invoices (migration 121). ON is what every tenant has done since day one:
+          the quote and the invoice are objects in the CRM. OFF moves BOTH documents into
+          StructureStudio — and the copy has to be explicit that contacts and opportunities
+          still go to the CRM, because "invoice in StructureStudio" reads like "stop using my
+          CRM" otherwise. The starting number is required before the switch can go off (the
+          server refuses the save without one); numbering that silently restarted at 1 would
+          collide with the paperwork a builder already has out. */}
+      <div style={S.card}>
+        <div style={S.h2}>Quotes &amp; Invoices</div>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+          <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
+          Quote and invoice through my CRM
+        </label>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+          {form.invoiceInGhl
+            ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
+            : <><b>Off — StructureStudio issues your quotes and invoices.</b> Each quote is one document: the priced
+                estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
+                their quote page, and you invoice from the Orders tab. Contacts and opportunities still go to your
+                CRM exactly as before, so your pipeline keeps working.</>}
+        </p>
+        {!form.invoiceInGhl && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+            <div><span style={S.lbl}>Starting quote number</span>
+              <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off. Counts up by one per quote.</div></div>
+            <div><span style={S.lbl}>Quote prefix (optional)</span>
+              <input style={S.input} value={form.ssQuotePrefix} onChange={set("ssQuotePrefix")} placeholder="e.g. JB-" maxLength={12} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || "1041")}.</div></div>
+            <div><span style={S.lbl}>Starting invoice number</span>
+              <input style={S.input} value={form.ssInvoiceNext} onChange={set("ssInvoiceNext")} placeholder="e.g. 2001" inputMode="numeric" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from quotes — set where they begin.</div></div>
+            <div><span style={S.lbl}>Invoice prefix (optional)</span>
+              <input style={S.input} value={form.ssInvoicePrefix} onChange={set("ssInvoicePrefix")} placeholder="e.g. INV-" maxLength={12} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || "2001")}.</div></div>
+          </div>
+        )}
+        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim()) && (
+          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Set {!String(form.ssQuoteNext).trim() && !String(form.ssInvoiceNext).trim() ? "starting quote and invoice numbers" : (!String(form.ssQuoteNext).trim() ? "a starting quote number" : "a starting invoice number")} before
+            saving. Without one, your first StructureStudio document would be numbered 1 and clash with the paperwork you already have out.
+          </div>
+        )}
+        {!form.invoiceInGhl && status && status.emailReady === false && (
+          /* Warn-but-allow (decision 5, 2026-08-23): in StructureStudio mode there is no
+             CRM fallback for sending, so until the sending domain is live, quotes and
+             invoices generate but nobody is emailed. Print / Copy-link still work. */
+          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Heads up: your email sending isn't verified yet (Settings → Email), so customers
+            won't receive quote or invoice emails — you can still print them or copy the
+            customer link. Emails start flowing once your sending domain is verified.
+          </div>
+        )}
+        {invMsg && invMsg.err && <div style={{ ...S.err, marginTop: 10 }}>{invMsg.err}</div>}
+        {invMsg && invMsg.ok && <div style={{ ...S.okMsg, marginTop: 10 }}>{invMsg.ok}</div>}
+        <button type="button" onClick={saveInvoicing} disabled={invBusy}
+          style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: invBusy ? 0.6 : 1 }}>
+          {invBusy ? "Saving…" : "Save Quote & Invoice Settings"}
+        </button>
       </div>
 
       {status && status.configured && (
@@ -1736,7 +1831,7 @@ function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number"
 
 // The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
 // ("height" for doors/windows, "length" for ramps — height_in holds the ramp LENGTH).
-function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null }) {
+function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null, refreshKey = 0 }) {
   // Operator "view as": scope EVERY call to the client on screen explicitly, so an item is
   // always read/written for the tenant shown, never silently the operator's own.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -1752,6 +1847,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   const [straighten, setStraighten] = useState(null);   // File awaiting the straighten step
   const [dlBusy, setDlBusy] = useState(false);
   const [fileKey, setFileKey] = useState(0);
+  // Door-flagged palette rows (Colors tab → Doors tick), for the color-mode UI. Doors only.
+  const [doorColors, setDoorColors] = useState([]);
+  const isDoorCat = category === "door";
+  // The client's window colors (Windows section list), for per-window availability
+  // checkboxes. Windows only.
+  const [winColors, setWinColors] = useState([]);
+  const isWindowCat = category === "window";
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -1759,6 +1861,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     price: d.price != null ? String(d.price) : "",
     swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
     op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
+    color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
+    // null = comes in ALL window colors (the living default); an array = exactly those.
+    window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
   });
   const load = async () => {
@@ -1767,17 +1872,28 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     const list = (data.fixtures || []).filter((f) => (f.category || "door") === category).map(mapRow);
     // Display order = the order drag persists: live items first, archived sink to the bottom.
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
+    if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
+    if (isWindowCat) setWinColors((data.windowColors || []).filter((c) => c.active !== false));
     setLoaded(true);
   };
-  useEffect(() => { load(); }, []);
+  // refreshKey lets a sibling editor force a reload in place — WindowsView bumps it after
+  // the window-color list saves, so a just-added color shows up in the per-window
+  // checkboxes without a page refresh.
+  useEffect(() => { load(); }, [refreshKey]);
 
   // One line's payload for save_fixture / import_fixtures. Sizes go over as inches.
+  // Color keys ride ONLY for doors so the server's presence contract leaves other
+  // categories' (forced) values alone.
   const toPayload = (r) => ({
     id: r.id || undefined, category, name: r.name, planLabel: r.plan_label,
     showImageOnEstimate: r.show_image_on_estimate !== false,
     widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
     swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
     opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
+    ...(isDoorCat ? { colorMode: r.color_mode || "fixed", hasTrimColor: r.has_trim_color === true, fixedColorId: (r.color_mode || "fixed") === "fixed" ? (r.fixed_color_id || null) : null } : {}),
+    // Every box ticked goes over as null ("all colors") so a window-color added later
+    // automatically appears on unrestricted windows.
+    ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
   });
 
@@ -1874,12 +1990,22 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // silently drops on re-import). The ID column is the row key: keep it to update a row,
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Photo on estimate", "Active", "Internal only", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", "Photo on estimate", "Active", "Internal only", "Archived"];
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
+  // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
+  // resolves it back against the door-flagged palette.
+  const fixedColorLabel = (r) => { const fc = doorColors.find((c) => c.id === r.fixed_color_id); return fc ? fc.label : ""; };
+  // The window Colors column carries LABELS too: "all" = every color (a color added later
+  // appears automatically), "none" = no color choice, else a comma-separated subset.
+  const winColorsCell = (r) => {
+    if (r.window_color_ids === null) return "all";
+    const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
+    return names.length ? names.join(", ") : "none";
+  };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -1941,6 +2067,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iW = col("width"), iH = col(sizeWord === "length" ? "length" : "height", "height", "length"), iPrice = col("price"),
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
+        iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -1969,6 +2096,30 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           row.opDouble = bool(cols, iOpD, false); row.opSlideUp = bool(cols, iOpS, false);
           const od = String(iOpDef >= 0 ? (cols[iOpDef] == null ? "" : cols[iOpDef]) : "").trim().toLowerCase();
           row.opDefault = iOpDef < 0 ? undefined : ((od === "right" || od === "left") ? od : null);
+          // Color columns follow the same absent-column-leaves-untouched contract. "Fixed
+          // color" carries the color's LABEL; an unknown label goes over as "" so the server
+          // clears it with a note rather than silently keeping a stale color.
+          if (iCMode >= 0) {
+            const cm = String(cols[iCMode] == null ? "" : cols[iCMode]).trim().toLowerCase();
+            row.colorMode = (cm === "paint" || cm === "match") ? cm : "fixed";
+          }
+          row.hasTrimColor = bool(cols, iTrimC, false);
+          if (iFixedC >= 0) {
+            const lbl = String(cols[iFixedC] == null ? "" : cols[iFixedC]).trim();
+            const fc = lbl ? doorColors.find((c) => String(c.label).trim().toLowerCase() === lbl.toLowerCase()) : null;
+            row.fixedColorId = fc ? fc.id : (lbl ? "unknown:" + lbl : null);
+          }
+        }
+        if (isWindowCat && iWinColors >= 0) {
+          // "all"/blank = every color (null), "none" = empty list, else labels → ids
+          // (unknown labels are dropped; the server filters again by tenant).
+          const raw = String(cols[iWinColors] == null ? "" : cols[iWinColors]).trim();
+          if (raw === "" || raw.toLowerCase() === "all") row.windowColorIds = null;
+          else if (raw.toLowerCase() === "none") row.windowColorIds = [];
+          else {
+            const names = raw.split(/[,;]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+            row.windowColorIds = winColors.filter((c) => names.includes(String(c.label).trim().toLowerCase())).map((c) => String(c.id));
+          }
         }
         return row;
       });
@@ -1982,7 +2133,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, image_url: null, active: true, archived: false, internalOnly: false });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -2036,6 +2187,19 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       else if (r.op_right) parts.push("opens right");
       else if (r.op_left) parts.push("opens left");
     }
+    if (isDoorCat) {
+      const trimTag = r.has_trim_color ? " + trim color" : "";
+      if (r.color_mode === "paint") parts.push(`customer picks color${trimTag}`);
+      else if (r.color_mode === "match") parts.push(`matches building${trimTag}`);
+      else if (r.fixed_color_id) {
+        const fc = doorColors.find((c) => c.id === r.fixed_color_id);
+        parts.push(fc ? `color: ${fc.label}` : "fixed color");
+      }
+    }
+    if (isWindowCat && winColors.length > 0 && r.window_color_ids !== null) {
+      const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
+      parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
+    }
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
   };
@@ -2083,6 +2247,72 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
               {dOpChk("op_slideup", "Slide up")}
             </div>
           </div>
+        </div>
+      )}
+      {isDoorCat && (
+        <div style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+          <div>
+            <div style={fldLbl}>Door color</div>
+            <select value={edit.draft.color_mode || "fixed"}
+              onChange={(e) => setDraft({ color_mode: e.target.value, ...(e.target.value === "fixed" ? { has_trim_color: false } : {}) })}
+              style={{ ...S.input, minWidth: 0 }}>
+              <option value="fixed">One fixed color</option>
+              <option value="paint">Customer picks a color</option>
+              <option value="match">Match building colors</option>
+            </select>
+          </div>
+          {(edit.draft.color_mode || "fixed") === "fixed" && (
+            <div>
+              <div style={fldLbl}>Color</div>
+              <select value={edit.draft.fixed_color_id || ""} onChange={(e) => setDraft({ fixed_color_id: e.target.value || null })} style={{ ...S.input, minWidth: 0 }}>
+                <option value="">(none)</option>
+                {doorColors.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </div>
+          )}
+          {(edit.draft.color_mode === "paint" || edit.draft.color_mode === "match") && (
+            <div style={{ paddingBottom: 6 }}>
+              {dCbx("has_trim_color", "Customer also picks a trim color", "Two-tone door: the customer picks a main color AND a trim color (both from colors ticked for Doors)")}
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#94A3B8", paddingBottom: 8, flexBasis: "100%" }}>
+            {(edit.draft.color_mode || "fixed") === "fixed"
+              ? "One fixed color — the customer sees no color choice on this door."
+              : doorColors.length === 0
+                ? "⚠ No colors are ticked for Doors yet — tick the Doors box on colors in the Colors tab, or this door will offer no colors."
+                : edit.draft.color_mode === "match"
+                  ? "Starts on the building's body/trim colors; the customer can change either."
+                  : "The customer picks from the colors ticked for Doors in the Colors tab."}
+          </div>
+        </div>
+      )}
+      {isWindowCat && winColors.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>Colors <span style={{ fontWeight: 400 }}>this window comes in</span></div>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            {winColors.map((c) => {
+              const ids = edit.draft.window_color_ids;
+              const checked = ids === null || ids.includes(String(c.id));
+              const toggle = (on) => {
+                const all = winColors.map((x) => String(x.id));
+                const cur = ids === null ? all : ids.filter((x) => all.includes(x));
+                const next = on ? [...new Set([...cur, String(c.id)])] : cur.filter((x) => x !== String(c.id));
+                // Every box ticked collapses back to null ("all") so colors added later
+                // appear on this window automatically.
+                setDraft({ window_color_ids: next.length === all.length ? null : next });
+              };
+              return (
+                <label key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  <input type="checkbox" checked={checked} onChange={(e) => toggle(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  <span style={{ width: 13, height: 13, borderRadius: 3, background: c.hex || "#CCC", border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
+                  {c.label}
+                </label>
+              );
+            })}
+          </div>
+          {edit.draft.window_color_ids !== null && winColors.every((c) => !edit.draft.window_color_ids.includes(String(c.id))) && (
+            <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No colors ticked — this window is placed with no color choice.</div>
+          )}
         </div>
       )}
       <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
@@ -2374,17 +2604,140 @@ function RampsView({ viewingLabel = null, clientId = null }) {
 // ─── Windows (Options tab → its own section, below Ramps) ───
 // A straight catalog like doors, minus swing/operation (windows don't swing). category='window'
 // in fixture_items; height_in holds the window HEIGHT. Per-line saves via the shared FixtureCatalog.
+// ─── Window colors (Options tab → Windows section, 116) ───
+// ONE small per-client list — every active window offers every active color here, so a
+// builder never enters the same window twice for a second color. rate is a flat $ added
+// per window (0 = included). Full-list replace via save_window_colors (same delete-sweep
+// semantics as the Colors tab, hence the same operator view-as confirm).
+function WindowColorsEditor({ viewingLabel = null, clientId = null, onSaved = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setRows((data.windowColors || []).map((c) => ({
+      id: c.id, label: c.label || "", hex: c.hex || null,
+      rate: (c.rate != null ? String(c.rate) : "0"),
+      is_default: c.is_default === true, active: c.active !== false,
+    })));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (i, field, val) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, [field]: val } : r));
+  // Only one default makes sense — the picker preselects the FIRST default it finds, so
+  // ticking one unticks the rest rather than leaving a state only the code can resolve.
+  const setDefault = (i, on) => setRows((rs) => rs.map((r, j) => ({ ...r, is_default: j === i ? on : (on ? false : r.is_default) })));
+  const swap = (i, j) => setRows((rs) => { if (j < 0 || j >= rs.length) return rs; const next = rs.slice(); [next[i], next[j]] = [next[j], next[i]]; return next; });
+  const addRow = () => setRows((rs) => [...rs, { id: null, label: "", hex: "#F5F2EA", rate: "0", is_default: rs.length === 0, active: true }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
+
+  const save = async () => {
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE window color list with these ${rows.length} color(s)?\n\nAnything not shown here will be removed from their account.`)) return;
+    setBusy(true); setMsg(null);
+    try {
+      const colors = rows.map((r, i) => ({
+        id: r.id || undefined, label: r.label, hex: r.hex || null,
+        rate: Number(r.rate) || 0, isDefault: r.is_default === true, active: r.active !== false, sortOrder: i,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_window_colors", colors }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      // Tell the host a save landed so the window catalog below re-reads — a just-added
+      // color must appear in the per-window checkboxes without a page refresh.
+      if (onSaved) onSaved();
+      const skipped = (data && data.skipped) || [];
+      setMsg({ ok: `Saved ${data.saved || 0} color(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped: ${skipped.join("; ")}` : "") + "." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const ctr = { ...S.td, padding: "8px 5px", textAlign: "center" };
+  const tdc = { ...S.td, padding: "8px 5px" };
+  const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Window colors</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+        One list for <b>all</b> windows — every window below offers every active color here, so you never enter the same
+        window twice for another color. <b>Price</b> is a flat dollar amount added <b>per window</b> in that color
+        (leave <b>0</b> for included colors). <b>Default</b> pre-selects one. The color shows on the 3D and on the estimate.
+      </p>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+        <>
+          {rows.length > 0 && (
+            <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 12 }}>
+              <colgroup>
+                <col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "34%" }} />
+                <col style={{ width: "17%" }} /><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
+              </colgroup>
+              <thead><tr>
+                <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+                <th style={thc} title="Flat $ added per window in this color">Price per window (USD)</th>
+                <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.id || `new-${i}`}>
+                    <td style={ctr}>
+                      <button onClick={() => swap(i, i - 1)} disabled={i === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                      <button onClick={() => swap(i, i + 1)} disabled={i === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                    </td>
+                    <td style={ctr}>
+                      <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(i, "hex", e.target.value)} title={r.hex || "Pick this color"}
+                        style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                    </td>
+                    <td style={tdc}>
+                      <input type="text" value={r.label} placeholder="e.g. White" onChange={(e) => setRow(i, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                    </td>
+                    <td style={ctr}>
+                      <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(i, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                    </td>
+                    <td style={ctr}><input type="checkbox" checked={!!r.is_default} onChange={(e) => setDefault(i, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} /></td>
+                    <td style={ctr}><input type="checkbox" checked={r.active !== false} onChange={(e) => setRow(i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} /></td>
+                    <td style={ctr}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {rows.length === 0 && <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No window colors yet — without any, windows are placed with no color choice (exactly as before).</div>}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+            <div style={{ flex: 1 }} />
+            <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save window colors"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function WindowsView({ viewingLabel = null, clientId = null }) {
+  // Bumped when the window-color list saves → remounts the catalog's data (refreshKey), so
+  // a just-added color appears in each window's availability checkboxes immediately.
+  const [colorsSavedAt, setColorsSavedAt] = useState(0);
   return (
     <div style={S.card}>
       <div style={S.h2}>Windows</div>
+      <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} onSaved={() => setColorsSavedAt((n) => n + 1)} />
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Window catalog</div>
       <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
         The windows your customers can add to a building. Each window is <b>one line</b> — click <b>Edit</b> to change it;
         every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are feet/inches — 8', 6'3", 36"
         (no spaces). <b>Export Excel</b> to edit in bulk and re-import — rows are matched by the ID column, and rows missing
         from the file are never deleted.
       </p>
-      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt} />
     </div>
   );
 }
@@ -2404,9 +2757,10 @@ function ColorsView({ viewingLabel = null }) {
     setCat(data);
     setRows((data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
-      shingle: !!c.shingle, metal: !!c.metal,
+      shingle: !!c.shingle, metal: !!c.metal, door: !!c.door,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
       hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
+      door_rate: (c.door_rate != null ? String(c.door_rate) : "0"),
     })));
   };
   useEffect(() => { load(); }, []);
@@ -2416,9 +2770,9 @@ function ColorsView({ viewingLabel = null }) {
   const addRow = (preset, category) => setRows((rs) => [...rs, {
     id: null, label: preset ? preset.name : "",
     siding: category === "paint", trim: category === "paint",
-    shingle: category === "shingle", metal: category === "metal",
+    shingle: category === "shingle", metal: category === "metal", door: false,
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
-    pricing_method: "each", rate: "0",
+    pricing_method: "each", rate: "0", door_rate: "0",
   }]);
   const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
@@ -2436,9 +2790,10 @@ Anything not shown here will be removed from their account.`)) return;
     try {
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label,
-        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal,
+        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
+        doorRate: Number(r.door_rate) || 0,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -2492,12 +2847,14 @@ Anything not shown here will be removed from their account.`)) return;
               {/* Widths sum to 100 in each branch. The Custom column added 2026-08-07 came out
                   of the name column, which holds a flexible text input and had the slack —
                   measured in the real ~693px panel, the checkbox headers need ~55px ("DEFAULT"
-                  is the longest at 54px) and clip below that, so those three stay at 8%. */}
+                  is the longest at 54px) and clip below that. The Doors + Door price columns
+                  (2026-08-24) squeezed name/method further; short checkbox headers (Siding/
+                  Trim/Doors) tolerate 5-6% because thc wraps, Custom/Default keep 8%. */}
               {showST ? (
                 <>
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} />
-                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} /><col style={{ width: "10%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} />
+                  <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
                 </>
               ) : (
                 <>
@@ -2511,7 +2868,9 @@ Anything not shown here will be removed from their account.`)) return;
               <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
+              {showST && <th style={thc} title="Customers can pick this color for doors set to use paint colors">Doors</th>}
               <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+              {showST && <th style={thc} title="Flat $ added per door painted this color — separate from the siding/trim rate">Door price (USD)</th>}
               <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
               <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
             </tr></thead>
@@ -2531,6 +2890,7 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
                   {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
+                  {showST && <td style={ctr}>{chk(gi, "door")}</td>}
                   <td style={tdc}>
                     <select value={r.pricing_method || "each"} onChange={(e) => setRow(gi, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
                       {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
@@ -2539,6 +2899,12 @@ Anything not shown here will be removed from their account.`)) return;
                   <td style={ctr}>
                     <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(gi, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
                   </td>
+                  {showST && <td style={ctr}>
+                    <input type="number" min="0" step="0.01" value={r.door_rate ?? "0"} disabled={!r.door}
+                      title={r.door ? "Flat $ added per door painted this color" : "Tick Doors to price this color on doors"}
+                      onChange={(e) => setRow(gi, "door_rate", e.target.value)}
+                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", opacity: r.door ? 1 : 0.45 }} />
+                  </td>}
                   <td style={ctr}>
                     <input type="checkbox" checked={!!r.allow_custom} onChange={(e) => setAllowCustom(gi, e.target.checked)}
                       title="Picking this entry in the designer shows a free-text box instead of a swatch"
@@ -2580,9 +2946,11 @@ Anything not shown here will be removed from their account.`)) return;
 
   const paintDesc = (<>
     These are the colors your customers pick from for <b>paint</b> in the designer.
-    Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+    Toggle <b>Siding</b> / <b>Trim</b> / <b>Doors</b> to control where a color can be used (a color can be in all three).
     Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
-    (leave the rate at <b>0</b> for colors included in the base price). <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
+    (leave the rate at <b>0</b> for colors included in the base price). <b>Door price</b> is separate: a flat dollar amount
+    added <b>per door</b> painted this color (0 = included) — it only applies to doors set to use paint colors in the Options tab.
+    <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
     <br />Tick <b>Custom</b> on one entry (name it something like “Other — my own color”) to let customers type a color you don’t stock; picking it in the designer swaps the swatch list for a text box. Only one entry per palette can be the custom one.
     <br />Need color ideas? See <b>hayleypaint.com</b> or use the quick-add library below.
   </>);

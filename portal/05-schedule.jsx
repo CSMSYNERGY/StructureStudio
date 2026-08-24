@@ -33,6 +33,11 @@ const schedPastDue = (job, kind) => {
   return d < schedLocalIso(new Date());
 };
 const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
+// A BUILD date reads weekday-first — "Mon, Aug 25, 26" (Carolyn 2026-08-23) — because the
+// shop thinks in weekdays; the 2-digit year buys back the width the weekday costs. Only for
+// build dates: week labels, load dates and history timestamps keep fmtDate.
+const schedFmtBuild = (iso) => schedLocalDate(iso).toLocaleDateString("en-US",
+  { weekday: "short", month: "short", day: "numeric", year: "2-digit" });
 // React `key` for an open SchedJobEditor. It seeds its form state from the job ONCE, and
 // React preserves that state across re-renders — so a refresh that brought newer values left
 // the open fields showing the old ones. Keying on updated_at remounts the editor exactly when
@@ -44,6 +49,130 @@ const schedEditorKey = (j) => j.id + ":" + (j.updated_at || "");
 // style — the same pattern the server already trusts, with no migration and no backfill.
 const schedStyle = (j) => String(j.building_label || "")
   .replace(/\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?/i, "").trim();
+
+// ── The WHEN filter — Carolyn's full condition list (screenshot, 2026-08-23) ──────────────
+// Filtering NARROWS the list; segmenting ARRANGES it; they compose. One condition dropdown
+// plus a contextual parameter input (`param` says which). All date math on ISO strings via
+// schedLocalDate/schedLocalIso; weeks are Sunday-first (the tab's convention throughout);
+// quarters are calendar quarters.
+const SCHED_WHEN = [
+  ["any", "Any date", "none"],
+  ["today", "Today", "none"],
+  ["yesterday", "Yesterday", "none"],
+  ["this_week", "This week", "none"],
+  ["this_month", "This month", "none"],
+  ["this_quarter", "This quarter", "none"],
+  ["in_month", "In month", "month"],
+  ["this_year", "This year", "none"],
+  ["on", "On", "date"],
+  ["between", "Between", "date2"],
+  ["more_than", "More than", "count"],
+  ["after", "After date", "date"],
+  ["less_than", "Less than", "count"],
+  ["before", "Before date", "date"],
+  ["in_next", "In the next", "count"],
+  ["in_last", "In the last", "count"],
+];
+const SCHED_WHEN_PARAM = Object.fromEntries(SCHED_WHEN.map(([k, _l, p]) => [k, p]));
+// ISO date + or - N days/weeks/months, in local time.
+const schedShiftIso = (iso, n, unit) => {
+  const d = schedLocalDate(iso);
+  if (unit === "months") d.setMonth(d.getMonth() + n);
+  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  return schedLocalIso(d);
+};
+// Does a build date pass the condition? Pure function of strings so it unit-tests cleanly.
+// p = { a, b, month, n, unit }. A condition whose parameter is not filled in yet MATCHES
+// EVERYTHING — filtering nothing while she types beats blanking the list mid-keystroke.
+// More than / Less than measure distance FORWARD from today: this is a build schedule, so
+// "more than 30 days" means further out than 30 days ("In the last" covers looking back).
+// Between is inclusive at both ends.
+const schedWhenMatch = (cond, p, iso, todayIso) => {
+  switch (cond) {
+    case "today": return iso === todayIso;
+    case "yesterday": return iso === schedShiftIso(todayIso, -1, "days");
+    case "this_week": {
+      const t = schedLocalDate(todayIso); t.setDate(t.getDate() - t.getDay());
+      const sun = schedLocalIso(t);
+      return iso >= sun && iso <= schedShiftIso(sun, 6, "days");
+    }
+    case "this_month": return iso.slice(0, 7) === todayIso.slice(0, 7);
+    case "this_quarter": {
+      const q = (m) => Math.floor((Number(m.slice(5, 7)) - 1) / 3);
+      return iso.slice(0, 4) === todayIso.slice(0, 4) && q(iso) === q(todayIso);
+    }
+    case "in_month": return !p.month || iso.slice(0, 7) === p.month;
+    case "this_year": return iso.slice(0, 4) === todayIso.slice(0, 4);
+    case "on": return !p.a || iso === p.a;
+    case "between": return (!p.a || iso >= p.a) && (!p.b || iso <= p.b);
+    case "more_than": return !p.n || iso > schedShiftIso(todayIso, Number(p.n), p.unit || "days");
+    case "after": return !p.a || iso > p.a;
+    case "less_than": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "before": return !p.a || iso < p.a;
+    case "in_next": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "in_last": return !p.n || (iso <= todayIso && iso >= schedShiftIso(todayIso, -Number(p.n), p.unit || "days"));
+    default: return true;
+  }
+};
+
+// ── What a set of jobs is worth, and how much building it is ──────────────────────────────
+// ONE computation, at module scope, because four places need it: the calendar's day headers,
+// its week strip, the month grid's week column, and the table's segment headings. It used to
+// live inside the calendar's render closure, where the table could not reach it.
+//
+// `valueCents` is computed per job by portal-schedule's build_board from whichever source row
+// owns the money; square footage comes from the width/length snapshot on the job itself.
+const schedSummary = (rows) => {
+  let cents = 0, priced = 0, unpriced = 0, sqft = 0, sized = 0, unsized = 0;
+  (rows || []).forEach((j) => {
+    // A MANUAL job ("shop maintenance day") has no building and no value, and never will —
+    // that is not a gap in the data, so it must not be counted as one in either direction.
+    if (j.source === "manual") return;
+    if (j.valueCents == null) unpriced++; else { cents += Number(j.valueCents); priced++; }
+    if (j.width_ft && j.length_ft) { sqft += Number(j.width_ft) * Number(j.length_ft); sized++; }
+    else unsized++;
+  });
+  return { cents, priced, unpriced, sqft, sized, unsized };
+};
+// Whole dollars and whole feet: a day header is 218px at its widest and the decimals buy
+// nothing there. (`money()` stays the formatter anywhere there is room for it.)
+const schedMoneyShort = (cents) => "$" + Math.round(cents / 100).toLocaleString("en-US");
+const schedSqftShort = (sqft) => Math.round(sqft).toLocaleString("en-US") + " sq ft";
+// NEVER print a confident figure that silently counts a missing value as zero — an order's
+// total_cents is routinely NULL until someone sets it (Orders' rule: "we never show a guessed
+// number"), and a repair usually carries no dimensions. Say what is known and flag the rest.
+// Returns null when there is genuinely nothing to say, so a caller can render nothing at all.
+const schedSummaryLabel = (s) => {
+  const out = { money: null, sqft: null };
+  if (s.priced) out.money = { text: schedMoneyShort(s.cents), gap: s.unpriced };
+  else if (s.unpriced) out.money = { text: s.unpriced === 1 ? "no total yet" : s.unpriced + " no total", muted: true };
+  if (s.sized) out.sqft = { text: schedSqftShort(s.sqft), gap: s.unsized };
+  else if (s.unsized) out.sqft = { text: s.unsized === 1 ? "no size yet" : s.unsized + " no size", muted: true };
+  return (out.money || out.sqft) ? out : null;
+};
+// The one way a summary is drawn, so a day header, the week strip, the month grid's week
+// column and a table segment heading cannot drift apart. `stack` puts sqft on its own line
+// for the narrow spots (month cells); everything else runs it inline.
+function SchedSummary({ rows, stack = false, size = 12.5, align = "left" }) {
+  const label = schedSummaryLabel(schedSummary(rows));
+  if (!label) return null;
+  const part = (p, color) => p && (
+    <span style={{ display: "inline-flex", alignItems: "baseline", gap: 4 }}>
+      <span style={{ fontSize: size, fontWeight: 800, color: p.muted ? "#94A3B8" : color, fontVariantNumeric: "tabular-nums" }}>{p.text}</span>
+      {p.gap > 0 && (
+        <span style={{ fontSize: Math.max(9.5, size - 2.5), fontWeight: 700, color: "#B45309" }}
+          title={p.gap + " job(s) here are missing that figure, so they are not in this total"}>· {p.gap} missing</span>
+      )}
+    </span>
+  );
+  return (
+    <span style={{ display: "inline-flex", flexDirection: stack ? "column" : "row", alignItems: stack ? (align === "right" ? "flex-end" : "flex-start") : "baseline", gap: stack ? 1 : 9 }}>
+      {part(label.money, "#15803D")}
+      {part(label.sqft, "#475569")}
+    </span>
+  );
+}
+
 // How the Table view can be cut into sections. Module-level so the remembered choice can be
 // validated before the component's first render.
 const SCHED_SEGMENTS = [
@@ -110,18 +239,20 @@ function SchedJobHistory({ jobId, refreshKey = 0 }) {
 // linked role may move a card" — which was true under the old STAFF tier and is not true
 // now: move_job and add_note both require build_schedule:'edit', so a view-only member was
 // being offered two controls the server refuses.
-function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComplete, onDelete, onMove, onNote, onOpenDesign }) {
+function SchedJobEditor({ job, stages, crews = [], canEdit, busy, error, onSave, onComplete, onDelete, onOpenDesign }) {
   // ONE build date (Carolyn 2026-08-04: most builds finish within a day). It writes both
   // date columns so every existing check (past due, delivery conflicts, pool) keys off it.
+  //
+  // ONE SAVE, and it closes (Carolyn 2026-08-22: "we need it to be a one and done save and
+  // when we click saved the popup should close"). The stage dropdown and the crew note used
+  // to be separate immediate writes — three ways to change a job, two of which gave no hint
+  // they had already committed. They are form state now; Save commits all of it.
   const [f, setF] = useState({
     title: job.title || "", customerName: job.customer_name || "", buildingLabel: job.building_label || "",
     buildDate: job.due_date || job.scheduled_start || "",
     crewId: job.crew_id || "", notes: job.notes || "",
+    stageId: job.stage_id || "", note: "",
   });
-  const [note, setNote] = useState("");
-  // Bumped after a note lands so the history below re-reads it — the note is stored as an
-  // activity row, so without this the writer sees nothing happen.
-  const [historyKey, setHistoryKey] = useState(0);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
@@ -145,14 +276,32 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComp
               {crews.filter((c) => c.active !== false || c.id === job.crew_id).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
-          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Job notes</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Shown on the card" /></div>
+          {/* The two note fields do DIFFERENT things, and the old labels ("Job notes" /
+              "Add a note for the crew…") did not say so — Carolyn asked what the difference
+              was, which is the label's fault, not hers. THIS one is a single editable field
+              on the job that renders on the card; saving replaces it. */}
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Stage</span>
+            <select style={inp} value={f.stageId} onChange={set("stageId")} aria-label="Stage">
+              {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Note on the card</span><input style={inp} value={f.notes} onChange={set("notes")} placeholder="Standing note — shows on the card until you change it" /></div>
+          {/* …and THIS one appends a timestamped, attributed line to the history below. It
+              never appears on the card and cannot be edited afterwards. */}
+          <div style={{ ...cell, gridColumn: "1 / -1" }}><span style={lbl}>Add to history</span><input style={inp} value={f.note} onChange={set("note")} placeholder="Logged with your name and the date — not shown on the card" /></div>
         </div>
+        {error && (
+          <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "7px 10px", color: "#DC2626", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{error}</div>
+        )}
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
+          {/* ONE Save: fields, stage and the history line all commit together, then the
+              popup closes. Nothing here writes before you press it. */}
           <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")} onClick={() => onSave({
             customerName: f.customerName, buildingLabel: f.buildingLabel, title: f.title,
             scheduledStart: f.buildDate || null, dueDate: f.buildDate || null,
             crewId: f.crewId || null, notes: f.notes,
-          })}>Save</button>
+            stageId: f.stageId || null, note: f.note,
+          })}>{busy ? "Saving…" : "Save"}</button>
           <button type="button" disabled={busy} style={S.btn("#F0FDF4", "#15803D")} onClick={onComplete}>✓ Mark built</button>
           {job.design_short_code && onOpenDesign && (
             <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={() => onOpenDesign(job.design_short_code)}>Open design</button>
@@ -164,25 +313,10 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, onSave, onComp
           <button type="button" disabled={busy} style={{ ...S.btn("#FEF2F2", "#DC2626"), marginLeft: "auto" }} onClick={onDelete}>Remove</button>
         </div>
       </>)}
-      {/* Stage move without drag — the touch/keyboard path, and the crew path on phones. */}
-      {canEdit && (
-        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          <select style={{ ...inp, width: "auto", maxWidth: "100%" }} value={job.stage_id} onChange={(e) => onMove(e.target.value)} disabled={busy} aria-label="Move to stage">
-            {stages.filter((s) => !s.archived || s.id === job.stage_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          <input style={{ ...inp, flex: "1 1 100px", minWidth: 0 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note for the crew…" />
-          <button type="button" disabled={busy || !note.trim()} style={S.btn("#F1F5F9", "#334155")}
-            onClick={async () => {
-              if (!note.trim()) return;
-              await onNote(note.trim());
-              setNote(""); setHistoryKey((k) => k + 1);
-            }}>Add note</button>
-        </div>
-      )}
       {/* History — every move, note and completion, with who and when. This is the read side
           of schedule_activity, which the edge function has always written and nothing ever
           showed: a crew note went into the log and vanished from the screen. */}
-      <SchedJobHistory jobId={job.id} refreshKey={historyKey} />
+      <SchedJobHistory jobId={job.id} />
     </div>
   );
 }
@@ -253,7 +387,15 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const [view, setView] = useState("calendar"); // calendar (main) | board | table
   const [calView, setCalView] = useState("week"); // week | month
   const [cursorMs, setCursorMs] = useState(() => Date.now());
-  const [crewFilter, setCrewFilter] = useState("all"); // "all" | userId — each crew gets their own calendar
+  const [crewFilter, setCrewFilter] = useState("all"); // "all" | crewId — ONE control, obeyed by every view
+  // The WHEN filter (round 8). Transient like crewFilter — filters are a working view, not a
+  // remembered preference (unlike `segment`, which persists deliberately).
+  const [whenCond, setWhenCond] = useState("any");
+  const [whenA, setWhenA] = useState("");       // date (On / Between-from / After / Before)
+  const [whenB, setWhenB] = useState("");       // date (Between-to)
+  const [whenMonth, setWhenMonth] = useState(""); // "YYYY-MM" (In month)
+  const [whenN, setWhenN] = useState("");       // number (More/Less than, In the next/last)
+  const [whenUnit, setWhenUnit] = useState("days");
   // Weekends on/off — remembered per browser; most shops run Mon–Fri (or Mon–Sat).
   const [showWeekends, setShowWeekends] = useState(() => {
     try { return window.localStorage.getItem("ss_sched_weekends") !== "off"; } catch (_e) { return true; }
@@ -289,6 +431,14 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // looked dead. `refreshedAt` drives a short-lived "Updated just now" note.
   const [refreshing, setRefreshing] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState(0);
+  // A failed save has to report itself INSIDE the editor: the tab's `msg` banner sits behind
+  // the modal overlay, so an error there is invisible exactly when it matters.
+  const [saveErr, setSaveErr] = useState(null);
+  // Table drag: which row is moving, and which segment group is under it. Separate from the
+  // calendar's dragId/dropStage so a half-finished drag in one view can never be read by the
+  // other.
+  const [dragRowId, setDragRowId] = useState(null);
+  const [dropGroup, setDropGroup] = useState(null);
   const [msg, setMsg] = useState(null);          // { ok } | { err }
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
@@ -310,9 +460,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   };
   const load = useCallback(async () => {
     setError(null);
-    // Clear the banner too, not just the error. A stale "Saved."/"That didn't work." sitting
-    // above the board through a refresh is itself evidence that nothing happened.
-    setMsg(null);
+    // Deliberately does NOT clear `msg`. It used to, to kill a stale banner across a
+    // Refresh — but EVERY mutation here ends with load(), so clearing it here wiped the
+    // "Saved." / "marked built" / "added to the board" toast each of them had just set, a
+    // second before the user could read it. The refresh path clears the banner itself now.
     const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body: { action: "build_board" } });
     if (err || !d || d.error) {
       setError((d && d.error) || (err ? await fnError(err) : "Could not load the build schedule."));
@@ -328,6 +479,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // let a double-click fire two concurrent fetches.
   const refresh = async () => {
     if (refreshing) return;
+    // Clearing the banner is the REFRESH's job, not load()'s: a stale "Saved." sitting above
+    // the board through a refresh is itself evidence that nothing happened.
+    setMsg(null);
     setRefreshing(true);
     await load();
     setRefreshing(false);
@@ -340,6 +494,17 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const t = setTimeout(() => setRefreshedAt(0), 4000);
     return () => clearTimeout(t);
   }, [refreshedAt]);
+  // A save error belongs to the job that failed — opening a different card, or closing and
+  // reopening, must not greet you with the last one's message.
+  useEffect(() => { setSaveErr(null); }, [expandedId]);
+  // Escape closes the job popup, in every view — it is the one detail surface now. Skipped
+  // while the stage editor is up, so Escape always closes the topmost thing.
+  useEffect(() => {
+    if (!expandedId || editingStages) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setExpandedId(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expandedId, editingStages]);
 
   const stages = (data && data.stages) || [];
   const jobs = (data && data.jobs) || [];
@@ -369,8 +534,34 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const visibleStages = stages.filter((s) => !s.archived);
   const trayCount = tray.orders.length + tray.inventory.length + tray.repairs.length;
 
+  // ── The filters, applied ONCE, upstream (round 8) ──
+  // Crew + WHEN narrow the set that the table, the board, and the summary tiles all read —
+  // filtering and segmenting compose because the segment groups are built from this. The
+  // calendar keeps its own crew-scoped `dated` and deliberately ignores WHEN: it already
+  // navigates by date, and a date filter there would fight the ‹ › arrows.
+  // An UNDATED job always survives a WHEN filter (Carolyn: they are the jobs most needing
+  // scheduling, so they must never disappear).
+  const whenActive = whenCond !== "any";
+  const whenParams = { a: whenA, b: whenB, month: whenMonth, n: whenN, unit: whenUnit };
+  const todayIso = schedLocalIso(new Date());
+  const filteredJobs = jobs.filter((j) => {
+    if (crewFilter !== "all" && j.crew_id !== crewFilter) return false;
+    if (!whenActive) return true;
+    const bd = schedBuildDate(j);
+    if (!bd) return true;
+    return schedWhenMatch(whenCond, whenParams, bd, todayIso);
+  });
+  const filtersOn = crewFilter !== "all" || whenActive;
+  const undatedShown = whenActive ? filteredJobs.filter((j) => !schedBuildDate(j)).length : 0;
+  const clearFilters = () => {
+    setCrewFilter("all"); setWhenCond("any");
+    setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN(""); setWhenUnit("days");
+  };
+
   const counts = { queue: 0, active: 0, done: 0, pastDue: 0 };
-  jobs.forEach((j) => {
+  // Tiles follow the filters — a filtered list under tiles that still count everything reads
+  // as a bug; the FilterBar's "Showing X of Y" is what makes the narrowing explicit.
+  filteredJobs.forEach((j) => {
     const k = kindOf[j.stage_id] || "queue";
     counts[k] = (counts[k] || 0) + 1;
     if (schedPastDue(j, k)) counts.pastDue++;
@@ -410,7 +601,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const extra = { dueDate: iso, scheduledStart: iso };
     if (crewFilter !== "all") extra.crewId = crewFilter;
     const r = await call({ action: "create_job", ...body, ...extra },
-      `${label} scheduled for ${fmtDate(schedLocalDate(iso))}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
+      `${label} scheduled for ${schedFmtBuild(iso)}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
     setBusy(false); if (r) load();
   };
   const createManual = async () => {
@@ -420,10 +611,29 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     setBusy(false);
     if (r) { setManual({ title: "", customerName: "", dueDate: "" }); setAddOpen(false); load(); }
   };
+  // ONE save (Carolyn 2026-08-22). The editor no longer writes the stage or the history line
+  // as you touch them — they arrive here with the fields and commit together, then the popup
+  // closes. Three server actions, in the order that leaves the least mess if one fails:
+  // fields, then the stage move, then the append-only history line.
+  //
+  // On failure the popup STAYS OPEN carrying the error, because the tab's own banner renders
+  // *behind* the modal overlay — closing on a failure would drop her edits and show the
+  // reason somewhere she can't see it. `load()` runs either way so the screen reflects what
+  // actually landed rather than what was typed.
   const saveJob = async (job, patch) => {
-    setBusy(true); setMsg(null);
-    const r = await call({ action: "update_job", jobId: job.id, ...patch }, "Saved.");
-    setBusy(false); if (r) load();
+    const { stageId, note, ...fields } = patch;
+    setBusy(true); setMsg(null); setSaveErr(null);
+    let r = await call({ action: "update_job", jobId: job.id, ...fields });
+    if (r && stageId && stageId !== job.stage_id) {
+      r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+    }
+    if (r && note && note.trim()) {
+      r = await call({ action: "add_note", jobId: job.id, note: note.trim() });
+    }
+    setBusy(false);
+    if (r) { setMsg({ ok: "Saved." }); setExpandedId(null); }
+    else setSaveErr("That didn't save. Nothing was closed — check the fields and try again.");
+    load();
   };
   const completeJob = async (job) => {
     setBusy(true); setMsg(null);
@@ -448,11 +658,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const r = await call({ action: "delete_job", jobId: job.id }, "Removed from the board.");
     setBusy(false); if (r) { setExpandedId(null); load(); }
   };
-  const addNote = async (job, text) => {
-    setBusy(true); setMsg(null);
-    await call({ action: "add_note", jobId: job.id, note: text }, "Note added.");
-    setBusy(false);
-  };
+  // (addNote used to live here. The history line is part of the ONE save now, so saveJob
+  // calls `add_note` itself and a second entry point would just be a way for the two to
+  // drift.)
   const saveStages = async (rows) => {
     setBusy(true); setMsg(null);
     const r = await call({ action: "save_stages", stages: rows.map((x) => ({ id: x.id, name: x.name, color: x.color, kind: x.kind, archived: x.archived })) }, "Stages saved.");
@@ -491,16 +699,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     ].filter(Boolean);
     const custLine = job.customer_name || (job.source === "inventory" ? "Spec build for the lot" : null);
     return (
-      <div key={job.id} draggable={!open && canEdit} tabIndex={0} role="button" aria-expanded={open}
+      <div key={job.id} draggable={canEdit} tabIndex={0} role="button" aria-expanded={open}
         onDragStart={(e) => { setDragId(job.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} }}
         onDragEnd={() => { setDragId(null); setDropStage(null); }}
         onClick={() => setExpandedId(open ? null : job.id)}
         onKeyDown={(e) => { if (e.key === "Enter") setExpandedId(open ? null : job.id); }}
         style={{ background: "#FFF", border: "1px solid " + (open ? "#B9C4D6" : "#E2E8F0"), borderRadius: 10, padding: "9px 11px",
-          cursor: open ? "default" : "grab", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)",
-          // With the detail in a panel below, the card is the only thing tying the panel to a
-          // day — so say which card the panel is showing.
-          ...(open && opts.detailInPanel ? { outline: `2px solid ${ACCENT}`, outlineOffset: -1 } : null) }}>
+          cursor: canEdit ? "grab" : "pointer", opacity: dragId === job.id ? 0.45 : 1, boxShadow: "0 1px 2px rgba(15,23,42,.05)",
+          // The card is the only thing tying the popup to its spot on the board or calendar —
+          // so say which card the popup is showing. One treatment in every view.
+          ...(open ? { outline: `2px solid ${ACCENT}`, outlineOffset: -1 } : null) }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{job.serial ? "#" + job.serial : (job.source === "repair" ? "Repair" : "—")}</span>
           <span style={{ ...schedChip(src.bg, src.fg), marginLeft: "auto" }}>{src.label}</span>
@@ -532,7 +740,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           {/* One build date per job; hidden on the calendar where the column says it. */}
           {!opts.hideDate && bd && (
             <span style={{ ...schedChip(late ? "#FEF2F2" : "#F1F5F9", late ? "#DC2626" : "#475569"), fontVariantNumeric: "tabular-nums" }}>
-              {fmtDate(schedLocalDate(bd))}{late ? " · past due" : ""}
+              {schedFmtBuild(bd)}{late ? " · past due" : ""}
             </span>
           )}
           {loadChip(job)}
@@ -553,86 +761,187 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           </div>
         ) : null}
         {job.notes && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600, marginTop: 6, whiteSpace: "pre-wrap" }}>{job.notes}</div>}
-        {/* On the CALENDAR the detail lives in one full-width panel below the grid
-            (`detailInPanel`), never inside the card: a week day column is a fixed 218px and a
-            month cell is narrower still, so the form had nowhere to go and its right-hand
-            fields ran off the edge. The panel is inline on the page, not a modal, so the
-            no-popouts rule (SCHEDULING_SCOPE.md decision 6) still holds. The BOARD keeps
-            expanding in place — its columns are wide enough. */}
-        {open && !opts.detailInPanel && (
-          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
-            onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-            onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
-        )}
+        {/* No inline editor here any more — clicking ANY card opens the one detail popup,
+            whichever view the card lives in (decision 25). */}
       </div>
     );
   };
-  // The full-width detail panel — one instance, under whichever calendar grid is showing.
+  // The calendar's job detail — a MODAL (Carolyn 2026-08-21: "I don't really like the edit
+  // field being below the calendars. I think it needs to be a popup screen."). This is a
+  // deliberate reversal of SCHEDULING_SCOPE.md decision 6 ("no popouts") for the CALENDAR
+  // only, made by the person who set that rule; the recorded reversal is decision 24. The
+  // Board and Table views still expand in place — their rows are wide enough, and she was
+  // pointing at the calendar.
+  //
   // Keyed on updated_at so a Refresh (or any save) REMOUNTS it: SchedJobEditor seeds its form
   // state from the job prop once, and React keeps that state across re-renders, so without
   // the key an open card kept showing pre-refresh values. Remounting also re-reads the
   // history, which had the same staleness for the same reason.
-  const detailPanel = () => {
+  const detailModal = () => {
     const job = jobs.find((j) => j.id === expandedId);
     if (!job) return null;
+    const close = () => setExpandedId(null);
     return (
-      <div style={{ marginTop: 12, border: "1px solid #C3D9F7", borderRadius: 12, background: "#FFF", padding: "11px 13px", boxShadow: "0 1px 3px rgba(15,23,42,.08)" }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap", marginBottom: 2 }}>
-          <span style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B" }}>
-            {job.building_label || job.title || (job.source === "repair" ? "Repair" : "Job")}
-          </span>
-          {job.serial != null && <span style={{ fontSize: 11.5, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>#{job.serial}</span>}
-          {job.customer_name && <span style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>{job.customer_name}</span>}
-          {/* Month view used to jump to the week on click; that navigation is now an explicit
-              control instead of a side effect of opening a card. */}
-          {calView === "month" && schedBuildDate(job) && (
-            <button type="button" onClick={() => { setCursorMs(schedLocalDate(schedBuildDate(job)).getTime()); setCalView("week"); }}
-              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11.5 }}>Open that week</button>
-          )}
-          <button type="button" onClick={() => setExpandedId(null)} aria-label="Close details"
-            style={{ ...S.btn("#F1F5F9", "#475569"), marginLeft: "auto", padding: "4px 11px", fontSize: 11.5 }}>Close</button>
+      <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.38)", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+        onClick={close} role="dialog" aria-modal="true" aria-label="Job details">
+        <div style={{ background: "#FFF", borderRadius: 14, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto", padding: "16px 20px 18px", boxShadow: "0 18px 44px rgba(15,23,42,.28)" }}
+          onClick={(e) => e.stopPropagation()}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap", marginBottom: 4 }}>
+            <span style={{ fontSize: 15, fontWeight: 800, color: "#1E293B" }}>
+              {job.building_label || job.title || (job.source === "repair" ? "Repair" : "Job")}
+            </span>
+            {job.serial != null && <span style={{ fontSize: 12, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>#{job.serial}</span>}
+            {/* The customer reads nearly as large and as heavy as the building (Carolyn
+                2026-08-22) — 14/800 against the building's 15/800. Still a step down, so the
+                building keeps the headline that decision 14 gives it, but the name is no
+                longer the smallest thing on the row. */}
+            {job.customer_name && <span style={{ fontSize: 14, fontWeight: 800, color: "#334155" }}>{job.customer_name}</span>}
+            {schedBuildDate(job) && (
+              <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{schedFmtBuild(schedBuildDate(job))}</span>
+            )}
+            {/* Month view used to jump to the week on click; that navigation is an explicit
+                control rather than a side effect of opening a card. Guarded on the VIEW too,
+                now that the modal serves every view — calView persists while Board/Table show,
+                and "Open that week" from a table row would be a non-sequitur. */}
+            {view === "calendar" && calView === "month" && schedBuildDate(job) && (
+              <button type="button" onClick={() => { setCursorMs(schedLocalDate(schedBuildDate(job)).getTime()); setCalView("week"); close(); }}
+                style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11.5 }}>Open that week</button>
+            )}
+            <button type="button" onClick={close} aria-label="Close details"
+              style={{ ...S.btn("#F1F5F9", "#64748B"), marginLeft: "auto", padding: "4px 11px" }}>×</button>
+          </div>
+          <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
+            onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
+            onOpenDesign={onOpenDesign} />
         </div>
-        <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
-          onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-          onMove={(stageId) => moveJob(job, stageId)} onNote={(t) => addNote(job, t)} onOpenDesign={onOpenDesign} />
       </div>
     );
   };
 
+  // ── The week as an ORDERED LIST, where position implies the date (Carolyn 2026-08-23,
+  // replacing the day rows she hated: "in a week view we want to simply drag buildings in
+  // the order of that week"). Rows in a week group display in build-date order, and dropping
+  // a building at a spot in that order derives its new date from the NEIGHBOURS:
+  //   · dropped between a Tuesday job and a Wednesday job → Tuesday (the first date);
+  //   · dropped between Tuesday and Thursday with Wednesday empty → Wednesday (the gap day);
+  //   · dropped at the very top → the first job's date; at the very end → the last job's.
+  // Deliberately approximate — "if it isn't the exact day they want, they can open and
+  // choose the right day" (the popup's date field is the precision tool).
+  const weekOrderedRows = (g) =>
+    [...g.rows].sort((a, b) => String(schedBuildDate(a) || "").localeCompare(String(schedBuildDate(b) || "")));
+  const weekInsertDate = (g, insertBeforeId, draggedId) => {
+    // Neighbours are computed WITHOUT the dragged row — otherwise dropping a job just below
+    // itself would read itself as its own neighbour.
+    const rows = weekOrderedRows(g).filter((j) => j.id !== draggedId);
+    const at = insertBeforeId == null ? rows.length
+      : Math.max(0, rows.findIndex((j) => j.id === insertBeforeId));
+    const dPrev = at > 0 ? schedBuildDate(rows[at - 1]) : null;
+    const dNext = at < rows.length ? schedBuildDate(rows[at]) : null;
+    if (dPrev && dNext) {
+      const gapDays = Math.round((schedLocalDate(dNext) - schedLocalDate(dPrev)) / 86400000);
+      return gapDays > 1 ? schedShiftIso(dPrev, 1, "days") : dPrev;
+    }
+    return dPrev || dNext || g.key;   // empty week can only be the dragged row's own — Sunday
+  };
+  // Drop props for a spot in a week's order. `insertBeforeId` null = the end-of-week strip.
+  const weekSpotDropProps = (g, insertBeforeId) => {
+    const spot = "ins:" + (insertBeforeId || "end:" + g.key);
+    return {
+      onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(spot); },
+      onDragEnter: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(spot); },
+      onDrop: (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const job = jobs.find((j) => j.id === dragRowId);
+        const intake = dragIntake;
+        setDropGroup(null); setDragRowId(null); setDragIntake(null);
+        const iso = weekInsertDate(g, insertBeforeId, job ? job.id : null);
+        if (!iso) return;
+        if (job) { if (schedBuildDate(job) !== iso) dropIntoSegment(job, { key: iso, exactDate: true }); }
+        else if (intake) addFromTrayDated(intake.body, intake.label, iso);
+      },
+    };
+  };
+
+  // Drop handlers shared by a group's header row and every data row inside it, so the whole
+  // band is one target. `preventDefault` on dragOver is what makes an element droppable at
+  // all — without it the browser refuses the drop and the gesture silently fails.
+  // stopPropagation is LOAD-BEARING, not tidiness: the day chips sit inside the group header
+  // row, which is itself a drop target, so without it every chip event bubbles to the row and
+  // the row's handler wins. That made the highlight track the week instead of the chip, and —
+  // worse — a drop on ANOTHER week's chip fired twice: the chip set the exact date, then the
+  // bubbled week handler overwrote it with the same-weekday rule. The innermost target must win.
+  // A tray item can only land on a target that IS a date, so only those may light up for it —
+  // a highlight on a target that will ignore the drop is a promise the drop breaks.
+  const acceptsCurrentDrag = (group) =>
+    dragRowId ? true : ((group.exactDate || segment === "date") && !!group.key);
+  const groupDropProps = (group) => ({
+    onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); if (acceptsCurrentDrag(group)) setDropGroup(group.key); },
+    onDragEnter: (e) => { e.preventDefault(); e.stopPropagation(); if (acceptsCurrentDrag(group)) setDropGroup(group.key); },
+    onDrop: (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const job = jobs.find((j) => j.id === dragRowId);
+      setDropGroup(null); setDragRowId(null);
+      if (job) { dropIntoSegment(job, group); return; }
+      // A TRAY item: it has no crew, stage or date yet, so only a target that IS a date can
+      // honour the drop — a day row, or a date-mode group. Anywhere else the drop is ignored
+      // (no write, no error), the same non-event as dropping a card on itself.
+      if (dragIntake) {
+        const intake = dragIntake;
+        setDragIntake(null);
+        if ((group.exactDate || segment === "date") && group.key) {
+          addFromTrayDated(intake.body, intake.label, group.key);
+        }
+      }
+    },
+  });
+
   // One table row + its expanded editor. Extracted so the flat list and every segment group
   // render the identical row — a second copy for the grouped path is how the two drift.
-  const tableRow = (j) => {
+  const tableRow = (j, weekGroup = null) => {
     const kind = kindOf[j.stage_id] || "queue";
     const late = schedPastDue(j, kind);
     const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
     const stg = stages.find((s) => s.id === j.stage_id);
     const open = expandedId === j.id;
+    // A row is both a drag SOURCE and a drop target. In WEEK mode a drop on a row means
+    // "insert into the order BEFORE me" — the date comes from the neighbours, and the
+    // insertion line above the row is the affordance. In other modes it means "join this
+    // row's group", so you can aim at rows you can see rather than hunting the header.
+    const rowGroup = !segmentGroups || weekGroup ? null : segmentOf(j);
+    const insSpot = weekGroup ? "ins:" + j.id : null;
+    const insHot = insSpot && dropGroup === insSpot && (dragRowId ? dragRowId !== j.id : !!dragIntake);
     return (
       <React.Fragment key={j.id}>
-        <tr onClick={() => setExpandedId(open ? null : j.id)} style={{ cursor: "pointer", background: open ? "#F7F9FF" : "transparent" }}>
+        <tr onClick={() => setExpandedId(open ? null : j.id)}
+          draggable={canDragRows}
+          onDragStart={canDragRows ? (e) => { setDragRowId(j.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} } : undefined}
+          onDragEnd={canDragRows ? () => { setDragRowId(null); setDropGroup(null); } : undefined}
+          {...(canDragRows ? (weekGroup ? weekSpotDropProps(weekGroup, j.id) : (rowGroup ? groupDropProps(rowGroup) : {})) : {})}
+          style={{ cursor: canDragRows ? "grab" : "pointer",
+            // The open row gets the month pill's open treatment — tint + ACCENT outline — so
+            // "which job is the popup showing" reads the same in every view.
+            background: open ? "#E9F0FF" : ((insHot || (rowGroup && dropGroup === rowGroup.key && dragRowId && dragRowId !== j.id)) ? "#F0F5FF" : "transparent"),
+            outline: open ? `2px solid ${ACCENT}` : "none", outlineOffset: -2,
+            // The insertion line: a drop lands ABOVE this row in the week's order.
+            boxShadow: insHot ? `inset 0 2px 0 ${ACCENT}` : "none",
+            opacity: dragRowId === j.id ? 0.45 : 1 }}>
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
           <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
           <td style={S.td}>{j.building_label || j.title || "—"}</td>
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
           <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
           <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
-          <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedLocalDate(schedBuildDate(j))) + (late ? " · past due" : "") : "—"}</td>
+          <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? schedFmtBuild(schedBuildDate(j)) + (late ? " · past due" : "") : "—"}</td>
           <td style={S.td}>{crewNameOf(j) || "—"}</td>
           <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
         </tr>
-        {open && (
-          <tr><td colSpan={9} style={{ ...S.td, background: "#F7F9FF" }}>
-            <SchedJobEditor key={schedEditorKey(j)} job={j} stages={stages} crews={crews} canEdit={canEdit} busy={busy}
-              onSave={(patch) => saveJob(j, patch)} onComplete={() => completeJob(j)} onDelete={() => deleteJob(j)}
-              onMove={(stageId) => moveJob(j, stageId)} onNote={(t) => addNote(j, t)} onOpenDesign={onOpenDesign} />
-          </td></tr>
-        )}
+        {/* No inline editor row any more — clicking opens the one detail popup (decision 25). */}
       </React.Fragment>
     );
   };
 
-  // ── Table view rows ──
-  const tableRows = jobs.filter((j) => {
+  // ── Table view rows — from the FILTERED set, so crew + WHEN compose with segmenting ──
+  const tableRows = filteredJobs.filter((j) => {
     if (stageFilter !== "all" && j.stage_id !== stageFilter) return false;
     if (!query.trim()) return true;
     return rowMatchesQuery(j, query,
@@ -682,7 +991,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                               rank: j.crew_id && crewById[j.crew_id] ? crews.findIndex((c) => c.id === j.crew_id) : 9999 }; }
       // schedLocalDate, not the bare ISO string: fmtDate would parse "2026-08-12" as UTC
       // midnight and render the day before it west of Greenwich.
-      case "date":   return { key: bd || "", label: bd ? fmtDate(schedLocalDate(bd)) : "No build date", rank: bd || "9999" };
+      case "date":   return { key: bd || "", label: bd ? schedFmtBuild(bd) : "No build date", rank: bd || "9999" };
       case "week":   return bd
                         ? { key: weekStartIso(bd), label: "Week of " + fmtDate(schedLocalDate(weekStartIso(bd))), rank: weekStartIso(bd) }
                         : { key: "", label: "No build date", rank: "9999" };
@@ -700,6 +1009,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       default:       return { key: "", label: "All jobs", rank: 0 };
     }
   };
+  // ── Dragging a row between segment groups ──
+  // Only four of the eight modes have a group key you can ASSIGN. Crew, build date, week and
+  // stage are all editable fields, so dropping a row into another group means something.
+  // Style, size and source are NOT: style and size are snapshots of the design's own
+  // geometry, and source is what the job IS (an order does not become an inventory build by
+  // being dragged). Offering a drag that silently does nothing is worse than offering none,
+  // so rows are only draggable in the four modes where the drop can be honoured.
+  const SEGMENT_ASSIGNABLE = { crew: true, date: true, week: true, stage: true };
+  const canDragRows = canEdit && !!SEGMENT_ASSIGNABLE[segment];
+
   const segmentGroups = (() => {
     if (segment === "none") return null;
     const buckets = new Map();
@@ -708,6 +1027,17 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       if (!buckets.has(g.key)) buckets.set(g.key, { ...g, rows: [] });
       buckets.get(g.key).rows.push(j);
     });
+    // EMPTY groups matter once you can drop into them: with only the occupied groups
+    // rendered, a crew or stage that currently holds nothing has no row to drop onto — so the
+    // first job could never be moved there, which is exactly when you most want to. Only for
+    // the two ENUMERABLE dimensions; there is no list of every possible date to pad out.
+    if (canDragRows && segment === "crew") {
+      activeCrews.forEach((c, i) => { if (!buckets.has(c.id)) buckets.set(c.id, { key: c.id, label: c.name, rank: i, rows: [] }); });
+      if (!buckets.has("")) buckets.set("", { key: "", label: "No crew yet", rank: 9999, rows: [] });
+    }
+    if (canDragRows && segment === "stage") {
+      visibleStages.forEach((s) => { if (!buckets.has(s.id)) buckets.set(s.id, { key: s.id, label: s.name, color: s.color, rank: stageOrder[s.id], rows: [] }); });
+    }
     return [...buckets.values()].sort((a, b) => {
       const ar = a.rank, br = b.rank;
       if (typeof ar === "number" && typeof br === "number") return ar - br;
@@ -715,14 +1045,68 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     });
   })();
 
+  // The drop: what "put this row in that group" means, per mode. Each one is an ordinary
+  // field write — the same actions the popup and the calendar already use, so a table drop is
+  // logged and permission-checked identically.
+  const dropIntoSegment = async (job, group) => {
+    if (!job || !group) return;
+    // A day chip carries an EXACT date and short-circuits the week rule below — that is the
+    // whole point of it: the week group can only say "same weekday, different week", and this
+    // is how Friday moves to Tuesday inside one week.
+    if (group.exactDate) {
+      if (schedBuildDate(job) === group.key) return;
+      setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, scheduled_start: group.key, due_date: group.key } : j) }));
+      await call({ action: "update_job", jobId: job.id, scheduledStart: group.key, dueDate: group.key },
+        `Moved to ${schedFmtBuild(group.key)}.`);
+      load();
+      return;
+    }
+    if (segmentOf(job).key === group.key) return;
+    if (segment === "crew") {
+      const crewId = group.key || null;
+      setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, crew_id: crewId } : j) }));
+      const r = await call({ action: "update_job", jobId: job.id, crewId },
+        crewId ? `Moved to ${group.label}.` : "Crew cleared.");
+      load();   // either way: the board must show what actually landed, not what was dropped
+      return;
+    }
+    if (segment === "stage") { await moveJob(job, group.key); return; }
+    // date | week — both end in a build date. Dropping on "No build date" CLEARS it, which
+    // sends the job back to the Unscheduled tray; that is the table's equivalent of dragging
+    // a calendar card off the grid, and it reads the same way.
+    let iso = null;
+    if (group.key) {
+      if (segment === "date") iso = group.key;
+      else {
+        // Into another WEEK: keep the weekday. A Tuesday build dropped on next week stays
+        // Tuesday rather than collapsing to Sunday — the crew's week has a shape, and the
+        // group only says which week, not which day.
+        const cur = schedBuildDate(job);
+        const dow = cur ? schedLocalDate(cur).getDay() : 1;
+        const d = schedLocalDate(group.key);
+        d.setDate(d.getDate() + dow);
+        iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+      }
+    }
+    setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, scheduled_start: iso, due_date: iso } : j) }));
+    // Deliberately NOT moveJobDate(): that one also hands the job to whichever crew's
+    // calendar is showing, which is right on the calendar and wrong here — the table has no
+    // crew filter, so a date drop must never quietly reassign the crew as a side effect.
+    const r = await call({ action: "update_job", jobId: job.id, scheduledStart: iso, dueDate: iso },
+      iso ? `Moved to ${schedFmtBuild(iso)}.` : "Build date cleared — back in the tray.");
+    load();   // either way: the board must show what actually landed, not what was dropped
+  };
+
   // In calendar view a tray item is DRAGGABLE — drop it on a date and the job is created
   // with that build date (addFromTrayDated). The + button still adds it unscheduled.
   const trayItem = (key, chipConf, who, what, addBody, label) => {
-    const draggable = canEdit && view === "calendar";
+    // Draggable in EVERY view (decision 25's uniformity pass) — the targets differ by view
+    // (calendar days, board stages, the table's day rows) but the gesture is the same one.
+    const draggable = canEdit;
     return (
       <div key={key} draggable={draggable}
         onDragStart={draggable ? () => setDragIntake({ body: addBody, label }) : undefined}
-        onDragEnd={draggable ? () => { setDragIntake(null); setDropStage(null); } : undefined}
+        onDragEnd={draggable ? () => { setDragIntake(null); setDropStage(null); setDropGroup(null); } : undefined}
         style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", background: "#FBFCFE", cursor: draggable ? "grab" : "default" }}>
         <span style={schedChip(chipConf.bg, chipConf.fg)}>{chipConf.label}</span>
         <div>
@@ -731,7 +1115,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         </div>
         {canEdit && (
           <button type="button" disabled={busy} onClick={() => addFromTray(addBody, label)}
-            title={view === "calendar" ? "Add without a date (or drag onto a day below)" : "Add to the board"}
+            title={view === "calendar" ? "Add without a date (or drag onto a day below)"
+              : view === "board" ? "Add to the board (or drag onto a stage column)"
+              : "Add to the board (or drag it into a week's order, or onto a date group)"}
             style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
         )}
       </div>
@@ -743,7 +1129,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       <CardHead title="Build Schedule" count={jobs.length}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
-            {[["calendar", "Calendar"], ["board", "Board"], ["table", "Table"]].map(([v, label]) => (
+            {[["calendar", "Calendar"], ["table", "Table"], ["board", "Board"]].map(([v, label]) => (
               <button key={v} type="button" onClick={() => setView(v)}
                 style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
                 {label}
@@ -776,6 +1162,83 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+
+      {/* ── The FILTER row (round 8) — narrows; the Segment dropdown arranges; they compose.
+          Crew chips are ONE tab-level control obeyed by calendar, board and table alike.
+          The WHEN date filter applies to board + table only: the calendar already navigates
+          by date, and a second date control there would fight the ‹ › arrows. ── */}
+      {data && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 11 }}>
+          <button type="button" onClick={() => setCrewFilter("all")}
+            style={{ ...S.btn(crewFilter === "all" ? "#1E293B" : "#FFF", crewFilter === "all" ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (crewFilter === "all" ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
+            All crews {jobs.length || ""}
+          </button>
+          {activeCrews.map((c) => {
+            const on = crewFilter === c.id;
+            const n = jobs.filter((j) => j.crew_id === c.id).length;
+            return (
+              <button key={c.id} type="button" onClick={() => setCrewFilter(on ? "all" : c.id)}
+                style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.color || ACCENT, display: "inline-block" }}></span>
+                {c.name} {n > 0 ? n : ""}
+              </button>
+            );
+          })}
+          {activeCrews.length === 0 && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
+              No crews yet — add them in Settings → Team.
+            </span>
+          )}
+          {view !== "calendar" && (<>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginLeft: 8 }}>When</span>
+            <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} aria-label="Filter by date"
+              style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }}>
+              {SCHED_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            {SCHED_WHEN_PARAM[whenCond] === "date" && (
+              <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} aria-label="Date"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+            )}
+            {SCHED_WHEN_PARAM[whenCond] === "date2" && (<>
+              <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} aria-label="From date"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+              <span style={{ fontSize: 12, color: "#64748B", fontWeight: 700 }}>–</span>
+              <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} aria-label="To date"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+            </>)}
+            {SCHED_WHEN_PARAM[whenCond] === "month" && (
+              <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} aria-label="Month"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }} />
+            )}
+            {SCHED_WHEN_PARAM[whenCond] === "count" && (<>
+              <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} aria-label="How many"
+                style={{ ...S.input, width: 64, padding: "5px 8px", fontSize: 12 }} />
+              <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} aria-label="Unit"
+                style={{ ...S.input, width: "auto", padding: "5px 8px", fontSize: 12 }}>
+                <option value="days">days</option>
+                <option value="weeks">weeks</option>
+                <option value="months">months</option>
+              </select>
+            </>)}
+          </>)}
+          {/* Say what the filters are doing — and that undated jobs are deliberately kept. */}
+          {filtersOn && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#64748B" }}>
+              Showing {filteredJobs.length} of {jobs.length}
+              {undatedShown > 0 ? ` — including ${undatedShown} with no build date` : ""}
+            </span>
+          )}
+          {filtersOn && (
+            <button type="button" onClick={clearFilters}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 11px", fontSize: 11.5 }}>Clear filters</button>
+          )}
+          {view === "calendar" && crewFilter !== "all" && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: ACCENT }}>
+              — {(crewById[crewFilter] || {}).name || "this crew"}'s calendar: dropping a card here schedules it AND assigns it to them
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Manual add (admin) */}
       {addOpen && canEdit && (
@@ -840,7 +1303,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         <div style={{ overflowX: "auto", paddingBottom: 6 }}>
           <div style={{ display: "flex", gap: 11, alignItems: "flex-start", minWidth: "min-content" }}>
             {visibleStages.map((s) => {
-              const colJobs = jobs.filter((j) => j.stage_id === s.id).sort((a, b) => Number(a.position) - Number(b.position));
+              const colJobs = filteredJobs.filter((j) => j.stage_id === s.id).sort((a, b) => Number(a.position) - Number(b.position));
               return (
                 <div key={s.id} data-stage={s.id}
                   onDragOver={(e) => { e.preventDefault(); setDropStage(s.id); }}
@@ -849,10 +1312,14 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     e.preventDefault(); setDropStage(null);
                     const job = jobs.find((j) => j.id === dragId);
                     if (job) moveJob(job, s.id);
-                    setDragId(null);
+                    // A TRAY item dropped on a stage: create the job straight into that stage
+                    // (create_job honors stageId server-side) — the board's version of the
+                    // calendar's drop-to-schedule.
+                    else if (dragIntake) addFromTray({ ...dragIntake.body, stageId: s.id }, dragIntake.label);
+                    setDragId(null); setDragIntake(null);
                   }}
                   style={{ width: 268, flex: "0 0 268px", background: "#EEF2F8", borderRadius: 12, padding: 9, outline: dropStage === s.id ? `2px dashed ${ACCENT}` : "none", outlineOffset: -2 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "2px 4px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "2px 4px 3px" }}>
                     <span style={{ width: 9, height: 9, borderRadius: "50%", background: s.color, flexShrink: 0 }}></span>
                     <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 0.3, color: "#334155" }}>{s.name}</span>
                     <span style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8" }}>
@@ -860,6 +1327,11 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                     </span>
                     <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{colJobs.length}</span>
                   </div>
+                  {/* What this column is worth — the same summary every other grouping shows,
+                      so the board can never disagree with the table's stage segments. */}
+                  {colJobs.length > 0 && (
+                    <div style={{ padding: "0 4px 8px" }}><SchedSummary rows={colJobs} size={11.5} /></div>
+                  )}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 36 }}>
                     {colJobs.map((j) => jobCard(j))}
                   </div>
@@ -922,24 +1394,80 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             <tbody>
               {segmentGroups === null
                 ? sorted.map((j) => tableRow(j))
-                : segmentGroups.map((g) => (
+                : segmentGroups.map((g) => {
+                  const hot = dropGroup === g.key && dragRowId;
+                  const weekMode = segment === "week" && !!g.key;
+                  return (
                   <React.Fragment key={"seg:" + g.key}>
-                    <tr>
-                      <td colSpan={9} style={{ padding: "12px 10px 5px", borderBottom: "2px solid #E2E8F0" }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#334155" }}>
-                          {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
-                          {g.label}
-                        </span>
-                        <span style={{ ...schedChip("#F1F5F9", "#475569"), marginLeft: 8 }}>{g.rows.length}</span>
+                    {/* EVERY segment heading carries the blue (Carolyn 2026-08-22) — it started
+                        as the week's own treatment in week mode and she wanted it everywhere.
+                        The day headings beneath it in week mode stay UNFILLED, told apart by
+                        weight and a heavy rule instead: two competing fills would flatten the
+                        hierarchy rather than show it, so the level with the fill has to stay
+                        the one level. */}
+                    <tr {...(canDragRows ? groupDropProps(g) : {})}
+                      style={{ background: hot ? "#DCE6FF" : "#EEF2FF" }}>
+                      <td colSpan={9} style={{ padding: "10px 10px", borderBottom: "2px solid " + (hot ? ACCENT : "#C3D9F7") }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: ACCENT }}>
+                            {g.color && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.color, display: "inline-block", marginRight: 6 }}></span>}
+                            {g.label}
+                          </span>
+                          <span style={schedChip("#FFF", "#475569")}>{g.rows.length}</span>
+                          {/* An empty crew/stage exists ONLY so it can be dropped into — say so,
+                              rather than leaving a bare zero that reads like a rendering bug.
+                              #64748B, not the #94A3B8 it used to be: that was picked to sit on
+                              white and goes soft on the tint. */}
+                          {g.rows.length === 0 && !weekMode && (
+                            <span style={{ fontSize: 11, fontWeight: 600, color: "#64748B" }}>drop a job here to move it</span>
+                          )}
+                          {/* What this section is worth and how much building it is — the same
+                              component the calendar's day headers use. */}
+                          <span style={{ marginLeft: "auto" }}><SchedSummary rows={g.rows} size={12} /></span>
+                        </div>
                       </td>
                     </tr>
-                    {g.rows.map((j) => tableRow(j))}
+                    {/* WEEK mode: a row per DAY of that week — all seven, empty ones included,
+                        because a day you cannot see is a day you cannot drop onto, and moving a
+                        job to a free Friday is exactly the move you want. Each is an exact-date
+                        target, reusing the write path the date segment already uses. */}
+                    {/* WEEK mode: an ordered list where POSITION implies the date. Rows sort
+                        by build date; dropping on a row inserts before it and derives the
+                        date from the neighbours (first date, or the gap day when one exists);
+                        the slim strip after the last row is the drop-at-the-end target. The
+                        popup remains the precision tool for an exact day. */}
+                    {weekMode
+                      ? (() => { const ordered = weekOrderedRows(g); return (<>
+                          {ordered.map((j) => tableRow(j, g))}
+                          <tr {...(canDragRows ? weekSpotDropProps(g, null) : {})}>
+                            <td colSpan={9} style={{ padding: 0, height: (dragRowId || dragIntake) ? 14 : 6,
+                              background: dropGroup === "ins:end:" + g.key ? "#EEF4FF" : "transparent",
+                              borderTop: dropGroup === "ins:end:" + g.key ? `2px solid ${ACCENT}` : "none" }}></td>
+                          </tr>
+                        </>); })()
+                      : g.rows.map((j) => tableRow(j))}
                   </React.Fragment>
-                ))}
+                  );
+                })}
             </tbody>
           </table>
         </div>
         {sorted.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No jobs match.</p>}
+        {/* Say plainly whether dragging does anything in the current mode. The four modes
+            below are the ones whose group is an editable field; in the others a drop would
+            have nothing to write, so rows are not draggable at all. */}
+        {segment !== "none" && sorted.length > 0 && (
+          <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
+            {canDragRows
+              ? (segment === "crew" ? "Drag a row onto another crew to hand the job over — onto “No crew yet” to unassign it."
+                : segment === "date" ? "Drag a row onto another day to reschedule it — onto “No build date” to send it back to the Unscheduled tray."
+                : segment === "week" ? "Buildings in a week are listed in build-date order — drag one to a new spot in the order and its date follows its neighbors (their day, or the empty day between them). For an exact day, open the building and set the date. Drop on a WEEK heading to move it to that week keeping the same weekday, or on “No build date” to send it back to the Unscheduled tray."
+                : "Drag a row onto another stage to move it there.")
+              : (canEdit
+                ? "Dragging is off in this view: " + (segment === "source" ? "an order does not become an inventory build" : "size and style come from the building’s own design") + ", so there is nothing a drop could change. Segment by crew, build date, week or stage to drag."
+                : "You have view-only access to the build schedule.")}
+          </p>
+        )}
       </>)}
 
       {/* ── CALENDAR — real dates, one build date per card, per-crew calendars ── */}
@@ -956,28 +1484,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         // "that day with that crew" with no extra filtering; on "all crews" it is the day's
         // whole total. `valueCents` is computed server-side per job (an order's total, a unit's
         // asking price, a repair's quote) — build_jobs carries no price column of its own.
-        const dayMoney = (rows) => {
-          let cents = 0, priced = 0, unpriced = 0;
-          (rows || []).forEach((j) => {
-            // A MANUAL job ("shop maintenance day") has no value and never will — it is not a
-            // gap in the data, so it must not be counted as one.
-            if (j.source === "manual") return;
-            if (j.valueCents == null) { unpriced++; return; }
-            cents += Number(j.valueCents); priced++;
-          });
-          return { cents, priced, unpriced };
-        };
-        // Whole dollars: a day header is 218px at its widest and cents buy nothing there.
-        // (`money()` stays the formatter anywhere there is room for it.)
-        const moneyShort = (cents) => "$" + Math.round(cents / 100).toLocaleString("en-US");
-        // NEVER print a confident figure that silently counts a missing total as zero — an
-        // order's total_cents is routinely NULL until someone sets it (Orders' own rule:
-        // "we never show a guessed number"). Say what is known and flag what isn't.
-        const dayMoneyLabel = (m) => {
-          if (!m.priced && !m.unpriced) return null;
-          if (!m.priced) return { text: m.unpriced === 1 ? "no total yet" : m.unpriced + " no total", muted: true };
-          return { text: moneyShort(m.cents), gap: m.unpriced };
-        };
+        // (dayMoney / moneyShort / dayMoneyLabel used to live here. They are module-level now
+        // as schedSummary / SchedSummary, because the table's segment headings need the same
+        // figures and could not reach into this closure.)
 
         // SUNDAY-FIRST weeks (Carolyn 2026-08-04); weekends can be toggled off entirely.
         // Days advance by DATE, never by adding 86,400,000ms: the US fall-back day is 25
@@ -990,8 +1499,15 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
         if (!showWeekends) weekDays = weekDays.filter((d) => !isWknd(d));
         const m0 = new Date(cur.getFullYear(), cur.getMonth(), 1);
         const gridStart = new Date(m0); gridStart.setDate(gridStart.getDate() - gridStart.getDay());
-        let monthCells = []; for (let i = 0; i < 42; i++) { const d = new Date(gridStart); d.setDate(d.getDate() + i); monthCells.push(d); }
-        if (!showWeekends) monthCells = monthCells.filter((d) => !isWknd(d));
+        // Chunked into WEEKS rather than a flat 42, so each row can carry its own total in a
+        // trailing column. Weekend filtering happens per week so a row still knows which days
+        // it is hiding.
+        const monthWeeks = [];
+        for (let w = 0; w < 6; w++) {
+          const all = [];
+          for (let i = 0; i < 7; i++) { const d = new Date(gridStart); d.setDate(d.getDate() + w * 7 + i); all.push(d); }
+          monthWeeks.push({ all, days: showWeekends ? all : all.filter((d) => !isWknd(d)) });
+        }
         const monthHeads = showWeekends ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["Mon", "Tue", "Wed", "Thu", "Fri"];
         const gridCols = showWeekends ? 7 : 5;
         const fmtShort = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
@@ -1037,47 +1553,43 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 Weekends {showWeekends ? "on" : "off"}
               </button>
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 11, alignItems: "center" }}>
-              <button type="button" onClick={() => setCrewFilter("all")}
-                style={{ ...S.btn(crewFilter === "all" ? "#1E293B" : "#FFF", crewFilter === "all" ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (crewFilter === "all" ? "#1E293B" : "#E2E8F0"), borderRadius: 16 }}>
-                All crews {jobs.filter((j) => schedBuildDate(j)).length || ""}
-              </button>
-              {activeCrews.map((c) => {
-                const on = crewFilter === c.id;
-                const n = jobs.filter((j) => schedBuildDate(j) && j.crew_id === c.id).length;
-                return (
-                  <button key={c.id} type="button" onClick={() => setCrewFilter(on ? "all" : c.id)}
-                    style={{ ...S.btn(on ? "#1E293B" : "#FFF", on ? "#FFF" : "#475569"), padding: "5px 12px", fontSize: 12, border: "1px solid " + (on ? "#1E293B" : "#E2E8F0"), borderRadius: 16, display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.color || ACCENT, display: "inline-block" }}></span>
-                    {c.name} {n > 0 ? n : ""}
-                  </button>
-                );
-              })}
-              {activeCrews.length === 0 && (
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
-                  No crews yet — add them in Settings → Team to get per-crew calendars.
-                </span>
-              )}
-              {crewFilter !== "all" && (
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: ACCENT }}>
-                  — {(crewById[crewFilter] || {}).name || "this crew"}'s calendar: dropping a card here schedules it AND assigns it to them
-                </span>
-              )}
-            </div>
+            {/* (The crew chips moved to the tab-level FILTER row above — one control for
+                every view. The same crewFilter state still scopes this calendar.) */}
 
             {/* The ONE Unscheduled tray sits above (shared with all views) — nothing
                 unscheduled renders inside the calendar itself (Carolyn 2026-08-04). */}
 
             {/* WEEK — the kanban feel, with days as the columns */}
-            {calView === "week" && (
+            {calView === "week" && (() => {
+              // The week's own totals. Summed over the days actually RENDERED, then the
+              // hidden ones are named rather than folded in: with weekends off, a Saturday
+              // job stays scheduled (the toggle's tooltip says so), so counting it silently
+              // makes the arithmetic not add up on screen, and dropping it silently
+              // understates the week. Same honesty rule as the "missing" flags.
+              const shownJobs = weekDays.flatMap((d) => byDate[isoLocal(d)] || []);
+              const hiddenJobs = showWeekends ? [] :
+                weekLabelDays.filter(isWknd).flatMap((d) => byDate[isoLocal(d)] || []);
+              return (
               <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+                {(shownJobs.length > 0 || hiddenJobs.length > 0) && (
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", padding: "7px 11px", marginBottom: 9, background: "#F7F9FF", border: "1px solid #E2E8F0", borderRadius: 10 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#64748B" }}>This week</span>
+                    <span style={{ ...schedChip("#FFF", "#475569"), fontVariantNumeric: "tabular-nums" }}>{shownJobs.length} job{shownJobs.length === 1 ? "" : "s"}</span>
+                    <SchedSummary rows={shownJobs} size={13.5} />
+                    {hiddenJobs.length > 0 && (
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309" }}
+                        title="Turn weekends back on to see them — they are still scheduled">
+                        · {hiddenJobs.length} more on hidden weekend day{hiddenJobs.length === 1 ? "" : "s"}, not counted
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
                   {weekDays.map((d) => {
                     const iso = isoLocal(d);
                     const isToday = iso === todayIso;
                     const wknd = d.getDay() === 0 || d.getDay() === 6;
                     const dayJobs = byDate[iso] || [];
-                    const wkMoney = dayMoneyLabel(dayMoney(dayJobs));
                     return (
                       <div key={iso} {...dropProps(iso)}
                         style={{ width: 218, flex: "0 0 218px", background: isToday ? "#E9F0FF" : wknd ? "#F4F6F9" : "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 190, outline: isToday ? "2px solid #C3D9F7" : "none", outlineOffset: -2, ...dropGlow(iso) }}>
@@ -1086,50 +1598,47 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                           <span style={{ fontSize: 16, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{d.getDate()}</span>
                           <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 800, color: "#64748B", background: "#FFF", borderRadius: 999, padding: "2px 7px", fontVariantNumeric: "tabular-nums" }}>{dayJobs.length}</span>
                         </div>
-                        {/* The day's scheduled value, for whichever crew's calendar is showing. */}
-                        {wkMoney && (
-                          <div style={{ display: "flex", alignItems: "baseline", gap: 5, flexWrap: "wrap", padding: "0 3px 8px" }}>
-                            <span style={{ fontSize: 12.5, fontWeight: 800, color: wkMoney.muted ? "#94A3B8" : "#15803D", fontVariantNumeric: "tabular-nums" }}>{wkMoney.text}</span>
-                            {wkMoney.gap > 0 && (
-                              <span style={{ fontSize: 10, fontWeight: 700, color: "#B45309" }} title="Some jobs on this day have no total yet, so they are not in this figure">
-                                · {wkMoney.gap} no total
-                              </span>
-                            )}
-                          </div>
+                        {/* The day's scheduled value and floor area, for whichever crew's
+                            calendar is showing. */}
+                        {dayJobs.length > 0 && (
+                          <div style={{ padding: "0 3px 8px" }}><SchedSummary rows={dayJobs} /></div>
                         )}
                         <div style={{ display: "flex", flexDirection: "column", gap: 7, minHeight: 40 }}>
-                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true, detailInPanel: true }))}
+                          {dayJobs.map((j) => jobCard(j, { hideDate: true, showStage: true }))}
                         </div>
                       </div>
                     );
                   })}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {/* MONTH — the planning radar */}
             {calView === "month" && (
               <div style={{ overflowX: "auto", paddingBottom: 6 }}>
-                <div style={{ display: "grid", gridTemplateColumns: `repeat(${gridCols}, minmax(150px, 1fr))`, gap: 6, minWidth: gridCols === 7 ? 1080 : 780 }}>
-                  {monthHeads.map((h) => (
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${gridCols}, minmax(150px, 1fr)) minmax(118px, .8fr)`, gap: 6, minWidth: (gridCols === 7 ? 1080 : 780) + 130 }}>
+                  {monthHeads.concat(["Week"]).map((h) => (
                     <div key={h} style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: "#94A3B8", padding: "0 4px 2px" }}>{h}</div>
                   ))}
-                  {monthCells.map((d) => {
+                  {monthWeeks.map((wk) => (
+                  <React.Fragment key={"wk:" + isoLocal(wk.all[0])}>
+                  {wk.days.map((d) => {
                     const iso = isoLocal(d);
                     const inMonth = d.getMonth() === cur.getMonth();
                     const isToday = iso === todayIso;
                     const dayJobs = byDate[iso] || [];
                     const shown = dayJobs.slice(0, 3);
-                    const mMoney = dayMoneyLabel(dayMoney(dayJobs));
                     return (
                       <div key={iso} {...dropProps(iso)}
                         style={{ background: inMonth ? "#FFF" : "#F8FAFC", opacity: inMonth ? 1 : 0.55, border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 150, padding: "6px 7px", outline: isToday ? `2px solid ${ACCENT}` : "none", outlineOffset: -2, ...dropGlow(iso) }}>
                         <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 5 }}>
                           <span style={{ fontSize: 11.5, fontWeight: 800, color: isToday ? ACCENT : "#475569" }}>{d.getDate()}</span>
-                          {mMoney && (
-                            <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: mMoney.muted ? "#94A3B8" : "#15803D", fontVariantNumeric: "tabular-nums" }}
-                              title={mMoney.gap > 0 ? mMoney.gap + " job(s) on this day have no total yet, so they are not in this figure" : undefined}>
-                              {mMoney.text}{mMoney.gap > 0 ? "*" : ""}
+                          {/* Stacked: a month cell is ~150px, so money and sq ft go on their
+                              own lines rather than fighting for one. */}
+                          {dayJobs.length > 0 && (
+                            <span style={{ marginLeft: "auto", textAlign: "right" }}>
+                              <SchedSummary rows={dayJobs} stack align="right" size={10.5} />
                             </span>
                           )}
                         </div>
@@ -1164,24 +1673,55 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                       </div>
                     );
                   })}
+                  {/* This row's total. Same rule as the week strip: it sums the days actually
+                      shown, and names any weekend days it is hiding rather than folding them
+                      in silently. */}
+                  {(() => {
+                    const rows = wk.days.flatMap((d) => byDate[isoLocal(d)] || []);
+                    const hidden = showWeekends ? [] : wk.all.filter(isWknd).flatMap((d) => byDate[isoLocal(d)] || []);
+                    const inThisMonth = wk.all.some((d) => d.getMonth() === cur.getMonth());
+                    return (
+                      <div key={"tot:" + isoLocal(wk.all[0])}
+                        style={{ background: "#F7F9FF", border: "1px solid #E2E8F0", borderRadius: 9, minHeight: 150, padding: "6px 8px", opacity: inThisMonth ? 1 : 0.55 }}>
+                        <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 0.7, textTransform: "uppercase", color: "#94A3B8", marginBottom: 5 }}>
+                          Week of {fmtDate(schedLocalDate(isoLocal(wk.all[0])))}
+                        </div>
+                        {rows.length === 0 && hidden.length === 0
+                          ? <div style={{ fontSize: 10.5, fontWeight: 700, color: "#CBD5E1" }}>—</div>
+                          : (<>
+                            <div style={{ fontSize: 10.5, fontWeight: 800, color: "#64748B", marginBottom: 3, fontVariantNumeric: "tabular-nums" }}>{rows.length} job{rows.length === 1 ? "" : "s"}</div>
+                            <SchedSummary rows={rows} stack size={11.5} />
+                            {hidden.length > 0 && (
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: "#B45309", marginTop: 4 }}
+                                title="Turn weekends back on to see them — they are still scheduled">
+                                +{hidden.length} on hidden weekend day{hidden.length === 1 ? "" : "s"}, not counted
+                              </div>
+                            )}
+                          </>)}
+                      </div>
+                    );
+                  })()}
+                  </React.Fragment>
+                  ))}
                 </div>
               </div>
             )}
-            {/* The one detail panel, full width, under whichever grid is showing — week and
-                month alike. Neither a 218px day column nor a 150px month cell can hold the
-                form, and it stays inline rather than becoming a popout. */}
-            {detailPanel()}
             <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 10 }}>
-              One build date per card — dropping a card on a day IS the reschedule, in week and month view alike. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a card to open its details below the calendar. Each day shows what is scheduled for it; a <strong>*</strong> or "no total" means some jobs on that day have no price yet and are not in the figure. Rescheduling from the calendar is admin-only.
+              One build date per card — dropping a card on a day IS the reschedule, in week and month view alike. Flip between crew calendars above: on a crew's calendar, a drop schedules the job and hands it to that crew in one motion. Click a card to open its details; Esc or a click outside closes it. Each day shows what is scheduled for it; a <strong>*</strong> or "no total" means some jobs on that day have no price yet and are not in the figure. Rescheduling from the calendar is admin-only.
             </p>
           </div>
         );
       })()}
 
       <p style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, lineHeight: 1.5, marginTop: 12 }}>
-        Drag cards between stages — team members can move cards and add notes; dates, assignments, and new jobs are admin-only. Every move is logged with who and when. Click a card to see and edit everything in place.
+        Drag cards between stages — team members can move cards and add notes; dates, assignments, and new jobs are admin-only. Every move is logged with who and when. Click a card to open its details in the popup; Esc or a click outside closes it.
       </p>
 
+      {/* The job detail popup — mounted at TAB level so it is the one detail surface for
+          every view (Carolyn 2026-08-23: "for uniformity and User experience it is IMPORTANT
+          to have things functioning the same"). It began as the calendar's alone; Board and
+          Table expanded inline until she found the difference from the Table side. */}
+      {detailModal()}
       {editingStages && (
         <SchedStageEditor stages={stages} busy={busy} onClose={() => setEditingStages(false)} onSave={saveStages} />
       )}
@@ -1232,10 +1772,17 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   const [busy, setBusy] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [loadPick, setLoadPick] = useState(null);  // null = picker closed; array = planned loads
-  const [intake, setIntake] = useState({ customerName: "", phone: "", email: "", serial: "", description: "", quote: "" });
+  const [intake, setIntake] = useState({ customerName: "", phone: "", email: "", street: "", city: "", state: "", zip: "", serial: "", description: "", quote: "" });
   const [photos, setPhotos] = useState(null);    // for the selected repair; null = loading
   const [detail, setDetail] = useState(null);    // editable copy of the selected repair
   const fileRef = useRef(null);
+  // Contact type-ahead (round 9): null = closed, [] = searched-and-nothing, array = hits.
+  // Repairs never create or touch GHL contacts — picking one just fills the fields.
+  const [contactHits, setContactHits] = useState(null);
+  const pickedRef = useRef(false);   // suppresses the re-search fired by the pick's own fill
+  // Refresh feedback — the same treatment the Build Schedule got.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState(0);
 
   const call = async (body, okMsg) => {
     const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body });
@@ -1258,6 +1805,41 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
 
+  const refresh = async () => {
+    if (refreshing) return;
+    setMsg(null);
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+    setRefreshedAt(Date.now());
+  };
+  useEffect(() => {
+    if (!refreshedAt) return undefined;
+    const t = setTimeout(() => setRefreshedAt(0), 4000);
+    return () => clearTimeout(t);
+  }, [refreshedAt]);
+
+  // The intake's contact type-ahead. Debounced; searches only while the intake is open; a
+  // pick's own field-fill must not immediately reopen the dropdown (pickedRef).
+  useEffect(() => {
+    if (!intakeOpen) { setContactHits(null); return undefined; }
+    if (pickedRef.current) { pickedRef.current = false; return undefined; }
+    const q = intake.customerName.trim();
+    if (q.length < 2) { setContactHits(null); return undefined; }
+    let dead = false;
+    const t = setTimeout(async () => {
+      const { data: d } = await sb.functions.invoke("portal-schedule", { body: { action: "search_contacts", q } });
+      if (!dead) setContactHits((d && d.contacts) || []);
+    }, 300);
+    return () => { dead = true; clearTimeout(t); };
+  }, [intake.customerName, intakeOpen]);
+  const pickContact = (c) => {
+    pickedRef.current = true;
+    setIntake({ ...intake, customerName: c.name, phone: c.phone || "", email: c.email || "",
+      street: c.street || "", city: c.city || "", state: c.state || "", zip: c.zip || "" });
+    setContactHits(null);
+  };
+
   const repairs = (data && data.repairs) || [];
   const jobs = (data && data.jobs) || [];
   const stops = (data && data.stops) || [];
@@ -1272,9 +1854,9 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   // Editable detail copy + photos, refreshed whenever the selection changes.
   useEffect(() => {
     if (!selected) { setDetail(null); setPhotos(null); return; }
-    setDetail({ status: selected.status, quote: selected.quote_cents == null ? "" : String(selected.quote_cents / 100), notes: selected.notes || "" });
+    setDetail({ status: selected.status, quote: selected.quote_cents == null ? "" : String(selected.quote_cents / 100), notes: selected.notes || "",
+      street: selected.street || "", city: selected.city || "", state: selected.state || "", zip: selected.zip || "" });
     setPhotos(null);
-    setLoadPick(null);   // a picker left open would apply to the wrong repair
     let dead = false;
     (async () => {
       const { data: d } = await sb.functions.invoke("portal-schedule", { body: { action: "repair_photos", repairId: selected.id } });
@@ -1282,6 +1864,11 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     })();
     return () => { dead = true; };
   }, [selectedId, data]);
+  // The load picker resets when the SELECTION changes — a picker left open would apply to
+  // the wrong repair. Deliberately NOT keyed on `data`: every write here ends in load(), so
+  // a data-keyed reset closed the picker the moment "Both →" opened it (the build-job write
+  // reloads, the reload reran the effect, the effect killed the picker it raced).
+  useEffect(() => { setLoadPick(null); }, [selectedId]);
 
   const counts = { open: 0, in_progress: 0, done30: 0, quotedCents: 0 };
   const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
@@ -1310,6 +1897,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     setBusy(true); setMsg(null);
     const r = await call({
       action: "create_repair", customerName: intake.customerName, phone: intake.phone, email: intake.email,
+      street: intake.street, city: intake.city, state: intake.state, zip: intake.zip,
       // Raw — the server decides whether that's a serial or a design code and links the
       // building either way. Parsing it here would drop the code half on the floor.
       buildingRef: intake.serial.trim() || null,
@@ -1318,7 +1906,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     setBusy(false);
     if (r && r.repair) {
       setMsg({ ok: `R-${r.repair.repair_no} logged for ${r.repair.customer_name}.` });
-      setIntake({ customerName: "", phone: "", email: "", serial: "", description: "", quote: "" });
+      setIntake({ customerName: "", phone: "", email: "", street: "", city: "", state: "", zip: "", serial: "", description: "", quote: "" });
       setIntakeOpen(false);
       await load();
       setSelectedId(r.repair.id);
@@ -1334,6 +1922,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     const r = await call({
       action: "update_repair", repairId: selected.id, status: detail.status,
       quoteCents, notes: detail.notes,
+      street: detail.street, city: detail.city, state: detail.state, zip: detail.zip,
     }, "Saved.");
     setBusy(false); if (r) load();
   };
@@ -1423,13 +2012,18 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     <div style={S.card}>
       <CardHead title="Repairs" count={repairs.length}
         right={<>
-          <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          <button type="button" onClick={refresh} disabled={refreshing} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: refreshing ? 0.6 : 1, cursor: refreshing ? "default" : "pointer" }}>
+            {refreshing ? "↻ Refreshing…" : "↻ Refresh"}
+          </button>
+          {refreshedAt > 0 && !refreshing && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#15803D" }}>Updated just now</span>
+          )}
           {canEdit && <button type="button" onClick={() => setIntakeOpen(!intakeOpen)} style={S.btn(ACCENT, "#FFF")}>+ Log a repair</button>}
         </>} />
 
       {data && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
-          {[["Open", counts.open], ["In progress", counts.in_progress], ["Completed · 30 days", counts.done30], ["Quoted · open", invMoney(counts.quotedCents || null)]].map(([t, n]) => (
+          {[["Open", counts.open], ["In progress", counts.in_progress], ["Completed · 30 days", counts.done30], ["Repair $ · open", invMoney(counts.quotedCents || null)]].map(([t, n]) => (
             <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
               <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{n == null ? "—" : n}</div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
@@ -1447,11 +2041,39 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
       {intakeOpen && canEdit && (
         <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "12px 14px", marginBottom: 13 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "8px 12px", marginBottom: 8 }}>
-            <div><span style={lbl}>Customer *</span><input style={S.input} value={intake.customerName} onChange={(e) => setIntake({ ...intake, customerName: e.target.value })} /></div>
+            {/* Customer is a TYPE-AHEAD over existing contacts (designs + past repairs);
+                picking one fills phone/email/address. Typing a new name IS the new-contact
+                path — the repair just holds the fields; nothing touches GHL. */}
+            <div style={{ position: "relative" }}>
+              <span style={lbl}>Customer *</span>
+              <input style={S.input} value={intake.customerName} autoComplete="off"
+                onChange={(e) => setIntake({ ...intake, customerName: e.target.value })} />
+              {contactHits !== null && (
+                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 40, background: "#FFF", border: "1px solid #C3D9F7", borderRadius: 9, boxShadow: "0 8px 22px rgba(15,23,42,.14)", overflow: "hidden" }}>
+                  {contactHits.map((c, i) => (
+                    <button key={i} type="button" onClick={() => pickContact(c)}
+                      style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "#FFF", padding: "7px 10px", cursor: "pointer", borderBottom: "1px solid #F1F5F9", fontFamily: "inherit" }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{c.name}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: "#64748B" }}>{[c.phone, c.city].filter(Boolean).map((x) => " · " + x).join("")}</span>
+                    </button>
+                  ))}
+                  <div style={{ padding: "6px 10px", fontSize: 11, fontWeight: 600, color: "#94A3B8", background: "#FBFCFE" }}>
+                    ＋ New contact — keep typing
+                  </div>
+                </div>
+              )}
+            </div>
             <div><span style={lbl}>Phone</span><input style={S.input} value={intake.phone} onChange={(e) => setIntake({ ...intake, phone: e.target.value })} /></div>
             <div><span style={lbl}>Email</span><input style={S.input} value={intake.email} onChange={(e) => setIntake({ ...intake, email: e.target.value })} /></div>
             <div><span style={lbl}>Building serial # or design code <span style={{ fontWeight: 500, textTransform: "none" }}>(blank if not one of ours)</span></span><input style={S.input} value={intake.serial} onChange={(e) => setIntake({ ...intake, serial: e.target.value })} placeholder="e.g. 11640 or SS-NR4DV8XK2P" /></div>
-            <div><span style={lbl}>Quote ($)</span><input style={S.input} value={intake.quote} onChange={(e) => setIntake({ ...intake, quote: e.target.value })} placeholder="optional" /></div>
+            <div><span style={lbl}>Repair $</span><input style={S.input} value={intake.quote} onChange={(e) => setIntake({ ...intake, quote: e.target.value })} placeholder="optional" /></div>
+          </div>
+          {/* The customer's address — a site visit delivers TO it, so the stop inherits it. */}
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr .6fr .8fr", gap: "8px 12px", marginBottom: 8 }}>
+            <div><span style={lbl}>Street</span><input style={S.input} value={intake.street} onChange={(e) => setIntake({ ...intake, street: e.target.value })} /></div>
+            <div><span style={lbl}>City</span><input style={S.input} value={intake.city} onChange={(e) => setIntake({ ...intake, city: e.target.value })} /></div>
+            <div><span style={lbl}>State</span><input style={S.input} value={intake.state} onChange={(e) => setIntake({ ...intake, state: e.target.value })} /></div>
+            <div><span style={lbl}>Zip</span><input style={S.input} value={intake.zip} onChange={(e) => setIntake({ ...intake, zip: e.target.value })} /></div>
           </div>
           <span style={lbl}>What's wrong? *</span>
           <textarea style={{ ...S.input, minHeight: 54, resize: "vertical", fontFamily: "inherit" }} value={intake.description}
@@ -1487,7 +2109,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                {["Repair", "Customer", "Building", "Requested", "Quote", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+                {["Repair", "Customer", "Building", "Requested", "Repair $", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
               </tr></thead>
               <tbody>
                 {filtered.map((r) => (
@@ -1528,11 +2150,25 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px", marginBottom: 10 }}>
                 <div><span style={lbl}>Contact</span><div style={{ fontSize: 13, fontWeight: 600 }}>{selected.phone || selected.email || "—"}</div></div>
                 <div>
-                  <span style={lbl}>Quote ($)</span>
+                  <span style={lbl}>Repair $</span>
                   {canEdit
                     ? <input style={{ ...S.input, padding: "6px 8px" }} value={detail.quote} onChange={(e) => setDetail({ ...detail, quote: e.target.value })} />
                     : <div style={{ fontSize: 13, fontWeight: 700 }}>{invMoney(selected.quote_cents)}</div>}
                 </div>
+              </div>
+              {/* The customer's address — the site-visit stop inherits it (migration 115). */}
+              <div style={{ marginBottom: 10 }}>
+                <span style={lbl}>Address</span>
+                {canEdit ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr .6fr .8fr", gap: "0 8px" }}>
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="Street" value={detail.street} onChange={(e) => setDetail({ ...detail, street: e.target.value })} />
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="City" value={detail.city} onChange={(e) => setDetail({ ...detail, city: e.target.value })} />
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="ST" value={detail.state} onChange={(e) => setDetail({ ...detail, state: e.target.value })} />
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="Zip" value={detail.zip} onChange={(e) => setDetail({ ...detail, zip: e.target.value })} />
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{[selected.street, selected.city, selected.state, selected.zip].filter(Boolean).join(", ") || "—"}</div>
+                )}
               </div>
               {canEdit && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px", marginBottom: 10 }}>
@@ -1569,23 +2205,39 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
               </div>
 
               <span style={lbl}>Scheduling</span>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "5px 0 11px" }}>
-                {selJob
-                  ? <span style={schedChip("#F0FDF4", "#15803D")}>On the Build Schedule ✓</span>
-                  : (canEdit && <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={scheduleShopWork}>Schedule shop work →</button>)}
-                {selStops.length > 0
-                  ? <span style={schedChip("#EEF2FF", "#3D3672")}>{selStops.some((s) => s.delivered_at) ? "Site visit done ✓" : "Site visit on a load ✓"}</span>
-                  : canDeliver
-                    ? (loadPick === null
-                        ? <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
-                            onClick={openLoadPick}>Site visit — add to a load →</button>
-                        : <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addSiteVisit(e.target.value); }}
-                            style={{ ...S.input, padding: "6px 8px", fontSize: 12, width: "auto", fontWeight: 700 }}>
-                            <option value="">{loadPick.length ? "Pick a load…" : "No planned loads — start one"}</option>
-                            {loadPick.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}</option>)}
-                            <option value="new">➕ New load</option>
-                          </select>)
-                    : <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600, alignSelf: "center" }}>Site visits ride a delivery load — ask someone with Delivery Schedule access to add it.</span>}
+              {/* ONE routing control — Build, Delivery, or BOTH (Carolyn 2026-08-23: a
+                  zero-$ repair "should just log the repair for either or both places").
+                  Both = the same two writes in sequence: the build job, then the load pick.
+                  Paths already taken show as chips and leave the control. */}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "5px 0 11px" }}>
+                {selJob && <span style={schedChip("#F0FDF4", "#15803D")}>On the Build Schedule ✓</span>}
+                {selStops.length > 0 && <span style={schedChip("#EEF2FF", "#3D3672")}>{selStops.some((s) => s.delivered_at) ? "Site visit done ✓" : "Site visit on a load ✓"}</span>}
+                {(!selJob || selStops.length === 0) && (canEdit || canDeliver) && (
+                  <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B" }}>Schedule:</span>
+                )}
+                {!selJob && canEdit && (
+                  <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
+                    onClick={scheduleShopWork}>Build →</button>
+                )}
+                {selStops.length === 0 && canDeliver && loadPick === null && (
+                  <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
+                    onClick={openLoadPick}>Delivery →</button>
+                )}
+                {!selJob && selStops.length === 0 && canEdit && canDeliver && loadPick === null && (
+                  <button type="button" disabled={busy} style={{ ...S.btn("#EEF2FF", "#3D3672"), border: "1px solid #C3D9F7", padding: "6px 11px", fontSize: 12 }}
+                    onClick={async () => { await scheduleShopWork(); await openLoadPick(); }}>Both →</button>
+                )}
+                {selStops.length === 0 && canDeliver && loadPick !== null && (
+                  <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addSiteVisit(e.target.value); }}
+                    style={{ ...S.input, padding: "6px 8px", fontSize: 12, width: "auto", fontWeight: 700 }}>
+                    <option value="">{loadPick.length ? "Pick a load…" : "No planned loads — start one"}</option>
+                    {loadPick.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}</option>)}
+                    <option value="new">➕ New load</option>
+                  </select>
+                )}
+                {selStops.length === 0 && !canDeliver && (
+                  <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Site visits ride a delivery load — ask someone with Delivery Schedule access to add it.</span>
+                )}
               </div>
 
               {history.length > 0 && (<>

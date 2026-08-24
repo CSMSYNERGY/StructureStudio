@@ -12,8 +12,11 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
+import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
+import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
+import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
@@ -67,6 +70,7 @@ const GATES: GateTable = {
 
   // ── Options & colours ────────────────────────────────────────────────────
   save_colors:                    { area: "settings_options", level: "edit" },
+  save_window_colors:             { area: "settings_options", level: "edit" },
   save_layout_pricing:            { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
@@ -152,6 +156,13 @@ const GATES: GateTable = {
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
+  // Re-sends the SS quote email (migration 122) — the rep who can edit designs can re-send
+  // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
+  // email to the design's own customer.
+  resend_quote_email: { area: "designs", level: "edit" },
+  // Emails a pending change order to the customer for signature (migration 126). Same
+  // altitude as raising one from the order card: Orders edit.
+  send_change_order: { area: "orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -577,7 +588,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -606,6 +617,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
         betaMode: Boolean(data?.beta_mode),
         betaEmail: data?.beta_email ?? null,
+        // Who issues the paperwork (migration 121). Defaults TRUE for every tenant, so a
+        // row that predates the column — or a tenant with no client_settings row at all —
+        // reads as "invoice through the CRM", i.e. today's behaviour.
+        invoiceInGhl: data?.invoice_in_ghl !== false,
+        ssQuoteNext: data?.ss_quote_next ?? null,
+        ssQuotePrefix: data?.ss_quote_prefix ?? "",
+        ssInvoiceNext: data?.ss_invoice_next ?? null,
+        ssInvoicePrefix: data?.ss_invoice_prefix ?? "",
+        // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
+        // in SS mode there is no GHL fallback, so a tenant without live sending can't
+        // email quotes/invoices at all — the card says so, loudly, without blocking.
+        emailReady: data?.email_provider === "resend" && data?.email_domain_status === "verified",
       }
       : {};
     return json({
@@ -664,6 +687,75 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
+    if ("invoiceInGhl" in payload) updates.invoice_in_ghl = Boolean(payload.invoiceInGhl);
+    // The quote-number START. Blank clears it back to "not set"; anything else must be a
+    // whole positive number, because it is allocated with +1 and printed on a customer's
+    // quote. A float or a stray "1,000" silently becoming NaN — and then 1 — is exactly the
+    // collision with a tenant's existing paperwork that this field exists to avoid.
+    if ("ssQuoteNext" in payload) {
+      const raw = String(payload.ssQuoteNext ?? "").trim();
+      if (!raw) updates.ss_quote_next = null;
+      else {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1 || n > 2_000_000_000) {
+          return json({ error: "The starting quote number must be a whole number, 1 or higher." }, 400);
+        }
+        updates.ss_quote_next = n;
+      }
+    }
+    // Prefix is printed on the customer's quote, so the charset is bounded to what a
+    // document number legitimately needs — no spaces, no punctuation that could be read as
+    // markup on the PDF or in the email subject.
+    if ("ssQuotePrefix" in payload) {
+      const p = String(payload.ssQuotePrefix ?? "").trim().slice(0, 12);
+      if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
+        return json({ error: "The quote prefix can only use letters, numbers and dashes — for example INV or JB-." }, 400);
+      }
+      updates.ss_quote_prefix = p;
+    }
+    // The INVOICE pair (migration 125) — a separate sequence by decision (2026-08-23):
+    // same integer and charset rules as the quote pair above.
+    if ("ssInvoiceNext" in payload) {
+      const raw = String(payload.ssInvoiceNext ?? "").trim();
+      if (!raw) updates.ss_invoice_next = null;
+      else {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1 || n > 2_000_000_000) {
+          return json({ error: "The starting invoice number must be a whole number, 1 or higher." }, 400);
+        }
+        updates.ss_invoice_next = n;
+      }
+    }
+    if ("ssInvoicePrefix" in payload) {
+      const p = String(payload.ssInvoicePrefix ?? "").trim().slice(0, 12);
+      if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
+        return json({ error: "The invoice prefix can only use letters, numbers and dashes — for example INV-." }, 400);
+      }
+      updates.ss_invoice_prefix = p;
+    }
+
+    // Turning CRM invoicing OFF hands the numbering to us, so BOTH start values (quote AND
+    // invoice — separate sequences, migration 125) have to exist before the switch flips —
+    // otherwise the first SS document would begin at 1 and collide with the tenant's
+    // existing paperwork. Checked against the MERGED state (the controls can arrive in
+    // separate saves), the same way the beta pair below is.
+    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload) {
+      const { data: curInv } = await admin
+        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next").eq("client_id", clientId).maybeSingle();
+      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
+      const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
+      const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
+      if (!nextInGhl && nextQuoteStart == null) {
+        return json({
+          error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
+        }, 400);
+      }
+      if (!nextInGhl && nextInvoiceStart == null) {
+        return json({
+          error: "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.",
+        }, 400);
+      }
+    }
 
     // Beta mode has a CONSEQUENCE now (submit-estimate redirects the estimate email to
     // beta_email instead of the customer), so the pair is validated as a pair. Refusing the
@@ -811,7 +903,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
@@ -822,18 +914,20 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
-      admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
+      // Window colors (116): the small per-client list every window fixture offers.
+      admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
@@ -843,7 +937,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
     // builder click a button that can only fail: the Anthropic key is an edge secret, so the
     // browser has no other way to know whether the feature is configured.
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -1741,6 +1835,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // client that doesn't know about these keys can't clear a color's roof categorization.
       if (Object.prototype.hasOwnProperty.call(row, "shingle")) rec.shingle = row.shingle === true;
       if (Object.prototype.hasOwnProperty.call(row, "metal")) rec.metal = row.metal === true;
+      // Door category (116) rides the same presence-guard: `door` = usable on doors,
+      // `doorRate` = FLAT $ per door painted this color (distinct from the paint rate).
+      if (Object.prototype.hasOwnProperty.call(row, "door")) rec.door = row.door === true;
+      if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
+        const dr = Number(row.doorRate);
+        rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
+      }
       if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
         rec.image_url = String(row.imageUrl ?? "").trim() || null;
       }
@@ -1755,6 +1856,54 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
       if (del.error) return dbFail(req, clientId, "remove the colors you deleted", del.error);
+      deleted = toDelete.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // Full-replace this tenant's WINDOW color list (Options tab → Windows section, 116).
+  // Same shape and invariants as save_colors: complete desired list, ids update, no-id
+  // inserts, absentees deleted; an existing row counts as KEPT the moment its id appears —
+  // before validation — so a skipped row can never be swept (audit 2026-08-20). rate is a
+  // FLAT $ per window (no pricing_method engine here). clientId is JWT-resolved.
+  if (action === "save_window_colors") {
+    if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
+    { const e = tooMany(payload.colors, "window colors"); if (e) return json({ error: e }, 400); }
+    const exRes = await admin.from("window_colors").select("id").eq("client_id", clientId);
+    if (exRes.error) return dbFail(req, clientId, "read your current window colors", exRes.error);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    const keptIds = new Set<string>();
+    let saved = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.colors) {
+      const rid = String(row?.id ?? "").trim();
+      const isExisting = rid !== "" && existingIds.has(rid);
+      if (isExisting) keptIds.add(rid);
+      const unchanged = isExisting ? " — existing color left unchanged" : "";
+      const label = String(row?.label ?? "").trim();
+      if (!label) { skipped.push(`row ${i}: blank label${unchanged}`); i++; continue; }
+      const rate = Number(row?.rate);
+      const rec: Record<string, unknown> = {
+        client_id: clientId,
+        label,
+        hex: (typeof row?.hex === "string" && /^#[0-9a-fA-F]{3,8}$/.test(row.hex.trim())) ? row.hex.trim() : null,
+        rate: Number.isFinite(rate) && rate >= 0 ? rate : 0,
+        is_default: row?.isDefault === true,
+        active: row?.active !== false,       // default true
+        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
+        updated_at: new Date().toISOString(),
+      };
+      const res = isExisting
+        ? await admin.from("window_colors").update(rec).eq("client_id", clientId).eq("id", rid)
+        : await admin.from("window_colors").insert(rec);
+      if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (toDelete.length) {
+      const del = await admin.from("window_colors").delete().eq("client_id", clientId).in("id", toDelete);
+      if (del.error) return dbFail(req, clientId, "remove the window colors you deleted", del.error);
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
@@ -1823,6 +1972,33 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       rec.op_right = opRight; rec.op_left = opLeft; rec.op_double = opDouble; rec.op_slideup = opSlideUp; rec.op_default = opDefault;
     }
     if (has("imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+    // Door color behavior (116). Doors only, presence-guarded like every other optional
+    // field; non-doors force the group unconditionally (same invariant as swing/op).
+    // fixed_color_id is validated against the tenant's door-flagged palette by the CALLER
+    // (save_fixture 400s, import_fixtures nulls + notes) — this validator has no DB access.
+    if (!isDoor) {
+      rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null;
+    } else {
+      if (has("colorMode")) {
+        const cm = String(row?.colorMode ?? "").trim();
+        rec.color_mode = (cm === "paint" || cm === "match") ? cm : "fixed";
+      }
+      if (has("hasTrimColor")) rec.has_trim_color = row?.hasTrimColor === true;
+      if (has("fixedColorId")) rec.fixed_color_id = String(row?.fixedColorId ?? "").trim() || null;
+    }
+    // Window color availability (119): windows only, presence-guarded. null = ALL window
+    // colors (the living default), array = exactly those (empty = none). Non-uuid strings
+    // are dropped here so a malformed id can't fail the whole row at the uuid[] cast; the
+    // CALLERS additionally filter to ids that exist in this tenant's window_colors.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (category !== "window") {
+      rec.window_color_ids = null;
+    } else if (has("windowColorIds")) {
+      if (row.windowColorIds === null) rec.window_color_ids = null;
+      else if (Array.isArray(row.windowColorIds)) {
+        rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
+      }
+    }
     return { rec };
   };
   // Inserts still need concrete values for whatever the presence contract left out — the
@@ -1837,7 +2013,33 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       rec.swing_in = false; rec.swing_out = false; rec.swing_default = null;
       rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
     }
+    if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
+    if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     return rec;
+  };
+
+  // Keep only window-color ids that exist in THIS tenant's list (foreign/stale ids buy
+  // nothing in the designer anyway, but a clean row beats a haunted one). null passes
+  // through — it means "all colors", not a list to check.
+  const filterWindowColorIds = async (rec: Record<string, unknown>): Promise<void> => {
+    const ids = rec.window_color_ids;
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    const { data } = await admin.from("window_colors").select("id").eq("client_id", clientId).in("id", ids);
+    const ok = new Set((data ?? []).map((r: any) => String(r.id)));
+    rec.window_color_ids = ids.filter((x) => ok.has(String(x)));
+  };
+
+  // The FK on fixture_items.fixed_color_id accepts ANY colors row — including another
+  // tenant's — so ownership + door-usability are checked here. Returns null when the id is
+  // fine (or absent), else an authored message.
+  const fixedColorProblem = async (rec: Record<string, unknown>): Promise<string | null> => {
+    const fcId = rec.fixed_color_id;
+    if (typeof fcId !== "string" || !fcId) return null;
+    const { data, error } = await admin.from("colors").select("id, door")
+      .eq("id", fcId).eq("client_id", clientId).maybeSingle();
+    if (error || !data) return "that fixed color is not in your palette — pick one from the Colors tab";
+    if (data.door !== true) return "that color is not ticked for Doors — tick it in the Colors tab first";
+    return null;
   };
 
   // Save ONE catalog fixture. Update is IN PLACE by uuid — building_size_inclusions
@@ -1850,6 +2052,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
     const v = validateFixtureRow(payload, category, 0);
     if (v.err) return json({ error: v.err }, 400);
+    { const p = await fixedColorProblem(v.rec!); if (p) return json({ error: p }, 400); }
+    await filterWindowColorIds(v.rec!);
     const id = String(payload?.id ?? "").trim();
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
@@ -1925,11 +2129,39 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (exRes.error) return dbFail(req, clientId, "read your current catalog lines", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
     let nextSort = (exRes.data ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.sort_order) || 0), -1) + 1;
+    // Door-flagged palette ids, prefetched ONCE so fixed-color ids check without a query
+    // per row. An invalid id is cleared with a note — never a skipped row (the rest of the
+    // line is fine; blocking a 500-row import on one stale color label helps nobody).
+    let doorColorIds: Set<string> | null = null;
+    if (category === "door") {
+      const dc = await admin.from("colors").select("id").eq("client_id", clientId).eq("door", true);
+      if (dc.error) return dbFail(req, clientId, "read your door colors", dc.error);
+      doorColorIds = new Set((dc.data ?? []).map((r: any) => String(r.id)));
+    }
+    // Same prefetch for window colors: availability lists are filtered per row below.
+    let windowColorIds: Set<string> | null = null;
+    if (category === "window") {
+      const wc = await admin.from("window_colors").select("id").eq("client_id", clientId);
+      if (wc.error) return dbFail(req, clientId, "read your window colors", wc.error);
+      windowColorIds = new Set((wc.data ?? []).map((r: any) => String(r.id)));
+    }
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
       const v = validateFixtureRow(row, category, i);
       if (v.err) { skipped.push(v.err); i++; continue; }
+      const fcId = v.rec!.fixed_color_id;
+      if (doorColorIds && typeof fcId === "string" && fcId && !doorColorIds.has(fcId)) {
+        skipped.push(`${String(row?.name ?? "row " + (i + 1))}: fixed color not in your door palette — cleared`);
+        v.rec!.fixed_color_id = null;
+      }
+      if (windowColorIds && Array.isArray(v.rec!.window_color_ids)) {
+        const before = (v.rec!.window_color_ids as unknown[]).length;
+        v.rec!.window_color_ids = (v.rec!.window_color_ids as unknown[]).filter((x) => windowColorIds!.has(String(x)));
+        if ((v.rec!.window_color_ids as unknown[]).length < before) {
+          skipped.push(`${String(row?.name ?? "row " + (i + 1))}: some colors aren't in your window color list — dropped`);
+        }
+      }
       const rid = String(row?.id ?? "").trim();
       if (rid && existingIds.has(rid)) {
         const res = await admin.from("fixture_items").update(v.rec!)
@@ -3240,6 +3472,114 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // (Restored here 2026-08-07: this note had been stranded ~330 lines up, above the
   // unrelated qbo_pending action — the file's most consequential invariant documented
   // nowhere near the code that implements it.)
+  // ── resend_quote_email: re-send the SS quote email (migration 122) ──────────────────
+  // The quote already exists (number allocated, PDF built by submit-estimate 9-ALT); this
+  // just re-sends the branded email. No allocation, no conversion, no ledger claim — the
+  // worst a retry can do is email the design's own customer twice. Success re-stamps
+  // ss_quote_sent_at; a failure reports {sent:false, reason} so the rep reaches for Print
+  // or Copy-link instead (Carolyn 2026-08-23: email absence never blocks the quote).
+  if (action === "resend_quote_email") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+
+    const { data: d, error: dErr } = await admin
+      .from("designs")
+      .select("short_code, contact, selections, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet — submit it from the designer first." }, 400);
+
+    const { data: cs, error: csErr } = await admin
+      .from("client_settings")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your settings", csErr);
+    if (!cs || cs.invoice_in_ghl !== false) {
+      return json({ error: "This account quotes through the CRM — re-send it from there." }, 400);
+    }
+
+    const to = String(d?.contact?.email || "").trim();
+    if (!to) return json({ ok: true, sent: false, reason: "no email address on this design" });
+
+    const total = totalFromSnapshot(d.estimate_lines);
+    const sel = d.selections || {};
+    const content = estimateEmail({
+      businessName: cs.business_name || clientId,
+      logoUrl: cs.business_logo_url || null,
+      phone: cs.business_phone || null,
+      website: cs.business_website || null,
+      estimateNumber: String(d.ss_quote_number),
+      total: total == null ? "" : total,
+      styleLabel: sel.style || null,
+      sizeLabel: sel.size || null,
+      estimateUrl: myQuotesUrl(clientId, req),
+      pdfUrl: d.image_url || null,
+      formalPdfUrl: d.ss_quote_pdf_url || null,
+      quoteTerms: cs.quote_terms || null,
+      docWord: "quote",
+    });
+    const outcome = await sendTenantEmail(admin, clientId, {
+      kind: "estimate",
+      shortCode,
+      to,
+      subject: content.subject,
+      html: content.html,
+      text: content.text,
+    });
+    if (outcome.sent) {
+      await admin.from("designs")
+        .update({ ss_quote_sent_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("short_code", shortCode);
+    }
+    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+  }
+
+  // ── send_change_order: email a pending change order to the customer (migration 126) ──
+  // The CO row already exists (raised by the SS resubmit path, or by the order card's
+  // form); this only delivers the request-for-signature email. Idempotent — re-sending is
+  // a duplicate email at worst, so it doubles as the "Resend" button.
+  if (action === "send_change_order") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change order", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status !== "pending_ack") {
+      return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided." }, 400);
+    }
+    const { data: d } = await admin.from("designs")
+      .select("contact, ss_quote_number")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    const to = String((d?.contact as { email?: unknown } | null)?.email ?? "").trim();
+    if (!isEmail(to)) return json({ ok: true, sent: false, reason: "no email address on this design" });
+    const { data: cs } = await admin.from("client_settings")
+      .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    const content = changeOrderEmail({
+      businessName: String(cs?.business_name ?? "").trim() || clientId,
+      logoUrl: cs?.business_logo_url,
+      phone: cs?.business_phone,
+      website: cs?.business_website,
+      quoteNumber: String(d?.ss_quote_number || co.short_code),
+      coNo: Number(co.co_no) || 0,
+      description: String(co.description || ""),
+      totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
+      totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
+      reviewUrl: myQuotesUrl(clientId, req),
+      quoteTerms: cs?.quote_terms,
+    });
+    const outcome = await sendTenantEmail(admin, clientId, {
+      kind: "change_order", shortCode: co.short_code, to,
+      subject: content.subject, html: content.html, text: content.text,
+    });
+    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+  }
+
   if (action === "send_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
@@ -3260,6 +3600,237 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         await auditStrict("operator_send_invoice_attempt", null, `short_code=${shortCode}`);
       } catch (e) {
         return json({ error: (e as Error).message }, 503);
+      }
+    }
+
+    // ── SS MODE (migration 125): StructureStudio issues the invoice ──────────────────
+    // One early-return branch, exactly the submit-estimate 9-ALT pattern: the entire GHL
+    // convert/send machinery below stays byte-identical for every invoice_in_ghl tenant.
+    {
+      const { data: cur0 } = await admin.from("client_settings")
+        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms")
+        .eq("client_id", clientId).maybeSingle();
+      if (cur0?.invoice_in_ghl === false) {
+        // The design: the SS quote is the prerequisite, and the acceptance evidence is OUR
+        // OWN record (designs.status/accepted_at written by customer-accept, migration 124)
+        // — there is no live GHL estimate to check.
+        const { data: d, error: dErr } = await admin.from("designs")
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, inventory_unit_id")
+          .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+        if (dErr) return dbFail(req, clientId, "find that design", dErr);
+        if (!d) return json({ error: "Design not found." }, 404);
+        if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
+        const dStatus = String(d.status || "");
+        if (dStatus === "invoiced" || dStatus === "delivered") {
+          // The invoice may have completed on paper (the email does not gate it — see
+          // below). If the ledger says created-but-never-emailed, this click is the email
+          // retry; anything else is genuinely done.
+          const { data: prior } = await admin.from("invoice_sends")
+            .select("status, issued_by, invoice_number, invoice_pdf_url")
+            .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+          if (prior && String(prior.status) === "created" && String(prior.issued_by) === "structurestudio" && prior.invoice_number) {
+            const { data: c2 } = await admin.from("designs").select("contact")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+            const to2 = String((c2?.contact as { email?: unknown } | null)?.email ?? "").trim();
+            if (!isEmail(to2)) {
+              return json({ error: `Invoice ${prior.invoice_number} is complete, but this design has no email address — print the invoice PDF instead.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 400);
+            }
+            const { data: cs2 } = await admin.from("client_settings")
+              .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+              .eq("client_id", clientId).maybeSingle();
+            const out2 = await sendTenantEmail(admin, clientId, {
+              kind: "invoice", shortCode, to: to2,
+              ...invoiceEmail({
+                businessName: String(cs2?.business_name ?? "").trim() || clientId,
+                logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
+                invoiceNumber: String(prior.invoice_number),
+                total: totalFromSnapshot(d.estimate_lines) ?? "",
+                invoiceUrl: prior.invoice_pdf_url, quoteTerms: cs2?.quote_terms,
+              }),
+            });
+            if (out2.sent) {
+              await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
+                .eq("client_id", clientId).eq("short_code", shortCode);
+              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true });
+            }
+            return json({ error: `Invoice ${prior.invoice_number} exists but the email still didn't go out (${out2.reason || "failed"}). Print the invoice PDF or fix email sending in Settings → Email.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 502);
+          }
+          return json({ error: "This design was already invoiced." }, 400);
+        }
+        if (dStatus !== "accepted" && !d.accepted_at) {
+          return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept and sign from their quote page.` }, 400);
+        }
+
+        // Pending change order blocks invoicing (Carolyn 2026-08-23). 42P01 = the
+        // change_orders table hasn't shipped yet — treat as no pending, so this branch and
+        // the change-orders slice can deploy in either order.
+        {
+          const co = await admin.from("change_orders").select("id")
+            .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "pending_ack").limit(1);
+          // A missing table is fine (the change-orders slice may not have shipped yet):
+          // raw Postgres says 42P01, but PostgREST reports it as PGRST205 ("could not find
+          // the table ... in the schema cache") — tolerate both spellings.
+          const missingTable = co.error && (
+            String(co.error.code) === "42P01" || String(co.error.code) === "PGRST205" ||
+            /does not exist|schema cache/i.test(String(co.error.message || ""))
+          );
+          if (co.error && !missingTable) return dbFail(req, clientId, "check change orders", co.error);
+          if (!co.error && (co.data?.length ?? 0) > 0) {
+            return json({ error: "A change order on this job is awaiting the customer's acknowledgment. Invoice it after they sign, or record their verbal confirmation on the order." }, 409);
+          }
+        }
+
+        const nowIso = () => new Date().toISOString();
+        const setClaim = (patch: Record<string, unknown>) =>
+          admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+            .eq("client_id", clientId).eq("short_code", shortCode);
+        const STALE_CLAIM_MS = 3 * 60 * 1000;
+
+        // Claim — same PK-insert concurrency claim and recovery ladder as the CRM path.
+        let recoveredNumber: string | null = null;
+        let recoveredPdfUrl: string | null = null;
+        const claimIns = await admin.from("invoice_sends").insert({
+          client_id: clientId, short_code: shortCode,
+          issued_by: "structurestudio", status: "claimed", attempts: 1,
+          sent_by_operator: operator ? operator.email : null,
+          invoice_type: invoiceTypeFor(d),
+        });
+        if (claimIns.error) {
+          const { data: prior } = await admin.from("invoice_sends")
+            .select("status, issued_by, invoice_number, invoice_pdf_url, updated_at, attempts")
+            .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+          if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
+          const st = String(prior.status || "");
+          if (st === "sent") {
+            return json({ error: `Invoice ${prior.invoice_number ?? ""} was already sent for this design.` }, 400);
+          }
+          if (st === "created") {
+            // The invoice EXISTS (number + document) but was never emailed → re-send only.
+            recoveredNumber = prior.invoice_number ? String(prior.invoice_number) : null;
+            recoveredPdfUrl = prior.invoice_pdf_url ? String(prior.invoice_pdf_url) : null;
+          } else if (st === "claimed") {
+            const age = Date.now() - new Date(String(prior.updated_at)).getTime();
+            if (age < STALE_CLAIM_MS) {
+              return json({ error: "An invoice for this design is already being sent — give it a moment." }, 409);
+            }
+          }
+          await setClaim({ status: st === "created" ? "created" : "claimed", issued_by: "structurestudio", error: null, attempts: (Number(prior.attempts) || 1) + 1 });
+        }
+
+        // Number — allocated ONCE; the recovery path reuses it, never re-numbers.
+        let invNumber = recoveredNumber;
+        if (!invNumber) {
+          const { data: allocated, error: allocErr } = await admin
+            .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
+          if (allocErr) {
+            await setClaim({ status: "failed", error: `allocate: ${allocErr.message}`.slice(0, 500) });
+            return json({ error: `Could not allocate an invoice number: ${allocErr.message}` }, 502);
+          }
+          invNumber = allocated ? String(allocated) : null;
+          if (!invNumber) {
+            await setClaim({ status: "failed", error: "no invoice starting number" });
+            return json({ error: "No starting invoice number is set. Add one in Settings → CRM Connection → Quotes & Invoices." }, 400);
+          }
+        }
+
+        // The document: the same 3-sheet builder as the quote, titled Invoice (docKind).
+        // Best-effort — a PDF failure records honestly and the invoice still sends, the
+        // same contract as the quote path.
+        let invoicePdfUrl = recoveredPdfUrl;
+        const totalNum = totalFromSnapshot(d.estimate_lines);
+        if (!invoicePdfUrl) {
+          try {
+            const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+            const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+            const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
+            const snapLines = Array.isArray(d.estimate_lines?.lines) ? d.estimate_lines.lines : [];
+            const pdfBytes = await buildQuotePdf({
+              docKind: "invoice",
+              business: {
+                name: String(cur0?.business_name ?? "").trim() || clientId,
+                phone: cur0?.business_phone ?? null,
+                website: cur0?.business_website ?? null,
+                address: cur0?.business_address ?? null,
+              },
+              estimateNumber: invNumber,
+              dateIso: nowIso(),
+              // deno-lint-ignore no-explicit-any
+              lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
+              discount: Number(d.estimate_lines?.discount) || 0,
+              quoteTerms: cur0?.quote_terms ?? null,
+              planPdfUrl: planUrl,
+            });
+            const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
+            const up = await admin.storage.from("floor-plans")
+              .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+            if (!up.error) {
+              const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
+              invoicePdfUrl = pub?.publicUrl || null;
+            } else {
+              console.warn("SS invoice PDF upload failed:", up.error.message);
+            }
+          } catch (e) {
+            console.warn("SS invoice PDF generation failed:", (e as Error).message);
+          }
+        }
+
+        // Record BEFORE the email: from here a retry re-sends this exact number + document.
+        await setClaim({ status: "created", issued_by: "structurestudio", invoice_number: invNumber, invoice_pdf_url: invoicePdfUrl, error: null });
+
+        // The email. Contact read only here (the PII discipline of 2026-08-07). There is
+        // NO GHL fallback in SS mode — there is no GHL invoice object to email.
+        const { data: c } = await admin.from("designs").select("contact")
+          .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+        const to = String((c?.contact as { email?: unknown } | null)?.email ?? "").trim();
+        let sent = false;
+        let sendReason: string | null = null;
+        if (isEmail(to)) {
+          const out = await sendTenantEmail(admin, clientId, {
+            kind: "invoice",
+            shortCode,
+            to,
+            ...invoiceEmail({
+              businessName: String(cur0?.business_name ?? "").trim() || clientId,
+              logoUrl: cur0?.business_logo_url,
+              phone: cur0?.business_phone,
+              website: cur0?.business_website,
+              invoiceNumber: invNumber,
+              total: totalNum == null ? "" : totalNum,
+              invoiceUrl: invoicePdfUrl,
+              quoteTerms: cur0?.quote_terms,
+            }),
+          });
+          sent = out.sent;
+          if (!out.sent) sendReason = out.reason || "failed";
+        } else {
+          sendReason = "no email address on this design";
+        }
+        // THE EMAIL DOES NOT GATE THE INVOICE (Carolyn 2026-08-23, paper-first: most lot
+        // customers want a printed invoice, and a design with no email address must still
+        // be invoiceable). The invoice is complete the moment it has a number and a
+        // document — the sale proceeds either way; the ledger keeps 'created' + the reason
+        // when the email didn't land, so "Resend" can finish that half later, and the
+        // response says plainly what did and didn't happen.
+        await setClaim(sent
+          ? { status: "sent", error: null }
+          : { status: "created", error: `email not sent: ${sendReason}`.slice(0, 500) });
+        await admin.from("designs")
+          .update({ status: "invoiced", updated_at: nowIso() })
+          .eq("client_id", clientId).eq("short_code", shortCode);
+        if (d.inventory_unit_id) {
+          await claimUnitSale(d.inventory_unit_id, shortCode, "invoice");
+        }
+        if (operator) audit("operator_send_invoice_result", null, `short_code=${shortCode} invoice=${invNumber} (structurestudio)`);
+        // qboInvoice.ts never reads GHL (verified 2026-08-23): lines come from the same
+        // estimate_lines snapshot, the customer from designs.contact. `ghlTotal` is a
+        // misnomer here — it only feeds the books' mismatch note.
+        await pushQboInvoice(admin, clientId, {
+          shortCode,
+          docNumber: invNumber,
+          ghlTotal: totalNum,
+        });
+
+        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, ...(sent ? {} : { emailReason: sendReason }) });
       }
     }
 

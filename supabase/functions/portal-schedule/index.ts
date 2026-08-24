@@ -94,6 +94,7 @@ const GATES: GateTable = {
   // ── Repairs ──────────────────────────────────────────────────────────────
   list_repairs:  { area: "repairs", level: "view" },
   repair_photos: { area: "repairs", level: "view" },
+  search_contacts: { area: "repairs", level: "view" },
   create_repair: { area: "repairs", level: "edit" },
   update_repair: { area: "repairs", level: "edit" },
   // Cascades into build_jobs and delivery_stops via FK, so this deletes rows owned by two
@@ -1391,6 +1392,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         row.customer_name = row.customer_name ?? repair.customer_name;
         row.customer_phone = row.customer_phone ?? repair.phone;
         row.building_label = row.building_label ?? `Repair R-${repair.repair_no}`;
+        // The site visit goes to the CUSTOMER'S address, which the repair now carries
+        // (migration 115). Caller-sent values still win; this only fills blanks — and the
+        // territory-defaulting block below then works for repair stops too, which it never
+        // could while a repair stop had no destination at all.
+        row.dest_street = row.dest_street ?? str(repair.street);
+        row.dest_city = row.dest_city ?? str(repair.city);
+        row.dest_state = row.dest_state ?? str(repair.state);
+        row.dest_zip = row.dest_zip ?? str(repair.zip);
       } else if (!row.customer_name && !row.building_label) {
         return json({ error: "A manual stop needs a customer or description." }, 400);
       }
@@ -1629,15 +1638,70 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
 
     // ═══════════════ ADMIN WRITES — repairs ═══════════════
 
+    if (action === "search_contacts") {
+      // The repair intake's contact type-ahead. Contacts have no table of their own — they
+      // live in designs.contact (schema-less jsonb; addressFrom knows its key history) and in
+      // past repairs' customer fields. Searched HERE rather than by a browser read of designs
+      // because a direct read breaks operator view-as (it would return the OPERATOR's tenant).
+      // Repairs never create or touch GHL contacts (Carolyn 2026-08-23: repair invoices are
+      // SS-native only), so this is read-only in every sense.
+      const q = (str(payload?.q) ?? "").toLowerCase();
+      if (q.length < 2) return json({ contacts: [] });
+      type Hit = { name: string; phone: string | null; email: string | null;
+        street: string | null; city: string | null; state: string | null; zip: string | null; source: string };
+      const hits: Hit[] = [];
+      const { data: designs } = await admin.from("designs").select("contact")
+        .eq("client_id", clientId).not("contact", "is", null)
+        .order("created_at", { ascending: false }).limit(500);
+      for (const d of designs ?? []) {
+        const c = d.contact as Record<string, unknown>;
+        const name = str(c?.name);
+        if (!name) continue;
+        const a = addressFrom(c);
+        hits.push({ name, phone: str(c?.phone), email: str(c?.email),
+          street: a.street, city: a.city, state: a.state, zip: a.zip, source: "design" });
+      }
+      const { data: reps } = await admin.from("repairs")
+        .select("customer_name, phone, email, street, city, state, zip")
+        .eq("client_id", clientId).order("requested_at", { ascending: false }).limit(300);
+      for (const r of reps ?? []) {
+        if (!r.customer_name) continue;
+        hits.push({ name: r.customer_name, phone: str(r.phone), email: str(r.email),
+          street: str(r.street), city: str(r.city), state: str(r.state), zip: str(r.zip), source: "repair" });
+      }
+      // Match on name/phone/email, dedupe by the strongest identity available (email →
+      // phone → name), keep the FIRST hit per person — designs are listed newest-first and
+      // before repairs, so the freshest design contact wins and its address rides along.
+      const seen = new Set<string>();
+      const out: Hit[] = [];
+      for (const h of hits) {
+        const hay = `${h.name} ${h.phone ?? ""} ${h.email ?? ""}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+        const key = (h.email ?? "").toLowerCase() || (h.phone ?? "").replace(/[^0-9]/g, "") || h.name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(h);
+        if (out.length >= 10) break;
+      }
+      return json({ contacts: out });
+    }
+
     if (action === "create_repair") {
       const customerName = str(payload?.customerName);
       const description = str(payload?.description);
       if (!customerName || !description) return json({ error: "Customer name and a description are required." }, 400);
+      // Address fields are length-capped (they render on stops and, later, on SS invoices) —
+      // the same posture as portal-settings' business_address.
+      const cap = (v: unknown, n: number) => { const t = str(v); return t ? t.slice(0, n) : null; };
       const row: Record<string, unknown> = {
         client_id: clientId,
         customer_name: customerName,
         phone: str(payload?.phone),
         email: str(payload?.email),
+        street: cap(payload?.street, 160),
+        city: cap(payload?.city, 80),
+        state: cap(payload?.state, 40),
+        zip: cap(payload?.zip, 20),
         description,
         serial: num(payload?.serial),
         design_short_code: str(payload?.designShortCode),
@@ -1690,6 +1754,11 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       if ("customerName" in payload) patch.customer_name = str(payload.customerName) ?? repair.customer_name;
       if ("phone" in payload) patch.phone = str(payload.phone);
       if ("email" in payload) patch.email = str(payload.email);
+      const capU = (v: unknown, n: number) => { const t = str(v); return t ? t.slice(0, n) : null; };
+      if ("street" in payload) patch.street = capU(payload.street, 160);
+      if ("city" in payload) patch.city = capU(payload.city, 80);
+      if ("state" in payload) patch.state = capU(payload.state, 40);
+      if ("zip" in payload) patch.zip = capU(payload.zip, 20);
       if ("description" in payload) patch.description = str(payload.description) ?? repair.description;
       if ("serial" in payload) patch.serial = num(payload.serial);
       if ("designShortCode" in payload) patch.design_short_code = str(payload.designShortCode);

@@ -405,7 +405,7 @@ function ReleasesView({ submissionsKey }) {
     (async () => {
       const { data, error: err } = await sb
         .from("release_notes")
-        .select("id, released_at, version, kind, title, detail, status, sort_order")
+        .select("id, released_at, version, kind, title, detail, status, sort_order, section")
         .order("released_at", { ascending: false })
         .order("sort_order", { ascending: false });
       if (err) { setError(err.message); setRows([]); return; }
@@ -452,9 +452,34 @@ function ReleasesView({ submissionsKey }) {
     return <span style={{ background: m.bg, color: m.fg, fontSize: 10, fontWeight: 800, borderRadius: 999, padding: "2px 8px", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>{m.label}</span>;
   };
 
+  // Which part of the product an entry is about (migration 114). Rendered FIRST on the line so
+  // the eye can run down the left edge and skip whole areas — the list is 88 entries and
+  // growing, and a label at the end of the title would have to be read to be used.
+  //
+  // Brand colours, not neutral grey (Carolyn 2026-08-23): light blue ground, ACCENT purple text.
+  // #DBEAFF is the light blue already used elsewhere in the portal, and ACCENT is the brand
+  // purple from 01-core — the constant rather than a copy of its hex, so a rebrand moves this
+  // with everything else. It reads as OURS rather than as a second status badge, which was the
+  // worry about colouring it at all; the status badges stay distinguishable because they are
+  // orange (beta), indigo (roadmap/planned) and amber (requested), none of which is this blue.
+  // An entry with no section renders NOTHING here — '' is the column's default, so an
+  // unlabelled entry looks exactly as it did before.
+  const sectionChip = (section) => {
+    const s = String(section || "").trim();
+    if (!s) return null;
+    return (
+      <span style={{
+        background: "#DBEAFF", color: ACCENT, fontSize: 10, fontWeight: 800,
+        borderRadius: 5, padding: "2px 7px", letterSpacing: 0.3, whiteSpace: "nowrap",
+        textTransform: "uppercase", flexShrink: 0,
+      }}>{s}</span>
+    );
+  };
+
   const entry = (r) => (
     <div key={r.id} style={{ padding: "12px 0", borderBottom: "1px solid #F1F5F9" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        {sectionChip(r.section)}
         <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{r.title}</span>
         {statusBadge(r.status)}
         <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", whiteSpace: "nowrap" }}>{fmtDT(r.released_at)}</span>
@@ -766,11 +791,16 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         if (!data || data.length < page) return { data: out };
       }
     };
-    const [{ data: dsn }, paysRes] = await Promise.all([
+    const [{ data: dsn }, paysRes, coRes] = await Promise.all([
       codes.length
-        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number").in("short_code", codes).limit(2000)
+        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url").in("short_code", codes).limit(2000)
         : Promise.resolve({ data: [] }),
       fetchAllPayments(),
+      // Pending change orders (migration 126): the row wears an amber chip, and the server
+      // 409s an invoice while one is open — the chip is the courtesy half of that rule.
+      codes.length
+        ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack").in("short_code", codes)
+        : Promise.resolve({ data: [] }),
     ]);
     // A failed payments read must not render every order as unpaid — that's the same
     // silent understatement the paging above exists to prevent.
@@ -778,11 +808,13 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const pays = paysRes.data;
     const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
     const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
+    const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
     setRows(list.map((o) => {
       const ps = payByOrder[o.id] || [];
       return {
         o, d: byCode[o.short_code] || null, pays: ps,
         paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
+        coPending: pendingCo.has(o.short_code),
       };
     }));
   }, [clientId]);
@@ -907,7 +939,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
       if (fMax !== "" && tot > Number(fMax)) return false;
     }
     const extra = [nameOf(r), bldgOf(r), "#" + r.o.order_no, r.o.short_code,
-      (r.d && r.d.ghl_estimate_number) ? "EST-" + r.d.ghl_estimate_number : "", stateOf(r).label, fmtDate(r.o.ordered_at)].join(" ");
+      (r.d && r.d.ghl_estimate_number) ? "EST-" + r.d.ghl_estimate_number : "", (r.d && r.d.ss_quote_number) || "", stateOf(r).label, fmtDate(r.o.ordered_at)].join(" ");
     return rowMatchesQuery(r.o, query, extra);
   });
   const openRow = openId ? all.find((r) => r.o.id === openId) : null;
@@ -1011,7 +1043,13 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
                       <td style={{ ...numCell, fontWeight: bal ? 800 : 600, color: bal === 0 ? "#94A3B8" : bal < 0 ? "#9A3412" : "#1E293B" }}>
                         {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
                       </td>
-                      <td style={S.td}><span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span></td>
+                      <td style={S.td}>
+                        <span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+                        {r.coPending && (
+                          <span title="A change order is awaiting the customer's acknowledgment — invoicing is blocked until they sign or a verbal confirmation is recorded"
+                            style={{ background: "#FEF3C7", color: "#B45309", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>CO pending</span>
+                        )}
+                      </td>
                       {(schedOn || deliverOn) && (
                         // stopPropagation throughout: the row itself opens the order detail.
                         <td style={{ ...S.td, whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{schedCell(r)}</td>
@@ -1030,6 +1068,251 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
 }
 
 // One order: the money detail + payment history + record-a-payment.
+/* Change orders (migration 126) — SS-mode orders only (the design carries an SS quote).
+   A change to an agreed order needs the customer's acknowledgment: e-signature from their
+   quote page, OR the rep's verbal attestation (checkbox + name + conversation date) —
+   either/or, Carolyn 2026-08-23. While one is pending, send_invoice 409s server-side.
+   Reads/writes are direct RLS (the orders precedent); the guard trigger owns the rules a
+   browser must not bypass (co_no assignment, signature acks, frozen-when-acknowledged). */
+function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onChanged }) {
+  const [cos, setCos] = useState(null);        // null = loading
+  const [msg, setMsg] = useState(null);        // { ok } | { err }
+  const [busy, setBusy] = useState(false);
+  // New-CO form
+  const [formOpen, setFormOpen] = useState(false);
+  const [desc, setDesc] = useState("");
+  const [newTotal, setNewTotal] = useState("");
+  const [ackPath, setAckPath] = useState("sign");   // 'sign' | 'verbal'
+  const [repName, setRepName] = useState("");
+  const [convDate, setConvDate] = useState(todayLocal());
+  const [note, setNote] = useState("");
+  // Per-CO verbal-attestation form
+  const [verbalFor, setVerbalFor] = useState(null); // co.id | null
+  const [vRep, setVRep] = useState("");
+  const [vDate, setVDate] = useState(todayLocal());
+  const [vNote, setVNote] = useState("");
+  const [vConfirm, setVConfirm] = useState(false);
+
+  const load = useCallback(async () => {
+    const { data, error } = await sb.from("change_orders")
+      .select("*").eq("client_id", clientId).eq("short_code", shortCode)
+      .order("co_no", { ascending: false });
+    if (error) { setMsg({ err: error.message }); setCos([]); return; }
+    setCos(data || []);
+  }, [clientId, shortCode]);
+  useEffect(() => { load(); }, [load]);
+
+  const applyAckedTotal = async (co) => {
+    // The acknowledged total becomes the order's total; 'manual' also shields it from the
+    // GHL repricer (sync-design-status skips manual rows).
+    if (co.total_after_cents == null) return;
+    const { error } = await sb.from("orders")
+      .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (error) setMsg({ err: `Change recorded, but the order total didn't update: ${error.message}` });
+  };
+
+  const createCo = async () => {
+    const d = desc.trim();
+    if (!d) { setMsg({ err: "Describe the change — this text is what the customer signs off on." }); return; }
+    let totalCents = null;
+    if (newTotal.trim()) {
+      totalCents = centsFrom(newTotal);
+      if (!Number.isFinite(totalCents) || totalCents < 0) { setMsg({ err: "Enter the new total as a dollar amount, e.g. 9575.00" }); return; }
+    }
+    const verbal = ackPath === "verbal";
+    if (verbal && (!repName.trim() || !convDate)) { setMsg({ err: "Verbal confirmation needs your name and the date of the conversation." }); return; }
+    setBusy(true); setMsg(null);
+    const rowBase = {
+      client_id: clientId, short_code: shortCode, order_id: orderId || null,
+      source: "manual", description: d,
+      total_before_cents: currentTotalCents == null ? null : currentTotalCents,
+      total_after_cents: totalCents,
+    };
+    const { data: created, error } = await sb.from("change_orders")
+      .insert(verbal
+        ? { ...rowBase, status: "acknowledged", ack_method: "verbal", verbal_rep_name: repName.trim(), verbal_conversation_date: convDate, verbal_note: note.trim() || null }
+        : rowBase)
+      .select("id, co_no, total_after_cents, status").maybeSingle();
+    setBusy(false);
+    if (error) { setMsg({ err: error.message }); return; }
+    setFormOpen(false); setDesc(""); setNewTotal(""); setRepName(""); setNote("");
+    if (verbal) {
+      await applyAckedTotal(created);
+      setMsg({ ok: `CO-${created.co_no} recorded with your verbal confirmation.` });
+    } else {
+      // Email it for signature right away — a pending CO nobody was told about blocks the
+      // invoice forever. sent:false just means print/hand it over; the CO still exists.
+      const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: created.id } });
+      setMsg(sent && sent.sent
+        ? { ok: `CO-${created.co_no} created and emailed to the customer for signature.` }
+        : { ok: `CO-${created.co_no} created. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — the customer can sign it from their quote page link.` });
+    }
+    load(); onChanged();
+  };
+
+  const recordVerbal = async (co) => {
+    if (!vConfirm) { setMsg({ err: "Tick the confirmation box — it is your attestation." }); return; }
+    if (!vRep.trim() || !vDate) { setMsg({ err: "Verbal confirmation needs your name and the date of the conversation." }); return; }
+    setBusy(true); setMsg(null);
+    const { error } = await sb.from("change_orders")
+      .update({ status: "acknowledged", ack_method: "verbal", verbal_rep_name: vRep.trim(), verbal_conversation_date: vDate, verbal_note: vNote.trim() || null })
+      .eq("id", co.id).eq("status", "pending_ack");
+    setBusy(false);
+    if (error) { setMsg({ err: error.message }); return; }
+    setVerbalFor(null); setVRep(""); setVNote(""); setVConfirm(false);
+    await applyAckedTotal(co);
+    setMsg({ ok: `CO-${co.co_no} confirmed verbally.` });
+    load(); onChanged();
+  };
+
+  const emailCo = async (co) => {
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: co.id } });
+    setBusy(false);
+    if (error || (data && data.error)) { setMsg({ err: (data && data.error) || error.message }); return; }
+    setMsg(data && data.sent
+      ? { ok: `CO-${co.co_no} emailed to the customer for signature.` }
+      : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their quote page.` });
+  };
+
+  const voidCo = async (co) => {
+    const reason = window.prompt(`Void CO-${co.co_no}? Give a reason (kept in the record):`);
+    if (reason == null) return;
+    if (!reason.trim()) { setMsg({ err: "Voiding needs a reason." }); return; }
+    const { error } = await sb.from("change_orders")
+      .update({ status: "void", void_reason: reason.trim() })
+      .eq("id", co.id);
+    if (error) { setMsg({ err: error.message }); return; }
+    load(); onChanged();
+  };
+
+  const chip = (co) => {
+    const s = co.status === "pending_ack"
+      ? { bg: "#FEF3C7", fg: "#B45309", label: "Awaiting customer" }
+      : co.status === "acknowledged"
+        ? { bg: "#F0FDF4", fg: "#15803D", label: "Acknowledged" }
+        : { bg: "#F1F5F9", fg: "#64748B", label: "Void" };
+    return <span style={{ background: s.bg, color: s.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{s.label}</span>;
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Change orders</div>
+        <button type="button" onClick={() => setFormOpen((o) => !o)}
+          style={{ ...S.btn("#FFF", ACCENT), border: `1px solid ${ACCENT}`, marginLeft: "auto", padding: "5px 12px", fontSize: 12 }}>
+          {formOpen ? "Cancel" : "+ New change order"}
+        </button>
+      </div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      {formOpen && (
+        <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, marginBottom: 12 }}>
+          <span style={S.lbl}>What changed?</span>
+          <textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={3}
+            placeholder={'e.g. "Moved delivery to the week of Sept 14" or "Added a 4\' side door, $250"'}
+            style={{ ...S.input, resize: "vertical", fontFamily: "inherit" }} />
+          <div style={{ marginTop: 10, maxWidth: 220 }}>
+            <span style={S.lbl}>New order total (optional)</span>
+            <input style={S.input} value={newTotal} onChange={(e) => setNewTotal(e.target.value)} placeholder="e.g. 9575.00" inputMode="decimal" />
+          </div>
+          <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 13, fontWeight: 600, color: "#334155", flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="radio" name="ss-co-ack" checked={ackPath === "sign"} onChange={() => setAckPath("sign")} />
+              Send to the customer to e-sign
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="radio" name="ss-co-ack" checked={ackPath === "verbal"} onChange={() => setAckPath("verbal")} />
+              Customer already confirmed verbally
+            </label>
+          </div>
+          {ackPath === "verbal" && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10, marginTop: 10, maxWidth: 520 }}>
+              <div><span style={S.lbl}>Your name</span>
+                <input style={S.input} value={repName} onChange={(e) => setRepName(e.target.value)} placeholder="Who spoke with them" /></div>
+              <div><span style={S.lbl}>Date of conversation</span>
+                <input type="date" style={S.input} value={convDate} onChange={(e) => setConvDate(e.target.value)} /></div>
+              <div style={{ gridColumn: "1 / -1" }}><span style={S.lbl}>Note (optional)</span>
+                <input style={S.input} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. phone call, spoke with Dave" /></div>
+            </div>
+          )}
+          <button type="button" onClick={createCo} disabled={busy}
+            style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, padding: "8px 16px", fontSize: 13, opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Saving…" : (ackPath === "verbal" ? "Record change with verbal confirmation" : "Create & send for signature")}
+          </button>
+        </div>
+      )}
+
+      {cos === null && <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Loading…</p>}
+      {cos && cos.length === 0 && !formOpen && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>
+          None. If this order changes after the customer signed, record it here — they
+          acknowledge it with a signature, or you record their verbal OK.
+        </p>
+      )}
+      {cos && cos.map((co) => (
+        <div key={co.id} style={{ borderTop: "1px solid #F1F5F9", padding: "10px 0", opacity: co.status === "void" ? 0.6 : 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <b style={{ fontSize: 13 }}>CO-{co.co_no}</b>
+            <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 600 }}>{co.source === "design_edit" ? "From design revision" : "Manual"} · {fmtDate(co.created_at)}</span>
+            {chip(co)}
+            {(co.total_before_cents != null || co.total_after_cents != null) && (
+              <span style={{ fontSize: 12.5, fontWeight: 700, marginLeft: "auto" }}>
+                {co.total_before_cents != null ? money(co.total_before_cents) : "—"} → {co.total_after_cents != null ? money(co.total_after_cents) : "—"}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 12.5, color: "#334155", whiteSpace: "pre-wrap", marginTop: 6 }}>{co.description}</div>
+          {co.status === "acknowledged" && (
+            <div style={{ fontSize: 12, color: "#15803D", fontWeight: 600, marginTop: 6 }}>
+              {co.ack_method === "verbal"
+                ? `Verbal — ${co.verbal_rep_name}, conversation on ${fmtDate(co.verbal_conversation_date)}${co.verbal_note ? ` (${co.verbal_note})` : ""}`
+                : `Signed by the customer${co.acknowledged_at ? ` · ${fmtDate(co.acknowledged_at)}` : ""}`}
+            </div>
+          )}
+          {co.status === "void" && co.void_reason && (
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 6 }}>Voided — {co.void_reason}</div>
+          )}
+          {co.status === "pending_ack" && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <button type="button" onClick={() => emailCo(co)} disabled={busy}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>Email to customer</button>
+                <button type="button" onClick={() => { setVerbalFor(verbalFor === co.id ? null : co.id); setVConfirm(false); }}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>Record verbal confirmation</button>
+                <button type="button" onClick={() => voidCo(co)}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12.5 }}>Void</button>
+              </div>
+              {verbalFor === co.id && (
+                <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, marginTop: 8 }}>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12.5, fontWeight: 600, color: "#334155" }}>
+                    <input type="checkbox" checked={vConfirm} onChange={(e) => setVConfirm(e.target.checked)} style={{ marginTop: 2 }} />
+                    The customer confirmed this change in a conversation with me.
+                  </label>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10, marginTop: 10, maxWidth: 520 }}>
+                    <div><span style={S.lbl}>Your name</span>
+                      <input style={S.input} value={vRep} onChange={(e) => setVRep(e.target.value)} /></div>
+                    <div><span style={S.lbl}>Date of conversation</span>
+                      <input type="date" style={S.input} value={vDate} onChange={(e) => setVDate(e.target.value)} /></div>
+                    <div style={{ gridColumn: "1 / -1" }}><span style={S.lbl}>Note (optional)</span>
+                      <input style={S.input} value={vNote} onChange={(e) => setVNote(e.target.value)} placeholder="e.g. phone call, spoke with Dave" /></div>
+                  </div>
+                  <button type="button" onClick={() => recordVerbal(co)} disabled={busy}
+                    style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 10, padding: "7px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+                    {busy ? "Saving…" : "Confirm"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
@@ -1114,7 +1397,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
                 <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
                   Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
-                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
+                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : (d && d.ss_quote_number ? ` · ${d.ss_quote_number}` : "")}
                 </div>
               </div>
               <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
@@ -1122,8 +1405,45 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
               {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+              {/* SS-issued quote (migration 122): the printable document + the two
+                  hand-delivery tools, same trio as the Designs row and the designer
+                  success screen (Carolyn 2026-08-23). */}
+              {d && d.ss_quote_number && d.ss_quote_pdf_url && (
+                <a href={d.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
+              )}
+              {d && d.ss_quote_number && (
+                <button type="button"
+                  onClick={(e) => {
+                    const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+                    const btn = e.currentTarget;
+                    const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
+                    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+                    else window.prompt("Copy the customer link:", link);
+                  }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Copy customer link</button>
+              )}
+              {d && d.ss_quote_number && (
+                <button type="button" disabled={busy}
+                  onClick={async () => {
+                    setBusy(true); setMsg(null);
+                    const { data: res, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: o.short_code } });
+                    setBusy(false);
+                    if (err || (res && res.error)) { setMsg({ err: (res && res.error) || err.message }); return; }
+                    setMsg(res && res.sent
+                      ? { ok: `Quote ${d.ss_quote_number} emailed to the customer.` }
+                      : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+                  }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>Resend quote email</button>
+              )}
             </div>
           </div>
+
+          {/* SS-mode orders (the design carries an SS quote) get change orders. CRM-mode
+              orders don't — the decision was SS-only (Carolyn 2026-08-23). */}
+          {d && d.ss_quote_number && o.short_code && (
+            <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
+              currentTotalCents={o.total_cents} onChanged={onChanged} />
+          )}
 
           <div style={S.card}>
             <div style={{ ...S.h2, marginBottom: 8 }}>Payments</div>

@@ -44,10 +44,11 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
     "`<Style> <Size>`" string, so stripping `parseSize`'s shape leaves the style — no
     migration and, unlike a real column, no backfill. Assumes no tenant names a style
     containing `number x number`. If that ever breaks, add the column; don't patch the regex.
-21. **Calendar detail lives in ONE full-width panel below the grid**, week and month alike —
-    a day column is a hard-coded 218px and a month cell narrower still, so the form had
-    nowhere to go. It is inline, not a modal, so decision 6 (no popouts) still holds. Month
-    view no longer navigates away to show detail; "Open that week" is an explicit control.
+21. **Calendar detail is a MODAL** — ~~one full-width panel below the grid~~ **superseded
+    within the day by decision 24 below.** The problem it solves is unchanged: a day column
+    is a hard-coded 218px and a month cell narrower still, so the form had nowhere to go and
+    its right-hand fields ran off the card. Month view no longer navigates away to show
+    detail; "Open that week" is an explicit control (month only).
 22. **Month view is a first-class scheduling surface**: pills drag (the day cells were
     already drop targets — it was half a loop), and read two lines, building first per
     decision 14.
@@ -66,6 +67,115 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
       revenue, where Orders is operator-only and Billing is owner-granted. If that should
       ever change, the hook is one condition on the header plus the `access` prop the tab
       already receives — no migration is stranded by shipping it open.
+
+24. ⚠️ **DECISION 6 IS REVERSED FOR THE CALENDAR: the job detail is a popup.** Carolyn, same
+    day, after using the panel from 21: *"I don't really like the edit field being below the
+    calendars. I think it needs to be a popup screen."* So the calendar's job detail is now a
+    **modal** — centred card, backdrop, closes on ×, Escape, or a click outside — built on
+    the same shell `SchedStageEditor` already uses.
+
+    **Read this before "fixing" it back.** Decision 6 says "Everything at face value — no
+    popouts… detail drawers/modals for job info are out", and that rule is still in this
+    document above. It was set by Carolyn and it has now been narrowed by Carolyn, so the
+    scope is exactly:
+    - **Calendar (week + month): a modal.** The 218px day column could never hold the form;
+      the inline panel fixed the clipping but she did not want the reading order.
+    - ~~**Board and Table: still expand in place.**~~ **Superseded by decision 25 below** —
+      she found the difference from the Table side two days later and asked for uniformity.
+
+    Decision 6 still governs the *card and row faces* — sizes, dates, phones, colours, build
+    status all stay on the face, and no detail lives only behind a click.
+
+25. **THE POPUP IS THE ONE DETAIL SURFACE FOR THE WHOLE BUILD SCHEDULE TAB** (Carolyn
+    2026-08-23: *"For uniformity and User experience it is IMPORTANT to have things
+    functioning the same"* — after clicking to edit in Table view and getting the inline
+    expansion instead of the popup). Board cards and Table rows no longer expand in place;
+    every click opens the same modal, Escape and click-outside close it in every view, and
+    the open card/row is marked the same way everywhere (ACCENT outline; tint on the table
+    row). Decision 6's no-popouts rule is now fully reversed for this tab's JOB DETAIL —
+    the faces still show everything, per decision 6's surviving half.
+
+    The same uniformity pass also: gave the Board's stage columns the $ + sq ft summary the
+    other groupings already had (summary only — no blue tint; the board keeps its kanban
+    gray), and made TRAY items draggable in every view — onto a day (calendar), onto a
+    stage column (board; `create_job` takes `stageId`), onto a day row or date group
+    (table). A tray item has no date/crew/stage yet, so in the table only date-shaped
+    targets accept it; others ignore the drop and do not light up during the drag.
+
+26. **FILTERS COMPOSE WITH SEGMENTING** (Carolyn 2026-08-23: *"when I see it by the week I
+    may want to select only one crew… and when I segment by the crew I might want to see a
+    certain week or certain month… I need more flexibility"*). Segmenting arranges the
+    list; filtering narrows it; one tab-level filter row carries both controls:
+    - **Crew chips are ONE control obeyed by every view** — previously calendar-only; now
+      the board's columns, the table's rows, and the summary tiles all read the same
+      `crewFilter`. The tiles follow the filters deliberately: a filtered list under tiles
+      that still count everything reads as a bug.
+    - **The WHEN filter is her full Monday-style condition list, all 16** (screenshot,
+      2026-08-23): Today · Yesterday · This week/month/quarter/year · In month · On ·
+      Between · More than · After date · Less than · Before date · In the next · In the
+      last. Pinned semantics: **More/Less than measure distance FORWARD from today** (a
+      build schedule looks ahead; "In the last" covers looking back), Between is inclusive
+      both ends, weeks are Sunday-first, and **an unfilled parameter filters nothing**
+      rather than blanking the list mid-keystroke. Applies to table + board only — the
+      calendar already navigates by date and a second date control would fight its arrows.
+    - **Undated jobs ALWAYS survive a WHEN filter** — they are the jobs most needing
+      scheduling, so they must never disappear; the "Showing X of Y" line says when it is
+      including them.
+    - The matcher (`schedWhenMatch`) is a pure function of ISO strings with 50 unit
+      assertions over every condition and edge.
+
+    ~~Same round, mockup-chosen: day headings get `#F7F9FF` + a `#FAFBFE` job band.~~
+    **Superseded hours later by decision 27 — the day rows are GONE entirely.**
+
+27. **THE WEEK SEGMENT IS AN ORDERED LIST — POSITION IMPLIES THE DATE** (Carolyn
+    2026-08-23: *"I absolutely Hate this day view in the week segment… in a week view we
+    want to simply drag buildings in the order of that week"*). The seven day rows from
+    round 5 are deleted; a week group is its blue heading plus its buildings sorted by
+    build date. Dragging a building to a spot in that order derives the date from the
+    NEIGHBOURS, her rules verbatim:
+    - between a Tuesday job and a Wednesday job → **Tuesday** (the first date);
+    - between Tuesday and Thursday with Wednesday empty → **Wednesday** (the gap day);
+    - at the very top → the first job's date; on the slim end-of-week strip → the last's.
+    Deliberately approximate: *"if it isn't the exact day they want, they can open and
+    choose the right day"* — the popup's date field is the precision tool. The neighbour
+    computation EXCLUDES the dragged row (else a job dropped beside itself reads itself as
+    its own neighbour), a same-date result is a no-op, tray items dropped into the order
+    are created on the derived date, and the week heading still means "same weekday, that
+    week" for cross-week drops. Implementation: `weekOrderedRows` / `weekInsertDate` /
+    `weekSpotDropProps` in 05-schedule.jsx, with unit tests over the neighbour rules.
+
+28. **REPAIRS: contacts, address, and the SS-invoice contract** (Carolyn 2026-08-23,
+    Repairs round). Migration 115: `repairs` gains `street/city/state/zip` (the StopAddress
+    shape `contactAddress.ts` defines) and `order_id uuid` (soft link, no FK — orders'
+    migrations live on wip/orders, the build_jobs.order_id convention).
+    - **Contact type-ahead** on repair intake: `search_contacts` in portal-schedule searches
+      `designs.contact` + past repairs, deduped by email→phone→name, capped at 10. It is a
+      server action because a direct browser read of `designs` breaks operator view-as.
+      Picking fills name/phone/email/address; typing a new name IS the new-contact path.
+      **Repairs never create or touch GHL contacts.**
+    - **The site-visit stop inherits the repair's address** in add_stop's repair branch
+      (caller-sent values still win), which also makes territory-defaulting work for repair
+      stops — before this a repair stop had NO destination unless typed on the stop.
+    - **"Repair $" is the label everywhere**; the field stays `quote_cents`.
+    - **One routing control** on the detail card — Schedule: Build / Delivery / Both — a
+      zero-$ repair routes without any invoice ("sometimes a repair has no actual $ value
+      and then it should just log the repair for either or both places"). Both = the two
+      existing writes in sequence. The load picker resets on SELECTION change only, not on
+      data reloads (a data-keyed reset killed the picker the moment "Both" opened it).
+
+    ── CONTRACT for the invoicing session (build against this, not around it) ──
+    - A repair with a Repair $ becomes an **SS-NATIVE invoice ONLY — never GHL**, regardless
+      of the tenant's `invoice_in_ghl` setting; a GHL-invoicing tenant invoices repairs some
+      other way and simply does not get this path.
+    - The invoice creates an order; the order's id is written to `repairs.order_id`
+      (column already live — do NOT add a competing repairs migration).
+    - Build/Delivery/Both routing at invoice time is a property of the GENERAL invoice
+      flow — repairs are one entry point, not a special case; the vocabulary already exists
+      on the repair card.
+    - ⚠️ SOLD = INVOICED feeds invoiced orders into the Build tray via the generic order
+      path. Once invoices carry routing flags, the tray must follow the flags — and a
+      repair-born order must never schedule a repair twice when it was already routed from
+      the Repairs tab.
 
 Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
 never disabled, and left a stale banner up — so on an unchanged board the screen was

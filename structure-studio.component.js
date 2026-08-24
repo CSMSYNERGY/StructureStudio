@@ -247,6 +247,12 @@ const SS_PAGE = { W: 850, H: 1100, TEXT_AREA_H: 340, TOP_LABEL_PAD: 30, BOT_LABE
 // viewport but ~832px at 900px — a viewport threshold would switch the dock ON for
 // the narrower layout and OFF for the wider one.
 const SS_DOCK_MIN_ROW_W = 960;
+// Settings -> Designer -> 3D docks the same panel beside a FORM, not beside a building plan,
+// and a form needs less room to stay usable: the calibration grids are
+// repeat(auto-fit, minmax(150px,1fr)) and still give two columns at ~390px, whereas the plan
+// SVG has a real drawing to keep legible. 960 would refuse to dock on a 1280px window (the
+// Settings row measures ~954 there), which is most of the laptops a style gets calibrated on.
+const SS_DOCK_MIN_CAL_W = 760;
 function pageGeom(bldgW, bldgH) {
   const visibleH = SS_PAGE.H - SS_PAGE.TEXT_AREA_H;
   const scale = Math.min(
@@ -473,6 +479,58 @@ function fixtureInitialOperation(fx) {
   if (fx.opLeft) return "left";
   return null;
 }
+// Color defaults for a catalog door (colors feature, migration 116). fixed → the owner's
+// fixed color or none (today's rendering); paint → the door-flagged palette's default;
+// match → the color whose label equals the building's CURRENT body/trim paint selection,
+// falling back to the palette default. Trim fields ride only when the door is two-tone
+// (hasTrimColor). Returns full {id,label,hex} triples so placements can snapshot them.
+function fixtureDoorColorDefaults(fx, doorColors, paintBody, paintTrim) {
+  const list = Array.isArray(doorColors) ? doorColors : [];
+  const byLabel = (lbl) => (lbl ? list.find((c) => c.label === lbl) : null);
+  const fallback = () => list.find((c) => c.isDefault) || list[0] || null;
+  const out = { colorId: null, colorLabel: null, colorHex: null, trimColorId: null, trimColorLabel: null, trimColorHex: null };
+  const mode = fx && fx.colorMode;
+  if (mode === "paint" || mode === "match") {
+    const main = (mode === "match" && byLabel(paintBody)) || fallback();
+    if (main) { out.colorId = main.id; out.colorLabel = main.label || null; out.colorHex = main.hex || null; }
+    if (fx.hasTrimColor) {
+      const trim = (mode === "match" && byLabel(paintTrim)) || fallback();
+      if (trim) { out.trimColorId = trim.id; out.trimColorLabel = trim.label || null; out.trimColorHex = trim.hex || null; }
+    }
+  } else if (fx && fx.fixedColor && fx.fixedColor.id) {
+    out.colorId = fx.fixedColor.id; out.colorLabel = fx.fixedColor.label || null; out.colorHex = fx.fixedColor.hex || null;
+  }
+  return out;
+}
+// The window-color default: the flagged default, else the first. One list serves every
+// catalog window (that's the point — no duplicate window rows per color).
+function fixtureWindowColorDefault(windowColors) {
+  const list = Array.isArray(windowColors) ? windowColors : [];
+  return list.find((c) => c.isDefault) || list[0] || null;
+}
+// Which of the client's window colors THIS window comes in (119): no windowColorIds on
+// the fixture = all of them; an id list = exactly those (a stale/deleted id just never
+// matches). Every window placement path — picker, included chip, 3D — offers/defaults
+// from this filtered list, never the raw one.
+function windowColorsFor(fx, windowColors) {
+  const list = Array.isArray(windowColors) ? windowColors : [];
+  if (!fx || !Array.isArray(fx.windowColorIds)) return list;
+  const s = new Set(fx.windowColorIds.map(String));
+  return list.filter((c) => s.has(String(c.id)));
+}
+// The color fields a PLACED fixture snapshots (ids for server-side price re-resolution,
+// labels for descriptions, hexes for 2D/3D rendering). Every door stamp site — place,
+// swap, included-chip, 3D placement — writes all six so a swap can never leak the old
+// door's colors; windows stamp the three main fields only.
+function doorColorStamps(dc, tc) {
+  return {
+    colorId: dc ? dc.id : null, colorLabel: dc ? (dc.label || null) : null, colorHex: dc ? (dc.hex || null) : null,
+    trimColorId: tc ? tc.id : null, trimColorLabel: tc ? (tc.label || null) : null, trimColorHex: tc ? (tc.hex || null) : null,
+  };
+}
+function windowColorStamps(c) {
+  return { colorId: c ? c.id : null, colorLabel: c ? (c.label || null) : null, colorHex: c ? (c.hex || null) : null };
+}
 function buildFixtureTools(fixtures) {
   const out = {};
   (Array.isArray(fixtures) ? fixtures : []).forEach((fx) => {
@@ -540,7 +598,7 @@ function fmtFtIn(inches) {
 // Door placement picker. Doors are grouped by STYLE (exact name): one card per style; picking a
 // style with more than one size reveals a size chooser, then swing/operation where more than one
 // is offered, then place.
-function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
+function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCancel, onPlace }) {
   const styles = useMemo(() => {
     const m = new Map();
     doors.forEach((d) => {
@@ -554,19 +612,40 @@ function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
   const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
   const [swing, setSwing] = useState(null);
   const [operation, setOperation] = useState(null);
+  // Chosen colors as full palette OBJECTS (id/label/hex/doorRate) so onPlace can snapshot
+  // them. Reset per selection like swing/operation: fixed mode gets the owner's fixed
+  // color, match mode starts on the building's current body/trim paint picks.
+  const [doorColor, setDoorColor] = useState(null);
+  const [trimColor, setTrimColor] = useState(null);
+  const colorList = Array.isArray(doorColors) ? doorColors : [];
   useEffect(() => {
-    if (!sel) { setSwing(null); setOperation(null); return; }
+    if (!sel) { setSwing(null); setOperation(null); setDoorColor(null); setTrimColor(null); return; }
     setSwing(fixtureInitialSwing(sel));
     setOperation(fixtureInitialOperation(sel));
+    const d = fixtureDoorColorDefaults(sel, colorList, paintBody, paintTrim);
+    setDoorColor(colorList.find((c) => c.id === d.colorId) || (d.colorId ? { id: d.colorId, label: d.colorLabel, hex: d.colorHex } : null));
+    setTrimColor(colorList.find((c) => c.id === d.trimColorId) || null);
   }, [sel]);
   const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const swingOpts = sel ? [sel.swingIn && "in", sel.swingOut && "out"].filter(Boolean) : [];
   const opOpts = sel ? [sel.opRight && "right", sel.opLeft && "left", sel.opDouble && "double", sel.opSlideUp && "slideup"].filter(Boolean) : [];
+  // Color choices only exist for paint/match modes; a single-entry palette auto-assigns
+  // silently, exactly like a single-swing door shows no Swing block.
+  const colorable = !!(sel && (sel.colorMode === "paint" || sel.colorMode === "match"));
+  const colorOpts = colorable ? colorList : [];
   const OP_LABEL = { right: "Right", left: "Left", double: "Double", slideup: "Slide up" };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
     <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
       border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, background: on ? "#FEF3C7" : "#FFF", color: on ? "#92400E" : "#334155" }}>{label}</div>
+  );
+  // A color chip: swatch dot + label + the color's flat per-door price when shown.
+  const colorChip = (c, on, onClick) => (
+    <div key={c.id} onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, background: on ? "#FEF3C7" : "#FFF", color: on ? "#92400E" : "#334155" }}>
+      <span style={{ width: 14, height: 14, borderRadius: "50%", background: c.hex || "#CCC", border: "1px solid rgba(0,0,0,0.2)", flexShrink: 0 }} />
+      {c.label}{showPricing && Number(c.doorRate) > 0 ? ` · +${money(c.doorRate)}` : ""}
+    </div>
   );
   return (
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -608,9 +687,21 @@ function DoorPicker({ doors, showPricing, onCancel, onPlace }) {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{opOpts.map((o) => chip(o, operation === o, OP_LABEL[o], () => setOperation(o)))}</div>
           </div>
         )}
+        {colorable && colorOpts.length > 1 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Color</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{colorOpts.map((c) => colorChip(c, doorColor && doorColor.id === c.id, () => setDoorColor(c)))}</div>
+          </div>
+        )}
+        {colorable && sel.hasTrimColor && colorOpts.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Trim color</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{colorOpts.map((c) => colorChip(c, trimColor && trimColor.id === c.id, () => setTrimColor(c)))}</div>
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => sel && onPlace(sel, swing, operation)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place door</button>
+          <button onClick={() => sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place door</button>
         </div>
       </div>
     </div>
@@ -976,51 +1067,104 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
 
   // Catalog fixture doors (Options → Doors): each carries its OWN snapshotted price, not a
   // per-key rate — so they price separately from the layout items above. Identical doors
-  // (same name + price) collapse into one line with a qty. Feeds the % base like any add-on.
-  // Grouped by fixture id so a size-inclusion nets the first N free (incForRows[fixtureId] = the
-  // qty the base price covers). Fully-included shows "(included)"; extras beyond it are charged.
+  // (same name + price + COLORS) collapse into one line with a qty; a color choice splits
+  // the group, so its unit price (fixture + color door-rates) stays honest per line.
+  //
+  // Inclusions are a SHARED POOL per fixture id: incForRows[fid] covers the first N of that
+  // door ACROSS color groups (consumed in placement order), because color splits mean one
+  // fixture id can span several groups — netting the full inclusion per group would give the
+  // inclusion away multiple times. An included unit nets the whole grouped price, color
+  // surcharge included (mirrored exactly in submit-estimate so preview == email).
+  const doorRateOf = (cid) => {
+    if (!cid) return 0;
+    const c = (Array.isArray(C.colors) ? C.colors : []).find((x) => x && x.id === cid);
+    return c ? (Number(c.doorRate) || 0) : 0;
+  };
+  // Color door-rates apply only when the CUSTOMER chose the color (paint/match modes). A
+  // fixed-color door stamps its color for 3D/description, but its price already includes
+  // that one color — charging the paint-a-door rate on top would surprise the owner.
+  // submit-estimate applies the same rule from fixture_items.color_mode server-side.
+  const doorColorPriced = (fid) => {
+    const f = fid ? (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && x.id === fid) : null;
+    return !!(f && (f.colorMode === "paint" || f.colorMode === "match"));
+  };
+  const incRemaining = {};
+  const takeIncluded = (fid, qty) => {
+    if (!fid || !incForRows[fid]) return 0;
+    if (!(fid in incRemaining)) incRemaining[fid] = Number(incForRows[fid]) || 0;
+    const take = Math.min(qty, incRemaining[fid]);
+    incRemaining[fid] -= take;
+    return take;
+  };
   const fxGroups = {};
+  const fxOrder = [];
   for (const it of items) {
     if (it.type !== "fixtureDoor") continue;
     const price = it.price != null ? Number(it.price) : 0;
     const fid = it.fixtureItemId || `${it.doorName || "Door"}|${price}`;
-    if (!fxGroups[fid]) fxGroups[fid] = { label: it.doorName || "Door", price, qty: 0, fid: it.fixtureItemId || null };
-    fxGroups[fid].qty++;
+    const gk = `${fid}|${it.colorId || ""}|${it.trimColorId || ""}`;
+    if (!fxGroups[gk]) {
+      const colorBits = [it.colorLabel, it.trimColorLabel ? `${it.trimColorLabel} trim` : null].filter(Boolean);
+      const priced = doorColorPriced(it.fixtureItemId);
+      fxGroups[gk] = {
+        label: (it.doorName || "Door") + (colorBits.length ? ` — ${colorBits.join(" / ")}` : ""),
+        price: price + (priced ? doorRateOf(it.colorId) + doorRateOf(it.trimColorId) : 0),
+        qty: 0, fid: it.fixtureItemId || null,
+      };
+      fxOrder.push(gk);
+    }
+    fxGroups[gk].qty++;
   }
-  for (const fid in fxGroups) {
-    const g = fxGroups[fid];
-    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+  for (const gk of fxOrder) {
+    const g = fxGroups[gk];
+    const inc = takeIncluded(g.fid, g.qty);
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `fx:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: `fx:${gk}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `fx:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: `fx:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
     nonPctSubtotal += total;
   }
 
-  // Catalog windows (Options → Windows): each carries its OWN snapshot price, grouped by style
-  // like doors. Built-in windows already priced above via the layout "window" rate.
+  // Catalog windows (Options → Windows): each carries its OWN snapshot price, grouped by
+  // style + color like doors (unit = window price + the color's flat per-window rate).
+  // Built-in windows already priced above via the layout "window" rate. Same shared
+  // inclusion pool per fixture id as doors.
+  const windowRateOf = (cid) => {
+    if (!cid) return 0;
+    const c = (Array.isArray(C.windowColors) ? C.windowColors : []).find((x) => x && x.id === cid);
+    return c ? (Number(c.rate) || 0) : 0;
+  };
   const winGroups = {};
+  const winOrder = [];
   for (const it of customWindows) {
     const price = it.price != null ? Number(it.price) : 0;
     const fid = it.fixtureItemId || `${it.windowName || "Window"}|${price}`;
-    if (!winGroups[fid]) winGroups[fid] = { label: it.windowName || "Window", price, qty: 0, fid: it.fixtureItemId || null };
-    winGroups[fid].qty++;
+    const gk = `${fid}|${it.colorId || ""}`;
+    if (!winGroups[gk]) {
+      winGroups[gk] = {
+        label: (it.windowName || "Window") + (it.colorLabel ? ` — ${it.colorLabel}` : ""),
+        price: price + windowRateOf(it.colorId),
+        qty: 0, fid: it.fixtureItemId || null,
+      };
+      winOrder.push(gk);
+    }
+    winGroups[gk].qty++;
   }
-  for (const fid in winGroups) {
-    const g = winGroups[fid];
-    const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
+  for (const gk of winOrder) {
+    const g = winGroups[gk];
+    const inc = takeIncluded(g.fid, g.qty);
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `win:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: `win:${gk}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `win:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: `win:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
     nonPctSubtotal += total;
   }
 
@@ -1122,8 +1266,21 @@ function priceRowMatcher(key) {
   // Group id exactly as the row was built: the fixture id when the snapshot carries one,
   // else the name|price fallback (String(): the row key came from template interpolation).
   const gid = (i, name) => String(i.fixtureItemId || `${name}|${i.price != null ? Number(i.price) : 0}`);
-  if (kind === "fx") return (i) => i.type === "fixtureDoor" && gid(i, i.doorName || "Door") === fid;
-  if (kind === "win") return (i) => i.type === "window" && isCatalog(i) && gid(i, i.windowName || "Window") === fid;
+  // Door/window keys carry trailing color segments (`fid|colorId|trimColorId` /
+  // `fid|colorId`) since a color choice splits the group. Split from the RIGHT — the
+  // name|price fallback fid itself contains a "|".
+  if (kind === "fx") {
+    const p2 = fid.lastIndexOf("|"), p1 = fid.lastIndexOf("|", p2 - 1);
+    const gfid = fid.slice(0, p1), cId = fid.slice(p1 + 1, p2), tId = fid.slice(p2 + 1);
+    return (i) => i.type === "fixtureDoor" && gid(i, i.doorName || "Door") === gfid
+      && String(i.colorId || "") === cId && String(i.trimColorId || "") === tId;
+  }
+  if (kind === "win") {
+    const p1 = fid.lastIndexOf("|");
+    const gfid = fid.slice(0, p1), cId = fid.slice(p1 + 1);
+    return (i) => i.type === "window" && isCatalog(i) && gid(i, i.windowName || "Window") === gfid
+      && String(i.colorId || "") === cId;
+  }
   if (kind === "ramp") return (i) => i.type === "ramp" && isCatalog(i) && gid(i, i.rampName || "Ramp") === fid;
   return () => false;
 }
@@ -2532,9 +2689,12 @@ function buildShed3DModel(THREE, p) {
       const f = 0.17;
       const og = new THREE.Group();
       og.userData = { itemId: o.it.id, wallItem: true, wall: wname };
-      og.add(wallBox(trimMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
-      og.add(wallBox(trimMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
-      og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
+      // A two-tone catalog door's chosen TRIM color drives its own casing; everything
+      // else keeps the building trim (windows deliberately so — their color is the sash).
+      const casingMat = (o.it.type === "fixtureDoor" && o.it.trimColorHex) ? mat(o.it.trimColorHex) : trimMat;
+      og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
+      og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
+      og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
       // A catalog fixture's own photo is masked onto the opening when the builder
       // uploaded one — but it is LAYERED IN FRONT of the parametric door/glass, never
       // instead of it, for two reasons that both bit us:
@@ -2547,10 +2707,15 @@ function buildShed3DModel(THREE, p) {
       // was shot in, and shading it again reads as a dirty smudge. The photo stretches to
       // the opening on purpose — one photo serves a door's 4/5/6 ft variants, which is the
       // whole point of not keeping a model library.
-      const photoLayer = (entry, a0, a1, y0, y1, depth) => {
+      const photoLayer = (entry, a0, a1, y0, y1, depth, tintHex) => {
         // alphaTest discards the transparent surround (cheaper and better-sorted than
         // blending it); transparent:true keeps the feathered edges of a soft cut-out.
         const pm = new THREE.MeshBasicMaterial({ map: entry.tex, transparent: true, alphaTest: 0.06 });
+        // Chosen fixture color TINTS the photo (three.js multiplies material.color into the
+        // map): white product-photo pixels take the color fully, so the mostly-white
+        // cut-outs builders upload read as painted. A photo of an already-dark door
+        // over-darkens — acceptable; the color choice must show somewhere.
+        if (tintHex) { try { pm.color.set(tintHex); } catch (_e) { /* bad hex: leave untinted */ } }
         const mesh = wallBox(pm, wf, a0, a1, y0, y1, 0.02, depth);   // 0.02 ft proud: no z-fight
         mesh.visible = Boolean(entry.tex);        // hidden until the photo has decoded
         d3BindFixturePhoto(entry, pm, mesh);
@@ -2565,7 +2730,9 @@ function buildShed3DModel(THREE, p) {
         // between casing → sash → glass is what turns the old flat decal into
         // an assembly (the SmartBuild teardown's biggest close-up win).
         const s = 0.09;
-        const sashMat = mat("#3A3F45", { roughness: 0.6 });
+        // A catalog window's chosen color drives the sash (and muntins below) — the
+        // "frame" a shopper means when they say a black or white window.
+        const sashMat = mat(o.it.colorHex || "#3A3F45", { roughness: 0.6 });
         og.add(wallBox(sashMat, wf, o.a0, o.a0 + s, o.y0, o.y1, 0, T * 0.5));
         og.add(wallBox(sashMat, wf, o.a1 - s, o.a1, o.y0, o.y1, 0, T * 0.5));
         og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y1 - s, o.y1, 0, T * 0.5));
@@ -2577,23 +2744,26 @@ function buildShed3DModel(THREE, p) {
         og.add(wallBox(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), wf, o.a0 + s, o.a1 - s, o.y0 + s, o.y1 - s, 0, 0.05));
         const winEntry = fixturePhotoTex(o.it);
         if (winEntry) {
-          photoLayer(winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08);
+          photoLayer(winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08, o.it.colorHex || null);
         } else {
           // Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
-          // by width, double-hung rail across the middle.
+          // by width, double-hung rail across the middle. Sash-colored so a black
+          // window reads black through the grid, not building-trim.
           const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
           const cols = Math.max(2, Math.min(3, Math.round(ww / 1.1)));
           for (let ci = 1; ci < cols; ci++) {
             const a = o.a0 + (ww * ci) / cols;
-            og.add(wallBox(trimMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
+            og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
           }
           const midY = o.y0 + wh / 2;
-          og.add(wallBox(trimMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
+          og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
         }
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
         const photoEntry = fixturePhotoTex(o.it);
         {
-          const doorMat = mat(D3_COLORS.door);
+          // The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
+          // doors with no palette row) keeps the hard-coded natural brown as before.
+          const doorMat = mat(o.it.colorHex || D3_COLORS.door);
           if (o.it.type === "doubleDoor" || o.it.operation === "double") {
             og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
             og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
@@ -2617,7 +2787,7 @@ function buildShed3DModel(THREE, p) {
         }
         // One photo layer even for a double or a roll-up: the photo already shows both
         // leaves / the panel seams, so splitting it would draw them twice.
-        if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0.16);
+        if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0.16, o.it.colorHex || null);
       }
       ogs.push(og);
     });
@@ -2997,7 +3167,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -3410,13 +3580,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (type === "window") {
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
-            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))) };
         } else {
           const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
           const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
           ni = { id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name || "Door",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
-            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation };
+            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation,
+            // The in-viewer picker has no color step (matching its no-swing/op contract):
+            // stamp the door's defaults; the shopper refines via the 2D swap flow.
+            ...fixtureDoorColorDefaults(fx, doorColors, paintBody, paintTrim) };
         }
         if (checkDoorCollision(ni, { width: widthFt }, liveItems, itemTypes, scale)) {
           flash3("Something's already there — pick a different spot on the wall.");
@@ -4137,7 +4311,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -4147,7 +4321,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // during render (not in an effect) so a flush scheduled this frame already
   // sees this frame's values — this is what avoids the frozen-props trap.
   const pRef = useRef(null);
-  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures };
+  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt };
 
   // Every geometry input that is NOT `items`, flattened to a scalar string.
   // d3ResolveStyleSpec returns a fresh object (with fresh nested roof/colors)
@@ -4159,7 +4333,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // The hand-picked version silently missed roofMaterial, roof.overhang and the gambrel
   // knee numbers, so two styles differing only in those left a stale roof standing beside
   // a corrected plan until some unrelated edit happened to force a full rebuild.
-  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY]);
+  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0]);
 
   useEffect(() => {
     let disposed = false;
@@ -4203,11 +4377,20 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
 
       // Camera framing — identical maths to the modal so the docked view and the
       // full-screen view read as the same building from the same angle. Every
-      // constant below derives ONLY from bldgW/bldgH, which is exactly why the
-      // parent remounts this component on a size change and on nothing else.
+      // constant below derives ONLY from bldgW/bldgH and the fit height, which is
+      // exactly why the parent remounts this component on a size change and on nothing
+      // else -- a height change re-aims in place via applyFraming instead.
+      //
+      // fitHeightFt is the VERTICAL half of the framing, and it is opt-in. The designer's
+      // dock passes nothing, so fitH is exactly D3.WALL_H and every number below is the
+      // arithmetic it always was. Settings -> Designer -> 3D passes the DRAFT wall height,
+      // because there the wall height is the number being typed: framed for 8ft, a 16ft
+      // wall puts the ridge outside the frustum, and this panel has no pan to recover it.
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw0] || [0.35, 1];
-      const R = Math.max(p0.bldgW, p0.bldgH) * 0.5 + D3.WALL_H;
-      const dist = R * 3.66;
+      const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0);
+      const frameFor = (p) => { const r = Math.max(p.bldgW, p.bldgH) * 0.5 + fitH(p); return { R: r, dist: r * 3.66 }; };
+      const f0 = frameFor(p0);
+      const R = f0.R, dist = f0.dist;
       const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
       const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
 
@@ -4237,7 +4420,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       if (sky) { sky.position.y = -0.5; scene.add(sky); }
 
       const controls = new OrbitControls(camera, canvas);
-      controls.target.set(0, D3.WALL_H * 0.45, 0);
+      controls.target.set(0, fitH(p0) * 0.45, 0);
       controls.maxPolarAngle = Math.PI * 0.495;   // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -4324,6 +4507,28 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
           if (scope) queue(scope);
         },
         applyFull: () => { builtItems = pRef.current.items; queue({ full: true }); },
+        // Re-frame WITHOUT rebuilding and WITHOUT remounting. Only reachable when the
+        // caller passes fitHeightFt, so the designer's dock keeps its documented "never
+        // re-aim the camera under someone who has just orbited" behaviour -- nothing there
+        // changes the building's height without also changing bldgW/bldgH, which remounts.
+        // The camera is NOT moved by hand: re-pointing controls.target re-aims in place and
+        // controls.update() clamps the orbit radius into the new [min,max] itself, so a
+        // building that grew pushes the camera out and one that shrank does not jump. The
+        // orbit ANGLE survives; only the look-at height and the distance clamps move.
+        // No render() here -- the applyFull() that always accompanies this queues one.
+        applyFraming: () => {
+          const p = pRef.current;
+          const f = frameFor(p);
+          controls.target.set(0, fitH(p) * 0.45, 0);
+          controls.minDistance = f.R * 1.1;
+          controls.maxDistance = f.dist * 2.5;
+          // Grow-only: the sky dome was sized dist*6.5 from the MOUNT-time distance and is
+          // never rebuilt here, so pulling far back in after a big height is dialled down
+          // again could clip the dome and leave a green disc in flat grey.
+          camera.far = Math.max(camera.far, f.dist * 10);
+          camera.updateProjectionMatrix();
+          controls.update();
+        },
       };
       canvas.addEventListener("webglcontextlost", (ev) => { ev.preventDefault(); setPhase("error"); });
       // preventDefault above is what asks the browser to restore the context. Without a
@@ -4382,7 +4587,11 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // free-text roof colour cannot churn a WebGL context per keystroke.
   useEffect(() => {
     const e = engineRef.current;
-    if (e) e.applyFull();
+    if (!e) return;
+    // Framing first: applyFull queues the rAF that actually paints, so this costs no
+    // frame. Guarded on fitHeightFt so a caller that never passes one is untouched.
+    if (fitHeightFt) e.applyFraming();
+    e.applyFull();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geomSig]);
 
@@ -4563,7 +4772,7 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
 
 // Window placement picker. Like RampPicker (style → size, no swing/operation), but the placed
 // item goes on a wall. "Choose a window" / "Place window".
-function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
+function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace }) {
   const styles = useMemo(() => {
     const m = new Map();
     windows.forEach((d) => {
@@ -4575,11 +4784,27 @@ function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
   }, [windows]);
   const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
   const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
+  // The chosen window color (full object). The offered list is PER WINDOW — each catalog
+  // row carries which of the client's colors it comes in (windowColorsFor) — so the
+  // options and the default reset with the selected size, like a door's swing. A
+  // single-color (or empty) list shows no Color block at all.
+  const [color, setColor] = useState(null);
+  const colorOpts = sel ? windowColorsFor(sel, windowColors) : [];
+  useEffect(() => {
+    setColor(sel ? fixtureWindowColorDefault(windowColorsFor(sel, windowColors)) : null);
+  }, [sel]);
   const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
     <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
       border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>{label}</div>
+  );
+  const colorChip = (c, on, onClick) => (
+    <div key={c.id} onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
+      border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>
+      <span style={{ width: 14, height: 14, borderRadius: "50%", background: c.hex || "#CCC", border: "1px solid rgba(0,0,0,0.2)", flexShrink: 0 }} />
+      {c.label}{showPricing && Number(c.rate) > 0 ? ` · +${money(c.rate)}` : ""}
+    </div>
   );
   return (
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -4609,9 +4834,15 @@ function WindowPicker({ windows, showPricing, onCancel, onPlace }) {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
           </div>
         )}
+        {sel && colorOpts.length > 1 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Color</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{colorOpts.map((c) => colorChip(c, color && color.id === c.id, () => setColor(c)))}</div>
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => sel && onPlace(sel)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
+          <button onClick={() => sel && onPlace(sel, color)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
         </div>
       </div>
     </div>
@@ -4834,6 +5065,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const placeableDoors = customerFacing ? doorFixtures.filter((f) => !f.internalOnly) : doorFixtures;
   const placeableRamps = customerFacing ? rampFixtures.filter((f) => !f.internalOnly) : rampFixtures;
   const placeableWindows = customerFacing ? windowFixtures.filter((f) => !f.internalOnly) : windowFixtures;
+  // Colors offered on fixtures: doors pick from the palette rows ticked for Doors
+  // (get_config emits the flag + a show_pricing-gated doorRate); windows have their own
+  // small per-client list (get_fixtures emits windowColors). Both feed the pickers and
+  // the default stamps on included-chip / 3D placements.
+  const doorPaintColors = useMemo(() => (Array.isArray(C.colors) ? C.colors : []).filter((c) => c && c.door), [C.colors]);
+  const windowColorList = useMemo(() => (Array.isArray(C.windowColors) ? C.windowColors : []), [C.windowColors]);
   // Ramp is self-contained now (SIMPLE_RAMP_CFG), driven by the Ramp settings — NOT the built-in
   // `ramp` layout item. Custom mode → the ramp picker (catalog styles); simple mode + offered → the
   // simple ramp tool; otherwise render-only (old ramps still draw, but no new placement).
@@ -5351,10 +5588,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // {!(show3D || adminCalPreview)} guard below, so two live WebGL contexts are
   // structurally impossible rather than merely avoided.
   const [dock3D, setDock3D] = useState(false);
+  // The CALIBRATION dock's own visibility (Settings -> Designer -> 3D). Defaults ON: Carolyn
+  // asked for the preview to just be there beside the settings, not behind a button. The ✕ on
+  // the panel header hides it and the toggle in the panel's button row brings it back.
+  // Separate state from dock3D, not a shared one: DesignerTab and DesignerSettings each mount
+  // their OWN <SS/> instance, so these two docks never see each other's state anyway.
+  const [calDock3D, setCalDock3D] = useState(true);
   // Boolean only. Storing the measured width would setState on every frame of a
   // window drag, on top of the SVG re-render that already costs.
   const [dockCapable, setDockCapable] = useState(false);
   const canvasRowObsRef = useRef(null);
+  // Which threshold this mount measures against. `calibrationOnly` is a prop that is fixed for
+  // a mount's lifetime, so the callback identity below never actually changes at runtime and
+  // no observer churn happens -- the dep is there because the closure reads it.
+  const dockMinW = calibrationOnly ? SS_DOCK_MIN_CAL_W : SS_DOCK_MIN_ROW_W;
   // Callback ref, NOT useEffect([]) — the observed row unmounts whenever the
   // full-screen 3D opens, and an effect-attached observer would keep watching a
   // detached node, freezing dockCapable after the first trip through the editor.
@@ -5373,7 +5620,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (!w) return;
       // 40px of hysteresis on the way down, so an appearing scrollbar cannot
       // oscillate the rule at the threshold.
-      setDockCapable((prev) => !coarse && (prev ? w >= SS_DOCK_MIN_ROW_W - 40 : w >= SS_DOCK_MIN_ROW_W));
+      setDockCapable((prev) => !coarse && (prev ? w >= dockMinW - 40 : w >= dockMinW));
     };
     // Measure SYNCHRONOUSLY here, and let the observer handle changes after.
     // ResizeObserver delivery rides the rendering steps, so its first callback is
@@ -5384,7 +5631,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const ro = new ResizeObserver(measure);
     ro.observe(node);
     canvasRowObsRef.current = ro;
-  }, []);
+  }, [dockMinW]);
   useEffect(() => () => { if (canvasRowObsRef.current) canvasRowObsRef.current.disconnect(); }, []);
   // Narrowing collapses the dock. Deliberately does NOT open the full-screen modal
   // instead: a modal appearing because someone dragged a window edge is hostile,
@@ -5661,7 +5908,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ghlContactIdRef.current = data.ghl_contact_id || null;
     ghlEstimateIdRef.current = data.ghl_estimate_id || null;
     ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
-    setHasExistingEstimate(!!data.ghl_estimate_id);
+    setHasExistingEstimate(!!(data.ghl_estimate_id || data.ss_quote_number));
 
     // Optionally open a specific saved version for review/resubmit. The design DATA
     // comes from that version's snapshot; the GHL refs above stay from the current
@@ -6078,13 +6325,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (fx.category === "window") {
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
-          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null };
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))) };
       } else {
         const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
         const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
         ni = { id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name || "Door",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
-          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation };
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation,
+          // No picker on the included-chip path — stamp the door's color defaults, same
+          // contract as its swing/operation defaults above.
+          ...fixtureDoorColorDefaults(fx, doorPaintColors, paintColors.body, paintColors.trim) };
       }
       if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
         setToast("Something's already there — pick a different spot on the wall."); setTimeout(() => setToast(null), 4000); return;
@@ -6266,12 +6517,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setItems((p) => [...p, ni]);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired, doorPaintColors, windowColorList, paintColors]);
 
   // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
   // swing/operation choice onto a stable `fixtureDoor` item.
-  const placePickedDoor = useCallback((fx, swing, operation) => {
+  const placePickedDoor = useCallback((fx, swing, operation, doorColor, trimColor) => {
     // Swap mode: replace the selected door in place with the chosen door — keeping its wall,
     // but RE-LEGALIZED for the new width. The swap used to keep x/y verbatim with no bounds,
     // collision, or workbench check — the one mutation path with none — so swapping to a
@@ -6310,6 +6561,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
           // matter what the builder's door actually measures.
           openingHeightFt: undefined, sillFt: undefined,
+          // All six color fields set EXPLICITLY (nulls when absent) — same stale-field
+          // discipline as openingHeightFt: the old door's colors must never survive a swap.
+          ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
           widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null };
         // The re-clamp can shift the door; its ramp is derived geometry and must follow,
         // exactly like the drag path — else it detaches into the rasterized PDF.
@@ -6343,6 +6597,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       price: (fx.price != null ? fx.price : null),
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
       swing: swing || null, operation: operation || null,
+      ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("A door is already there — pick a different spot on the wall.");
@@ -6369,7 +6624,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Place the window style chosen in the picker at the remembered wall/point. A catalog window is
   // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
   // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
-  const placePickedWindow = useCallback((fx) => {
+  const placePickedWindow = useCallback((fx, windowColor) => {
     // Swap mode: same re-legalization as the door swap above — the new width is re-clamped
     // to the wall and collision/workbench-checked before committing; the old swap kept x/y
     // verbatim with no checks at all (audit 2026-08-20).
@@ -6401,8 +6656,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
         price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
         // As on the door swap: a built-in window stamped openingHeightFt/sillFt, and those
-        // beat the catalog window's own heightIn in openingSpan.
-        openingHeightFt: undefined, sillFt: undefined, widthFt: wFt } : it));
+        // beat the catalog window's own heightIn in openingSpan. Color fields likewise set
+        // explicitly so the old window's color never survives the swap.
+        openingHeightFt: undefined, sillFt: undefined, ...windowColorStamps(windowColor), widthFt: wFt } : it));
       setSwapId(null); setWindowPick(null); setToast(null); return;
     }
     if (!windowPick || !fx) return;
@@ -6423,6 +6679,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
       price: (fx.price != null ? fx.price : null),
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+      ...windowColorStamps(windowColor),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("Something's already there — pick a different spot on the wall.");
@@ -7163,9 +7420,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (sw) parts.push(sw);
       const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : "";
       if (op) parts.push(op);
+      if (d.colorLabel) parts.push(d.trimColorLabel ? `${d.colorLabel} / ${d.trimColorLabel} trim` : d.colorLabel);
       bullets.push(`${d.doorName || "Door"}${parts.length ? " — " + parts.join(", ") : ""}`);
     });
-    const winCount = items.filter((i) => i.type === "window").length;
+    // Catalog windows get their own spec bullet (name, size, color) like doors; the plain
+    // count line now covers built-in windows only.
+    items.filter((i) => i.type === "window" && i.fixtureItemId).forEach((w) => {
+      const parts = [];
+      if (w.widthIn && w.heightIn) parts.push(`${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}`);
+      if (w.colorLabel) parts.push(w.colorLabel);
+      bullets.push(`${w.windowName || "Window"}${parts.length ? " — " + parts.join(", ") : ""}`);
+    });
+    const winCount = items.filter((i) => i.type === "window" && !i.fixtureItemId).length;
     if (winCount > 0) bullets.push(`Window${winCount > 1 ? "s ×" + winCount : ""}`);
     items.filter((i) => i.type === "workbench").forEach((wb) => bullets.push(`${wb.widthFt}ft Workbench`));
     const loftItems = items.filter((i) => i.type === "loft");
@@ -7259,6 +7525,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // workflow): a human — or the calibrate-style function — reads the roof/
   // siding/color parameters off them into the style's d3 spec; the parametric
   // engine renders from the spec, never from the photos.
+  // The size labels available for the style being calibrated. Same precedence the scan's
+  // closest-match list uses (a style's own `sizes`, falling back to the tenant default set)
+  // and the same tolerance for string-or-{label} entries, because both read the same
+  // catalog shape. Keyed off adminCal.styleValue rather than sel.style: on this surface the
+  // calibrated style and the "selected" style are the same thing, and reading sel.style
+  // would make the list empty until a size had already been picked.
+  const calSizeOpts = () => {
+    const st = ((C && C.buildingStyles) || []).find((x) => x.value === (adminCal && adminCal.styleValue));
+    const labels = st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []);
+    return labels.map((l) => (typeof l === "string" ? l : (l && l.label))).filter(Boolean);
+  };
+  // The sample building the calibration preview renders on. Writes sel, which the [sel.size]
+  // effect turns into bldgW/bldgH -- so the 3D panel remounts and re-frames for the new
+  // footprint. Only ever called from the calibrationOnly surface: in the full designer this
+  // same panel sits over a customer's plan, and moving their style/size would clear it.
+  const calSetSize = (label) => setSel((p) => ({ ...p, style: adminCal.styleValue, size: label }));
+  // The size closest to the middle of the list by floor area — a fairer test of a roof pitch
+  // or a gambrel knee than the component's 10x12 default, which is the smallest thing anyone
+  // sells. Median rather than mean so one 14x40 in the list cannot drag the pick to the end.
+  const calMidSize = (styleValue) => {
+    const st = ((C && C.buildingStyles) || []).find((x) => x.value === styleValue);
+    const labels = st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []);
+    const sized = labels
+      .map((l) => (typeof l === "string" ? l : (l && l.label)))
+      .filter(Boolean)
+      .map((label) => ({ label, p: parseSize(label) }))
+      .filter((x) => x.p)
+      .sort((a, b) => (a.p.w * a.p.h) - (b.p.w * b.p.h));
+    return sized.length ? sized[Math.floor((sized.length - 1) / 2)].label : "";
+  };
   const openCalEditor = (s) => {
     setAdminCalMsg(null);
     setAdminCalPreview(false);
@@ -7271,6 +7567,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // session below; the standalone ?admin=1 path has no session and so starts blank.
       photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
     });
+    // Put the preview on a representative building instead of the component's 10x12 default
+    // (sel.size starts "", so the [sel.size] effect has never fired on this surface and
+    // bldgW/bldgH sit at their useState values). calibrationOnly ONLY: this same panel also
+    // renders over the full designer on the ?admin=1 operator path, where writing sel would
+    // change the style and size out from under a customer's plan and clear it.
+    if (calibrationOnly) {
+      const mid = calMidSize(s.value);
+      if (mid) setSel((p) => ({ ...p, style: s.value, size: mid }));
+    }
     setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
     // Reset with the scan: cached frame URLs belong to the style they were filmed for, and
     // carrying them across would draft the next style from the previous building.
@@ -7583,7 +7888,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return out.filter((s) => s.score <= 4).slice(0, 3);
   };
   const scanApplySize = (label) => {
-    setSel((p) => ({ ...p, style: adminCal.styleValue, size: label }));
+    calSetSize(label);
     setAdminCalMsg({ ok: true, msg: `Canvas set to ${label} on this style — the resize cleared any placed items.` });
   };
   // Store the scan against the style so it can be re-measured later (an algorithm improvement
@@ -7903,9 +8208,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
             ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
-            ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
+            ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null, colorId: item.colorId || null, colorLabel: item.colorLabel || null, trimColorId: item.trimColorId || null, trimColorLabel: item.trimColorLabel || null } : {}),
             ...(item.type === "ramp" ? { name: item.rampName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
-            ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId } : {}),
+            ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId, colorId: item.colorId || null, colorLabel: item.colorLabel || null } : {}),
           };
         }),
         // Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
@@ -7923,6 +8228,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             price: d.price != null ? Number(d.price) : null,
             wall: lbl ? lbl.toLowerCase() : (d.wall || null),
             fixtureItemId: d.fixtureItemId || null,
+            // Color choice: ids are what submit-estimate re-resolves prices from (never the
+            // snapshot); labels are fallback display only.
+            colorId: d.colorId || null,
+            colorLabel: d.colorLabel || null,
+            trimColorId: d.trimColorId || null,
+            trimColorLabel: d.trimColorLabel || null,
           };
         }),
         // Ramp schedule: one row per placed ramp. Custom ramps carry their snapshot price; simple
@@ -7954,6 +8265,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             price: w.price != null ? Number(w.price) : null,
             wall: lbl ? lbl.toLowerCase() : (w.wall || null),
             fixtureItemId: w.fixtureItemId || null,
+            colorId: w.colorId || null,
+            colorLabel: w.colorLabel || null,
           };
         }),
         itemSummary: {
@@ -8030,6 +8343,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (result.estimateId) {
         ghlEstimateIdRef.current = result.estimateId;
         setHasExistingEstimate(true);
+      } else if (result.issuedBy === "structurestudio" && result.quoteNumber) {
+        // SS-mode tenants (migration 121): no GHL estimate exists, but the quote does —
+        // and 9-ALT reuses its number on resubmit, so the button must flip to "Resubmit".
+        setHasExistingEstimate(true);
       }
       if (result.estimateNumber) ghlEstimateNumberRef.current = result.estimateNumber;
 
@@ -8039,6 +8356,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         imageUrl,
         estimateNumber: result.estimateNumber || null,
         updated: !!result.updated,
+        // SS-mode extras: which word to use, the printable document, and whether the
+        // customer actually got an email (a missing address must be visible, not silent).
+        ssQuote: result.issuedBy === "structurestudio",
+        quotePdfUrl: result.quotePdfUrl || null,
+        quoteEmailed: result.issuedBy === "structurestudio" ? result.quoteEmailed === true : null,
+        quoteEmailReason: result.quoteEmailReason || null,
+        changeOrder: result.changeOrder || null,
       });
       setSubmitted(true);
       // Embedded (in-portal) mounts: tell the host page a design was submitted so it
@@ -8615,7 +8939,37 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button onClick={() => setAdminCalPreview(true)} style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>🧊 Preview in 3D</button>
+                {/* The sample building the preview renders on. calibrationOnly ONLY, for the
+                    same reason calSetSize is: over the full designer this row sits above a
+                    customer's plan, and a size change there would clear it. A pitch or a
+                    gambrel knee reads completely differently on a 10x12 than on a 12x32, so
+                    calibrating against one fixed small shell was the actual problem. */}
+                {calibrationOnly && calSizeOpts().length > 0 && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#92400E" }}>
+                    Preview on
+                    <select value={sel.size || ""} onChange={(e) => calSetSize(e.target.value)}
+                      style={{ ...S.sel, minWidth: 110, border: "1px solid #FCD34D" }}>
+                      {calSizeOpts().map((sz) => <option key={sz} value={sz}>{sz}</option>)}
+                    </select>
+                  </label>
+                )}
+                {/* Full screen stays even with the dock up: it is the ONLY 3D on a narrow or
+                    touch screen (where dockOn is false), and the bigger view on a wide one. */}
+                <button onClick={() => setAdminCalPreview(true)}
+                  title={calibrationOnly && dockOn ? "Open the 3D at full screen" : "Preview this style in 3D"}
+                  style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>
+                  {calibrationOnly && dockOn ? "⛶ Full screen 3D" : "🧊 Preview in 3D"}
+                </button>
+                {/* Without this the ✕ on the docked panel's header would be a one-way door.
+                    Same wording as the designer toolbar's dock toggle, deliberately. dockOn
+                    requires `embedded`, so this never appears on the ?admin=1 page, which
+                    renders this same const from the full return. */}
+                {calibrationOnly && dockOn && (
+                  <button onClick={() => setCalDock3D((v) => !v)}
+                    style={{ ...S.btn("#FFF", "#7C3AED"), border: "1px solid #DDD6FE", fontSize: 12 }}>
+                    {calDock3D ? "🧊 Hide 3D" : "🧊 Show 3D"}
+                  </button>
+                )}
                 {/* Copy-JSON is the operator's escape hatch when a save path is down; a
                     builder has no use for it and no place to paste it. */}
                 {!setup3d && <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>}
@@ -8649,7 +9003,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           painted={false} paintBody="" paintTrim=""
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
-          fixtures={C.fixtures}
+          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
@@ -8664,10 +9018,65 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // canvas, no estimate. Every hook above still runs, which is what keeps hook order
   // identical between this return and the full designer below.
   if (calibrationOnly) {
+    // Side-by-side since 2026-08-22 (Carolyn): "in the same way that the designer Tab now has
+    // the 3D view on the side of the layout, I want that same thing happening in the designer
+    // settings so as we change the view settings we can immediately see what it is doing in
+    // the 3D and adjust accordingly." Same Structure3DPanel, same dock-capability rule, one
+    // different width threshold, and the DRAFT spec instead of the saved one.
+    //
+    // `adminCal` is in the term because the form body only renders once a style is picked —
+    // a 3D panel beside nothing but the style chips is a WebGL context spent on decoration.
+    const calDock = Boolean(adminCal) && view3dOn && dockOn && calDock3D;
     return (
       <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
         {showCal3D
-          ? cal3dPanel
+          ? (
+            /* Measured on the ROW, like the designer's canvas row, for the same reason: the
+               portal sidebar collapses from 240px to 68px at max-width:900px, so a viewport
+               threshold would switch the dock ON for the narrower layout and OFF for the
+               wider one. alignItems:"flex-start" is also what leaves the sticky column room
+               to move — the flex default (stretch) makes it full-height and inert. */
+            <div ref={canvasRowRef} style={{ display: "flex", alignItems: "flex-start", gap: !adminCalPreview && calDock ? 12 : 0 }}>
+              {/* minWidth:0 is load-bearing, same as the canvas row: the form's auto-fit grids
+                  have an intrinsic min-content width, so without it the row overflows
+                  sideways instead of reflowing six columns down to three. */}
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>{cal3dPanel}</div>
+              {/* The `!adminCalPreview` term sits ON the render site and is never read from a
+                  variable — that is what makes the docked panel and the full-screen viewer
+                  below structurally unable to hold two WebGL contexts at once, the same
+                  guarantee {!(show3D || adminCalPreview)} gives the full designer. React runs
+                  this subtree's cleanup (dispose + forceContextLoss) before mounting the
+                  modal in the same commit. */}
+              {!adminCalPreview && calDock && (
+                /* top:74, not the designer's 12: this mounts inside the portal's NORMALLY
+                   SCROLLING .ss-inner, under a position:sticky .ss-topbar ~62px tall. top:12
+                   would park the panel behind it. */
+                <div style={{ flex: "0 0 clamp(320px, 34%, 480px)", height: "min(560px, 72vh)", position: "sticky", top: 74, marginTop: 12, marginRight: 12 }}>
+                  <Structure3DPanel
+                    /* Remount on the sample building's size and nothing else — same rule as
+                       the designer. Wall height deliberately does NOT remount: fitHeightFt
+                       re-frames in place, because here the height is what is being typed. */
+                    key={`${bldgW}x${bldgH}`}
+                    bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+                    /* The DRAFT spec, NOT d3ResolveStyleSpec(...) — an unsaved slider showing
+                       up here is the whole feature. painted/roofType/roofColorHex are pinned
+                       to what cal3dPreview passes, so the docked view and the full-screen one
+                       cannot disagree about what a style looks like. */
+                    style3d={adminCal.spec}
+                    fitHeightFt={adminCal.spec.wallHeightFt || 0}
+                    painted={false} paintBody="" paintTrim=""
+                    roofType="" roofColorHex=""
+                    frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
+                    fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+                    /* Nothing drags on this surface, and no canEdit: there is no plan to edit
+                       here, so the panel's "⛶ Edit in 3D" footer never renders. */
+                    suspended={false}
+                    onClose={() => setCalDock3D(false)}
+                  />
+                </div>
+              )}
+            </div>
+          )
           : <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>}
         {cal3dPreview}
       </div>
@@ -8676,9 +9085,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
       {/* Size change refused: something on the plan has nowhere to go in the smaller
           building. The size is ALREADY back to what it was (the reflow is computed before
           anything is committed), so this only has to explain and get out of the way. */}
@@ -9557,7 +9966,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
-              fixtures={C.fixtures}
+              fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
               suspended={Boolean(dragging || resizing)}
               canEdit={!planLocked}
               onEdit={() => { setDock3D(false); setShow3D(true); }}
@@ -10102,13 +10511,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div style={{ background: "#F0FDF4", borderTop: "2px solid #BBF7D0", padding: "32px 20px", textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
           <h3 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700, color: "#166534" }}>
-            {savedDesign && savedDesign.updated ? "Estimate Updated!" : "Quote Request Submitted!"}
+            {savedDesign && savedDesign.ssQuote
+              ? (savedDesign.updated ? "Quote Updated!" : "Quote Created!")
+              : (savedDesign && savedDesign.updated ? "Estimate Updated!" : "Quote Request Submitted!")}
           </h3>
           <p style={{ margin: 0, fontSize: 14, color: "#15803D", maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
-            {savedDesign && savedDesign.updated
-              ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
-              : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`}
+            {savedDesign && savedDesign.ssQuote
+              ? (savedDesign.quoteEmailed
+                ? `Thank you, ${contact.name || ""}! The quote has been emailed with a link to view and sign it.`
+                : `Thank you, ${contact.name || ""}! The quote is ready — print it or share the link below.`)
+              : (savedDesign && savedDesign.updated
+                ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
+                : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`)}
           </p>
+          {savedDesign && savedDesign.changeOrder && (
+            /* This revision changed a SIGNED order (migration 126): the customer must
+               acknowledge it before the order can be invoiced. */
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+              This changes an order the customer already signed — change order
+              {savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} needs their
+              approval (they sign from their quote page, or record their verbal OK on the order). Invoicing
+              waits until it's acknowledged.
+            </div>
+          )}
+          {savedDesign && savedDesign.ssQuote && savedDesign.quoteEmailed === false && (
+            /* The quote exists but no email went out (no address on file, or the tenant's
+               sending domain isn't live). Silence here reads as "the customer got it". */
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+              Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
+            </div>
+          )}
           {savedDesign && (
             <div style={{ maxWidth: 520, margin: "20px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -10117,8 +10549,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               {savedDesign.estimateNumber && (
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>Estimate #</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>EST-{savedDesign.estimateNumber}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>{savedDesign.ssQuote ? "Quote #" : "Estimate #"}</span>
+                  {/* SS numbers carry the builder's own prefix and render verbatim; EST- is GHL's. */}
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>{savedDesign.ssQuote ? savedDesign.estimateNumber : `EST-${savedDesign.estimateNumber}`}</span>
+                </div>
+              )}
+              {savedDesign.ssQuote && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                  {savedDesign.quotePdfUrl && (
+                    <a href={savedDesign.quotePdfUrl} target="_blank" rel="noopener"
+                      style={{ ...S.btn(accent, "#FFF"), padding: "9px 16px", fontSize: 13, textDecoration: "none" }}>
+                      Print quote (PDF)
+                    </a>
+                  )}
+                  <button type="button"
+                    onClick={(e) => {
+                      const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(C.clientId)}`;
+                      const btn = e.currentTarget;
+                      const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
+                      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+                      else { window.prompt("Copy the customer link:", link); }
+                    }}
+                    style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "9px 16px", fontSize: 13 }}>
+                    Copy customer link
+                  </button>
                 </div>
               )}
             </div>
@@ -10229,7 +10683,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
-          fixtures={C.fixtures}
+          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
@@ -10434,18 +10888,22 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
         }
         // Fixtures catalog (Options → Doors; windows/ramps later) — best-effort: a failure
         // just means no catalog doors in the palette, it never blocks the designer.
-        let fixtures = [], rampSettings = null;
+        let fixtures = [], rampSettings = null, windowColors = [];
         try {
           const fxRes = await sb.rpc("get_fixtures", { p_client_id: clientId });
           const fx = fxRes && fxRes.data;
           if (!cancelled && fx) {
-            // get_fixtures returns either the legacy array or { items, ramp }.
+            // get_fixtures returns either the legacy array or { items, ramp, windowColors }.
             if (Array.isArray(fx)) fixtures = fx;
-            else { if (Array.isArray(fx.items)) fixtures = fx.items; if (fx.ramp) rampSettings = fx.ramp; }
+            else {
+              if (Array.isArray(fx.items)) fixtures = fx.items;
+              if (fx.ramp) rampSettings = fx.ramp;
+              if (Array.isArray(fx.windowColors)) windowColors = fx.windowColors;
+            }
           }
         } catch (_e) { /* non-fatal */ }
         if (cancelled) return;
-        setState({ status: "ready", config: { ...cfg, clientId, fixtures, rampSettings } });
+        setState({ status: "ready", config: { ...cfg, clientId, fixtures, rampSettings, windowColors } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);

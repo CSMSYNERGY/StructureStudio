@@ -1,7 +1,7 @@
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a
 // machine with no registry access -- the same rule the other _shared tests follow.
 // Preflight discovers _shared/*.test.ts automatically, so these run on every push.
-import { esc, estimateEmail, formatMoney, invoiceEmail, testEmail } from "./emailTemplates.ts";
+import { acceptanceEmail, changeOrderEmail, esc, estimateEmail, formatMoney, invoiceEmail, testEmail } from "./emailTemplates.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg);
@@ -130,11 +130,86 @@ Deno.test("formatMoney formats numbers $#,##0.00 and passes strings through", ()
   assert(formatMoney("$1,234.00") === "$1,234.00", "pre-formatted strings pass through");
 });
 
+const baseAcceptance = () => ({
+  businessName: "Junior Barns",
+  phone: "(555) 201-8890",
+  quoteNumber: "JB-1041",
+  total: 12345.5,
+  signerName: "Pat Example",
+  acceptedAtIso: "2026-08-23T18:30:00.000Z",
+  pdfUrl: "https://storage.example.com/floor-plans/junior-barns/SS-ABC123-quote.pdf",
+  quoteTerms: "50% deposit due on acceptance.",
+});
+
+Deno.test("docWord 'quote' reworders the estimate email; default stays 'estimate'", () => {
+  const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
+  assertIncludes(q.subject, "Your quote JB-1041");
+  assertIncludes(q.html, "View &amp; Sign Your Quote");
+  assertNotIncludes(q.html, "Your estimate is ready");
+  assertIncludes(q.text, "Quote #: JB-1041");
+  const e = estimateEmail(baseEstimate());
+  assertIncludes(e.subject, "Your estimate EST-1042");
+  assertIncludes(e.html, "View &amp; Accept Your Estimate");
+});
+
+Deno.test("acceptanceEmail carries the number, signer, date and signed-PDF link", () => {
+  const o = acceptanceEmail(baseAcceptance());
+  assertIncludes(o.subject, "You accepted quote JB-1041");
+  assertIncludes(o.html, "Pat Example");
+  assertIncludes(o.html, "2026-08-23");
+  assertIncludes(o.html, `href="${baseAcceptance().pdfUrl}"`);
+  assertIncludes(o.text, "Signed by: Pat Example");
+  // No PDF -> no link, still a valid email.
+  const bare = acceptanceEmail({ ...baseAcceptance(), pdfUrl: null });
+  assertNotIncludes(bare.html, "signed quote (PDF)");
+  assert(bare.text.trim().length > 0, "text half must survive without a PDF");
+});
+
+const baseChangeOrder = () => ({
+  businessName: "Junior Barns",
+  quoteNumber: "JB-1041",
+  coNo: 2,
+  description: "Added: Window ×2 ($450.00)\nBody color: options updated\nTotal: $2,800.00 → $3,250.00",
+  totalBefore: 2800,
+  totalAfter: 3250,
+  reviewUrl: "https://app.example.com/my-quotes?client=junior-barns",
+  quoteTerms: "50% deposit due on acceptance.",
+});
+
+Deno.test("changeOrderEmail carries the description, totals, CO number and review CTA", () => {
+  const o = changeOrderEmail(baseChangeOrder());
+  assertIncludes(o.subject, "A change to your quote JB-1041 needs your approval");
+  assertIncludes(o.html, "CO-2");
+  assertIncludes(o.html, "Added: Window ×2");
+  assertIncludes(o.html, "$2,800.00");
+  assertIncludes(o.html, "$3,250.00");
+  assertIncludes(o.html, `href="${baseChangeOrder().reviewUrl}"`);
+  assertIncludes(o.html, "Review &amp; Approve");
+  assertIncludes(o.text, "New total: $3,250.00");
+  // Multi-line description keeps its structure in HTML.
+  assertIncludes(o.html, "($450.00)<br>Body color");
+});
+
+Deno.test("changeOrderEmail escapes a hostile description", () => {
+  const o = changeOrderEmail({ ...baseChangeOrder(), description: `<script>alert(1)</script> changed` });
+  assertNotIncludes(o.html, "<script>");
+  assertIncludes(o.html, "&lt;script&gt;");
+});
+
+Deno.test("acceptanceEmail escapes a hostile signer name", () => {
+  const o = acceptanceEmail({ ...baseAcceptance(), signerName: `Pat <script>alert(1)</script>` });
+  assertNotIncludes(o.html, "<script>", "raw tag must never reach the html");
+  assertIncludes(o.html, "&lt;script&gt;");
+});
+
 Deno.test("white-label: no platform branding anywhere in any output", () => {
   // The whole point of the Postmark path is that the customer sees ONLY their builder.
   const outs = [
     estimateEmail(baseEstimate()),
+    estimateEmail({ ...baseEstimate(), docWord: "quote" }),
     invoiceEmail(baseInvoice()),
+    acceptanceEmail(baseAcceptance()),
+    changeOrderEmail(baseChangeOrder()),
     testEmail({ businessName: "Junior Barns", fromAddress: "info@juniorbarns.example.com" }),
   ];
   for (const o of outs) {

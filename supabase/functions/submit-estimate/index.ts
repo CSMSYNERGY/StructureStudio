@@ -2,9 +2,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { estimateEmail } from "../_shared/emailTemplates.ts";
+import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
+import { buildQuotePdf } from "../_shared/quotePdf.ts";
+import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
+import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -73,6 +77,9 @@ function json(body: unknown, status = 200) {
 // redirect. Kept in step with portal-settings' save-side check.
 const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
+// deHtml moved to _shared/estimateLines.ts (2026-08-24): the SS invoice in portal-settings
+// renders the same estimate_lines snapshot and must de-render it identically.
+
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -102,7 +109,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -122,6 +129,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const businessAddress: any = settings.business_address || null;
   const businessLogoUrl: string = settings.business_logo_url || "";
   const quoteTerms: string = settings.quote_terms || "";
+  // WHO ISSUES THE PAPERWORK (migration 121). Default TRUE — and read as "anything but an
+  // explicit false is the CRM", so a tenant whose row predates the column, or whose value is
+  // null for any reason, gets today's GHL path rather than silently switching to a document
+  // StructureStudio has never sent for them. The credential check above is deliberately NOT
+  // relaxed for SS mode: the contact upsert and the opportunity still go to the CRM either way.
+  const invoiceInGhl: boolean = settings.invoice_in_ghl !== false;
   const effectiveBetaMode: boolean = Boolean(betaMode) || Boolean(settings.beta_mode);
 
   // ⚠️ ONLY the tenant's own `beta_mode` switch redirects. The request's `betaMode` flag is
@@ -156,7 +169,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    browser right before calling us, so it must exist here.
   const { data: existingDesign, error: designErr } = await supabase
     .from("designs")
-    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id")
+    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -724,17 +737,51 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Identical doors (same name + price) collapse into one line with a qty, matching the
   // designer's live preview. Unpriced / $0 doors add no line (NULL-price contract = not
   // charged). NOT matched against GHL products — pushed as ad-hoc lines like custom options.
+  // Size-inclusions for CATALOG fixtures are a SHARED POOL per fixture id, consumed across
+  // color-split groups in placement order: a color choice splits one fixture id into several
+  // lines, and netting the full inclusion per line would give it away multiple times. The
+  // designer's computeLayoutPricingRows runs the identical pool in the identical order so
+  // the live preview and this estimate always agree. An included unit nets the whole grouped
+  // (base + color) price — included doors don't pay the color surcharge.
+  const fxIncRemaining = new Map<string, number>();
+  const takeFxIncluded = (fid: string | null, qty: number): number => {
+    if (!fid || !includedMap.get(fid)) return 0;
+    if (!fxIncRemaining.has(fid)) fxIncRemaining.set(fid, includedMap.get(fid) || 0);
+    const take = Math.min(qty, fxIncRemaining.get(fid) || 0);
+    fxIncRemaining.set(fid, (fxIncRemaining.get(fid) || 0) - take);
+    return take;
+  };
   if (Array.isArray(doors)) {
     // Sizes are stored in inches; show them as feet/inches on the estimate line.
     const fmtFtIn = (inches: unknown): string => { const n = Number(inches); if (!isFinite(n) || n <= 0) return ""; const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100; return ft === 0 ? `${inch}"` : inch === 0 ? `${ft}'` : `${ft}'${inch}"`; };
     // Each door's price, photo + "show on estimate" flag, read live from the catalog by
     // fixtureItemId — same lookup the declined-fixtures credit below has always done.
     const doorIds = [...new Set(doors.map((d: any) => d && d.fixtureItemId).filter(Boolean))];
-    const fxImg = new Map<string, { url: string | null; show: boolean; price: number | null }>();
+    const fxImg = new Map<string, { url: string | null; show: boolean; price: number | null; colorMode: string }>();
     if (doorIds.length) {
-      const fr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
-      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
+      const fr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate, color_mode").eq("client_id", clientId).in("id", doorIds);
+      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null, colorMode: String(r.color_mode || "fixed") });
     }
+    // Chosen door/trim colors: label + flat per-door rate re-resolved from the tenant's
+    // palette by id — same trust posture as the price re-read above (the body's labels are
+    // fallback display only, its ids buy nothing unless the row is the tenant's AND ticked
+    // for doors; a forged/stale/foreign id prices as $0 with the snapshot label).
+    const colorIds = [...new Set(doors.flatMap((d: any) => [d && d.colorId, d && d.trimColorId]).filter(Boolean).map(String))];
+    const doorColorMap = new Map<string, { label: string; rate: number }>();
+    if (colorIds.length) {
+      const cr = await supabase.from("colors").select("id, label, door, door_rate").eq("client_id", clientId).in("id", colorIds);
+      for (const r of cr.data ?? []) if (r.door === true) doorColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.door_rate) || 0 });
+    }
+    // `charge` = the door's CATALOG color_mode is paint/match (customer-chosen color). A
+    // fixed-color door stamps its color for the description, but its own price already
+    // includes that one color — no rate on top. The mode comes from fixture_items, never
+    // the body, so a forged payload can't dodge (or invent) a surcharge.
+    const colorBit = (id: unknown, fallbackLabel: unknown, suffix: string, charge: boolean): { text: string | null; rate: number } => {
+      const c = id ? doorColorMap.get(String(id)) : undefined;
+      const label = c ? c.label : (id && fallbackLabel ? String(fallbackLabel) : null);
+      const rate = charge && c ? c.rate : 0;
+      return { text: label ? `${label}${suffix}${rate > 0 ? ` ($${rate})` : ""}` : null, rate };
+    };
     const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const d of doors) {
       // A FOUND catalog row always wins, its NULL/0 price included (the owner's "unpriced =
@@ -747,26 +794,33 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // than simply omitting the door from the payload.
       const dFid = d && d.fixtureItemId ? String(d.fixtureItemId) : null;
       const dFx = dFid ? fxImg.get(dFid) : undefined;
-      const price = dFx !== undefined
+      const basePrice = dFx !== undefined
         ? (dFx.price != null ? dFx.price : 0)
         : (d && d.price != null ? Number(d.price) : 0);
+      // Chosen colors: each adds its flat per-door rate to the line and its name (with the
+      // price when it charges) to the description — "Barn Red ($50) · White trim ($25)".
+      const chargeColors = dFx !== undefined && (dFx.colorMode === "paint" || dFx.colorMode === "match");
+      const mainC = colorBit(d && d.colorId, d && d.colorLabel, "", chargeColors);
+      const trimC = colorBit(d && d.trimColorId, d && d.trimColorLabel, " trim", chargeColors);
+      const price = basePrice + mainC.rate + trimC.rate;
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";
       // Spell swing + operation out the same way the floor-plan PDF does (out-swing, right hinge)
       // so the estimate line and the plan read identically.
       const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : null;
       const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : null;
-      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}`;
+      const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, mainC.text, trimC.text, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}|${mainC.text || ""}|${trimC.text || ""}`;
       const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
       g.qty++; dg.set(key, g);
     }
     for (const g of dg.values()) {
       // Fixtures-catalog doors (2026-07-30) — their own line kind: they are neither a
       // layout_item (no layout_item_pricing row) nor a custom option (catalog-priced).
-      // Net the size-included qty (building_size_inclusions keyed by the fixture id) — the first N
-      // are covered by the base price (shown as a $0 "(included)" line), extras are charged.
-      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      // Net the size-included qty (building_size_inclusions keyed by the fixture id) — the
+      // first N are covered by the base price (shown as a $0 "(included)" line), extras are
+      // charged. The pool is shared across this fixture's color groups (see takeFxIncluded).
+      const inc = takeFxIncluded(g.fixtureItemId ? String(g.fixtureItemId) : null, g.qty);
       const chargeable = Math.max(0, g.qty - inc);
       const im = g.fixtureItemId ? fxImg.get(String(g.fixtureItemId)) : null;
       const atts = (im && im.show && im.url) ? imgAttachments(im.url) : [];
@@ -901,6 +955,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const wr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", winIds);
       for (const r of wr.data ?? []) wImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
     }
+    // Chosen window colors: label + flat per-window rate re-resolved from window_colors by
+    // id (never the snapshot) — same trust posture as door colors above.
+    const wColorIds = [...new Set(windows.map((w: any) => w && w.colorId).filter(Boolean).map(String))];
+    const winColorMap = new Map<string, { label: string; rate: number }>();
+    if (wColorIds.length) {
+      const wcr = await supabase.from("window_colors").select("id, label, rate").eq("client_id", clientId).in("id", wColorIds);
+      for (const r of wcr.data ?? []) winColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.rate) || 0 });
+    }
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
@@ -909,18 +971,23 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // omitting the window from the client-authored payload.
       const wFid = w && w.fixtureItemId ? String(w.fixtureItemId) : null;
       const wFx = wFid ? wImg.get(wFid) : undefined;
-      const price = wFx !== undefined
+      const basePrice = wFx !== undefined
         ? (wFx.price != null ? wFx.price : 0)
         : (w && w.price != null ? Number(w.price) : 0);
+      const wc = (w && w.colorId) ? winColorMap.get(String(w.colorId)) : undefined;
+      const colorLabel = wc ? wc.label : (w && w.colorId && w.colorLabel ? String(w.colorLabel) : null);
+      const colorRate = wc ? wc.rate : 0;
+      const colorText = colorLabel ? `${colorLabel}${colorRate > 0 ? ` ($${colorRate})` : ""}` : null;
+      const price = basePrice + colorRate;
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}`;
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
+      const key = `${name}|${price}|${colorText || ""}`;
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
       g.qty++; wg.set(key, g);
     }
     for (const g of wg.values()) {
-      const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+      const inc = takeFxIncluded(g.fixtureItemId ? String(g.fixtureItemId) : null, g.qty);
       const chargeable = Math.max(0, g.qty - inc);
       const included = inc > 0 && chargeable <= 0;
       const im = g.fixtureItemId ? wImg.get(String(g.fixtureItemId)) : null;
@@ -1326,6 +1393,277 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     ...(opportunityId ? { opportunityId: String(opportunityId) } : {}),
   };
 
+  // Line provenance snapshot (persisted as designs.estimate_lines at step 11).
+  //
+  // Serialized after pct_estimate_total resolution, credit baking, and the discount clamp
+  // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
+  // style id is stored once at the top level (every building/layout line shares it) and the
+  // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
+  // Built BEFORE step 9 (moved up from between 9 and 10 on 2026-08-21) because BOTH send
+  // paths render their document from this same snapshot — the own-domain (Resend) path's
+  // formal estimate PDF, and the SS-mode quote immediately below, which never reaches step 9
+  // at all. Nothing in it depends on the GHL response: every input (targetItems, lineProv,
+  // totalDiscount, styleRowId) is final by step 8. Same object, same amounts, so the emailed
+  // document and the persisted books lines can never disagree.
+  const estimateLines = {
+    version: 1,
+    styleId: styleRowId,
+    discount: totalDiscount > 0 ? totalDiscount : 0,
+    lines: targetItems
+      .filter((li) => !lineProv.get(li)?.skip)
+      .map((li) => {
+        const p = lineProv.get(li);
+        return {
+          kind: p?.kind ?? "fallback",
+          itemKey: p?.itemKey ?? "",
+          name: String(li.name ?? ""),
+          // The GHL line's description is where the specifics live (paint colors, roof
+          // type/color, ramp sizing, RO dimensions) — under the simplified category-item
+          // model the QuickBooks item is a broad category, so this text is what makes the
+          // books line readable. Capped: it feeds a 4000-char QBO Description, not storage.
+          desc: String(li.description ?? "").trim().slice(0, 1000),
+          qty: Number(li.qty) || 0,
+          amount: Number(li.amount) || 0,
+          nonTaxable: !!p?.nonTaxable,
+        };
+      }),
+  };
+
+  // ── 9-ALT. StructureStudio issues the quote (client_settings.invoice_in_ghl = false) ──
+  //
+  // Everything above still ran: the contact was upserted into the CRM and the opportunity was
+  // created/moved per the tenant's stage mapping (Carolyn 2026-08-21 — "Contacts are still
+  // created in GHL and Opportunities are placed per the settings"). What this branch replaces
+  // is only the PAPERWORK: no GHL estimate object is created, and GHL does not email anyone.
+  //
+  // It returns, so steps 9/10/11 below are the untouched GHL path — no reindentation, no new
+  // conditionals threaded through the money path. Junior Barns and every other tenant on
+  // invoice_in_ghl = true reach this line and walk straight past it.
+  if (!invoiceInGhl) {
+    // The number is allocated ONCE per design and reused on every resubmit — the same promise
+    // the GHL path keeps by PUTting the same estimate id rather than creating a second one. A
+    // customer who receives a revised quote must not see the number change under them.
+    let ssQuoteNumber: string | null = existingDesign.ss_quote_number || null;
+    if (!ssQuoteNumber) {
+      const { data: allocated, error: allocErr } = await supabase
+        .rpc("allocate_ss_quote_number", { p_client_id: clientId });
+      if (allocErr) {
+        return json({ error: `Could not allocate a quote number: ${allocErr.message}` }, 502);
+      }
+      ssQuoteNumber = allocated ? String(allocated) : null;
+    }
+    // NULL means the tenant has no starting number. portal-settings refuses to save this
+    // combination, so reaching here means the row was edited around the portal — refuse rather
+    // than invent a 1, which would collide with the paperwork they already have out.
+    if (!ssQuoteNumber) {
+      return json({
+        error: "This account issues its own quotes but has no starting quote number set. Add one in Settings → CRM Connection → Quotes & Invoices.",
+      }, 400);
+    }
+
+    // The plan PDF the designer just uploaded becomes sheets 2-3 (floor plan, four-sided 3D).
+    // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
+    // URL, since this one is fetched server-side.
+    const planUrl = imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null;
+    const skippedSheets: string[] = [];
+
+    let quotePdfUrl: string | null = null;
+    try {
+      const pdfBytes = await buildQuotePdf({
+        business: {
+          name: businessName,
+          phone: businessPhone || null,
+          website: businessWebsite || null,
+          address: businessAddress,
+        },
+        estimateNumber: ssQuoteNumber,
+        dateIso: today,
+        lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
+        discount: estimateLines.discount,
+        quoteTerms: quoteTerms || null,
+        planPdfUrl: planUrl,
+        onSheetSkipped: (r) => skippedSheets.push(r),
+      });
+      // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
+      // not apply — same reasoning as the formal estimate PDF's `-estimate.pdf` sibling.
+      // upsert: one quote document per design, replaced on every resubmit.
+      const pdfPath = `${clientId}/${designId}-quote.pdf`;
+      const up = await supabase.storage.from("floor-plans")
+        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+      if (up.error) {
+        console.warn("SS quote PDF upload failed:", up.error.message);
+      } else {
+        const { data: pub } = supabase.storage.from("floor-plans").getPublicUrl(pdfPath);
+        quotePdfUrl = pub?.publicUrl || null;
+      }
+    } catch (e) {
+      // Unlike the plan sheets (which degrade inside buildQuotePdf), a failure HERE means there
+      // is no document at all. Still not fatal to the submission: the design, the contact and
+      // the opportunity are real and the rep can resubmit. Reported honestly below.
+      console.warn("SS quote PDF generation failed:", (e as Error).message);
+    }
+
+    // ── THE CHANGE ORDER (migration 126). A resubmit AFTER the customer signed is a change
+    // to an agreed order, and it needs their acknowledgment — e-signature or the rep's
+    // verbal attestation — before it can be invoiced. The description is GENERATED from the
+    // two snapshots (what the customer signed vs what was just built), never typed: a rep
+    // summarising their own change is how the acknowledgment drifts from reality. One
+    // pending design_edit CO per design, updated in place on every further resubmit so the
+    // customer always sees the CUMULATIVE change against what they signed. An identical
+    // resubmit (null diff) is not a change order.
+    let changeOrder: { coNo: number | null; description: string } | null = null;
+    if (existingDesign.accepted_at) {
+      const coDescription = changeOrderDescription(existingDesign.estimate_lines, estimateLines);
+      if (coDescription) {
+        const oldTotal = totalFromSnapshot(existingDesign.estimate_lines);
+        const newTotal = totalFromSnapshot(estimateLines);
+        // The baseline the customer signed: the latest acceptance's design_version. The
+        // "after" is the version the browser just saved (save_design runs before us).
+        const [{ data: lastAcc }, { data: maxVer }] = await Promise.all([
+          supabase.from("design_acceptances").select("design_version")
+            .eq("client_id", clientId).eq("short_code", designId)
+            .order("accepted_at", { ascending: false }).limit(1).maybeSingle(),
+          supabase.from("design_versions").select("version")
+            .eq("short_code", designId).order("version", { ascending: false }).limit(1).maybeSingle(),
+        ]);
+        const coFields = {
+          description: coDescription,
+          total_before_cents: oldTotal == null ? null : Math.round(oldTotal * 100),
+          total_after_cents: newTotal == null ? null : Math.round(newTotal * 100),
+          version_before: lastAcc?.design_version ?? null,
+          version_after: maxVer?.version ?? null,
+        };
+        const { data: existingCo } = await supabase.from("change_orders")
+          .select("id, co_no, version_before")
+          .eq("client_id", clientId).eq("short_code", designId)
+          .eq("status", "pending_ack").eq("source", "design_edit")
+          .limit(1).maybeSingle();
+        if (existingCo) {
+          // Keep the SIGNED baseline (version_before) — the customer acknowledges the total
+          // change since their signature, not since the previous unacknowledged revision.
+          const { error: coErr } = await supabase.from("change_orders")
+            .update({ ...coFields, version_before: existingCo.version_before ?? coFields.version_before })
+            .eq("id", existingCo.id);
+          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription };
+          else console.warn("change order update failed:", coErr.message);
+        } else {
+          const { data: coRow, error: coErr } = await supabase.from("change_orders")
+            .insert({ client_id: clientId, short_code: designId, source: "design_edit", ...coFields })
+            .select("co_no").maybeSingle();
+          if (!coErr) changeOrder = { coNo: coRow?.co_no ?? null, description: coDescription };
+          else console.warn("change order insert failed:", coErr.message);
+        }
+      }
+    }
+
+    // The email. sendTenantEmail owns the beta redirect, the dark-mode guards and the
+    // email_sends ledger, and never throws.
+    //
+    // The CTA is the CUSTOMER PORTAL (my-quotes), not a GHL page: that is where they view,
+    // accept and SIGN the quote (migration 124). The email also carries the printable quote
+    // PDF link and the total (Carolyn 2026-08-23 — the printed quote is first-class; the
+    // email must hand her future template everything it needs). docWord flips the copy to
+    // "quote", her word for SS-issued paperwork.
+    //
+    // When this resubmit raised a CHANGE ORDER, the customer gets the change-order email
+    // INSTEAD — one email describing what changed with a Review & Approve CTA, not a
+    // routine "your quote is ready" that buries the thing needing their signature.
+    const intendedTo = String(contact?.email || "").trim();
+    let emailed = false;
+    let emailReason: string | null = null;
+    if (intendedTo || redirectToTestInbox) {
+      const content = changeOrder
+        ? changeOrderEmail({
+          businessName,
+          logoUrl: businessLogoUrl || null,
+          phone: businessPhone || null,
+          website: businessWebsite || null,
+          quoteNumber: ssQuoteNumber,
+          coNo: changeOrder.coNo ?? 0,
+          description: changeOrder.description,
+          totalBefore: totalFromSnapshot(existingDesign.estimate_lines),
+          totalAfter: oppValue,
+          reviewUrl: myQuotesUrl(clientId, req),
+          quoteTerms: quoteTerms || null,
+        })
+        : estimateEmail({
+          businessName,
+          logoUrl: businessLogoUrl || null,
+          phone: businessPhone || null,
+          website: businessWebsite || null,
+          estimateNumber: ssQuoteNumber,
+          total: oppValue,
+          styleLabel,
+          sizeLabel: size,
+          estimateUrl: myQuotesUrl(clientId, req),
+          pdfUrl: planUrl,
+          formalPdfUrl: quotePdfUrl,
+          quoteTerms: quoteTerms || null,
+          docWord: "quote",
+        });
+      const outcome = await sendTenantEmail(supabase, clientId, {
+        kind: changeOrder ? "change_order" : "estimate",
+        shortCode: designId,
+        to: intendedTo,
+        subject: content.subject,
+        html: content.html,
+        text: content.text,
+      });
+      emailed = outcome.sent;
+      if (!outcome.sent) emailReason = outcome.reason || "failed";
+    } else {
+      emailReason = "no recipient";
+    }
+
+    // Persist. ss_quote_sent_at is stamped ONLY when the customer was actually emailed, so
+    // "numbered but never sent" stays visible and recoverable — the same distinction
+    // invoice_sends draws between 'created' and 'sent'. There is no GHL estimate id or number
+    // to write, and the two GHL ids that DO exist are written exactly as the GHL path does.
+    const { error: persistErr } = await supabase
+      .from("designs")
+      .update({
+        ghl_contact_id: contactId,
+        ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
+        estimate_lines: estimateLines,
+        ss_quote_number: ssQuoteNumber,
+        ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
+        // ss_quote_sent_at means the QUOTE email landed; a change-order email is a
+        // different document and must not masquerade as the quote having been sent.
+        ...(emailed && !changeOrder ? { ss_quote_sent_at: new Date().toISOString() } : {}),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("short_code", designId);
+    // A failed persist is worth surfacing: the number has been consumed and the customer may
+    // already hold the document, so silence here would leave nothing to reconcile against.
+    if (persistErr) console.warn("SS quote persist failed:", persistErr.message);
+
+    return json({
+      ok: true,
+      issuedBy: "structurestudio",
+      contactId,
+      opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
+      // No GHL estimate exists in this mode. Reported as null rather than omitted so a caller
+      // reading `estimateId` gets an explicit "there isn't one" instead of undefined.
+      estimateId: null,
+      estimateNumber: ssQuoteNumber,
+      quoteNumber: ssQuoteNumber,
+      quotePdfUrl,
+      quoteEmailed: emailed,
+      quoteEmailReason: emailReason,
+      // Which sheets the document is missing, and why — the answer to "the customer says the
+      // 3D page isn't there".
+      sheetsSkipped: skippedSheets,
+      updated: Boolean(existingDesign.ss_quote_number),
+      // A resubmit after the customer signed raised (or refreshed) a pending change order —
+      // the designer surfaces "awaiting the customer's approval" instead of a routine
+      // success line.
+      ...(changeOrder ? { changeOrder: { coNo: changeOrder.coNo, pending: true } } : {}),
+      betaMode: effectiveBetaMode,
+      betaRedirected: redirectToTestInbox,
+      betaRedirectedTo: redirectToTestInbox ? betaEmail : null,
+    });
+  }
+
   // 9. Create or update
   let estimateId: string | null = existingEstimateId;
   let estimateNumber: string | null = null;
@@ -1385,38 +1723,6 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   } catch (e) {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
   }
-
-  // Line provenance snapshot (persisted as designs.estimate_lines at step 11).
-  //
-  // Serialized after pct_estimate_total resolution, credit baking, and the discount clamp
-  // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
-  // style id is stored once at the top level (every building/layout line shares it) and the
-  // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
-  // Built BEFORE step 10 because the own-domain path's formal estimate PDF renders from this
-  // same snapshot — the emailed document and the persisted books lines can never disagree.
-  const estimateLines = {
-    version: 1,
-    styleId: styleRowId,
-    discount: totalDiscount > 0 ? totalDiscount : 0,
-    lines: targetItems
-      .filter((li) => !lineProv.get(li)?.skip)
-      .map((li) => {
-        const p = lineProv.get(li);
-        return {
-          kind: p?.kind ?? "fallback",
-          itemKey: p?.itemKey ?? "",
-          name: String(li.name ?? ""),
-          // The GHL line's description is where the specifics live (paint colors, roof
-          // type/color, ramp sizing, RO dimensions) — under the simplified category-item
-          // model the QuickBooks item is a broad category, so this text is what makes the
-          // books line readable. Capped: it feeds a 4000-char QBO Description, not storage.
-          desc: String(li.description ?? "").trim().slice(0, 1000),
-          qty: Number(li.qty) || 0,
-          amount: Number(li.amount) || 0,
-          nonTaxable: !!p?.nonTaxable,
-        };
-      }),
-  };
 
   // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
   //     email_provider='resend' get action:"send_manually" + our own Resend email;
@@ -1479,17 +1785,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // estimate email.
           let formalPdfUrl: string | null = null;
           try {
-            // estimate_lines.desc carries GHL-flavored HTML in two places (the floor-plan
-            // <a> link prepended to the building line, and <br>-joined credit notes, both
-            // entity-escaped). The PDF is plain text — de-render for it only: drop anchors
-            // whole (a link label with no href is noise on paper), <br> → newline, strip
-            // tags, then unescape in reverse of the escape order (&lt;/&gt; before &amp;).
-            const deHtml = (s: string) =>
-              s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
-                .replace(/<br\s*\/?>/gi, "\n")
-                .replace(/<[^>]*>/g, "")
-                .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-                .trim();
+            // deHtml is at module scope (see its comment there) — shared with the SS-mode
+            // quote so the two documents cannot de-render the same snapshot differently.
             const pdfBytes = await buildFormalEstimatePdf({
               business: {
                 name: businessName,
