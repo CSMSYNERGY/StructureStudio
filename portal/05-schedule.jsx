@@ -1772,10 +1772,17 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   const [busy, setBusy] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [loadPick, setLoadPick] = useState(null);  // null = picker closed; array = planned loads
-  const [intake, setIntake] = useState({ customerName: "", phone: "", email: "", serial: "", description: "", quote: "" });
+  const [intake, setIntake] = useState({ customerName: "", phone: "", email: "", street: "", city: "", state: "", zip: "", serial: "", description: "", quote: "" });
   const [photos, setPhotos] = useState(null);    // for the selected repair; null = loading
   const [detail, setDetail] = useState(null);    // editable copy of the selected repair
   const fileRef = useRef(null);
+  // Contact type-ahead (round 9): null = closed, [] = searched-and-nothing, array = hits.
+  // Repairs never create or touch GHL contacts — picking one just fills the fields.
+  const [contactHits, setContactHits] = useState(null);
+  const pickedRef = useRef(false);   // suppresses the re-search fired by the pick's own fill
+  // Refresh feedback — the same treatment the Build Schedule got.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState(0);
 
   const call = async (body, okMsg) => {
     const { data: d, error: err } = await sb.functions.invoke("portal-schedule", { body });
@@ -1798,6 +1805,41 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
 
+  const refresh = async () => {
+    if (refreshing) return;
+    setMsg(null);
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+    setRefreshedAt(Date.now());
+  };
+  useEffect(() => {
+    if (!refreshedAt) return undefined;
+    const t = setTimeout(() => setRefreshedAt(0), 4000);
+    return () => clearTimeout(t);
+  }, [refreshedAt]);
+
+  // The intake's contact type-ahead. Debounced; searches only while the intake is open; a
+  // pick's own field-fill must not immediately reopen the dropdown (pickedRef).
+  useEffect(() => {
+    if (!intakeOpen) { setContactHits(null); return undefined; }
+    if (pickedRef.current) { pickedRef.current = false; return undefined; }
+    const q = intake.customerName.trim();
+    if (q.length < 2) { setContactHits(null); return undefined; }
+    let dead = false;
+    const t = setTimeout(async () => {
+      const { data: d } = await sb.functions.invoke("portal-schedule", { body: { action: "search_contacts", q } });
+      if (!dead) setContactHits((d && d.contacts) || []);
+    }, 300);
+    return () => { dead = true; clearTimeout(t); };
+  }, [intake.customerName, intakeOpen]);
+  const pickContact = (c) => {
+    pickedRef.current = true;
+    setIntake({ ...intake, customerName: c.name, phone: c.phone || "", email: c.email || "",
+      street: c.street || "", city: c.city || "", state: c.state || "", zip: c.zip || "" });
+    setContactHits(null);
+  };
+
   const repairs = (data && data.repairs) || [];
   const jobs = (data && data.jobs) || [];
   const stops = (data && data.stops) || [];
@@ -1812,9 +1854,9 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   // Editable detail copy + photos, refreshed whenever the selection changes.
   useEffect(() => {
     if (!selected) { setDetail(null); setPhotos(null); return; }
-    setDetail({ status: selected.status, quote: selected.quote_cents == null ? "" : String(selected.quote_cents / 100), notes: selected.notes || "" });
+    setDetail({ status: selected.status, quote: selected.quote_cents == null ? "" : String(selected.quote_cents / 100), notes: selected.notes || "",
+      street: selected.street || "", city: selected.city || "", state: selected.state || "", zip: selected.zip || "" });
     setPhotos(null);
-    setLoadPick(null);   // a picker left open would apply to the wrong repair
     let dead = false;
     (async () => {
       const { data: d } = await sb.functions.invoke("portal-schedule", { body: { action: "repair_photos", repairId: selected.id } });
@@ -1822,6 +1864,11 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     })();
     return () => { dead = true; };
   }, [selectedId, data]);
+  // The load picker resets when the SELECTION changes — a picker left open would apply to
+  // the wrong repair. Deliberately NOT keyed on `data`: every write here ends in load(), so
+  // a data-keyed reset closed the picker the moment "Both →" opened it (the build-job write
+  // reloads, the reload reran the effect, the effect killed the picker it raced).
+  useEffect(() => { setLoadPick(null); }, [selectedId]);
 
   const counts = { open: 0, in_progress: 0, done30: 0, quotedCents: 0 };
   const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
@@ -1850,6 +1897,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     setBusy(true); setMsg(null);
     const r = await call({
       action: "create_repair", customerName: intake.customerName, phone: intake.phone, email: intake.email,
+      street: intake.street, city: intake.city, state: intake.state, zip: intake.zip,
       // Raw — the server decides whether that's a serial or a design code and links the
       // building either way. Parsing it here would drop the code half on the floor.
       buildingRef: intake.serial.trim() || null,
@@ -1858,7 +1906,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     setBusy(false);
     if (r && r.repair) {
       setMsg({ ok: `R-${r.repair.repair_no} logged for ${r.repair.customer_name}.` });
-      setIntake({ customerName: "", phone: "", email: "", serial: "", description: "", quote: "" });
+      setIntake({ customerName: "", phone: "", email: "", street: "", city: "", state: "", zip: "", serial: "", description: "", quote: "" });
       setIntakeOpen(false);
       await load();
       setSelectedId(r.repair.id);
@@ -1874,6 +1922,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     const r = await call({
       action: "update_repair", repairId: selected.id, status: detail.status,
       quoteCents, notes: detail.notes,
+      street: detail.street, city: detail.city, state: detail.state, zip: detail.zip,
     }, "Saved.");
     setBusy(false); if (r) load();
   };
@@ -1963,13 +2012,18 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     <div style={S.card}>
       <CardHead title="Repairs" count={repairs.length}
         right={<>
-          <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          <button type="button" onClick={refresh} disabled={refreshing} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: refreshing ? 0.6 : 1, cursor: refreshing ? "default" : "pointer" }}>
+            {refreshing ? "↻ Refreshing…" : "↻ Refresh"}
+          </button>
+          {refreshedAt > 0 && !refreshing && (
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#15803D" }}>Updated just now</span>
+          )}
           {canEdit && <button type="button" onClick={() => setIntakeOpen(!intakeOpen)} style={S.btn(ACCENT, "#FFF")}>+ Log a repair</button>}
         </>} />
 
       {data && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
-          {[["Open", counts.open], ["In progress", counts.in_progress], ["Completed · 30 days", counts.done30], ["Quoted · open", invMoney(counts.quotedCents || null)]].map(([t, n]) => (
+          {[["Open", counts.open], ["In progress", counts.in_progress], ["Completed · 30 days", counts.done30], ["Repair $ · open", invMoney(counts.quotedCents || null)]].map(([t, n]) => (
             <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
               <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{n == null ? "—" : n}</div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
@@ -1987,11 +2041,39 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
       {intakeOpen && canEdit && (
         <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "12px 14px", marginBottom: 13 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "8px 12px", marginBottom: 8 }}>
-            <div><span style={lbl}>Customer *</span><input style={S.input} value={intake.customerName} onChange={(e) => setIntake({ ...intake, customerName: e.target.value })} /></div>
+            {/* Customer is a TYPE-AHEAD over existing contacts (designs + past repairs);
+                picking one fills phone/email/address. Typing a new name IS the new-contact
+                path — the repair just holds the fields; nothing touches GHL. */}
+            <div style={{ position: "relative" }}>
+              <span style={lbl}>Customer *</span>
+              <input style={S.input} value={intake.customerName} autoComplete="off"
+                onChange={(e) => setIntake({ ...intake, customerName: e.target.value })} />
+              {contactHits !== null && (
+                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 40, background: "#FFF", border: "1px solid #C3D9F7", borderRadius: 9, boxShadow: "0 8px 22px rgba(15,23,42,.14)", overflow: "hidden" }}>
+                  {contactHits.map((c, i) => (
+                    <button key={i} type="button" onClick={() => pickContact(c)}
+                      style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "#FFF", padding: "7px 10px", cursor: "pointer", borderBottom: "1px solid #F1F5F9", fontFamily: "inherit" }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{c.name}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: "#64748B" }}>{[c.phone, c.city].filter(Boolean).map((x) => " · " + x).join("")}</span>
+                    </button>
+                  ))}
+                  <div style={{ padding: "6px 10px", fontSize: 11, fontWeight: 600, color: "#94A3B8", background: "#FBFCFE" }}>
+                    ＋ New contact — keep typing
+                  </div>
+                </div>
+              )}
+            </div>
             <div><span style={lbl}>Phone</span><input style={S.input} value={intake.phone} onChange={(e) => setIntake({ ...intake, phone: e.target.value })} /></div>
             <div><span style={lbl}>Email</span><input style={S.input} value={intake.email} onChange={(e) => setIntake({ ...intake, email: e.target.value })} /></div>
             <div><span style={lbl}>Building serial # or design code <span style={{ fontWeight: 500, textTransform: "none" }}>(blank if not one of ours)</span></span><input style={S.input} value={intake.serial} onChange={(e) => setIntake({ ...intake, serial: e.target.value })} placeholder="e.g. 11640 or SS-NR4DV8XK2P" /></div>
-            <div><span style={lbl}>Quote ($)</span><input style={S.input} value={intake.quote} onChange={(e) => setIntake({ ...intake, quote: e.target.value })} placeholder="optional" /></div>
+            <div><span style={lbl}>Repair $</span><input style={S.input} value={intake.quote} onChange={(e) => setIntake({ ...intake, quote: e.target.value })} placeholder="optional" /></div>
+          </div>
+          {/* The customer's address — a site visit delivers TO it, so the stop inherits it. */}
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr .6fr .8fr", gap: "8px 12px", marginBottom: 8 }}>
+            <div><span style={lbl}>Street</span><input style={S.input} value={intake.street} onChange={(e) => setIntake({ ...intake, street: e.target.value })} /></div>
+            <div><span style={lbl}>City</span><input style={S.input} value={intake.city} onChange={(e) => setIntake({ ...intake, city: e.target.value })} /></div>
+            <div><span style={lbl}>State</span><input style={S.input} value={intake.state} onChange={(e) => setIntake({ ...intake, state: e.target.value })} /></div>
+            <div><span style={lbl}>Zip</span><input style={S.input} value={intake.zip} onChange={(e) => setIntake({ ...intake, zip: e.target.value })} /></div>
           </div>
           <span style={lbl}>What's wrong? *</span>
           <textarea style={{ ...S.input, minHeight: 54, resize: "vertical", fontFamily: "inherit" }} value={intake.description}
@@ -2027,7 +2109,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                {["Repair", "Customer", "Building", "Requested", "Quote", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+                {["Repair", "Customer", "Building", "Requested", "Repair $", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
               </tr></thead>
               <tbody>
                 {filtered.map((r) => (
@@ -2068,11 +2150,25 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px", marginBottom: 10 }}>
                 <div><span style={lbl}>Contact</span><div style={{ fontSize: 13, fontWeight: 600 }}>{selected.phone || selected.email || "—"}</div></div>
                 <div>
-                  <span style={lbl}>Quote ($)</span>
+                  <span style={lbl}>Repair $</span>
                   {canEdit
                     ? <input style={{ ...S.input, padding: "6px 8px" }} value={detail.quote} onChange={(e) => setDetail({ ...detail, quote: e.target.value })} />
                     : <div style={{ fontSize: 13, fontWeight: 700 }}>{invMoney(selected.quote_cents)}</div>}
                 </div>
+              </div>
+              {/* The customer's address — the site-visit stop inherits it (migration 115). */}
+              <div style={{ marginBottom: 10 }}>
+                <span style={lbl}>Address</span>
+                {canEdit ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr .6fr .8fr", gap: "0 8px" }}>
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="Street" value={detail.street} onChange={(e) => setDetail({ ...detail, street: e.target.value })} />
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="City" value={detail.city} onChange={(e) => setDetail({ ...detail, city: e.target.value })} />
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="ST" value={detail.state} onChange={(e) => setDetail({ ...detail, state: e.target.value })} />
+                    <input style={{ ...S.input, padding: "6px 8px" }} placeholder="Zip" value={detail.zip} onChange={(e) => setDetail({ ...detail, zip: e.target.value })} />
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{[selected.street, selected.city, selected.state, selected.zip].filter(Boolean).join(", ") || "—"}</div>
+                )}
               </div>
               {canEdit && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px", marginBottom: 10 }}>
@@ -2109,23 +2205,39 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
               </div>
 
               <span style={lbl}>Scheduling</span>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "5px 0 11px" }}>
-                {selJob
-                  ? <span style={schedChip("#F0FDF4", "#15803D")}>On the Build Schedule ✓</span>
-                  : (canEdit && <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }} onClick={scheduleShopWork}>Schedule shop work →</button>)}
-                {selStops.length > 0
-                  ? <span style={schedChip("#EEF2FF", "#3D3672")}>{selStops.some((s) => s.delivered_at) ? "Site visit done ✓" : "Site visit on a load ✓"}</span>
-                  : canDeliver
-                    ? (loadPick === null
-                        ? <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
-                            onClick={openLoadPick}>Site visit — add to a load →</button>
-                        : <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addSiteVisit(e.target.value); }}
-                            style={{ ...S.input, padding: "6px 8px", fontSize: 12, width: "auto", fontWeight: 700 }}>
-                            <option value="">{loadPick.length ? "Pick a load…" : "No planned loads — start one"}</option>
-                            {loadPick.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}</option>)}
-                            <option value="new">➕ New load</option>
-                          </select>)
-                    : <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600, alignSelf: "center" }}>Site visits ride a delivery load — ask someone with Delivery Schedule access to add it.</span>}
+              {/* ONE routing control — Build, Delivery, or BOTH (Carolyn 2026-08-23: a
+                  zero-$ repair "should just log the repair for either or both places").
+                  Both = the same two writes in sequence: the build job, then the load pick.
+                  Paths already taken show as chips and leave the control. */}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "5px 0 11px" }}>
+                {selJob && <span style={schedChip("#F0FDF4", "#15803D")}>On the Build Schedule ✓</span>}
+                {selStops.length > 0 && <span style={schedChip("#EEF2FF", "#3D3672")}>{selStops.some((s) => s.delivered_at) ? "Site visit done ✓" : "Site visit on a load ✓"}</span>}
+                {(!selJob || selStops.length === 0) && (canEdit || canDeliver) && (
+                  <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B" }}>Schedule:</span>
+                )}
+                {!selJob && canEdit && (
+                  <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
+                    onClick={scheduleShopWork}>Build →</button>
+                )}
+                {selStops.length === 0 && canDeliver && loadPick === null && (
+                  <button type="button" disabled={busy} style={{ ...S.btn("#FFF", "#475569"), border: "1px solid #CBD5E1", padding: "6px 11px", fontSize: 12 }}
+                    onClick={openLoadPick}>Delivery →</button>
+                )}
+                {!selJob && selStops.length === 0 && canEdit && canDeliver && loadPick === null && (
+                  <button type="button" disabled={busy} style={{ ...S.btn("#EEF2FF", "#3D3672"), border: "1px solid #C3D9F7", padding: "6px 11px", fontSize: 12 }}
+                    onClick={async () => { await scheduleShopWork(); await openLoadPick(); }}>Both →</button>
+                )}
+                {selStops.length === 0 && canDeliver && loadPick !== null && (
+                  <select disabled={busy} value="" onChange={(e) => { if (e.target.value) addSiteVisit(e.target.value); }}
+                    style={{ ...S.input, padding: "6px 8px", fontSize: 12, width: "auto", fontWeight: 700 }}>
+                    <option value="">{loadPick.length ? "Pick a load…" : "No planned loads — start one"}</option>
+                    {loadPick.map((l) => <option key={l.id} value={l.id}>Load {l.load_no}{l.load_date ? " · " + schedDayLabel(l.load_date) : ""}</option>)}
+                    <option value="new">➕ New load</option>
+                  </select>
+                )}
+                {selStops.length === 0 && !canDeliver && (
+                  <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Site visits ride a delivery load — ask someone with Delivery Schedule access to add it.</span>
+                )}
               </div>
 
               {history.length > 0 && (<>

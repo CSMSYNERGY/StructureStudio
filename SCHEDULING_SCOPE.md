@@ -144,6 +144,39 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
     week" for cross-week drops. Implementation: `weekOrderedRows` / `weekInsertDate` /
     `weekSpotDropProps` in 05-schedule.jsx, with unit tests over the neighbour rules.
 
+28. **REPAIRS: contacts, address, and the SS-invoice contract** (Carolyn 2026-08-23,
+    Repairs round). Migration 115: `repairs` gains `street/city/state/zip` (the StopAddress
+    shape `contactAddress.ts` defines) and `order_id uuid` (soft link, no FK — orders'
+    migrations live on wip/orders, the build_jobs.order_id convention).
+    - **Contact type-ahead** on repair intake: `search_contacts` in portal-schedule searches
+      `designs.contact` + past repairs, deduped by email→phone→name, capped at 10. It is a
+      server action because a direct browser read of `designs` breaks operator view-as.
+      Picking fills name/phone/email/address; typing a new name IS the new-contact path.
+      **Repairs never create or touch GHL contacts.**
+    - **The site-visit stop inherits the repair's address** in add_stop's repair branch
+      (caller-sent values still win), which also makes territory-defaulting work for repair
+      stops — before this a repair stop had NO destination unless typed on the stop.
+    - **"Repair $" is the label everywhere**; the field stays `quote_cents`.
+    - **One routing control** on the detail card — Schedule: Build / Delivery / Both — a
+      zero-$ repair routes without any invoice ("sometimes a repair has no actual $ value
+      and then it should just log the repair for either or both places"). Both = the two
+      existing writes in sequence. The load picker resets on SELECTION change only, not on
+      data reloads (a data-keyed reset killed the picker the moment "Both" opened it).
+
+    ── CONTRACT for the invoicing session (build against this, not around it) ──
+    - A repair with a Repair $ becomes an **SS-NATIVE invoice ONLY — never GHL**, regardless
+      of the tenant's `invoice_in_ghl` setting; a GHL-invoicing tenant invoices repairs some
+      other way and simply does not get this path.
+    - The invoice creates an order; the order's id is written to `repairs.order_id`
+      (column already live — do NOT add a competing repairs migration).
+    - Build/Delivery/Both routing at invoice time is a property of the GENERAL invoice
+      flow — repairs are one entry point, not a special case; the vocabulary already exists
+      on the repair card.
+    - ⚠️ SOLD = INVOICED feeds invoiced orders into the Build tray via the generic order
+      path. Once invoices carry routing flags, the tray must follow the flags — and a
+      repair-born order must never schedule a repair twice when it was already routed from
+      the Repairs tab.
+
 Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
 never disabled, and left a stale banner up — so on an unchanged board the screen was
 byte-identical and the button read as dead. And an expanded card kept pre-refresh values,
