@@ -3574,6 +3574,39 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
         const dStatus = String(d.status || "");
         if (dStatus === "invoiced" || dStatus === "delivered") {
+          // The invoice may have completed on paper (the email does not gate it — see
+          // below). If the ledger says created-but-never-emailed, this click is the email
+          // retry; anything else is genuinely done.
+          const { data: prior } = await admin.from("invoice_sends")
+            .select("status, issued_by, invoice_number, invoice_pdf_url")
+            .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+          if (prior && String(prior.status) === "created" && String(prior.issued_by) === "structurestudio" && prior.invoice_number) {
+            const { data: c2 } = await admin.from("designs").select("contact")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+            const to2 = String((c2?.contact as { email?: unknown } | null)?.email ?? "").trim();
+            if (!isEmail(to2)) {
+              return json({ error: `Invoice ${prior.invoice_number} is complete, but this design has no email address — print the invoice PDF instead.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 400);
+            }
+            const { data: cs2 } = await admin.from("client_settings")
+              .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+              .eq("client_id", clientId).maybeSingle();
+            const out2 = await sendTenantEmail(admin, clientId, {
+              kind: "invoice", shortCode, to: to2,
+              ...invoiceEmail({
+                businessName: String(cs2?.business_name ?? "").trim() || clientId,
+                logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
+                invoiceNumber: String(prior.invoice_number),
+                total: totalFromSnapshot(d.estimate_lines) ?? "",
+                invoiceUrl: prior.invoice_pdf_url, quoteTerms: cs2?.quote_terms,
+              }),
+            });
+            if (out2.sent) {
+              await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
+                .eq("client_id", clientId).eq("short_code", shortCode);
+              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true });
+            }
+            return json({ error: `Invoice ${prior.invoice_number} exists but the email still didn't go out (${out2.reason || "failed"}). Print the invoice PDF or fix email sending in Settings → Email.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 502);
+          }
           return json({ error: "This design was already invoiced." }, 400);
         }
         if (dStatus !== "accepted" && !d.accepted_at) {
@@ -3586,7 +3619,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         {
           const co = await admin.from("change_orders").select("id")
             .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "pending_ack").limit(1);
-          if (co.error && co.error.code !== "42P01") return dbFail(req, clientId, "check change orders", co.error);
+          // A missing table is fine (the change-orders slice may not have shipped yet):
+          // raw Postgres says 42P01, but PostgREST reports it as PGRST205 ("could not find
+          // the table ... in the schema cache") — tolerate both spellings.
+          const missingTable = co.error && (
+            String(co.error.code) === "42P01" || String(co.error.code) === "PGRST205" ||
+            /does not exist|schema cache/i.test(String(co.error.message || ""))
+          );
+          if (co.error && !missingTable) return dbFail(req, clientId, "check change orders", co.error);
           if (!co.error && (co.data?.length ?? 0) > 0) {
             return json({ error: "A change order on this job is awaiting the customer's acknowledgment. Invoice it after they sign, or record their verbal confirmation on the order." }, 409);
           }
@@ -3690,9 +3730,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         await setClaim({ status: "created", issued_by: "structurestudio", invoice_number: invNumber, invoice_pdf_url: invoicePdfUrl, error: null });
 
         // The email. Contact read only here (the PII discipline of 2026-08-07). There is
-        // NO GHL fallback in SS mode — there is no GHL invoice object to email — so a
-        // failed/dark send returns the same honest 502 shape as the CRM path's email
-        // failure: created, not sent, retry re-sends.
+        // NO GHL fallback in SS mode — there is no GHL invoice object to email.
         const { data: c } = await admin.from("designs").select("contact")
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
         const to = String((c?.contact as { email?: unknown } | null)?.email ?? "").trim();
@@ -3719,17 +3757,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         } else {
           sendReason = "no email address on this design";
         }
-        if (!sent) {
-          await setClaim({ status: "created", error: `send: ${sendReason}`.slice(0, 500) });
-          return json({
-            error: `Invoice ${invNumber} was created but the email didn't go out (${sendReason}). Click Send invoice again to retry — it will NOT create a second invoice. You can also print the invoice PDF from the order.`,
-            invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", created: true, sent: false,
-          }, 502);
-        }
-
-        // Done: ledger sent, design invoiced, unit sold, books pushed — the same tail as
-        // the CRM path, minus GHL.
-        await setClaim({ status: "sent", error: null });
+        // THE EMAIL DOES NOT GATE THE INVOICE (Carolyn 2026-08-23, paper-first: most lot
+        // customers want a printed invoice, and a design with no email address must still
+        // be invoiceable). The invoice is complete the moment it has a number and a
+        // document — the sale proceeds either way; the ledger keeps 'created' + the reason
+        // when the email didn't land, so "Resend" can finish that half later, and the
+        // response says plainly what did and didn't happen.
+        await setClaim(sent
+          ? { status: "sent", error: null }
+          : { status: "created", error: `email not sent: ${sendReason}`.slice(0, 500) });
         await admin.from("designs")
           .update({ status: "invoiced", updated_at: nowIso() })
           .eq("client_id", clientId).eq("short_code", shortCode);
@@ -3746,7 +3782,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
           ghlTotal: totalNum,
         });
 
-        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent: true });
+        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, ...(sent ? {} : { emailReason: sendReason }) });
       }
     }
 

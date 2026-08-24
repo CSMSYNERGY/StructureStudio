@@ -126,7 +126,11 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: code, ...(asOperator ? { confirmSend: true } : {}) } });
     setInvBusyKey(null);
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
-    setInvMsg({ ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${est} is now Invoiced.` });
+    // SS mode completes the invoice even when the email couldn't go out (paper-first) —
+    // say which half happened rather than claiming "sent" for an email that never left.
+    setInvMsg(data && data.sent === false
+      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${est} is Invoiced, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${est} is now Invoiced.` });
     load();
   };
 
