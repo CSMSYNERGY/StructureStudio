@@ -33,6 +33,11 @@ const schedPastDue = (job, kind) => {
   return d < schedLocalIso(new Date());
 };
 const schedDims = (j) => (j.width_ft && j.length_ft) ? `${Number(j.width_ft)}×${Number(j.length_ft)}` : "—";
+// A BUILD date reads weekday-first — "Mon, Aug 25, 26" (Carolyn 2026-08-23) — because the
+// shop thinks in weekdays; the 2-digit year buys back the width the weekday costs. Only for
+// build dates: week labels, load dates and history timestamps keep fmtDate.
+const schedFmtBuild = (iso) => schedLocalDate(iso).toLocaleDateString("en-US",
+  { weekday: "short", month: "short", day: "numeric", year: "2-digit" });
 // React `key` for an open SchedJobEditor. It seeds its form state from the job ONCE, and
 // React preserves that state across re-renders — so a refresh that brought newer values left
 // the open fields showing the old ones. Keying on updated_at remounts the editor exactly when
@@ -596,7 +601,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const extra = { dueDate: iso, scheduledStart: iso };
     if (crewFilter !== "all") extra.crewId = crewFilter;
     const r = await call({ action: "create_job", ...body, ...extra },
-      `${label} scheduled for ${fmtDate(schedLocalDate(iso))}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
+      `${label} scheduled for ${schedFmtBuild(iso)}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
     setBusy(false); if (r) load();
   };
   const createManual = async () => {
@@ -735,7 +740,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           {/* One build date per job; hidden on the calendar where the column says it. */}
           {!opts.hideDate && bd && (
             <span style={{ ...schedChip(late ? "#FEF2F2" : "#F1F5F9", late ? "#DC2626" : "#475569"), fontVariantNumeric: "tabular-nums" }}>
-              {fmtDate(schedLocalDate(bd))}{late ? " · past due" : ""}
+              {schedFmtBuild(bd)}{late ? " · past due" : ""}
             </span>
           )}
           {loadChip(job)}
@@ -792,7 +797,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 longer the smallest thing on the row. */}
             {job.customer_name && <span style={{ fontSize: 14, fontWeight: 800, color: "#334155" }}>{job.customer_name}</span>}
             {schedBuildDate(job) && (
-              <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{fmtDate(schedLocalDate(schedBuildDate(job)))}</span>
+              <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{schedFmtBuild(schedBuildDate(job))}</span>
             )}
             {/* Month view used to jump to the week on click; that navigation is an explicit
                 control rather than a side effect of opening a card. Guarded on the VIEW too,
@@ -926,7 +931,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{schedDims(j)}</td>
           <td style={S.td}><span style={schedChip(src.bg, src.fg)}>{src.label}</span></td>
           <td style={S.td}>{stg && <span style={schedChip("#FFF", "#334155")}><span style={{ width: 8, height: 8, borderRadius: "50%", background: stg.color, display: "inline-block" }}></span>{stg.name}</span>}</td>
-          <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? fmtDate(schedLocalDate(schedBuildDate(j))) + (late ? " · past due" : "") : "—"}</td>
+          <td style={{ ...S.td, whiteSpace: "nowrap", color: late ? "#DC2626" : "#1E293B", fontWeight: late ? 700 : 400 }}>{schedBuildDate(j) ? schedFmtBuild(schedBuildDate(j)) + (late ? " · past due" : "") : "—"}</td>
           <td style={S.td}>{crewNameOf(j) || "—"}</td>
           <td style={S.td}>{loadChip(j) || <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>not on a load</span>}</td>
         </tr>
@@ -986,7 +991,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                               rank: j.crew_id && crewById[j.crew_id] ? crews.findIndex((c) => c.id === j.crew_id) : 9999 }; }
       // schedLocalDate, not the bare ISO string: fmtDate would parse "2026-08-12" as UTC
       // midnight and render the day before it west of Greenwich.
-      case "date":   return { key: bd || "", label: bd ? fmtDate(schedLocalDate(bd)) : "No build date", rank: bd || "9999" };
+      case "date":   return { key: bd || "", label: bd ? schedFmtBuild(bd) : "No build date", rank: bd || "9999" };
       case "week":   return bd
                         ? { key: weekStartIso(bd), label: "Week of " + fmtDate(schedLocalDate(weekStartIso(bd))), rank: weekStartIso(bd) }
                         : { key: "", label: "No build date", rank: "9999" };
@@ -1052,7 +1057,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       if (schedBuildDate(job) === group.key) return;
       setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, scheduled_start: group.key, due_date: group.key } : j) }));
       await call({ action: "update_job", jobId: job.id, scheduledStart: group.key, dueDate: group.key },
-        `Moved to ${fmtDate(schedLocalDate(group.key))}.`);
+        `Moved to ${schedFmtBuild(group.key)}.`);
       load();
       return;
     }
@@ -1088,7 +1093,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     // calendar is showing, which is right on the calendar and wrong here — the table has no
     // crew filter, so a date drop must never quietly reassign the crew as a side effect.
     const r = await call({ action: "update_job", jobId: job.id, scheduledStart: iso, dueDate: iso },
-      iso ? `Moved to ${fmtDate(schedLocalDate(iso))}.` : "Build date cleared — back in the tray.");
+      iso ? `Moved to ${schedFmtBuild(iso)}.` : "Build date cleared — back in the tray.");
     load();   // either way: the board must show what actually landed, not what was dropped
   };
 
