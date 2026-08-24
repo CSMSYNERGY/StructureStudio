@@ -744,10 +744,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // Each door's price, photo + "show on estimate" flag, read live from the catalog by
     // fixtureItemId — same lookup the declined-fixtures credit below has always done.
     const doorIds = [...new Set(doors.map((d: any) => d && d.fixtureItemId).filter(Boolean))];
-    const fxImg = new Map<string, { url: string | null; show: boolean; price: number | null }>();
+    const fxImg = new Map<string, { url: string | null; show: boolean; price: number | null; colorMode: string }>();
     if (doorIds.length) {
-      const fr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", doorIds);
-      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
+      const fr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate, color_mode").eq("client_id", clientId).in("id", doorIds);
+      for (const r of fr.data ?? []) fxImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null, colorMode: String(r.color_mode || "fixed") });
     }
     // Chosen door/trim colors: label + flat per-door rate re-resolved from the tenant's
     // palette by id — same trust posture as the price re-read above (the body's labels are
@@ -759,10 +759,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const cr = await supabase.from("colors").select("id, label, door, door_rate").eq("client_id", clientId).in("id", colorIds);
       for (const r of cr.data ?? []) if (r.door === true) doorColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.door_rate) || 0 });
     }
-    const colorBit = (id: unknown, fallbackLabel: unknown, suffix: string): { text: string | null; rate: number } => {
+    // `charge` = the door's CATALOG color_mode is paint/match (customer-chosen color). A
+    // fixed-color door stamps its color for the description, but its own price already
+    // includes that one color — no rate on top. The mode comes from fixture_items, never
+    // the body, so a forged payload can't dodge (or invent) a surcharge.
+    const colorBit = (id: unknown, fallbackLabel: unknown, suffix: string, charge: boolean): { text: string | null; rate: number } => {
       const c = id ? doorColorMap.get(String(id)) : undefined;
       const label = c ? c.label : (id && fallbackLabel ? String(fallbackLabel) : null);
-      const rate = c ? c.rate : 0;
+      const rate = charge && c ? c.rate : 0;
       return { text: label ? `${label}${suffix}${rate > 0 ? ` ($${rate})` : ""}` : null, rate };
     };
     const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
@@ -782,8 +786,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         : (d && d.price != null ? Number(d.price) : 0);
       // Chosen colors: each adds its flat per-door rate to the line and its name (with the
       // price when it charges) to the description — "Barn Red ($50) · White trim ($25)".
-      const mainC = colorBit(d && d.colorId, d && d.colorLabel, "");
-      const trimC = colorBit(d && d.trimColorId, d && d.trimColorLabel, " trim");
+      const chargeColors = dFx !== undefined && (dFx.colorMode === "paint" || dFx.colorMode === "match");
+      const mainC = colorBit(d && d.colorId, d && d.colorLabel, "", chargeColors);
+      const trimC = colorBit(d && d.trimColorId, d && d.trimColorLabel, " trim", chargeColors);
       const price = basePrice + mainC.rate + trimC.rate;
       if (!(price > 0)) continue;
       const name = (String(d.name || "Door").trim()) || "Door";

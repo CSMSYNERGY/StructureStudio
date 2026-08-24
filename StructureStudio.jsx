@@ -1067,6 +1067,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const c = (Array.isArray(C.colors) ? C.colors : []).find((x) => x && x.id === cid);
     return c ? (Number(c.doorRate) || 0) : 0;
   };
+  // Color door-rates apply only when the CUSTOMER chose the color (paint/match modes). A
+  // fixed-color door stamps its color for 3D/description, but its price already includes
+  // that one color — charging the paint-a-door rate on top would surprise the owner.
+  // submit-estimate applies the same rule from fixture_items.color_mode server-side.
+  const doorColorPriced = (fid) => {
+    const f = fid ? (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && x.id === fid) : null;
+    return !!(f && (f.colorMode === "paint" || f.colorMode === "match"));
+  };
   const incRemaining = {};
   const takeIncluded = (fid, qty) => {
     if (!fid || !incForRows[fid]) return 0;
@@ -1084,9 +1092,10 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const gk = `${fid}|${it.colorId || ""}|${it.trimColorId || ""}`;
     if (!fxGroups[gk]) {
       const colorBits = [it.colorLabel, it.trimColorLabel ? `${it.trimColorLabel} trim` : null].filter(Boolean);
+      const priced = doorColorPriced(it.fixtureItemId);
       fxGroups[gk] = {
         label: (it.doorName || "Door") + (colorBits.length ? ` — ${colorBits.join(" / ")}` : ""),
-        price: price + doorRateOf(it.colorId) + doorRateOf(it.trimColorId),
+        price: price + (priced ? doorRateOf(it.colorId) + doorRateOf(it.trimColorId) : 0),
         qty: 0, fid: it.fixtureItemId || null,
       };
       fxOrder.push(gk);
