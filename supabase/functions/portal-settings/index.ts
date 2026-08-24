@@ -67,6 +67,7 @@ const GATES: GateTable = {
 
   // ── Options & colours ────────────────────────────────────────────────────
   save_colors:                    { area: "settings_options", level: "edit" },
+  save_window_colors:             { area: "settings_options", level: "edit" },
   save_layout_pricing:            { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
@@ -811,7 +812,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
@@ -822,18 +823,20 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
-      admin.from("colors").select("id, label, siding, trim, shingle, metal, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
+      // Window colors (116): the small per-client list every window fixture offers.
+      admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
@@ -843,7 +846,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
     // builder click a button that can only fail: the Anthropic key is an edge secret, so the
     // browser has no other way to know whether the feature is configured.
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -1741,6 +1744,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // client that doesn't know about these keys can't clear a color's roof categorization.
       if (Object.prototype.hasOwnProperty.call(row, "shingle")) rec.shingle = row.shingle === true;
       if (Object.prototype.hasOwnProperty.call(row, "metal")) rec.metal = row.metal === true;
+      // Door category (116) rides the same presence-guard: `door` = usable on doors,
+      // `doorRate` = FLAT $ per door painted this color (distinct from the paint rate).
+      if (Object.prototype.hasOwnProperty.call(row, "door")) rec.door = row.door === true;
+      if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
+        const dr = Number(row.doorRate);
+        rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
+      }
       if (Object.prototype.hasOwnProperty.call(row, "imageUrl")) {
         rec.image_url = String(row.imageUrl ?? "").trim() || null;
       }
@@ -1755,6 +1765,54 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
       if (del.error) return dbFail(req, clientId, "remove the colors you deleted", del.error);
+      deleted = toDelete.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // Full-replace this tenant's WINDOW color list (Options tab → Windows section, 116).
+  // Same shape and invariants as save_colors: complete desired list, ids update, no-id
+  // inserts, absentees deleted; an existing row counts as KEPT the moment its id appears —
+  // before validation — so a skipped row can never be swept (audit 2026-08-20). rate is a
+  // FLAT $ per window (no pricing_method engine here). clientId is JWT-resolved.
+  if (action === "save_window_colors") {
+    if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
+    { const e = tooMany(payload.colors, "window colors"); if (e) return json({ error: e }, 400); }
+    const exRes = await admin.from("window_colors").select("id").eq("client_id", clientId);
+    if (exRes.error) return dbFail(req, clientId, "read your current window colors", exRes.error);
+    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    const keptIds = new Set<string>();
+    let saved = 0; const skipped: string[] = [];
+    let i = 0;
+    for (const row of payload.colors) {
+      const rid = String(row?.id ?? "").trim();
+      const isExisting = rid !== "" && existingIds.has(rid);
+      if (isExisting) keptIds.add(rid);
+      const unchanged = isExisting ? " — existing color left unchanged" : "";
+      const label = String(row?.label ?? "").trim();
+      if (!label) { skipped.push(`row ${i}: blank label${unchanged}`); i++; continue; }
+      const rate = Number(row?.rate);
+      const rec: Record<string, unknown> = {
+        client_id: clientId,
+        label,
+        hex: (typeof row?.hex === "string" && /^#[0-9a-fA-F]{3,8}$/.test(row.hex.trim())) ? row.hex.trim() : null,
+        rate: Number.isFinite(rate) && rate >= 0 ? rate : 0,
+        is_default: row?.isDefault === true,
+        active: row?.active !== false,       // default true
+        sort_order: Number.isFinite(Number(row?.sortOrder)) ? Number(row.sortOrder) : i,
+        updated_at: new Date().toISOString(),
+      };
+      const res = isExisting
+        ? await admin.from("window_colors").update(rec).eq("client_id", clientId).eq("id", rid)
+        : await admin.from("window_colors").insert(rec);
+      if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (toDelete.length) {
+      const del = await admin.from("window_colors").delete().eq("client_id", clientId).in("id", toDelete);
+      if (del.error) return dbFail(req, clientId, "remove the window colors you deleted", del.error);
       deleted = toDelete.length;
     }
     return json({ ok: true, saved, deleted, skipped });
@@ -1823,6 +1881,20 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       rec.op_right = opRight; rec.op_left = opLeft; rec.op_double = opDouble; rec.op_slideup = opSlideUp; rec.op_default = opDefault;
     }
     if (has("imageUrl")) rec.image_url = String(row.imageUrl ?? "").trim() || null;
+    // Door color behavior (116). Doors only, presence-guarded like every other optional
+    // field; non-doors force the group unconditionally (same invariant as swing/op).
+    // fixed_color_id is validated against the tenant's door-flagged palette by the CALLER
+    // (save_fixture 400s, import_fixtures nulls + notes) — this validator has no DB access.
+    if (!isDoor) {
+      rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null;
+    } else {
+      if (has("colorMode")) {
+        const cm = String(row?.colorMode ?? "").trim();
+        rec.color_mode = (cm === "paint" || cm === "match") ? cm : "fixed";
+      }
+      if (has("hasTrimColor")) rec.has_trim_color = row?.hasTrimColor === true;
+      if (has("fixedColorId")) rec.fixed_color_id = String(row?.fixedColorId ?? "").trim() || null;
+    }
     return { rec };
   };
   // Inserts still need concrete values for whatever the presence contract left out — the
@@ -1837,7 +1909,21 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       rec.swing_in = false; rec.swing_out = false; rec.swing_default = null;
       rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
     }
+    if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     return rec;
+  };
+
+  // The FK on fixture_items.fixed_color_id accepts ANY colors row — including another
+  // tenant's — so ownership + door-usability are checked here. Returns null when the id is
+  // fine (or absent), else an authored message.
+  const fixedColorProblem = async (rec: Record<string, unknown>): Promise<string | null> => {
+    const fcId = rec.fixed_color_id;
+    if (typeof fcId !== "string" || !fcId) return null;
+    const { data, error } = await admin.from("colors").select("id, door")
+      .eq("id", fcId).eq("client_id", clientId).maybeSingle();
+    if (error || !data) return "that fixed color is not in your palette — pick one from the Colors tab";
+    if (data.door !== true) return "that color is not ticked for Doors — tick it in the Colors tab first";
+    return null;
   };
 
   // Save ONE catalog fixture. Update is IN PLACE by uuid — building_size_inclusions
@@ -1850,6 +1936,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!FIXTURE_CATEGORIES.has(category)) return json({ error: "invalid category" }, 400);
     const v = validateFixtureRow(payload, category, 0);
     if (v.err) return json({ error: v.err }, 400);
+    { const p = await fixedColorProblem(v.rec!); if (p) return json({ error: p }, 400); }
     const id = String(payload?.id ?? "").trim();
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
@@ -1925,11 +2012,25 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (exRes.error) return dbFail(req, clientId, "read your current catalog lines", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
     let nextSort = (exRes.data ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.sort_order) || 0), -1) + 1;
+    // Door-flagged palette ids, prefetched ONCE so fixed-color ids check without a query
+    // per row. An invalid id is cleared with a note — never a skipped row (the rest of the
+    // line is fine; blocking a 500-row import on one stale color label helps nobody).
+    let doorColorIds: Set<string> | null = null;
+    if (category === "door") {
+      const dc = await admin.from("colors").select("id").eq("client_id", clientId).eq("door", true);
+      if (dc.error) return dbFail(req, clientId, "read your door colors", dc.error);
+      doorColorIds = new Set((dc.data ?? []).map((r: any) => String(r.id)));
+    }
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
       const v = validateFixtureRow(row, category, i);
       if (v.err) { skipped.push(v.err); i++; continue; }
+      const fcId = v.rec!.fixed_color_id;
+      if (doorColorIds && typeof fcId === "string" && fcId && !doorColorIds.has(fcId)) {
+        skipped.push(`${String(row?.name ?? "row " + (i + 1))}: fixed color not in your door palette — cleared`);
+        v.rec!.fixed_color_id = null;
+      }
       const rid = String(row?.id ?? "").trim();
       if (rid && existingIds.has(rid)) {
         const res = await admin.from("fixture_items").update(v.rec!)
