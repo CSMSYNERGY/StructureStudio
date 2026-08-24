@@ -39,7 +39,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     }
     const { data, error: err } = await sb
       .from("designs")
-      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
       .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
@@ -123,6 +123,27 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     load();
   };
 
+  // SS-mode rep tools (migration 122, Carolyn 2026-08-23: rep tools live in all three
+  // places — this table, the order detail, and the designer success screen).
+  const [resendBusyKey, setResendBusyKey] = useState(null);
+  const [copiedKey, setCopiedKey] = useState(null);
+  const myQuotesLink = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+  const copyCustomerLink = (code) => {
+    const done = () => { setCopiedKey(code); setTimeout(() => setCopiedKey((k) => (k === code ? null : k)), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, done);
+    else window.prompt("Copy the customer link:", myQuotesLink);
+  };
+  const resendQuoteEmail = async (r) => {
+    setResendBusyKey(r.short_code); setInvMsg(null);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: r.short_code } });
+    setResendBusyKey(null);
+    if (err) { setInvMsg({ err: await fnError(err) }); return; }
+    if (data && data.error) { setInvMsg({ err: data.error }); return; }
+    setInvMsg(data && data.sent
+      ? { ok: `Quote ${r.ss_quote_number || ""} emailed to the customer.` }
+      : { err: `Quote email not sent${data && data.reason ? ` — ${data.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+  };
+
   // Chip filter first, then facets, then the free-text search over what survives.
   const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((r) => normStatus(r.status) === statusFilter);
   const byFacets = byStatus.filter((r) => {
@@ -136,7 +157,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   });
   const filtered = byFacets.filter((r) => {
     const st = normStatus(r.status);
-    const extra = [r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : "", STATUS_LABELS[st], fmtDate(r.created_at), titleCase((r.selections || {}).style)].join(" ");
+    const extra = [r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : "", r.ss_quote_number || "", STATUS_LABELS[st], fmtDate(r.created_at), titleCase((r.selections || {}).style)].join(" ");
     return rowMatchesQuery(r, query, extra);
   });
 
@@ -151,7 +172,9 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       case "customer": return c.name;
       case "contact":  return c.email || c.phone;
       case "building": return [titleCase(sel.style), sel.size].filter(Boolean).join(" ");
-      case "estimate": return r.ghl_estimate_number != null ? Number(r.ghl_estimate_number) : null;
+      // GHL numbers sort numerically; SS quote numbers are prefixed text ("JB-1041") and
+      // fall back to string comparison inside sortRows.
+      case "estimate": return r.ghl_estimate_number != null ? Number(r.ghl_estimate_number) : (r.ss_quote_number || null);
       case "status":   return STATUS_RANK[normStatus(r.status)];
       default:         return r.created_at;
     }
@@ -232,7 +255,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         </button>
                       )}
                     </td>
-                    <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : "—"}</td>
+                    {/* SS quote numbers render verbatim (prefix included); EST- is GHL's. */}
+                    <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : (r.ss_quote_number || "—")}</td>
                     <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return (
                       <span style={{ whiteSpace: "nowrap" }}>
                         <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>
@@ -245,6 +269,28 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                       <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
                       {ssSafeUrl(r.image_url) && <a href={ssSafeUrl(r.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                      {/* SS-issued quote (migration 122): the printable 3-sheet document plus the
+                          two hand-delivery tools — most lot customers want paper, and a design
+                          with no email address never blocks. */}
+                      {r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && (
+                        <a href={ssSafeUrl(r.ss_quote_pdf_url)} target="_blank" rel="noopener noreferrer"
+                          title="Open the printable quote document"
+                          style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginLeft: 10 }}>Quote PDF</a>
+                      )}
+                      {r.ss_quote_number && (
+                        <button type="button" onClick={() => copyCustomerLink(r.short_code)}
+                          title="Copy the customer quote-page link (they sign in with their phone)"
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginLeft: 10 }}>
+                          {copiedKey === r.short_code ? "Copied ✓" : "Copy link"}
+                        </button>
+                      )}
+                      {r.ss_quote_number && (
+                        <button type="button" onClick={() => resendQuoteEmail(r)} disabled={resendBusyKey === r.short_code}
+                          title="Re-send the quote email to the customer"
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginLeft: 10, opacity: resendBusyKey === r.short_code ? 0.5 : 1 }}>
+                          {resendBusyKey === r.short_code ? "Sending…" : "Resend email"}
+                        </button>
+                      )}
                       {/* Only on an ACCEPTED design — that is the one state where an invoice
                           is the next step, and it is what the server gates on too. Keyed on
                           this row's own short code, so what gets invoiced is the design the

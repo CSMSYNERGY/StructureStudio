@@ -6,6 +6,7 @@ import { estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -1518,10 +1519,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // The email. sendTenantEmail owns the beta redirect, the dark-mode guards and the
     // email_sends ledger, and never throws.
     //
-    // estimateUrl is NULL deliberately: in SS mode there is no GHL hosted estimate page to
-    // link, and the customer's own quote page (with its Accept button) is the next slice. The
-    // template omits the CTA entirely for null rather than rendering a dead button, so the
-    // email leads with the quote document itself until that page exists.
+    // The CTA is the CUSTOMER PORTAL (my-quotes), not a GHL page: that is where they view,
+    // accept and SIGN the quote (migration 124). The email also carries the printable quote
+    // PDF link and the total (Carolyn 2026-08-23 — the printed quote is first-class; the
+    // email must hand her future template everything it needs). docWord flips the copy to
+    // "quote", her word for SS-issued paperwork.
     const intendedTo = String(contact?.email || "").trim();
     let emailed = false;
     let emailReason: string | null = null;
@@ -1535,10 +1537,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         total: oppValue,
         styleLabel,
         sizeLabel: size,
-        estimateUrl: null,
+        estimateUrl: myQuotesUrl(clientId, req),
         pdfUrl: planUrl,
         formalPdfUrl: quotePdfUrl,
         quoteTerms: quoteTerms || null,
+        docWord: "quote",
       });
       const outcome = await sendTenantEmail(supabase, clientId, {
         kind: "estimate",

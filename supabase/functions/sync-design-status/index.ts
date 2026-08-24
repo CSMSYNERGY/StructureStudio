@@ -155,7 +155,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   // 3. Load the tenant's designs for these codes (service role, tenant-scoped).
   const { data: designs, error: dErr } = await admin
     .from("designs")
-    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact")
+    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
     .eq("client_id", clientId)
     .in("short_code", shortCodes);
   if (dErr) return json({ error: dErr.message }, 500);
@@ -241,6 +241,14 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     // (no tenant maps ghl_stage_delivered_id), so recomputing here would DOWNGRADE it back
     // to invoiced on the very next sync. Locally-delivered is terminal: skip the recompute.
     if (d.delivered_at) { statuses[d.short_code] = "delivered"; continue; }
+    // THE SS FENCE (migrations 121/122/124): a StructureStudio-issued quote has NO GHL
+    // estimate, and its status is written locally — customer-accept sets 'accepted', the
+    // SS invoice path sets 'invoiced'. The 'sent' baseline below would downgrade both on
+    // the very next portal load. Keyed on BOTH conditions so a design quoted through GHL
+    // before the tenant flipped the switch (it has a ghl_estimate_id) keeps GHL-derived
+    // sync. Trade-off, deliberate: SS designs give up opportunity-stage promotion —
+    // acceptance lives on our quote page, not in the CRM pipeline.
+    if (!d.ghl_estimate_id && d.ss_quote_number) { statuses[d.short_code] = d.status || "sent"; continue; }
     // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
     // Otherwise start from what we already believe, so the computation below can raise the status
     // but never lower it (see dataComplete above).
@@ -260,6 +268,13 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
       const mappedFromStage = oppStage ? stageIdToStatus.get(oppStage) : undefined;
       if (mappedFromStage && STAGE_RANK[mappedFromStage] > STAGE_RANK[stage]) stage = mappedFromStage;
     }
+
+    // THE ACCEPTED FLOOR (migration 124, mirror of the delivered fence): an in-app
+    // signature stamps designs.accepted_at — a state GHL may never report. Belt-and-braces
+    // under the SS fence above (which already skips pure-SS designs): this one also holds
+    // for a design that has BOTH a GHL estimate and a local signature. Floor, not pin —
+    // invoiced/delivered promotions still pass.
+    if (d.accepted_at && STAGE_RANK[stage] < STAGE_RANK.accepted) stage = "accepted";
 
     statuses[d.short_code] = stage;
     if (stage !== (d.status || "sent")) updates.push({ short_code: d.short_code, status: stage });

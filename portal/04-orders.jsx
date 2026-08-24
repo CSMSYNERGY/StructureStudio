@@ -793,7 +793,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     };
     const [{ data: dsn }, paysRes] = await Promise.all([
       codes.length
-        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number").in("short_code", codes).limit(2000)
+        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url").in("short_code", codes).limit(2000)
         : Promise.resolve({ data: [] }),
       fetchAllPayments(),
     ]);
@@ -932,7 +932,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
       if (fMax !== "" && tot > Number(fMax)) return false;
     }
     const extra = [nameOf(r), bldgOf(r), "#" + r.o.order_no, r.o.short_code,
-      (r.d && r.d.ghl_estimate_number) ? "EST-" + r.d.ghl_estimate_number : "", stateOf(r).label, fmtDate(r.o.ordered_at)].join(" ");
+      (r.d && r.d.ghl_estimate_number) ? "EST-" + r.d.ghl_estimate_number : "", (r.d && r.d.ss_quote_number) || "", stateOf(r).label, fmtDate(r.o.ordered_at)].join(" ");
     return rowMatchesQuery(r.o, query, extra);
   });
   const openRow = openId ? all.find((r) => r.o.id === openId) : null;
@@ -1139,7 +1139,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
                 <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
                   Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
-                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
+                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : (d && d.ss_quote_number ? ` · ${d.ss_quote_number}` : "")}
                 </div>
               </div>
               <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
@@ -1147,6 +1147,36 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
               {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+              {/* SS-issued quote (migration 122): the printable document + the two
+                  hand-delivery tools, same trio as the Designs row and the designer
+                  success screen (Carolyn 2026-08-23). */}
+              {d && d.ss_quote_number && d.ss_quote_pdf_url && (
+                <a href={d.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
+              )}
+              {d && d.ss_quote_number && (
+                <button type="button"
+                  onClick={(e) => {
+                    const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+                    const btn = e.currentTarget;
+                    const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
+                    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+                    else window.prompt("Copy the customer link:", link);
+                  }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Copy customer link</button>
+              )}
+              {d && d.ss_quote_number && (
+                <button type="button" disabled={busy}
+                  onClick={async () => {
+                    setBusy(true); setMsg(null);
+                    const { data: res, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: o.short_code } });
+                    setBusy(false);
+                    if (err || (res && res.error)) { setMsg({ err: (res && res.error) || err.message }); return; }
+                    setMsg(res && res.sent
+                      ? { ok: `Quote ${d.ss_quote_number} emailed to the customer.` }
+                      : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+                  }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>Resend quote email</button>
+              )}
             </div>
           </div>
 

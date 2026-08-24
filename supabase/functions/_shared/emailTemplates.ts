@@ -44,6 +44,26 @@ export interface EstimateEmailInput {
    *  second document link — absent renders nothing, so pre-existing callers are unchanged. */
   formalPdfUrl?: string | null;
   quoteTerms?: string | null;
+  /** Which word the document goes by. StructureStudio-issued paperwork says "quote"
+   *  (Carolyn's terminology, migration 121+); the GHL path keeps "estimate" so existing
+   *  tenants' emails don't change under them. Also flips the CTA to "View & Sign Your
+   *  Quote" — the SS-mode CTA leads to the customer portal where the signature lives. */
+  docWord?: "estimate" | "quote";
+}
+
+export interface AcceptanceEmailInput {
+  businessName: string;
+  logoUrl?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  quoteNumber: string | number;
+  total?: string | number | null;
+  signerName: string;
+  /** ISO timestamp of the signature; rendered as a plain date. */
+  acceptedAtIso: string;
+  /** The (now countersigned) quote PDF. */
+  pdfUrl?: string | null;
+  quoteTerms?: string | null;
 }
 
 export interface InvoiceEmailInput {
@@ -192,26 +212,31 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const num = oneLine(input.estimateNumber);
   const money = formatMoney(input.total);
+  // "quote" for StructureStudio-issued paperwork, "estimate" (the default) for the GHL path.
+  const word = input.docWord === "quote" ? "quote" : "estimate";
+  const Word = word === "quote" ? "Quote" : "Estimate";
   const building = [input.styleLabel, input.sizeLabel]
     .map((v) => (v == null ? "" : String(v).trim()))
     .filter(Boolean)
     .join(" - ");
 
-  const rows = [detailRow("Estimate #", esc(num))];
+  const rows = [detailRow(`${Word} #`, esc(num))];
   if (building) rows.push(detailRow("Building", esc(building)));
-  rows.push(detailRow("Estimate total", esc(money)));
+  rows.push(detailRow(`${Word} total`, esc(money)));
 
-  const cta = input.estimateUrl ? ctaButton(input.estimateUrl, "View & Accept Your Estimate") : "";
+  const cta = input.estimateUrl
+    ? ctaButton(input.estimateUrl, word === "quote" ? "View & Sign Your Quote" : "View & Accept Your Estimate")
+    : "";
   const pdfLink = input.pdfUrl
     ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a></p>`
     : "";
-  // Second document link: the formal (letterhead) estimate PDF. Tighter top margin when it
+  // Second document link: the formal (letterhead) document PDF. Tighter top margin when it
   // sits directly under the floor-plan link so the two read as one list.
   const formalPdfLink = input.formalPdfUrl
-    ? `<p style="margin:${input.pdfUrl ? "8px" : "18px"} 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.formalPdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your estimate (PDF)</a></p>`
+    ? `<p style="margin:${input.pdfUrl ? "8px" : "18px"} 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.formalPdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your ${word} (PDF)</a></p>`
     : "";
 
-  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">Thank you for designing your building with ${esc(name)}. Your estimate is ready.</p>
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">Thank you for designing your building with ${esc(name)}. Your ${word} is ready.</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
               ${rows.join("\n")}
             </table>
@@ -220,26 +245,78 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const text: string[] = [
     name,
     "",
-    `Thank you for designing your building with ${name}. Your estimate is ready.`,
+    `Thank you for designing your building with ${name}. Your ${word} is ready.`,
     "",
-    `Estimate #: ${num}`,
+    `${Word} #: ${num}`,
   ];
   if (building) text.push(`Building: ${building}`);
-  text.push(`Estimate total: ${money}`, "");
-  if (input.estimateUrl) text.push(`View & accept your estimate: ${input.estimateUrl}`);
+  text.push(`${Word} total: ${money}`, "");
+  if (input.estimateUrl) {
+    text.push(word === "quote" ? `View & sign your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
+  }
   if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
-  if (input.formalPdfUrl) text.push(`Estimate (PDF): ${input.formalPdfUrl}`);
+  if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
   text.push(...textFooter(input));
 
   return {
-    subject: `Your estimate ${num} from ${name}`,
+    subject: `Your ${word} ${num} from ${name}`,
     html: htmlShell({
       businessName: name,
       logoUrl: input.logoUrl,
       phone: input.phone,
       website: input.website,
       quoteTerms: input.quoteTerms,
-      preheader: `Your estimate from ${name} is ready - ${money}.`,
+      preheader: `Your ${word} from ${name} is ready - ${money}.`,
+      bodyHtml,
+    }),
+    text: text.join("\n") + "\n",
+  };
+}
+
+export function acceptanceEmail(input: AcceptanceEmailInput): EmailContent {
+  const name = oneLine(input.businessName);
+  const num = oneLine(input.quoteNumber);
+  const signer = oneLine(input.signerName);
+  const money = input.total == null || input.total === "" ? "" : formatMoney(input.total);
+  const d = new Date(input.acceptedAtIso);
+  const when = isNaN(d.getTime()) ? oneLine(input.acceptedAtIso) : d.toISOString().slice(0, 10);
+
+  const rows = [detailRow("Quote #", esc(num))];
+  if (money) rows.push(detailRow("Total", esc(money)));
+  rows.push(detailRow("Signed by", esc(signer)));
+  rows.push(detailRow("Date", esc(when)));
+
+  const pdfLink = input.pdfUrl
+    ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your signed quote (PDF)</a></p>`
+    : "";
+
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">Thank you! You accepted your quote from ${esc(name)}. A copy of the signed document is attached below for your records.</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+              ${rows.join("\n")}
+            </table>
+            ${pdfLink}`;
+
+  const text: string[] = [
+    name,
+    "",
+    `Thank you! You accepted your quote from ${name}.`,
+    "",
+    `Quote #: ${num}`,
+  ];
+  if (money) text.push(`Total: ${money}`);
+  text.push(`Signed by: ${signer}`, `Date: ${when}`, "");
+  if (input.pdfUrl) text.push(`Signed quote (PDF): ${input.pdfUrl}`);
+  text.push(...textFooter(input));
+
+  return {
+    subject: `You accepted quote ${num} from ${name}`,
+    html: htmlShell({
+      businessName: name,
+      logoUrl: input.logoUrl,
+      phone: input.phone,
+      website: input.website,
+      quoteTerms: input.quoteTerms,
+      preheader: `Quote ${num} accepted - thank you!`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",

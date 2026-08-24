@@ -12,8 +12,10 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
+import { estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
+import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
+import { totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
@@ -153,6 +155,10 @@ const GATES: GateTable = {
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
+  // Re-sends the SS quote email (migration 122) — the rep who can edit designs can re-send
+  // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
+  // email to the design's own customer.
+  resend_quote_email: { area: "designs", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -3429,6 +3435,69 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // (Restored here 2026-08-07: this note had been stranded ~330 lines up, above the
   // unrelated qbo_pending action — the file's most consequential invariant documented
   // nowhere near the code that implements it.)
+  // ── resend_quote_email: re-send the SS quote email (migration 122) ──────────────────
+  // The quote already exists (number allocated, PDF built by submit-estimate 9-ALT); this
+  // just re-sends the branded email. No allocation, no conversion, no ledger claim — the
+  // worst a retry can do is email the design's own customer twice. Success re-stamps
+  // ss_quote_sent_at; a failure reports {sent:false, reason} so the rep reaches for Print
+  // or Copy-link instead (Carolyn 2026-08-23: email absence never blocks the quote).
+  if (action === "resend_quote_email") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+
+    const { data: d, error: dErr } = await admin
+      .from("designs")
+      .select("short_code, contact, selections, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet — submit it from the designer first." }, 400);
+
+    const { data: cs, error: csErr } = await admin
+      .from("client_settings")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your settings", csErr);
+    if (!cs || cs.invoice_in_ghl !== false) {
+      return json({ error: "This account quotes through the CRM — re-send it from there." }, 400);
+    }
+
+    const to = String(d?.contact?.email || "").trim();
+    if (!to) return json({ ok: true, sent: false, reason: "no email address on this design" });
+
+    const total = totalFromSnapshot(d.estimate_lines);
+    const sel = d.selections || {};
+    const content = estimateEmail({
+      businessName: cs.business_name || clientId,
+      logoUrl: cs.business_logo_url || null,
+      phone: cs.business_phone || null,
+      website: cs.business_website || null,
+      estimateNumber: String(d.ss_quote_number),
+      total: total == null ? "" : total,
+      styleLabel: sel.style || null,
+      sizeLabel: sel.size || null,
+      estimateUrl: myQuotesUrl(clientId, req),
+      pdfUrl: d.image_url || null,
+      formalPdfUrl: d.ss_quote_pdf_url || null,
+      quoteTerms: cs.quote_terms || null,
+      docWord: "quote",
+    });
+    const outcome = await sendTenantEmail(admin, clientId, {
+      kind: "estimate",
+      shortCode,
+      to,
+      subject: content.subject,
+      html: content.html,
+      text: content.text,
+    });
+    if (outcome.sent) {
+      await admin.from("designs")
+        .update({ ss_quote_sent_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("short_code", shortCode);
+    }
+    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+  }
+
   if (action === "send_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);

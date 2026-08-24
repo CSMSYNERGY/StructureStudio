@@ -45,6 +45,17 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 .qc-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .qc-actions .btn{flex:1 1 auto;font-size:14px;padding:10px 14px}
 .footer-row{margin-top:20px;text-align:center}
+/* ── Signing (SS-mode tenants, migration 124) ── */
+.sign-panel{margin-top:12px;border-top:1px solid #E2E8F0;padding-top:12px}
+.sign-tabs{display:flex;gap:8px;margin-bottom:10px}
+.sign-tab{flex:1;font:inherit;font-size:13px;font-weight:600;padding:8px;border-radius:8px;border:1px solid #CBD5E1;background:#FFF;color:#475569;cursor:pointer}
+.sign-tab.active{border-color:#3D3672;color:#3D3672;background:#EEF2FF}
+.sig-pad{width:100%;height:140px;border:1px dashed #94A3B8;border-radius:8px;background:#FFF;touch-action:none;display:block;cursor:crosshair}
+.sig-clear{margin-top:6px;text-align:right}
+.sig-typed-preview{font-style:italic;font-family:Georgia,"Times New Roman",serif;font-size:26px;min-height:40px;padding:6px 2px;color:#0F172A;border-bottom:1px solid #CBD5E1}
+.consent-row{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5;color:#334155;margin:12px 0}
+.consent-row input{width:auto;margin-top:2px}
+.accepted-line{margin-top:10px;font-size:13px;font-weight:600;color:#15803D}
 </style>
 </head>
 <body>
@@ -487,7 +498,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var rawNum = q.estimateNumber != null ? q.estimateNumber : q.estimate_number;
     if (rawNum != null && String(rawNum).trim() !== "") {
       var s = String(rawNum).trim();
-      num.textContent = /^est/i.test(s) ? s : "EST-" + s;
+      // EST- is the GHL numbering convention and only belongs on BARE numbers. An
+      // SS-issued quote number carries the builder's own prefix ("JB-1041") and must
+      // render exactly as it reads on the PDF — "EST-JB-1041" is a support call.
+      num.textContent = /^\d+$/.test(s) ? "EST-" + s : s;
     } else {
       num.textContent = "Quote";
     }
@@ -536,13 +550,34 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       card.appendChild(meta);
     }
 
+    // Accepted already? Say so — the signature happened, no button needed.
+    if (q.acceptedAt) {
+      var acc = document.createElement("div");
+      acc.className = "accepted-line";
+      var accDate = fmtDate(q.acceptedAt);
+      acc.textContent = "Accepted ✓" + (accDate ? " · " + accDate : "");
+      card.appendChild(acc);
+    }
+
     // Actions — only when the URLs are present (and look like URLs)
     var acceptUrl = safeUrl(q.acceptUrl || q.accept_url);
     var pdfUrl = safeUrl(q.pdfUrl || q.pdf_url);
-    if (acceptUrl || pdfUrl) {
+    var canSign = q.canAccept === true && q.quoteRef;   // SS-mode in-app signing
+    if (canSign || acceptUrl || pdfUrl) {
       var actions = document.createElement("div");
       actions.className = "qc-actions";
-      if (acceptUrl) {
+      if (canSign) {
+        // SS mode: signing happens HERE, not on an external page.
+        var signBtn = document.createElement("button");
+        signBtn.type = "button";
+        signBtn.className = "btn btn-primary";
+        signBtn.style.width = "auto";
+        signBtn.textContent = "Review & Sign";
+        signBtn.addEventListener("click", function () {
+          toggleSignPanel(card, q, signBtn);
+        });
+        actions.appendChild(signBtn);
+      } else if (acceptUrl && !q.acceptedAt) {
         var accept = document.createElement("a");
         accept.className = "btn btn-primary";
         accept.style.width = "auto";
@@ -558,13 +593,215 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         pdf.href = pdfUrl;
         pdf.target = "_blank";
         pdf.rel = "noopener";
-        pdf.textContent = "Floor plan (PDF)";
+        // The SS quote PDF is the whole document (price + plan + 3D); the GHL-mode link
+        // is just the floor plan. Label accordingly.
+        pdf.textContent = q.ssQuote ? "Quote (PDF)" : "Floor plan (PDF)";
         actions.appendChild(pdf);
       }
       card.appendChild(actions);
     }
 
     return card;
+  }
+
+  // ── The sign panel (SS-mode, migration 124): draw OR type + consent ──
+  function toggleSignPanel(card, q, signBtn) {
+    var existing = card.querySelector(".sign-panel");
+    if (existing) { existing.parentNode.removeChild(existing); return; }
+
+    var panel = document.createElement("div");
+    panel.className = "sign-panel";
+
+    // Draw / Type tabs
+    var tabs = document.createElement("div");
+    tabs.className = "sign-tabs";
+    var drawTab = document.createElement("button");
+    drawTab.type = "button"; drawTab.className = "sign-tab active"; drawTab.textContent = "Draw my signature";
+    var typeTab = document.createElement("button");
+    typeTab.type = "button"; typeTab.className = "sign-tab"; typeTab.textContent = "Type my name";
+    tabs.appendChild(drawTab); tabs.appendChild(typeTab);
+    panel.appendChild(tabs);
+
+    var mode = "drawn";
+
+    // Draw pane: a plain canvas pad. Sized by CSS, backed at devicePixelRatio so the
+    // stored PNG stays crisp; pointer events cover mouse, touch and stylus alike.
+    var drawPane = document.createElement("div");
+    var canvas = document.createElement("canvas");
+    canvas.className = "sig-pad";
+    drawPane.appendChild(canvas);
+    var clearRow = document.createElement("div");
+    clearRow.className = "sig-clear";
+    var clearBtn = document.createElement("button");
+    clearBtn.type = "button"; clearBtn.className = "linkish"; clearBtn.textContent = "Clear";
+    clearRow.appendChild(clearBtn);
+    drawPane.appendChild(clearRow);
+    panel.appendChild(drawPane);
+
+    var hasInk = false;
+    var ctx = null;
+    function setupCanvas() {
+      var rect = canvas.getBoundingClientRect();
+      var dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.round(rect.width * dpr));
+      canvas.height = Math.max(1, Math.round(rect.height * dpr));
+      ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.lineWidth = 2.25;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "#0F172A";
+      hasInk = false;
+    }
+    var drawing = false;
+    function posOf(e) {
+      var rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+    canvas.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      drawing = true;
+      var p = posOf(e);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      // A dot counts: tap-signers exist.
+      ctx.lineTo(p.x + 0.01, p.y + 0.01);
+      ctx.stroke();
+      hasInk = true;
+    });
+    canvas.addEventListener("pointermove", function (e) {
+      if (!drawing) return;
+      e.preventDefault();
+      var p = posOf(e);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    });
+    function endStroke() { drawing = false; }
+    canvas.addEventListener("pointerup", endStroke);
+    canvas.addEventListener("pointercancel", endStroke);
+    canvas.addEventListener("pointerleave", endStroke);
+    clearBtn.addEventListener("click", setupCanvas);
+
+    // Type pane
+    var typePane = document.createElement("div");
+    typePane.hidden = true;
+    var typedInput = document.createElement("input");
+    typedInput.type = "text";
+    typedInput.maxLength = 120;
+    typedInput.placeholder = "Type your full name";
+    typedInput.autocomplete = "name";
+    var preview = document.createElement("div");
+    preview.className = "sig-typed-preview";
+    typedInput.addEventListener("input", function () { preview.textContent = typedInput.value; });
+    typePane.appendChild(typedInput);
+    typePane.appendChild(preview);
+    panel.appendChild(typePane);
+
+    drawTab.addEventListener("click", function () {
+      mode = "drawn";
+      drawTab.className = "sign-tab active"; typeTab.className = "sign-tab";
+      drawPane.hidden = false; typePane.hidden = true;
+    });
+    typeTab.addEventListener("click", function () {
+      mode = "typed";
+      typeTab.className = "sign-tab active"; drawTab.className = "sign-tab";
+      typePane.hidden = false; drawPane.hidden = true;
+      typedInput.focus();
+    });
+
+    // Name + consent + submit
+    var nameField = document.createElement("div");
+    nameField.className = "field";
+    nameField.style.marginTop = "12px";
+    var nameLabel = document.createElement("label");
+    nameLabel.className = "label";
+    nameLabel.textContent = "Your full name";
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.maxLength = 120;
+    nameInput.autocomplete = "name";
+    nameInput.value = custName || "";
+    nameField.appendChild(nameLabel);
+    nameField.appendChild(nameInput);
+    panel.appendChild(nameField);
+
+    // The consent sentence — composed the same way the server composes (and stores) it.
+    var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your quote";
+    var totalText = fmtMoney(q.total);
+    var consentRow = document.createElement("label");
+    consentRow.className = "consent-row";
+    var consentBox = document.createElement("input");
+    consentBox.type = "checkbox";
+    var consentSpan = document.createElement("span");
+    consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept quote " +
+      numText + (totalText ? " for " + totalText : "") + ".";
+    consentRow.appendChild(consentBox);
+    consentRow.appendChild(consentSpan);
+    panel.appendChild(consentRow);
+
+    var errEl = document.createElement("div");
+    errEl.className = "error";
+    errEl.hidden = true;
+    panel.appendChild(errEl);
+
+    var submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "btn btn-primary";
+    submit.textContent = "Sign & Accept";
+    submit.style.marginTop = "4px";
+    panel.appendChild(submit);
+
+    submit.addEventListener("click", function () {
+      setError(errEl, "");
+      var signerName = nameInput.value.trim();
+      if (!signerName) { setError(errEl, "Enter your full name."); return; }
+      if (!consentBox.checked) { setError(errEl, "Please tick the agreement box to sign."); return; }
+      var payload = {
+        action: "accept_quote",
+        token: token,
+        quoteRef: q.quoteRef,
+        signerName: signerName,
+        consent: true,
+        method: mode
+      };
+      if (mode === "drawn") {
+        if (!hasInk) { setError(errEl, "Draw your signature in the box (or switch to typing your name)."); return; }
+        payload.signatureDataUrl = canvas.toDataURL("image/png");
+      } else {
+        var typed = typedInput.value.trim();
+        if (!typed) { setError(errEl, "Type your name to sign."); return; }
+        payload.typedName = typed;
+      }
+      submit.disabled = true;
+      submit.textContent = "Signing…";
+      callFn("customer-accept", payload)
+        .then(function (r) {
+          if (invalidSession(r)) {
+            token = null;
+            lsDel(tokenKey);
+            show("phone");
+            setError($("phone-error"), "Your session expired. Enter your number and we'll text you a new code.");
+            return;
+          }
+          if (r.ok && r.data && r.data.ok) {
+            loadQuotes();   // re-render: the card flips to Accepted
+          } else {
+            setError(errEl, errText(r, "Couldn't record your signature. Please try again."));
+            submit.disabled = false;
+            submit.textContent = "Sign & Accept";
+          }
+        })
+        .catch(function () {
+          setError(errEl, "Couldn't reach the server. Check your connection and try again.");
+          submit.disabled = false;
+          submit.textContent = "Sign & Accept";
+        });
+    });
+
+    card.appendChild(panel);
+    // The canvas has a size only after it is in the document.
+    setupCanvas();
   }
 
   // ── Sign out ──

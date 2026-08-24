@@ -5906,7 +5906,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ghlContactIdRef.current = data.ghl_contact_id || null;
     ghlEstimateIdRef.current = data.ghl_estimate_id || null;
     ghlEstimateNumberRef.current = data.ghl_estimate_number || null;
-    setHasExistingEstimate(!!data.ghl_estimate_id);
+    setHasExistingEstimate(!!(data.ghl_estimate_id || data.ss_quote_number));
 
     // Optionally open a specific saved version for review/resubmit. The design DATA
     // comes from that version's snapshot; the GHL refs above stay from the current
@@ -8341,6 +8341,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (result.estimateId) {
         ghlEstimateIdRef.current = result.estimateId;
         setHasExistingEstimate(true);
+      } else if (result.issuedBy === "structurestudio" && result.quoteNumber) {
+        // SS-mode tenants (migration 121): no GHL estimate exists, but the quote does —
+        // and 9-ALT reuses its number on resubmit, so the button must flip to "Resubmit".
+        setHasExistingEstimate(true);
       }
       if (result.estimateNumber) ghlEstimateNumberRef.current = result.estimateNumber;
 
@@ -8350,6 +8354,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         imageUrl,
         estimateNumber: result.estimateNumber || null,
         updated: !!result.updated,
+        // SS-mode extras: which word to use, the printable document, and whether the
+        // customer actually got an email (a missing address must be visible, not silent).
+        ssQuote: result.issuedBy === "structurestudio",
+        quotePdfUrl: result.quotePdfUrl || null,
+        quoteEmailed: result.issuedBy === "structurestudio" ? result.quoteEmailed === true : null,
+        quoteEmailReason: result.quoteEmailReason || null,
       });
       setSubmitted(true);
       // Embedded (in-portal) mounts: tell the host page a design was submitted so it
@@ -10498,13 +10508,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div style={{ background: "#F0FDF4", borderTop: "2px solid #BBF7D0", padding: "32px 20px", textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
           <h3 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700, color: "#166534" }}>
-            {savedDesign && savedDesign.updated ? "Estimate Updated!" : "Quote Request Submitted!"}
+            {savedDesign && savedDesign.ssQuote
+              ? (savedDesign.updated ? "Quote Updated!" : "Quote Created!")
+              : (savedDesign && savedDesign.updated ? "Estimate Updated!" : "Quote Request Submitted!")}
           </h3>
           <p style={{ margin: 0, fontSize: 14, color: "#15803D", maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
-            {savedDesign && savedDesign.updated
-              ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
-              : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`}
+            {savedDesign && savedDesign.ssQuote
+              ? (savedDesign.quoteEmailed
+                ? `Thank you, ${contact.name || ""}! The quote has been emailed with a link to view and sign it.`
+                : `Thank you, ${contact.name || ""}! The quote is ready — print it or share the link below.`)
+              : (savedDesign && savedDesign.updated
+                ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
+                : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`)}
           </p>
+          {savedDesign && savedDesign.ssQuote && savedDesign.quoteEmailed === false && (
+            /* The quote exists but no email went out (no address on file, or the tenant's
+               sending domain isn't live). Silence here reads as "the customer got it". */
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+              Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
+            </div>
+          )}
           {savedDesign && (
             <div style={{ maxWidth: 520, margin: "20px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -10513,8 +10536,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               {savedDesign.estimateNumber && (
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>Estimate #</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>EST-{savedDesign.estimateNumber}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>{savedDesign.ssQuote ? "Quote #" : "Estimate #"}</span>
+                  {/* SS numbers carry the builder's own prefix and render verbatim; EST- is GHL's. */}
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>{savedDesign.ssQuote ? savedDesign.estimateNumber : `EST-${savedDesign.estimateNumber}`}</span>
+                </div>
+              )}
+              {savedDesign.ssQuote && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                  {savedDesign.quotePdfUrl && (
+                    <a href={savedDesign.quotePdfUrl} target="_blank" rel="noopener"
+                      style={{ ...S.btn(accent, "#FFF"), padding: "9px 16px", fontSize: 13, textDecoration: "none" }}>
+                      Print quote (PDF)
+                    </a>
+                  )}
+                  <button type="button"
+                    onClick={(e) => {
+                      const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(C.clientId)}`;
+                      const btn = e.currentTarget;
+                      const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
+                      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+                      else { window.prompt("Copy the customer link:", link); }
+                    }}
+                    style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "9px 16px", fontSize: 13 }}>
+                    Copy customer link
+                  </button>
                 </div>
               )}
             </div>

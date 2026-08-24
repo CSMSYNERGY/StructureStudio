@@ -53,7 +53,8 @@ import { logEdgeError } from "./logError.ts";
 const PLATFORM_FROM = "no-reply@mail.structurestudiosuite.com";
 
 export type TenantMail = {
-  kind: "estimate" | "invoice" | "test";
+  // Mirrors the email_sends.kind CHECK: 'acceptance' + 'change_order' added by migration 124.
+  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order";
   /**
    * Where a REPLY should go. Optional, and deliberately not defaulted from client_settings:
    * there is no business_email column to default it FROM (checked 2026-08-21), so inventing

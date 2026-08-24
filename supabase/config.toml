@@ -114,6 +114,12 @@ verify_jwt = true
 # The anon key passes the gateway here too — the token check is the real gate.
 verify_jwt = true
 
+[functions.customer-accept]
+# The customer's e-signature (migration 124). Same auth story as customer-quotes: the
+# session token is the real gate, and the signature only attaches to a design whose
+# contact phone matches the session's verified phone. SS-mode tenants only.
+verify_jwt = true
+
 [functions.qbo-oauth-connect]
 # Starting an OAuth flow attaches a QuickBooks company to a tenant — an owner/admin action.
 verify_jwt = true
