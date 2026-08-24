@@ -813,20 +813,48 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     );
   };
 
-  // A week group split into its seven days. All seven, always — an empty day still needs to
-  // exist as a drop target, which is the same reason the empty crew and stage groups are
-  // padded in. The rows come from the GROUP, so whatever filter and sort produced it applies
-  // here unchanged and the day buckets always re-add to the week's own count.
-  const weekDayRows = (g) => {
-    const start = schedLocalDate(g.key);
-    const byDay = {};
-    g.rows.forEach((j) => { const d = schedBuildDate(j); if (d) (byDay[d] = byDay[d] || []).push(j); });
-    return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(start); d.setDate(d.getDate() + i);
-      const iso = schedLocalIso(d);
-      return { iso, rows: byDay[iso] || [],
-        label: d.toLocaleDateString("en-US", { weekday: "short" }) + " " + d.getDate() };
-    });
+  // ── The week as an ORDERED LIST, where position implies the date (Carolyn 2026-08-23,
+  // replacing the day rows she hated: "in a week view we want to simply drag buildings in
+  // the order of that week"). Rows in a week group display in build-date order, and dropping
+  // a building at a spot in that order derives its new date from the NEIGHBOURS:
+  //   · dropped between a Tuesday job and a Wednesday job → Tuesday (the first date);
+  //   · dropped between Tuesday and Thursday with Wednesday empty → Wednesday (the gap day);
+  //   · dropped at the very top → the first job's date; at the very end → the last job's.
+  // Deliberately approximate — "if it isn't the exact day they want, they can open and
+  // choose the right day" (the popup's date field is the precision tool).
+  const weekOrderedRows = (g) =>
+    [...g.rows].sort((a, b) => String(schedBuildDate(a) || "").localeCompare(String(schedBuildDate(b) || "")));
+  const weekInsertDate = (g, insertBeforeId, draggedId) => {
+    // Neighbours are computed WITHOUT the dragged row — otherwise dropping a job just below
+    // itself would read itself as its own neighbour.
+    const rows = weekOrderedRows(g).filter((j) => j.id !== draggedId);
+    const at = insertBeforeId == null ? rows.length
+      : Math.max(0, rows.findIndex((j) => j.id === insertBeforeId));
+    const dPrev = at > 0 ? schedBuildDate(rows[at - 1]) : null;
+    const dNext = at < rows.length ? schedBuildDate(rows[at]) : null;
+    if (dPrev && dNext) {
+      const gapDays = Math.round((schedLocalDate(dNext) - schedLocalDate(dPrev)) / 86400000);
+      return gapDays > 1 ? schedShiftIso(dPrev, 1, "days") : dPrev;
+    }
+    return dPrev || dNext || g.key;   // empty week can only be the dragged row's own — Sunday
+  };
+  // Drop props for a spot in a week's order. `insertBeforeId` null = the end-of-week strip.
+  const weekSpotDropProps = (g, insertBeforeId) => {
+    const spot = "ins:" + (insertBeforeId || "end:" + g.key);
+    return {
+      onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(spot); },
+      onDragEnter: (e) => { e.preventDefault(); e.stopPropagation(); setDropGroup(spot); },
+      onDrop: (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const job = jobs.find((j) => j.id === dragRowId);
+        const intake = dragIntake;
+        setDropGroup(null); setDragRowId(null); setDragIntake(null);
+        const iso = weekInsertDate(g, insertBeforeId, job ? job.id : null);
+        if (!iso) return;
+        if (job) { if (schedBuildDate(job) !== iso) dropIntoSegment(job, { key: iso, exactDate: true }); }
+        else if (intake) addFromTrayDated(intake.body, intake.label, iso);
+      },
+    };
   };
 
   // Drop handlers shared by a group's header row and every data row inside it, so the whole
@@ -864,31 +892,33 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
 
   // One table row + its expanded editor. Extracted so the flat list and every segment group
   // render the identical row — a second copy for the grouped path is how the two drift.
-  const tableRow = (j, dayIso = null) => {
+  const tableRow = (j, weekGroup = null) => {
     const kind = kindOf[j.stage_id] || "queue";
     const late = schedPastDue(j, kind);
     const src = SCHED_SRC_CHIP[j.source] || SCHED_SRC_CHIP.manual;
     const stg = stages.find((s) => s.id === j.stage_id);
     const open = expandedId === j.id;
-    // A row is both a drag SOURCE and a drop target — dropping onto any row lands where that
-    // row lives, so you can aim at the rows you can see rather than hunting the header. Under
-    // a DAY heading that means the day, not the week: the row sits beneath "Wed 26", so a drop
-    // on it has to mean Wed 26 or the affordance lies.
-    const rowGroup = !segmentGroups ? null
-      : dayIso ? { key: dayIso, exactDate: true }
-      : segmentOf(j);
+    // A row is both a drag SOURCE and a drop target. In WEEK mode a drop on a row means
+    // "insert into the order BEFORE me" — the date comes from the neighbours, and the
+    // insertion line above the row is the affordance. In other modes it means "join this
+    // row's group", so you can aim at rows you can see rather than hunting the header.
+    const rowGroup = !segmentGroups || weekGroup ? null : segmentOf(j);
+    const insSpot = weekGroup ? "ins:" + j.id : null;
+    const insHot = insSpot && dropGroup === insSpot && (dragRowId ? dragRowId !== j.id : !!dragIntake);
     return (
       <React.Fragment key={j.id}>
         <tr onClick={() => setExpandedId(open ? null : j.id)}
           draggable={canDragRows}
           onDragStart={canDragRows ? (e) => { setDragRowId(j.id); try { e.dataTransfer.effectAllowed = "move"; } catch (_) {} } : undefined}
           onDragEnd={canDragRows ? () => { setDragRowId(null); setDropGroup(null); } : undefined}
-          {...(canDragRows && rowGroup ? groupDropProps(rowGroup) : {})}
+          {...(canDragRows ? (weekGroup ? weekSpotDropProps(weekGroup, j.id) : (rowGroup ? groupDropProps(rowGroup) : {})) : {})}
           style={{ cursor: canDragRows ? "grab" : "pointer",
             // The open row gets the month pill's open treatment — tint + ACCENT outline — so
             // "which job is the popup showing" reads the same in every view.
-            background: open ? "#E9F0FF" : (dropGroup === (rowGroup && rowGroup.key) && dragRowId && dragRowId !== j.id ? "#F0F5FF" : (dayIso ? "#FAFBFE" : "transparent")),
+            background: open ? "#E9F0FF" : ((insHot || (rowGroup && dropGroup === rowGroup.key && dragRowId && dragRowId !== j.id)) ? "#F0F5FF" : "transparent"),
             outline: open ? `2px solid ${ACCENT}` : "none", outlineOffset: -2,
+            // The insertion line: a drop lands ABOVE this row in the week's order.
+            boxShadow: insHot ? `inset 0 2px 0 ${ACCENT}` : "none",
             opacity: dragRowId === j.id ? 0.45 : 1 }}>
           <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 800, color: "#64748B" }}>{j.serial ? "#" + j.serial : "—"}</td>
           <td style={S.td}><strong>{j.customer_name || j.title || "—"}</strong></td>
@@ -1082,7 +1112,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           <button type="button" disabled={busy} onClick={() => addFromTray(addBody, label)}
             title={view === "calendar" ? "Add without a date (or drag onto a day below)"
               : view === "board" ? "Add to the board (or drag onto a stage column)"
-              : "Add to the board (or drag onto a day row below)"}
+              : "Add to the board (or drag it into a week's order, or onto a date group)"}
             style={{ border: "none", background: ACCENT, color: "#FFF", width: 24, height: 24, borderRadius: 7, fontSize: 15, fontWeight: 800, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>+</button>
         )}
       </div>
@@ -1396,25 +1426,20 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                         because a day you cannot see is a day you cannot drop onto, and moving a
                         job to a free Friday is exactly the move you want. Each is an exact-date
                         target, reusing the write path the date segment already uses. */}
+                    {/* WEEK mode: an ordered list where POSITION implies the date. Rows sort
+                        by build date; dropping on a row inserts before it and derives the
+                        date from the neighbours (first date, or the gap day when one exists);
+                        the slim strip after the last row is the drop-at-the-end target. The
+                        popup remains the precision tool for an exact day. */}
                     {weekMode
-                      ? weekDayRows(g).map((day) => (
-                        <React.Fragment key={"day:" + day.iso}>
-                          <tr {...(canDragRows ? groupDropProps({ key: day.iso, exactDate: true }) : {})}
-                            style={{ background: dropGroup === day.iso && dragRowId ? "#EEF4FF" : "#F7F9FF" }}>
-                            <td colSpan={9} style={{ padding: "7px 10px 5px 26px",
-                              borderBottom: "2px solid " + (dropGroup === day.iso && dragRowId ? ACCENT : "#94A3B8") }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                <span style={{ fontSize: 12, fontWeight: 800, color: day.rows.length ? "#334155" : "#94A3B8" }}>{day.label}</span>
-                                {day.rows.length > 0
-                                  ? <span style={schedChip("#FFF", "#475569")}>{day.rows.length}</span>
-                                  : <span style={{ fontSize: 11, fontWeight: 600, color: "#94A3B8" }}>drop a job here</span>}
-                                <span style={{ marginLeft: "auto" }}><SchedSummary rows={day.rows} size={12} /></span>
-                              </div>
-                            </td>
+                      ? (() => { const ordered = weekOrderedRows(g); return (<>
+                          {ordered.map((j) => tableRow(j, g))}
+                          <tr {...(canDragRows ? weekSpotDropProps(g, null) : {})}>
+                            <td colSpan={9} style={{ padding: 0, height: (dragRowId || dragIntake) ? 14 : 6,
+                              background: dropGroup === "ins:end:" + g.key ? "#EEF4FF" : "transparent",
+                              borderTop: dropGroup === "ins:end:" + g.key ? `2px solid ${ACCENT}` : "none" }}></td>
                           </tr>
-                          {day.rows.map((j) => tableRow(j, day.iso))}
-                        </React.Fragment>
-                      ))
+                        </>); })()
                       : g.rows.map((j) => tableRow(j))}
                   </React.Fragment>
                   );
@@ -1431,7 +1456,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             {canDragRows
               ? (segment === "crew" ? "Drag a row onto another crew to hand the job over — onto “No crew yet” to unassign it."
                 : segment === "date" ? "Drag a row onto another day to reschedule it — onto “No build date” to send it back to the Unscheduled tray."
-                : segment === "week" ? "Every week is broken into its seven days — drop a row on any day to move it there, including an empty one. Drop on a WEEK heading instead and it keeps the same weekday in that week. Drop on “No build date” to send it back to the Unscheduled tray."
+                : segment === "week" ? "Buildings in a week are listed in build-date order — drag one to a new spot in the order and its date follows its neighbors (their day, or the empty day between them). For an exact day, open the building and set the date. Drop on a WEEK heading to move it to that week keeping the same weekday, or on “No build date” to send it back to the Unscheduled tray."
                 : "Drag a row onto another stage to move it there.")
               : (canEdit
                 ? "Dragging is off in this view: " + (segment === "source" ? "an order does not become an inventory build" : "size and style come from the building’s own design") + ", so there is nothing a drop could change. Segment by crew, build date, week or stage to drag."

@@ -124,10 +124,25 @@ Seven fixes from her walking the Build Schedule tab. All in `portal/05-schedule.
     - The matcher (`schedWhenMatch`) is a pure function of ISO strings with 50 unit
       assertions over every condition and edge.
 
-    Same round, mockup-chosen: **day headings in the week segment get `#F7F9FF`** and each
-    day's job rows share a faint `#FAFBFE` band, so a day holding one building still reads
-    as a block. Week → day → job is three tints of one family, each a step lighter; this
-    supersedes round 5's "day rows have NO fill" — same person, after living with it.
+    ~~Same round, mockup-chosen: day headings get `#F7F9FF` + a `#FAFBFE` job band.~~
+    **Superseded hours later by decision 27 — the day rows are GONE entirely.**
+
+27. **THE WEEK SEGMENT IS AN ORDERED LIST — POSITION IMPLIES THE DATE** (Carolyn
+    2026-08-23: *"I absolutely Hate this day view in the week segment… in a week view we
+    want to simply drag buildings in the order of that week"*). The seven day rows from
+    round 5 are deleted; a week group is its blue heading plus its buildings sorted by
+    build date. Dragging a building to a spot in that order derives the date from the
+    NEIGHBOURS, her rules verbatim:
+    - between a Tuesday job and a Wednesday job → **Tuesday** (the first date);
+    - between Tuesday and Thursday with Wednesday empty → **Wednesday** (the gap day);
+    - at the very top → the first job's date; on the slim end-of-week strip → the last's.
+    Deliberately approximate: *"if it isn't the exact day they want, they can open and
+    choose the right day"* — the popup's date field is the precision tool. The neighbour
+    computation EXCLUDES the dragged row (else a job dropped beside itself reads itself as
+    its own neighbour), a same-date result is a no-op, tray items dropped into the order
+    are created on the derived date, and the week heading still means "same weekday, that
+    week" for cross-week drops. Implementation: `weekOrderedRows` / `weekInsertDate` /
+    `weekSpotDropProps` in 05-schedule.jsx, with unit tests over the neighbour rules.
 
 Also fixed: **Refresh gave no sign it ran.** It always refetched, but set no busy state,
 never disabled, and left a stale banner up — so on an unchanged board the screen was
