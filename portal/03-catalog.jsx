@@ -30,6 +30,9 @@ function SettingsView({ section }) {
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
+    // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
+    // column has — so a status response that predates the column can't read as "SS issues it".
+    invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -112,6 +115,9 @@ function SettingsView({ section }) {
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
         betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
+        invoiceInGhl: data.invoiceInGhl !== false,
+        ssQuoteNext: data.ssQuoteNext == null ? "" : String(data.ssQuoteNext),
+        ssQuotePrefix: data.ssQuotePrefix || "",
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -146,6 +152,29 @@ function SettingsView({ section }) {
     if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
     setSaved(true);
     // refresh masked status
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
+  // the three fields are presence-based on the server, so sending only these leaves every
+  // other setting untouched — and this card lives in the CRM section while the page Save
+  // button lives down in Branding.
+  const [invBusy, setInvBusy] = useState(false);
+  const [invMsg, setInvMsg] = useState(null);   // { ok } | { err }
+  const saveInvoicing = async () => {
+    setInvMsg(null); setInvBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: {
+      action: "save",
+      invoiceInGhl: form.invoiceInGhl,
+      ssQuoteNext: form.ssQuoteNext,
+      ssQuotePrefix: form.ssQuotePrefix,
+    } });
+    setInvBusy(false);
+    if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
+    setInvMsg({ ok: form.invoiceInGhl
+      ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
+      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -271,6 +300,51 @@ function SettingsView({ section }) {
         </div>
         <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
         <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against your CRM and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
+      </div>
+
+      {/* Quotes & Invoices (migration 121). ON is what every tenant has done since day one:
+          the quote and the invoice are objects in the CRM. OFF moves BOTH documents into
+          StructureStudio — and the copy has to be explicit that contacts and opportunities
+          still go to the CRM, because "invoice in StructureStudio" reads like "stop using my
+          CRM" otherwise. The starting number is required before the switch can go off (the
+          server refuses the save without one); numbering that silently restarted at 1 would
+          collide with the paperwork a builder already has out. */}
+      <div style={S.card}>
+        <div style={S.h2}>Quotes &amp; Invoices</div>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+          <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
+          Quote and invoice through my CRM
+        </label>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+          {form.invoiceInGhl
+            ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
+            : <><b>Off — StructureStudio issues your quotes and invoices.</b> Each quote is one document: the priced
+                estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
+                their quote page, and you invoice from the Orders tab. Contacts and opportunities still go to your
+                CRM exactly as before, so your pipeline keeps working.</>}
+        </p>
+        {!form.invoiceInGhl && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+            <div><span style={S.lbl}>Starting quote number</span>
+              <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off. Counts up by one per quote.</div></div>
+            <div><span style={S.lbl}>Prefix (optional)</span>
+              <input style={S.input} value={form.ssQuotePrefix} onChange={set("ssQuotePrefix")} placeholder="e.g. JB-" maxLength={12} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || "1041")}.</div></div>
+          </div>
+        )}
+        {!form.invoiceInGhl && !String(form.ssQuoteNext).trim() && (
+          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Set a starting quote number before saving. Without one, your first StructureStudio
+            quote would be numbered 1 and clash with the paperwork you already have out.
+          </div>
+        )}
+        {invMsg && invMsg.err && <div style={{ ...S.err, marginTop: 10 }}>{invMsg.err}</div>}
+        {invMsg && invMsg.ok && <div style={{ ...S.okMsg, marginTop: 10 }}>{invMsg.ok}</div>}
+        <button type="button" onClick={saveInvoicing} disabled={invBusy}
+          style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: invBusy ? 0.6 : 1 }}>
+          {invBusy ? "Saving…" : "Save Quote & Invoice Settings"}
+        </button>
       </div>
 
       {status && status.configured && (

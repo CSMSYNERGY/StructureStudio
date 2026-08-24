@@ -5,6 +5,7 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
+import { buildQuotePdf } from "../_shared/quotePdf.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -73,6 +74,24 @@ function json(body: unknown, status = 200) {
 // redirect. Kept in step with portal-settings' save-side check.
 const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
+// estimate_lines.desc carries GHL-flavored HTML in two places (the floor-plan <a> link
+// prepended to the building line, and <br>-joined credit notes, both entity-escaped). Every
+// PDF we render is plain text, so it is de-rendered first: drop anchors whole (a link label
+// with no href is noise on paper), <br> → newline, strip tags, then unescape in reverse of the
+// escape order (&lt;/&gt; before &amp;).
+//
+// Module scope since 2026-08-21, hoisted verbatim out of the own-domain (Resend) branch in
+// step 10: the SS-mode quote renders from the same snapshot and needs the same de-rendering.
+// Two copies of an HTML stripper that must agree is precisely the drift worth avoiding — if
+// one ever learns about a new tag and the other does not, the two documents describing one
+// sale disagree.
+const deHtml = (s: string) =>
+  s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+    .trim();
+
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -102,7 +121,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -122,6 +141,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const businessAddress: any = settings.business_address || null;
   const businessLogoUrl: string = settings.business_logo_url || "";
   const quoteTerms: string = settings.quote_terms || "";
+  // WHO ISSUES THE PAPERWORK (migration 121). Default TRUE — and read as "anything but an
+  // explicit false is the CRM", so a tenant whose row predates the column, or whose value is
+  // null for any reason, gets today's GHL path rather than silently switching to a document
+  // StructureStudio has never sent for them. The credential check above is deliberately NOT
+  // relaxed for SS mode: the contact upsert and the opportunity still go to the CRM either way.
+  const invoiceInGhl: boolean = settings.invoice_in_ghl !== false;
   const effectiveBetaMode: boolean = Boolean(betaMode) || Boolean(settings.beta_mode);
 
   // ⚠️ ONLY the tenant's own `beta_mode` switch redirects. The request's `betaMode` flag is
@@ -156,7 +181,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    browser right before calling us, so it must exist here.
   const { data: existingDesign, error: designErr } = await supabase
     .from("designs")
-    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id")
+    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -1380,6 +1405,198 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     ...(opportunityId ? { opportunityId: String(opportunityId) } : {}),
   };
 
+  // Line provenance snapshot (persisted as designs.estimate_lines at step 11).
+  //
+  // Serialized after pct_estimate_total resolution, credit baking, and the discount clamp
+  // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
+  // style id is stored once at the top level (every building/layout line shares it) and the
+  // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
+  // Built BEFORE step 9 (moved up from between 9 and 10 on 2026-08-21) because BOTH send
+  // paths render their document from this same snapshot — the own-domain (Resend) path's
+  // formal estimate PDF, and the SS-mode quote immediately below, which never reaches step 9
+  // at all. Nothing in it depends on the GHL response: every input (targetItems, lineProv,
+  // totalDiscount, styleRowId) is final by step 8. Same object, same amounts, so the emailed
+  // document and the persisted books lines can never disagree.
+  const estimateLines = {
+    version: 1,
+    styleId: styleRowId,
+    discount: totalDiscount > 0 ? totalDiscount : 0,
+    lines: targetItems
+      .filter((li) => !lineProv.get(li)?.skip)
+      .map((li) => {
+        const p = lineProv.get(li);
+        return {
+          kind: p?.kind ?? "fallback",
+          itemKey: p?.itemKey ?? "",
+          name: String(li.name ?? ""),
+          // The GHL line's description is where the specifics live (paint colors, roof
+          // type/color, ramp sizing, RO dimensions) — under the simplified category-item
+          // model the QuickBooks item is a broad category, so this text is what makes the
+          // books line readable. Capped: it feeds a 4000-char QBO Description, not storage.
+          desc: String(li.description ?? "").trim().slice(0, 1000),
+          qty: Number(li.qty) || 0,
+          amount: Number(li.amount) || 0,
+          nonTaxable: !!p?.nonTaxable,
+        };
+      }),
+  };
+
+  // ── 9-ALT. StructureStudio issues the quote (client_settings.invoice_in_ghl = false) ──
+  //
+  // Everything above still ran: the contact was upserted into the CRM and the opportunity was
+  // created/moved per the tenant's stage mapping (Carolyn 2026-08-21 — "Contacts are still
+  // created in GHL and Opportunities are placed per the settings"). What this branch replaces
+  // is only the PAPERWORK: no GHL estimate object is created, and GHL does not email anyone.
+  //
+  // It returns, so steps 9/10/11 below are the untouched GHL path — no reindentation, no new
+  // conditionals threaded through the money path. Junior Barns and every other tenant on
+  // invoice_in_ghl = true reach this line and walk straight past it.
+  if (!invoiceInGhl) {
+    // The number is allocated ONCE per design and reused on every resubmit — the same promise
+    // the GHL path keeps by PUTting the same estimate id rather than creating a second one. A
+    // customer who receives a revised quote must not see the number change under them.
+    let ssQuoteNumber: string | null = existingDesign.ss_quote_number || null;
+    if (!ssQuoteNumber) {
+      const { data: allocated, error: allocErr } = await supabase
+        .rpc("allocate_ss_quote_number", { p_client_id: clientId });
+      if (allocErr) {
+        return json({ error: `Could not allocate a quote number: ${allocErr.message}` }, 502);
+      }
+      ssQuoteNumber = allocated ? String(allocated) : null;
+    }
+    // NULL means the tenant has no starting number. portal-settings refuses to save this
+    // combination, so reaching here means the row was edited around the portal — refuse rather
+    // than invent a 1, which would collide with the paperwork they already have out.
+    if (!ssQuoteNumber) {
+      return json({
+        error: "This account issues its own quotes but has no starting quote number set. Add one in Settings → CRM Connection → Quotes & Invoices.",
+      }, 400);
+    }
+
+    // The plan PDF the designer just uploaded becomes sheets 2-3 (floor plan, four-sided 3D).
+    // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
+    // URL, since this one is fetched server-side.
+    const planUrl = imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null;
+    const skippedSheets: string[] = [];
+
+    let quotePdfUrl: string | null = null;
+    try {
+      const pdfBytes = await buildQuotePdf({
+        business: {
+          name: businessName,
+          phone: businessPhone || null,
+          website: businessWebsite || null,
+          address: businessAddress,
+        },
+        estimateNumber: ssQuoteNumber,
+        dateIso: today,
+        lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
+        discount: estimateLines.discount,
+        quoteTerms: quoteTerms || null,
+        planPdfUrl: planUrl,
+        onSheetSkipped: (r) => skippedSheets.push(r),
+      });
+      // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
+      // not apply — same reasoning as the formal estimate PDF's `-estimate.pdf` sibling.
+      // upsert: one quote document per design, replaced on every resubmit.
+      const pdfPath = `${clientId}/${designId}-quote.pdf`;
+      const up = await supabase.storage.from("floor-plans")
+        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+      if (up.error) {
+        console.warn("SS quote PDF upload failed:", up.error.message);
+      } else {
+        const { data: pub } = supabase.storage.from("floor-plans").getPublicUrl(pdfPath);
+        quotePdfUrl = pub?.publicUrl || null;
+      }
+    } catch (e) {
+      // Unlike the plan sheets (which degrade inside buildQuotePdf), a failure HERE means there
+      // is no document at all. Still not fatal to the submission: the design, the contact and
+      // the opportunity are real and the rep can resubmit. Reported honestly below.
+      console.warn("SS quote PDF generation failed:", (e as Error).message);
+    }
+
+    // The email. sendTenantEmail owns the beta redirect, the dark-mode guards and the
+    // email_sends ledger, and never throws.
+    //
+    // estimateUrl is NULL deliberately: in SS mode there is no GHL hosted estimate page to
+    // link, and the customer's own quote page (with its Accept button) is the next slice. The
+    // template omits the CTA entirely for null rather than rendering a dead button, so the
+    // email leads with the quote document itself until that page exists.
+    const intendedTo = String(contact?.email || "").trim();
+    let emailed = false;
+    let emailReason: string | null = null;
+    if (intendedTo || redirectToTestInbox) {
+      const content = estimateEmail({
+        businessName,
+        logoUrl: businessLogoUrl || null,
+        phone: businessPhone || null,
+        website: businessWebsite || null,
+        estimateNumber: ssQuoteNumber,
+        total: oppValue,
+        styleLabel,
+        sizeLabel: size,
+        estimateUrl: null,
+        pdfUrl: planUrl,
+        formalPdfUrl: quotePdfUrl,
+        quoteTerms: quoteTerms || null,
+      });
+      const outcome = await sendTenantEmail(supabase, clientId, {
+        kind: "estimate",
+        shortCode: designId,
+        to: intendedTo,
+        subject: content.subject,
+        html: content.html,
+        text: content.text,
+      });
+      emailed = outcome.sent;
+      if (!outcome.sent) emailReason = outcome.reason || "failed";
+    } else {
+      emailReason = "no recipient";
+    }
+
+    // Persist. ss_quote_sent_at is stamped ONLY when the customer was actually emailed, so
+    // "numbered but never sent" stays visible and recoverable — the same distinction
+    // invoice_sends draws between 'created' and 'sent'. There is no GHL estimate id or number
+    // to write, and the two GHL ids that DO exist are written exactly as the GHL path does.
+    const { error: persistErr } = await supabase
+      .from("designs")
+      .update({
+        ghl_contact_id: contactId,
+        ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
+        estimate_lines: estimateLines,
+        ss_quote_number: ssQuoteNumber,
+        ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
+        ...(emailed ? { ss_quote_sent_at: new Date().toISOString() } : {}),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("short_code", designId);
+    // A failed persist is worth surfacing: the number has been consumed and the customer may
+    // already hold the document, so silence here would leave nothing to reconcile against.
+    if (persistErr) console.warn("SS quote persist failed:", persistErr.message);
+
+    return json({
+      ok: true,
+      issuedBy: "structurestudio",
+      contactId,
+      opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
+      // No GHL estimate exists in this mode. Reported as null rather than omitted so a caller
+      // reading `estimateId` gets an explicit "there isn't one" instead of undefined.
+      estimateId: null,
+      estimateNumber: ssQuoteNumber,
+      quoteNumber: ssQuoteNumber,
+      quotePdfUrl,
+      quoteEmailed: emailed,
+      quoteEmailReason: emailReason,
+      // Which sheets the document is missing, and why — the answer to "the customer says the
+      // 3D page isn't there".
+      sheetsSkipped: skippedSheets,
+      updated: Boolean(existingDesign.ss_quote_number),
+      betaMode: effectiveBetaMode,
+      betaRedirected: redirectToTestInbox,
+      betaRedirectedTo: redirectToTestInbox ? betaEmail : null,
+    });
+  }
+
   // 9. Create or update
   let estimateId: string | null = existingEstimateId;
   let estimateNumber: string | null = null;
@@ -1439,38 +1656,6 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   } catch (e) {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
   }
-
-  // Line provenance snapshot (persisted as designs.estimate_lines at step 11).
-  //
-  // Serialized after pct_estimate_total resolution, credit baking, and the discount clamp
-  // (all complete before step 8) so every amount is the FINAL number that went to GHL. The
-  // style id is stored once at the top level (every building/layout line shares it) and the
-  // invoice-level discount as one synthetic entry, since it is not a line in targetItems.
-  // Built BEFORE step 10 because the own-domain path's formal estimate PDF renders from this
-  // same snapshot — the emailed document and the persisted books lines can never disagree.
-  const estimateLines = {
-    version: 1,
-    styleId: styleRowId,
-    discount: totalDiscount > 0 ? totalDiscount : 0,
-    lines: targetItems
-      .filter((li) => !lineProv.get(li)?.skip)
-      .map((li) => {
-        const p = lineProv.get(li);
-        return {
-          kind: p?.kind ?? "fallback",
-          itemKey: p?.itemKey ?? "",
-          name: String(li.name ?? ""),
-          // The GHL line's description is where the specifics live (paint colors, roof
-          // type/color, ramp sizing, RO dimensions) — under the simplified category-item
-          // model the QuickBooks item is a broad category, so this text is what makes the
-          // books line readable. Capped: it feeds a 4000-char QBO Description, not storage.
-          desc: String(li.description ?? "").trim().slice(0, 1000),
-          qty: Number(li.qty) || 0,
-          amount: Number(li.amount) || 0,
-          nonTaxable: !!p?.nonTaxable,
-        };
-      }),
-  };
 
   // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
   //     email_provider='resend' get action:"send_manually" + our own Resend email;
@@ -1533,17 +1718,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // estimate email.
           let formalPdfUrl: string | null = null;
           try {
-            // estimate_lines.desc carries GHL-flavored HTML in two places (the floor-plan
-            // <a> link prepended to the building line, and <br>-joined credit notes, both
-            // entity-escaped). The PDF is plain text — de-render for it only: drop anchors
-            // whole (a link label with no href is noise on paper), <br> → newline, strip
-            // tags, then unescape in reverse of the escape order (&lt;/&gt; before &amp;).
-            const deHtml = (s: string) =>
-              s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
-                .replace(/<br\s*\/?>/gi, "\n")
-                .replace(/<[^>]*>/g, "")
-                .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-                .trim();
+            // deHtml is at module scope (see its comment there) — shared with the SS-mode
+            // quote so the two documents cannot de-render the same snapshot differently.
             const pdfBytes = await buildFormalEstimatePdf({
               business: {
                 name: businessName,

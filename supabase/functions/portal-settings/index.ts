@@ -578,7 +578,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -607,6 +607,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
         betaMode: Boolean(data?.beta_mode),
         betaEmail: data?.beta_email ?? null,
+        // Who issues the paperwork (migration 121). Defaults TRUE for every tenant, so a
+        // row that predates the column — or a tenant with no client_settings row at all —
+        // reads as "invoice through the CRM", i.e. today's behaviour.
+        invoiceInGhl: data?.invoice_in_ghl !== false,
+        ssQuoteNext: data?.ss_quote_next ?? null,
+        ssQuotePrefix: data?.ss_quote_prefix ?? "",
       }
       : {};
     return json({
@@ -665,6 +671,48 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
+    if ("invoiceInGhl" in payload) updates.invoice_in_ghl = Boolean(payload.invoiceInGhl);
+    // The quote-number START. Blank clears it back to "not set"; anything else must be a
+    // whole positive number, because it is allocated with +1 and printed on a customer's
+    // quote. A float or a stray "1,000" silently becoming NaN — and then 1 — is exactly the
+    // collision with a tenant's existing paperwork that this field exists to avoid.
+    if ("ssQuoteNext" in payload) {
+      const raw = String(payload.ssQuoteNext ?? "").trim();
+      if (!raw) updates.ss_quote_next = null;
+      else {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1 || n > 2_000_000_000) {
+          return json({ error: "The starting quote number must be a whole number, 1 or higher." }, 400);
+        }
+        updates.ss_quote_next = n;
+      }
+    }
+    // Prefix is printed on the customer's quote, so the charset is bounded to what a
+    // document number legitimately needs — no spaces, no punctuation that could be read as
+    // markup on the PDF or in the email subject.
+    if ("ssQuotePrefix" in payload) {
+      const p = String(payload.ssQuotePrefix ?? "").trim().slice(0, 12);
+      if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
+        return json({ error: "The quote prefix can only use letters, numbers and dashes — for example INV or JB-." }, 400);
+      }
+      updates.ss_quote_prefix = p;
+    }
+
+    // Turning CRM invoicing OFF hands the numbering to us, so a start value has to exist
+    // before the switch flips — otherwise the first SS quote would begin at 1 and collide
+    // with the tenant's existing paperwork. Checked against the MERGED state (the two
+    // controls can arrive in separate saves), the same way the beta pair below is.
+    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload) {
+      const { data: curInv } = await admin
+        .from("client_settings").select("invoice_in_ghl, ss_quote_next").eq("client_id", clientId).maybeSingle();
+      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
+      const nextStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
+      if (!nextInGhl && nextStart == null) {
+        return json({
+          error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
+        }, 400);
+      }
+    }
 
     // Beta mode has a CONSEQUENCE now (submit-estimate redirects the estimate email to
     // beta_email instead of the customer), so the pair is validated as a pair. Refusing the
