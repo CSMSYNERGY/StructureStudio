@@ -1129,7 +1129,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       <CardHead title="Build Schedule" count={jobs.length}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
-            {[["calendar", "Calendar"], ["board", "Board"], ["table", "Table"]].map(([v, label]) => (
+            {[["calendar", "Calendar"], ["table", "Table"], ["board", "Board"]].map(([v, label]) => (
               <button key={v} type="button" onClick={() => setView(v)}
                 style={{ border: "none", background: view === v ? "#FFF" : "transparent", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, color: view === v ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", boxShadow: view === v ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>
                 {label}
