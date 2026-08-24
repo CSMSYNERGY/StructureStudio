@@ -1752,6 +1752,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   const [straighten, setStraighten] = useState(null);   // File awaiting the straighten step
   const [dlBusy, setDlBusy] = useState(false);
   const [fileKey, setFileKey] = useState(0);
+  // Door-flagged palette rows (Colors tab → Doors tick), for the color-mode UI. Doors only.
+  const [doorColors, setDoorColors] = useState([]);
+  const isDoorCat = category === "door";
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -1759,6 +1762,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     price: d.price != null ? String(d.price) : "",
     swing_in: !!d.swing_in, swing_out: !!d.swing_out, swing_default: d.swing_default || null,
     op_right: !!d.op_right, op_left: !!d.op_left, op_double: !!d.op_double, op_slideup: !!d.op_slideup, op_default: d.op_default || null,
+    color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
   });
   const load = async () => {
@@ -1767,17 +1771,21 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     const list = (data.fixtures || []).filter((f) => (f.category || "door") === category).map(mapRow);
     // Display order = the order drag persists: live items first, archived sink to the bottom.
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
+    if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
 
   // One line's payload for save_fixture / import_fixtures. Sizes go over as inches.
+  // Color keys ride ONLY for doors so the server's presence contract leaves other
+  // categories' (forced) values alone.
   const toPayload = (r) => ({
     id: r.id || undefined, category, name: r.name, planLabel: r.plan_label,
     showImageOnEstimate: r.show_image_on_estimate !== false,
     widthIn: ftInToInches(r.width_in), heightIn: ftInToInches(r.height_in), price: r.price,
     swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
     opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
+    ...(isDoorCat ? { colorMode: r.color_mode || "fixed", hasTrimColor: r.has_trim_color === true, fixedColorId: (r.color_mode || "fixed") === "fixed" ? (r.fixed_color_id || null) : null } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
   });
 
@@ -1874,11 +1882,14 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // silently drops on re-import). The ID column is the row key: keep it to update a row,
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Photo on estimate", "Active", "Internal only", "Archived"]
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
     : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", "Photo on estimate", "Active", "Internal only", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
+  // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
+  // resolves it back against the door-flagged palette.
+  const fixedColorLabel = (r) => { const fc = doorColors.find((c) => c.id === r.fixed_color_id); return fc ? fc.label : ""; };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
     : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
@@ -1941,6 +1952,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iW = col("width"), iH = col(sizeWord === "length" ? "length" : "height", "height", "length"), iPrice = col("price"),
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
+        iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -1969,6 +1981,19 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           row.opDouble = bool(cols, iOpD, false); row.opSlideUp = bool(cols, iOpS, false);
           const od = String(iOpDef >= 0 ? (cols[iOpDef] == null ? "" : cols[iOpDef]) : "").trim().toLowerCase();
           row.opDefault = iOpDef < 0 ? undefined : ((od === "right" || od === "left") ? od : null);
+          // Color columns follow the same absent-column-leaves-untouched contract. "Fixed
+          // color" carries the color's LABEL; an unknown label goes over as "" so the server
+          // clears it with a note rather than silently keeping a stale color.
+          if (iCMode >= 0) {
+            const cm = String(cols[iCMode] == null ? "" : cols[iCMode]).trim().toLowerCase();
+            row.colorMode = (cm === "paint" || cm === "match") ? cm : "fixed";
+          }
+          row.hasTrimColor = bool(cols, iTrimC, false);
+          if (iFixedC >= 0) {
+            const lbl = String(cols[iFixedC] == null ? "" : cols[iFixedC]).trim();
+            const fc = lbl ? doorColors.find((c) => String(c.label).trim().toLowerCase() === lbl.toLowerCase()) : null;
+            row.fixedColorId = fc ? fc.id : (lbl ? "unknown:" + lbl : null);
+          }
         }
         return row;
       });
@@ -1982,7 +2007,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, image_url: null, active: true, archived: false, internalOnly: false });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -2036,6 +2061,15 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       else if (r.op_right) parts.push("opens right");
       else if (r.op_left) parts.push("opens left");
     }
+    if (isDoorCat) {
+      const trimTag = r.has_trim_color ? " + trim color" : "";
+      if (r.color_mode === "paint") parts.push(`customer picks color${trimTag}`);
+      else if (r.color_mode === "match") parts.push(`matches building${trimTag}`);
+      else if (r.fixed_color_id) {
+        const fc = doorColors.find((c) => c.id === r.fixed_color_id);
+        parts.push(fc ? `color: ${fc.label}` : "fixed color");
+      }
+    }
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
   };
@@ -2082,6 +2116,43 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
               {dOpChk("op_double", "Double")}
               {dOpChk("op_slideup", "Slide up")}
             </div>
+          </div>
+        </div>
+      )}
+      {isDoorCat && (
+        <div style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+          <div>
+            <div style={fldLbl}>Door color</div>
+            <select value={edit.draft.color_mode || "fixed"}
+              onChange={(e) => setDraft({ color_mode: e.target.value, ...(e.target.value === "fixed" ? { has_trim_color: false } : {}) })}
+              style={{ ...S.input, minWidth: 0 }}>
+              <option value="fixed">One fixed color</option>
+              <option value="paint">Customer picks a color</option>
+              <option value="match">Match building colors</option>
+            </select>
+          </div>
+          {(edit.draft.color_mode || "fixed") === "fixed" && (
+            <div>
+              <div style={fldLbl}>Color</div>
+              <select value={edit.draft.fixed_color_id || ""} onChange={(e) => setDraft({ fixed_color_id: e.target.value || null })} style={{ ...S.input, minWidth: 0 }}>
+                <option value="">(none)</option>
+                {doorColors.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </div>
+          )}
+          {(edit.draft.color_mode === "paint" || edit.draft.color_mode === "match") && (
+            <div style={{ paddingBottom: 6 }}>
+              {dCbx("has_trim_color", "Customer also picks a trim color", "Two-tone door: the customer picks a main color AND a trim color (both from colors ticked for Doors)")}
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#94A3B8", paddingBottom: 8, flexBasis: "100%" }}>
+            {(edit.draft.color_mode || "fixed") === "fixed"
+              ? "One fixed color — the customer sees no color choice on this door."
+              : doorColors.length === 0
+                ? "⚠ No colors are ticked for Doors yet — tick the Doors box on colors in the Colors tab, or this door will offer no colors."
+                : edit.draft.color_mode === "match"
+                  ? "Starts on the building's body/trim colors; the customer can change either."
+                  : "The customer picks from the colors ticked for Doors in the Colors tab."}
           </div>
         </div>
       )}
@@ -2374,10 +2445,127 @@ function RampsView({ viewingLabel = null, clientId = null }) {
 // ─── Windows (Options tab → its own section, below Ramps) ───
 // A straight catalog like doors, minus swing/operation (windows don't swing). category='window'
 // in fixture_items; height_in holds the window HEIGHT. Per-line saves via the shared FixtureCatalog.
+// ─── Window colors (Options tab → Windows section, 116) ───
+// ONE small per-client list — every active window offers every active color here, so a
+// builder never enters the same window twice for a second color. rate is a flat $ added
+// per window (0 = included). Full-list replace via save_window_colors (same delete-sweep
+// semantics as the Colors tab, hence the same operator view-as confirm).
+function WindowColorsEditor({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setRows((data.windowColors || []).map((c) => ({
+      id: c.id, label: c.label || "", hex: c.hex || null,
+      rate: (c.rate != null ? String(c.rate) : "0"),
+      is_default: c.is_default === true, active: c.active !== false,
+    })));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (i, field, val) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, [field]: val } : r));
+  // Only one default makes sense — the picker preselects the FIRST default it finds, so
+  // ticking one unticks the rest rather than leaving a state only the code can resolve.
+  const setDefault = (i, on) => setRows((rs) => rs.map((r, j) => ({ ...r, is_default: j === i ? on : (on ? false : r.is_default) })));
+  const swap = (i, j) => setRows((rs) => { if (j < 0 || j >= rs.length) return rs; const next = rs.slice(); [next[i], next[j]] = [next[j], next[i]]; return next; });
+  const addRow = () => setRows((rs) => [...rs, { id: null, label: "", hex: "#F5F2EA", rate: "0", is_default: rs.length === 0, active: true }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
+
+  const save = async () => {
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE window color list with these ${rows.length} color(s)?\n\nAnything not shown here will be removed from their account.`)) return;
+    setBusy(true); setMsg(null);
+    try {
+      const colors = rows.map((r, i) => ({
+        id: r.id || undefined, label: r.label, hex: r.hex || null,
+        rate: Number(r.rate) || 0, isDefault: r.is_default === true, active: r.active !== false, sortOrder: i,
+      }));
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_window_colors", colors }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = (data && data.skipped) || [];
+      setMsg({ ok: `Saved ${data.saved || 0} color(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped: ${skipped.join("; ")}` : "") + "." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  const ctr = { ...S.td, padding: "8px 5px", textAlign: "center" };
+  const tdc = { ...S.td, padding: "8px 5px" };
+  const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Window colors</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+        One list for <b>all</b> windows — every window below offers every active color here, so you never enter the same
+        window twice for another color. <b>Price</b> is a flat dollar amount added <b>per window</b> in that color
+        (leave <b>0</b> for included colors). <b>Default</b> pre-selects one. The color shows on the 3D and on the estimate.
+      </p>
+      {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
+      {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+        <>
+          {rows.length > 0 && (
+            <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 12 }}>
+              <colgroup>
+                <col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "34%" }} />
+                <col style={{ width: "17%" }} /><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
+              </colgroup>
+              <thead><tr>
+                <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+                <th style={thc} title="Flat $ added per window in this color">Price per window (USD)</th>
+                <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.id || `new-${i}`}>
+                    <td style={ctr}>
+                      <button onClick={() => swap(i, i - 1)} disabled={i === 0} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▲</button>{" "}
+                      <button onClick={() => swap(i, i + 1)} disabled={i === rows.length - 1} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "2px 7px" }}>▼</button>
+                    </td>
+                    <td style={ctr}>
+                      <input type="color" value={r.hex || "#CCCCCC"} onChange={(e) => setRow(i, "hex", e.target.value)} title={r.hex || "Pick this color"}
+                        style={{ width: 34, height: 26, padding: 0, border: "1px solid #CBD5E1", borderRadius: 4, background: "#FFF", cursor: "pointer" }} />
+                    </td>
+                    <td style={tdc}>
+                      <input type="text" value={r.label} placeholder="e.g. White" onChange={(e) => setRow(i, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                    </td>
+                    <td style={ctr}>
+                      <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(i, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                    </td>
+                    <td style={ctr}><input type="checkbox" checked={!!r.is_default} onChange={(e) => setDefault(i, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} /></td>
+                    <td style={ctr}><input type="checkbox" checked={r.active !== false} onChange={(e) => setRow(i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} /></td>
+                    <td style={ctr}><button onClick={() => removeRow(i)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {rows.length === 0 && <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>No window colors yet — without any, windows are placed with no color choice (exactly as before).</div>}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={addRow} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
+            <div style={{ flex: 1 }} />
+            <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save window colors"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function WindowsView({ viewingLabel = null, clientId = null }) {
   return (
     <div style={S.card}>
       <div style={S.h2}>Windows</div>
+      <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} />
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Window catalog</div>
       <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
         The windows your customers can add to a building. Each window is <b>one line</b> — click <b>Edit</b> to change it;
         every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are feet/inches — 8', 6'3", 36"
@@ -2404,9 +2592,10 @@ function ColorsView({ viewingLabel = null }) {
     setCat(data);
     setRows((data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
-      shingle: !!c.shingle, metal: !!c.metal,
+      shingle: !!c.shingle, metal: !!c.metal, door: !!c.door,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
       hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
+      door_rate: (c.door_rate != null ? String(c.door_rate) : "0"),
     })));
   };
   useEffect(() => { load(); }, []);
@@ -2416,9 +2605,9 @@ function ColorsView({ viewingLabel = null }) {
   const addRow = (preset, category) => setRows((rs) => [...rs, {
     id: null, label: preset ? preset.name : "",
     siding: category === "paint", trim: category === "paint",
-    shingle: category === "shingle", metal: category === "metal",
+    shingle: category === "shingle", metal: category === "metal", door: false,
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
-    pricing_method: "each", rate: "0",
+    pricing_method: "each", rate: "0", door_rate: "0",
   }]);
   const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
@@ -2436,9 +2625,10 @@ Anything not shown here will be removed from their account.`)) return;
     try {
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label,
-        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal,
+        siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
+        doorRate: Number(r.door_rate) || 0,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -2492,12 +2682,14 @@ Anything not shown here will be removed from their account.`)) return;
               {/* Widths sum to 100 in each branch. The Custom column added 2026-08-07 came out
                   of the name column, which holds a flexible text input and had the slack —
                   measured in the real ~693px panel, the checkbox headers need ~55px ("DEFAULT"
-                  is the longest at 54px) and clip below that, so those three stay at 8%. */}
+                  is the longest at 54px) and clip below that. The Doors + Door price columns
+                  (2026-08-24) squeezed name/method further; short checkbox headers (Siding/
+                  Trim/Doors) tolerate 5-6% because thc wraps, Custom/Default keep 8%. */}
               {showST ? (
                 <>
-                  <col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} />
-                  <col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "15%" }} /><col style={{ width: "10%" }} />
-                  <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} />
+                  <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
                 </>
               ) : (
                 <>
@@ -2511,7 +2703,9 @@ Anything not shown here will be removed from their account.`)) return;
               <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
+              {showST && <th style={thc} title="Customers can pick this color for doors set to use paint colors">Doors</th>}
               <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
+              {showST && <th style={thc} title="Flat $ added per door painted this color — separate from the siding/trim rate">Door price (USD)</th>}
               <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
               <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
             </tr></thead>
@@ -2531,6 +2725,7 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
                   {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
+                  {showST && <td style={ctr}>{chk(gi, "door")}</td>}
                   <td style={tdc}>
                     <select value={r.pricing_method || "each"} onChange={(e) => setRow(gi, "pricing_method", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }}>
                       {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
@@ -2539,6 +2734,12 @@ Anything not shown here will be removed from their account.`)) return;
                   <td style={ctr}>
                     <input type="number" min="0" step="0.01" value={r.rate ?? "0"} onChange={(e) => setRow(gi, "rate", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
                   </td>
+                  {showST && <td style={ctr}>
+                    <input type="number" min="0" step="0.01" value={r.door_rate ?? "0"} disabled={!r.door}
+                      title={r.door ? "Flat $ added per door painted this color" : "Tick Doors to price this color on doors"}
+                      onChange={(e) => setRow(gi, "door_rate", e.target.value)}
+                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", opacity: r.door ? 1 : 0.45 }} />
+                  </td>}
                   <td style={ctr}>
                     <input type="checkbox" checked={!!r.allow_custom} onChange={(e) => setAllowCustom(gi, e.target.checked)}
                       title="Picking this entry in the designer shows a free-text box instead of a swatch"
@@ -2580,9 +2781,11 @@ Anything not shown here will be removed from their account.`)) return;
 
   const paintDesc = (<>
     These are the colors your customers pick from for <b>paint</b> in the designer.
-    Toggle <b>Siding</b> / <b>Trim</b> to control which dropdown a color appears in (a color can be in both).
+    Toggle <b>Siding</b> / <b>Trim</b> / <b>Doors</b> to control where a color can be used (a color can be in all three).
     Set <b>How it’s priced</b> + a <b>Rate</b> to charge for a color — it’s added to the estimate automatically when picked
-    (leave the rate at <b>0</b> for colors included in the base price). <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
+    (leave the rate at <b>0</b> for colors included in the base price). <b>Door price</b> is separate: a flat dollar amount
+    added <b>per door</b> painted this color (0 = included) — it only applies to doors set to use paint colors in the Options tab.
+    <b>Default</b> pre-selects a color; <b>Active</b> shows/hides it. Drag order with ▲▼.
     <br />Tick <b>Custom</b> on one entry (name it something like “Other — my own color”) to let customers type a color you don’t stock; picking it in the designer swaps the swatch list for a text box. Only one entry per palette can be the custom one.
     <br />Need color ideas? See <b>hayleypaint.com</b> or use the quick-add library below.
   </>);
