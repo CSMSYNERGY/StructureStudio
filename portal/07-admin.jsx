@@ -664,16 +664,25 @@ function AdmBilling() {
 
   const report = useMemo(() => {
     const paying = subs.filter((s) => s.status === "active" || s.status === "past_due");
-    const mrrCents = (s) => Math.round((s.price_cents || 0) / (s.billing_interval === "annual" ? 12 : 1));
-    const mrr = paying.reduce((t, s) => t + mrrCents(s), 0);
-    const byPlan = new Map();
-    for (const s of paying) {
-      const k = s.plan_name || s.plan_id;
-      byPlan.set(k, (byPlan.get(k) || 0) + mrrCents(s));
-    }
+    // Monthly and yearly plans are reported in their own units on their own cards
+    // (Carolyn 2026-08-24); the ARR card is the one place they combine (monthly ×12).
+    const breakdown = (rows) => {
+      const m = new Map();
+      for (const s of rows) {
+        const k = s.plan_name || s.plan_id;
+        m.set(k, (m.get(k) || 0) + (s.price_cents || 0));
+      }
+      return [...m.entries()].sort((a, b) => b[1] - a[1]);
+    };
+    const monthly = paying.filter((s) => s.billing_interval !== "annual");
+    const annual = paying.filter((s) => s.billing_interval === "annual");
+    const monthlyRevenue = monthly.reduce((t, s) => t + (s.price_cents || 0), 0);
+    const annualRevenue = annual.reduce((t, s) => t + (s.price_cents || 0), 0);
     return {
-      mrr,
-      byPlan: [...byPlan.entries()].sort((a, b) => b[1] - a[1]),
+      monthly, annual, monthlyRevenue, annualRevenue,
+      byPlanMonthly: breakdown(monthly),
+      byPlanAnnual: breakdown(annual),
+      arr: monthlyRevenue * 12 + annualRevenue,
       active: subs.filter((s) => s.status === "active").length,
       pastDue: subs.filter((s) => s.status === "past_due"),
       cancelled: subs.filter((s) => s.status === "cancelled").length,
@@ -724,17 +733,34 @@ function AdmBilling() {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginBottom: 12 }}>
         <div style={S.card}>
-          <AdmBillingStat label="Monthly revenue" value={money(report.mrr) + "/mo"}
-            sub={`${report.payingBuilders} paying builder${report.payingBuilders === 1 ? "" : "s"} · annual plans counted /12`} />
-          {report.byPlan.length > 0 && (
+          <AdmBillingStat label="Monthly plans" value={money(report.monthlyRevenue) + "/mo"}
+            sub={`${report.monthly.length} monthly subscription${report.monthly.length === 1 ? "" : "s"}`} />
+          {report.byPlanMonthly.length > 0 && (
             <div style={{ marginTop: 10, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
-              {report.byPlan.map(([name, cents]) => (
+              {report.byPlanMonthly.map(([name, cents]) => (
                 <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#475569", padding: "2px 0" }}>
-                  <span>{name}</span><span style={{ fontWeight: 700 }}>{money(cents)}</span>
+                  <span>{name}</span><span style={{ fontWeight: 700 }}>{money(cents)}/mo</span>
                 </div>
               ))}
             </div>
           )}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Yearly plans" value={money(report.annualRevenue) + "/yr"}
+            sub={`${report.annual.length} yearly subscription${report.annual.length === 1 ? "" : "s"}`} />
+          {report.byPlanAnnual.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
+              {report.byPlanAnnual.map(([name, cents]) => (
+                <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#475569", padding: "2px 0" }}>
+                  <span>{name}</span><span style={{ fontWeight: 700 }}>{money(cents)}/yr</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Annual revenue" value={money(report.arr) + "/yr"}
+            sub={`all subscriptions · monthly ×12 + yearly · ${report.payingBuilders} paying builder${report.payingBuilders === 1 ? "" : "s"}`} />
         </div>
         <div style={S.card}>
           <AdmBillingStat label="Subscriptions" value={report.active}
