@@ -76,7 +76,20 @@ export async function buildCrmFeed(
   const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts] = await Promise.all([
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
-    codes.length ? q(admin.from("email_sends").select("id, short_code, kind, to_email, subject, status, created_at").in("short_code", codes).eq("client_id", clientId).order("created_at", { ascending: false }).limit(80)) : Promise.resolve([]),
+    // Email is the conversation channel, so this read has to cover BOTH scopes: document
+    // mail keyed on a design, and conversation mail keyed on the person — which often is
+    // about no design at all ("are you still thinking about the 12x24?"). An `or` rather
+    // than two queries so the 80-row cap applies to the merged history, not twice over.
+    (codes.length || opts.contactId)
+      ? q(admin.from("email_sends")
+          .select("id, short_code, contact_id, kind, to_email, subject, status, created_at")
+          .eq("client_id", clientId)
+          .or([
+            codes.length ? `short_code.in.(${codes.join(",")})` : null,
+            opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
+          ].filter(Boolean).join(","))
+          .order("created_at", { ascending: false }).limit(80))
+      : Promise.resolve([]),
     codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("change_orders").select("id, short_code, co_no, status, total_before_cents, total_after_cents, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("invoice_sends").select("short_code, status, invoice_number, issued_by, updated_at, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
@@ -121,7 +134,12 @@ export async function buildCrmFeed(
   // it today, so every quote and invoice email we have ever sent is invisible in the UI.
   for (const e of emails as any[]) {
     const st = e.status && e.status !== "sent" ? ` (${e.status})` : "";
-    push({ id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email" });
+    // A conversation reads as the SUBJECT, because that is what someone actually wrote and
+    // what they will scan for. A document reads as its kind, because "Quote emailed to
+    // jane@…" is the useful line and its subject is boilerplate.
+    push(e.kind === "conversation"
+      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: e.subject || "(no subject)", body: `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email" }
+      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email" });
   }
   for (const a of accepts as any[]) {
     push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Quote"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Quote ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });

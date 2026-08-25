@@ -760,7 +760,19 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                   <tr>
                     <td style={{ ...S.td, fontWeight: 700 }}>
                       {(() => { const a = activityInfo(g.lastActivity); return <span title={a.label} style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: a.color, marginRight: 8, verticalAlign: "middle" }} />; })()}
-                      {g.name || "—"}
+                      {/* THE NAME IS THE LINK. Carolyn, 2026-08-24, describing Pipedrive:
+                          "I want it to be very similar to where YOU CLICK THIS CUSTOMER NAME
+                          and you pop it up." It was briefly behind a small "Open record"
+                          button beside Details, which is not what she demonstrated and not
+                          where anyone would look. Falls back to plain text for a contact
+                          with no crm_contacts row yet — i.e. before the backfill has run. */}
+                      {g.contactId && onOpenRecord ? (
+                        <button type="button" onClick={() => onOpenRecord(g.contactId)}
+                          title="Open this contact's record"
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
+                          {g.name || "—"}
+                        </button>
+                      ) : (g.name || "—")}
                     </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
@@ -776,15 +788,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                       {/* In-portal open — same rule as DesignsTable: never the public page. */}
                       {!g.browsing && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open latest</button>}
-                      {/* The full Pipedrive-style record page, when this contact has a real
-                          crm_contacts row. The inline drawer stays as the fallback so a
-                          tenant whose backfill has not run yet loses nothing. */}
-                      {!g.browsing && g.contactId && onOpenRecord && (
-                        <button type="button" onClick={() => onOpenRecord(g.contactId)}
-                          style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
-                          Open record
-                        </button>
-                      )}
+                      {/* The "Open record" button that stood here is gone: the customer NAME
+                          is the link now, which is what Carolyn demonstrated. "Details" stays
+                          as the quick inline peek that does not leave the list. */}
                       {!g.browsing && (
                         <button type="button" onClick={() => openDetails(g)}
                           style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
@@ -901,7 +907,11 @@ const CRM_TABS = [
   // service and no A2P registration.
   //
   // Conversations ARE email. That is why the Email tab is the one that grows a composer.
-  { key: "email", label: "Email", enabled: () => false, hint: "Sending from here is next; quotes and invoices already sent show in History below." },
+  // Email IS the conversation channel (Ahsan, 2026-08-25), so this is the tab that carries
+  // a composer. Needs an address to write to — a contact with neither an email nor a design
+  // is a browsing artefact, and offering a compose box that cannot send is worse than not
+  // offering one.
+  { key: "email", label: "Email", enabled: (c) => c.canEdit && !!(c.contact && c.contact.email), hint: "This contact has no email address on file." },
   { key: "files", label: "Files", enabled: () => false, hint: "Needs a contact-scoped storage bucket." },
   { key: "documents", label: "Documents", enabled: () => true },
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
@@ -976,6 +986,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [chip, setChip] = useState("all");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mail, setMail] = useState({ subject: "", body: "" });
+  const [mailMsg, setMailMsg] = useState(null);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1021,6 +1033,29 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     });
     setBusy(false);
     if (!error) { setDraft(""); load(); }
+  };
+
+  const sendEmail = async () => {
+    const subject = mail.subject.trim(), body = mail.body.trim();
+    if (!subject || !body) return;
+    setBusy(true); setMailMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_send_email",
+        to: data.contact && data.contact.email,
+        subject, body,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    // The server authors every sentence here — a domain that is not verified yet, a
+    // provider that is dark, a bounce. Restating them in the browser is how the two drift.
+    const err = (r && r.error) || (error && error.message);
+    if (err) { setMailMsg({ err }); return; }
+    setMail({ subject: "", body: "" });
+    setMailMsg({ ok: "Sent." });
+    load();
   };
 
   const renderSection = (key) => {
@@ -1124,6 +1159,25 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               })}
             </div>
 
+            {tab === "email" && canEdit && data.contact && data.contact.email && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
+                  To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
+                </div>
+                <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
+                  placeholder="Subject" style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
+                  placeholder="Write to this customer…"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
+                  <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
+                    {busy ? "Sending…" : "Send email"}
+                  </button>
+                  {mailMsg && mailMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{mailMsg.ok}</span>}
+                  {mailMsg && mailMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{mailMsg.err}</span>}
+                </div>
+              </div>
+            )}
             {tab === "note" && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
