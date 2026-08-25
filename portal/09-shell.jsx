@@ -832,16 +832,45 @@ function Dashboard({ session }) {
               </div>
             )}
             {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
-            {!gateLocked && activeTab === "designs" && (
+            {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "these two need to be
+                consolidated ... the view of being in an opportunity and the view of being
+                in a person are different, but they're the same."
+
+                Routed on the EXISTING `sub` segment rather than a new merged tab:
+                /portal/leads/c-<uuid> and /portal/designs/d-<code>. ssParsePath, ssPagePath
+                and the popstate handler already carry `sub`, so this needs no router
+                change, no TAB_META entry, no TAB_AREA/ssFallbackTab/NONADMIN_TABS edit, and
+                no PORTAL_PARTS renumber — all of which are edits to files a second session
+                is committing to today. The prefix (c-/d-) is what tells the two record
+                kinds apart, so one shell serves both from either tab.
+
+                Consolidating the two LISTS into one tab is the remaining half and is
+                deliberately not done here: it touches six hardcoded "designs" literals in
+                this file plus the landing clamp, and it is not what makes the demo. */}
+            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
+              <CrmRecord
+                key={sub}
+                kind={sub.charAt(0) === "c" ? "contact" : "design"}
+                recordId={sub.slice(2)}
+                isAdmin={canAdmin}
+                canEdit={ssCanRead(myAccess, "contacts") === "edit"}
+                onBack={() => navigate(activeTab, null)}
+                onNavigate={(k, id) => navigate(k === "contact" ? "leads" : "designs", (k === "contact" ? "c-" : "d-") + id)}
+                onOpenDesign={(code) => openInDesigner(code)}
+              />
+            ) : null}
+            {!gateLocked && activeTab === "designs" && !(sub && /^[cd]-/.test(sub)) && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
                 isAdmin={canAdmin}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                onOpenRecord={(code) => navigate("designs", "d-" + code)}
                 onOpenDesign={openInDesigner} />
             )}
-            {!gateLocked && activeTab === "leads" && (
+            {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (
