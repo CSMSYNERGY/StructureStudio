@@ -88,7 +88,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, planImageUrl, view3dImageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -648,6 +648,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Price a single color (paint or roof) by its catalog rate + pricing_method — same math as
   // layout add-ons. pct_estimate_total isn't supported on a combined color line (colors realistically
   // use each / pct_building_price / flat), so it falls back to 0.
+  //
+  // ⚠️ EXTRACTED COPY EXISTS: _shared/attributeLines.ts carries this function and the
+  // paint/roof line builders below verbatim — the order screen's attribute change orders
+  // (migration 127) price with it. Any change to this math MUST land in both files.
   const colorAmount = (row: any): number => {
     const rate = Number(row?.rate) || 0;
     if (rate <= 0) return 0;
@@ -1465,6 +1469,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
     // URL, since this one is fetched server-side.
     const planUrl = imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null;
+    // The plain-image twins for the order screen's sidebar cards (migration 127) — same
+    // prefix guard, persisted below. SS branch only, so the CRM path never writes them.
+    const planImg = planImageUrl && String(planImageUrl).startsWith(expectedPdfPrefix) ? String(planImageUrl) : null;
+    const view3dImg = view3dImageUrl && String(view3dImageUrl).startsWith(expectedPdfPrefix) ? String(view3dImageUrl) : null;
     const skippedSheets: string[] = [];
 
     let quotePdfUrl: string | null = null;
@@ -1627,6 +1635,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         estimate_lines: estimateLines,
         ss_quote_number: ssQuoteNumber,
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
+        ...(planImg ? { plan_image_url: planImg } : {}),
+        ...(view3dImg ? { view3d_image_url: view3dImg } : {}),
         // ss_quote_sent_at means the QUOTE email landed; a change-order email is a
         // different document and must not masquerade as the quote having been sent.
         ...(emailed && !changeOrder ? { ss_quote_sent_at: new Date().toISOString() } : {}),

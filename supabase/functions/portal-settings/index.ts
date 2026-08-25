@@ -17,6 +17,15 @@ import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
+import {
+  CLADDING_OPTIONS,
+  claddingLabel,
+  computePaintLine,
+  computeRoofLine,
+  norm as attrNorm,
+  resolveBuildingContext,
+} from "../_shared/attributeLines.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 
 import type { GateTable } from "../_shared/access.ts";
@@ -163,6 +172,15 @@ const GATES: GateTable = {
   // Emails a pending change order to the customer for signature (migration 126). Same
   // altitude as raising one from the order card: Orders edit.
   send_change_order: { area: "orders", level: "edit" },
+  // The invoice-style order document (migration 127): letterhead + color options + the
+  // service-role-only invoice_sends fields. A read.
+  order_paperwork: { area: "orders", level: "view" },
+  // Changing roof/cladding/paint on an order — reprices from the catalog and raises the
+  // change order. Same altitude as raising one by hand.
+  stage_order_attribute_change: { area: "orders", level: "edit" },
+  // Discards a staged-but-unsigned change order, restoring the design as the customer
+  // signed it (snapshot_before). Void with a reason, like the browser void.
+  void_change_order: { area: "orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -312,6 +330,92 @@ const tooMany = (arr: unknown[], what: string): string | null =>
 // beta_email that one would refuse to SEND to, so a divergence would let a tenant save a
 // value that then blocks every submission. Change both or neither.
 const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+// Rebuild the SS quote PDF from a (patched or restored) estimate_lines snapshot and upsert
+// it over the SAME storage path, so every link the customer holds keeps working — then
+// RE-APPEND the acceptance certificate page when the quote was signed (migration 124).
+// Regeneration must never silently drop the countersign: the design_acceptances row and the
+// signatures-bucket PNG remain the legal record, and the visible document re-earns its
+// certificate every time it is rebuilt. Best-effort by contract (quotePdf.ts): a PDF
+// problem logs and returns null; it never blocks the change that triggered it.
+// deno-lint-ignore no-explicit-any
+async function regenerateQuotePdf(
+  admin: any,
+  req: Request,
+  clientId: string,
+  shortCode: string,
+  input: { quoteNumber: string; snap: any; planUrl: unknown },
+): Promise<string | null> {
+  try {
+    const { data: cs } = await admin.from("client_settings")
+      .select("business_name, business_phone, business_website, business_address, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+    const planUrl = input.planUrl && String(input.planUrl).startsWith(expectedPdfPrefix) ? String(input.planUrl) : null;
+    const lines = Array.isArray(input.snap?.lines) ? input.snap.lines : [];
+    let pdfBytes = await buildQuotePdf({
+      business: {
+        name: String(cs?.business_name ?? "").trim() || clientId,
+        phone: cs?.business_phone ?? null,
+        website: cs?.business_website ?? null,
+        address: cs?.business_address ?? null,
+      },
+      estimateNumber: input.quoteNumber,
+      dateIso: new Date().toISOString(),
+      // deno-lint-ignore no-explicit-any
+      lines: lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
+      discount: Number(input.snap?.discount) || 0,
+      quoteTerms: cs?.quote_terms ?? null,
+      planPdfUrl: planUrl,
+    });
+
+    const { data: acc } = await admin.from("design_acceptances")
+      .select("method, signer_name, typed_signature, signature_image_path, accepted_at, ip, consent_text, total")
+      .eq("client_id", clientId).eq("short_code", shortCode).eq("subject", "quote")
+      .maybeSingle();
+    if (acc) {
+      let signaturePng: Uint8Array | null = null;
+      if (acc.signature_image_path) {
+        try {
+          const dl = await admin.storage.from("signatures").download(String(acc.signature_image_path));
+          if (dl.data) signaturePng = new Uint8Array(await dl.data.arrayBuffer());
+        } catch (_e) { /* the typed fields still countersign */ }
+      }
+      try {
+        pdfBytes = await appendAcceptancePage(pdfBytes, {
+          businessName: cs?.business_name ?? null,
+          quoteNumber: input.quoteNumber,
+          total: acc.total == null ? null : Number(acc.total),
+          signerName: String(acc.signer_name ?? ""),
+          method: acc.method === "drawn" ? "drawn" : "typed",
+          signaturePng,
+          typedSignature: acc.typed_signature ?? null,
+          acceptedAtIso: String(acc.accepted_at ?? ""),
+          ip: acc.ip == null ? null : String(acc.ip),
+          consentText: String(acc.consent_text ?? ""),
+        });
+      } catch (e) {
+        console.warn("acceptance page re-append failed:", (e as Error).message);
+      }
+    }
+
+    const pdfPath = `${clientId}/${shortCode}-quote.pdf`;
+    const up = await admin.storage.from("floor-plans")
+      .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+    if (up.error) { console.warn("quote PDF regenerate upload failed:", up.error.message); return null; }
+    const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
+    const url = pub?.publicUrl || null;
+    if (url) {
+      await admin.from("designs").update({ ss_quote_pdf_url: url })
+        .eq("client_id", clientId).eq("short_code", shortCode).is("ss_quote_pdf_url", null);
+    }
+    return url;
+  } catch (e) {
+    logEdgeError({ fn: "portal-settings", req, clientId, code: 500, message: `quote PDF regenerate failed: ${(e as Error).message}`, context: { shortCode } }).catch(() => {});
+    return null;
+  }
+}
 
 // Carolyn 2026-08-07: a sold display keeps its SOLD badge on the storefront for 30 days and
 // then silently falls off the list. Nothing public exists to hang that on yet, so this only
@@ -3578,6 +3682,346 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       subject: content.subject, html: content.html, text: content.text,
     });
     return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+  }
+
+  // ── order_paperwork: everything the invoice-style order document needs (migration 127) ──
+  // One call: the tenant's letterhead identity, the active colors palette (labels + flags +
+  // hex for the dropdowns — deliberately NO rates; prices are only ever computed server-side
+  // by the staging action), and the invoice_sends fields the sidebar shows (the table is
+  // service-role only, so this is its portal projection).
+  if (action === "order_paperwork") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your settings", csErr);
+    if (!cs || cs.invoice_in_ghl !== false) {
+      return json({ error: "This account quotes through the CRM — the order document is for StructureStudio-issued paperwork." }, 400);
+    }
+    const [colRes, invRes] = await Promise.all([
+      admin.from("colors")
+        .select("id, label, hex, siding, trim, shingle, metal, allow_custom, is_default, sort_order")
+        .eq("client_id", clientId).eq("active", true).order("sort_order", { ascending: true }),
+      admin.from("invoice_sends")
+        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+    ]);
+    if (colRes.error) return dbFail(req, clientId, "read your colors", colRes.error);
+    return json({
+      ok: true,
+      business: {
+        name: cs.business_name || null,
+        phone: cs.business_phone || null,
+        website: cs.business_website || null,
+        logoUrl: cs.business_logo_url || null,
+        quoteTerms: cs.quote_terms || null,
+      },
+      colors: colRes.data || [],
+      invoice: invRes.error ? null : (invRes.data || null),
+    });
+  }
+
+  // ── stage_order_attribute_change: the order document's live dropdowns (migration 127) ──
+  //
+  // A rep changed roof type/color, cladding, or paint on the order screen. The delta is
+  // priced with the SAME catalog math the quote used (_shared/attributeLines.ts — the
+  // extraction of submit-estimate's colorAmount + line builders), and ONLY the paint/roof
+  // lines of the stored estimate_lines snapshot are touched — never a full re-price, so a
+  // signed order can't absorb unrelated catalog drift, and never a GHL side effect.
+  //
+  // Applies at STAGING (the same semantics as the designer-resubmit CO): the design row
+  // updates now, the customer acknowledges after. snapshot_before (127) preserves the
+  // as-signed state so void_change_order can restore it, and re-stages diff against it so
+  // the customer always signs the CUMULATIVE change since their signature.
+  if (action === "stage_order_attribute_change") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    const attrs = (payload?.attrs && typeof payload.attrs === "object") ? payload.attrs : {};
+    const dryRun = payload?.dryRun === true;
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(attrs, k);
+    if (!["roofType", "roofColor", "cladding", "paintStatus", "paintBody", "paintTrim"].some(has)) {
+      return json({ error: "Nothing to change." }, 400);
+    }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, selections, paint_colors, contact, custom_options, ro_dimensions, items, bldg_w, bldg_h, inventory_unit_id")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
+    const dStatus = String(d.status || "");
+    if (dStatus === "invoiced" || dStatus === "delivered") {
+      return json({ error: "This order is already invoiced — its paperwork is frozen. Raise a manual change order instead." }, 400);
+    }
+    // deno-lint-ignore no-explicit-any
+    const snap: any = d.estimate_lines;
+    if (!snap || !Array.isArray(snap.lines)) {
+      return json({ error: "This design has no priced snapshot — resubmit it from the designer first." }, 400);
+    }
+
+    const sel = (d.selections || {}) as Record<string, unknown>;
+    const pc = (d.paint_colors || {}) as Record<string, unknown>;
+
+    // Current values (stored shapes: selections.paint 'Painted'/'No Paint', paint_colors
+    // {body,trim}, selections.roofType/roofColor, selections.cladding = the id).
+    const cur = {
+      roofType: String(sel.roofType ?? "").trim(),
+      roofColor: String(sel.roofColor ?? "").trim(),
+      cladding: String(sel.cladding ?? ""),
+      paintStatus: (sel.paint && String(sel.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint" as "Paint" | "Unpaint",
+      paintBody: String(pc.body ?? "").trim(),
+      paintTrim: String(pc.trim ?? "").trim(),
+    };
+    const next = {
+      roofType: has("roofType") ? String(attrs.roofType ?? "").trim() : cur.roofType,
+      roofColor: has("roofColor") ? String(attrs.roofColor ?? "").trim() : cur.roofColor,
+      cladding: has("cladding") ? String(attrs.cladding ?? "") : cur.cladding,
+      paintStatus: has("paintStatus")
+        ? (String(attrs.paintStatus) === "Paint" ? "Paint" : "Unpaint") as "Paint" | "Unpaint"
+        : cur.paintStatus,
+      paintBody: has("paintBody") ? String(attrs.paintBody ?? "").trim() : cur.paintBody,
+      paintTrim: has("paintTrim") ? String(attrs.paintTrim ?? "").trim() : cur.paintTrim,
+    };
+
+    // ── Validate against the catalog, loudly. ──
+    if (next.cladding && !CLADDING_OPTIONS.some((c) => c.id === next.cladding)) {
+      return json({ error: "That cladding isn't offered." }, 400);
+    }
+    const { data: colRows, error: colErr } = await admin.from("colors")
+      .select("id, label, rate, pricing_method, allow_custom, siding, trim, shingle, metal")
+      .eq("client_id", clientId).eq("active", true);
+    if (colErr) return dbFail(req, clientId, "read your colors", colErr);
+    const palette = colRows || [];
+    const labelOk = (v: string, flag: "siding" | "trim" | "shingle" | "metal") =>
+      !v || attrNorm(v) === attrNorm("TBD") || attrNorm(v) === attrNorm("No Paint") ||
+      palette.some((c) => (c as Record<string, unknown>)[flag] === true && attrNorm(c.label) === attrNorm(v)) ||
+      palette.some((c) => c.allow_custom); // free text prices at the allow-custom rate, like the designer
+    if (next.roofType && !["shingle", "metal"].includes(attrNorm(next.roofType))) {
+      return json({ error: "Roof type must be Shingle or Metal." }, 400);
+    }
+    if (next.roofType) {
+      const flag = attrNorm(next.roofType) === "metal" ? "metal" : "shingle";
+      if (!palette.some((c) => (c as Record<string, unknown>)[flag] === true)) {
+        return json({ error: `No ${next.roofType} roof colors are set up in your catalog.` }, 400);
+      }
+      if (!labelOk(next.roofColor, flag as "shingle" | "metal")) return json({ error: "That roof color isn't in your catalog." }, 400);
+    }
+    if (next.paintStatus === "Paint") {
+      if (!labelOk(next.paintBody, "siding")) return json({ error: "That body color isn't in your catalog." }, 400);
+      if (!labelOk(next.paintTrim, "trim")) return json({ error: "That trim color isn't in your catalog." }, 400);
+    }
+
+    // ── Re-price ONLY the paint/roof lines, with the quote's exact math. ──
+    const ctx = await resolveBuildingContext(admin, clientId, sel.style, sel.size);
+    if (!ctx) {
+      // Never price an attribute change against a $0 building: a renamed style/size must
+      // fail loudly (submit-estimate:425 precedent), not zero a signed order's delta.
+      return json({ error: `Couldn't match "${sel.style} ${sel.size}" in your catalog — was the style or size renamed? Fix the catalog (or resubmit from the designer), then try again.` }, 400);
+    }
+    const paint = computePaintLine(palette, ctx, next.paintStatus, next.paintBody || "TBD", next.paintTrim || "TBD");
+    const roof = computeRoofLine(palette, ctx, next.roofType, next.roofColor);
+
+    // deno-lint-ignore no-explicit-any
+    const newSnap: any = JSON.parse(JSON.stringify(snap));
+    let sawRoof = false;
+    for (const li of newSnap.lines) {
+      if (li && li.kind === "paint") { li.amount = paint.amount; li.desc = paint.desc; }
+      if (li && li.kind === "roof") { li.amount = roof.amount; li.desc = roof.desc; sawRoof = true; }
+    }
+    // The tenant offers roofs but the signed snapshot predates a roof pick: append the
+    // line the way submit-estimate would have (only when a type is actually chosen now).
+    if (!sawRoof && next.roofType) {
+      newSnap.lines.push({ kind: "roof", itemKey: "", name: "Roof", desc: roof.desc, qty: 1, amount: roof.amount, nonTaxable: false });
+    }
+
+    // Baseline for the CUMULATIVE description: what the customer signed (snapshot_before
+    // when a staged CO already exists), else the current snapshot.
+    const { data: existingCo } = await admin.from("change_orders")
+      .select("id, co_no, version_before, snapshot_before")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .eq("status", "pending_ack").eq("source", "design_edit")
+      .limit(1).maybeSingle();
+    // deno-lint-ignore no-explicit-any
+    const baseSnapshot: any = existingCo?.snapshot_before ?? null;
+    const baseLines = baseSnapshot?.estimateLines ?? snap;
+    const baseSel = (baseSnapshot?.selections ?? sel) as Record<string, unknown>;
+    const basePc = (baseSnapshot?.paintColors ?? pc) as Record<string, unknown>;
+
+    const totalBefore = totalFromSnapshot(baseLines);
+    const totalAfter = totalFromSnapshot(newSnap);
+
+    // The description the customer signs: explicit attribute sentences (cladding is
+    // invisible to the line diff, and "options updated" is too vague to sign) + the money.
+    const sentences: string[] = [];
+    const say = (label: string, from: string, to: string) => {
+      if (attrNorm(from) !== attrNorm(to)) sentences.push(`${label}: ${from || "—"} → ${to || "—"}`);
+    };
+    const basePaintStatus = (baseSel.paint && String(baseSel.paint).toLowerCase() === "painted") ? "Painted" : "Unpainted";
+    const nextPaintStatus = next.paintStatus === "Paint" ? "Painted" : "Unpainted";
+    say("Roof type", String(baseSel.roofType ?? ""), next.roofType);
+    say("Roof color", String(baseSel.roofColor ?? ""), next.roofColor);
+    say("Cladding", claddingLabel(baseSel.cladding), claddingLabel(next.cladding));
+    say("Paint", basePaintStatus, nextPaintStatus);
+    if (next.paintStatus === "Paint") {
+      say("Paint body", String(basePc.body ?? ""), next.paintBody);
+      say("Paint trim", String(basePc.trim ?? ""), next.paintTrim);
+    }
+    if (sentences.length === 0) {
+      return json({ error: "That matches what the customer already signed — nothing to change." }, 400);
+    }
+    const fmtM = (n: number) => {
+      const v = Math.round(n * 100) / 100;
+      const [int, frac] = Math.abs(v).toFixed(2).split(".");
+      return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+    };
+    if (totalBefore != null && totalAfter != null) {
+      sentences.push(`Total: ${fmtM(totalBefore)} → ${fmtM(totalAfter)}`);
+    }
+    const description = sentences.join("\n");
+
+    if (dryRun) {
+      return json({ ok: true, preview: true, totalBefore, totalAfter, description });
+    }
+
+    // ── Persist: the design row, a version row, the CO, the regenerated PDF. ──
+    const nowIso = new Date().toISOString();
+    const newSelections = {
+      ...sel,
+      roofType: next.roofType,
+      roofColor: next.roofColor,
+      cladding: next.cladding,
+      claddingId: next.cladding,
+      paint: next.paintStatus === "Paint" ? "Painted" : "No Paint",
+    };
+    const newPaintColors = next.paintStatus === "Paint" ? { body: next.paintBody, trim: next.paintTrim } : { body: "", trim: "" };
+    const { error: updErr } = await admin.from("designs")
+      .update({ selections: newSelections, paint_colors: newPaintColors, estimate_lines: newSnap, updated_at: nowIso })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (updErr) return dbFail(req, clientId, "apply the change", updErr);
+
+    // A real design_versions row, so the CO's version_after points at something (031 shape).
+    let versionAfter: number | null = null;
+    try {
+      const { data: maxV } = await admin.from("design_versions").select("version")
+        .eq("short_code", shortCode).order("version", { ascending: false }).limit(1).maybeSingle();
+      versionAfter = (Number(maxV?.version) || 0) + 1;
+      await admin.from("design_versions").insert({
+        short_code: shortCode, client_id: clientId, version: versionAfter,
+        contact: d.contact, selections: newSelections, paint_colors: newPaintColors,
+        items: d.items, custom_options: d.custom_options, ro_dimensions: d.ro_dimensions,
+        bldg_w: d.bldg_w, bldg_h: d.bldg_h, image_url: d.image_url,
+        inventory_unit_id: d.inventory_unit_id ?? null,
+      });
+    } catch (_e) { versionAfter = null; /* version history is bookkeeping, not the change */ }
+
+    // The change order — only once the customer has signed something to change.
+    let changeOrderId: string | null = null;
+    let coNo: number | null = null;
+    if (d.accepted_at) {
+      const coFields = {
+        description,
+        total_before_cents: totalBefore == null ? null : Math.round(totalBefore * 100),
+        total_after_cents: totalAfter == null ? null : Math.round(totalAfter * 100),
+        version_after: versionAfter,
+      };
+      if (existingCo) {
+        const { error: coErr } = await admin.from("change_orders")
+          .update({
+            ...coFields,
+            // First staging over a designer-raised CO adopts it: stamp the baseline so a
+            // discard can restore, keeping the CO's original version_before.
+            ...(existingCo.snapshot_before ? {} : { snapshot_before: { estimateLines: snap, selections: sel, paintColors: pc } }),
+          })
+          .eq("id", existingCo.id).eq("status", "pending_ack");
+        if (coErr) return dbFail(req, clientId, "update the change order", coErr);
+        changeOrderId = existingCo.id; coNo = existingCo.co_no;
+      } else {
+        const { data: acc } = await admin.from("design_acceptances").select("design_version")
+          .eq("client_id", clientId).eq("short_code", shortCode)
+          .order("accepted_at", { ascending: false }).limit(1).maybeSingle();
+        const { data: coRow, error: coErr } = await admin.from("change_orders")
+          .insert({
+            client_id: clientId, short_code: shortCode, source: "design_edit",
+            ...coFields,
+            version_before: acc?.design_version ?? null,
+            snapshot_before: { estimateLines: snap, selections: sel, paintColors: pc },
+          })
+          .select("id, co_no").maybeSingle();
+        if (coErr) return dbFail(req, clientId, "raise the change order", coErr);
+        changeOrderId = coRow?.id ?? null; coNo = coRow?.co_no ?? null;
+      }
+    }
+
+    // Regenerate the quote PDF from the patched snapshot, keeping the customer's
+    // acceptance certificate page (regeneration must never silently drop the countersign).
+    const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, shortCode, {
+      quoteNumber: String(d.ss_quote_number), snap: newSnap, planUrl: d.image_url,
+    });
+
+    return json({ ok: true, changeOrderId, coNo, totalBefore, totalAfter, description, quotePdfUrl, pendingAck: !!changeOrderId });
+  }
+
+  // ── void_change_order: discard a staged-but-unsigned change (migration 127) ──
+  // Pending only. When the CO carries snapshot_before (staged from the order document, or
+  // adopted by it), the design is RESTORED as the customer signed it and the PDF is
+  // regenerated; a designer-resubmit CO without a snapshot voids only (today's behavior).
+  if (action === "void_change_order") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    const reason = String(payload?.reason ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    if (!reason) return json({ error: "Voiding a change order needs a reason." }, 400);
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, snapshot_before")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change order", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status !== "pending_ack") {
+      return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged — it can't be discarded." : "This change order is already voided." }, 400);
+    }
+
+    let reverted = false;
+    // deno-lint-ignore no-explicit-any
+    const before: any = co.snapshot_before;
+    if (before && before.estimateLines) {
+      const { data: d } = await admin.from("designs")
+        .select("ss_quote_number, image_url, contact, items, custom_options, ro_dimensions, bldg_w, bldg_h, inventory_unit_id")
+        .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+      const { error: restErr } = await admin.from("designs")
+        .update({
+          estimate_lines: before.estimateLines,
+          selections: before.selections ?? undefined,
+          paint_colors: before.paintColors ?? undefined,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("client_id", clientId).eq("short_code", co.short_code);
+      if (restErr) return dbFail(req, clientId, "restore the signed design", restErr);
+      reverted = true;
+      try {
+        const { data: maxV } = await admin.from("design_versions").select("version")
+          .eq("short_code", co.short_code).order("version", { ascending: false }).limit(1).maybeSingle();
+        await admin.from("design_versions").insert({
+          short_code: co.short_code, client_id: clientId, version: (Number(maxV?.version) || 0) + 1,
+          contact: d?.contact, selections: before.selections, paint_colors: before.paintColors,
+          items: d?.items, custom_options: d?.custom_options, ro_dimensions: d?.ro_dimensions,
+          bldg_w: d?.bldg_w, bldg_h: d?.bldg_h, image_url: d?.image_url,
+          inventory_unit_id: d?.inventory_unit_id ?? null,
+        });
+      } catch (_e) { /* bookkeeping */ }
+      if (d?.ss_quote_number) {
+        await regenerateQuotePdf(admin, req, clientId, co.short_code, {
+          quoteNumber: String(d.ss_quote_number), snap: before.estimateLines, planUrl: d.image_url,
+        });
+      }
+    }
+
+    const { error: voidErr } = await admin.from("change_orders")
+      .update({ status: "void", void_reason: reason })
+      .eq("id", co.id).eq("status", "pending_ack");
+    if (voidErr) return dbFail(req, clientId, "void the change order", voidErr);
+    return json({ ok: true, reverted, coNo: co.co_no });
   }
 
   if (action === "send_invoice") {

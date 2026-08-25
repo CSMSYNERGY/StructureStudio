@@ -1320,6 +1320,380 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
   );
 }
 
+/* ─── The invoice-style order document (migration 127) ─────────────────────────────────
+   SS-mode orders render the ORDER itself "between an invoice and a PDF" (Carolyn
+   2026-08-24): letterhead, the priced line items from designs.estimate_lines — the same
+   snapshot every PDF renders from, so screen and paper can't disagree — with roof,
+   cladding and paint as LIVE dropdowns. Changing one stages a change (dryRun price
+   preview from the server's catalog math), raises the change order the customer must
+   acknowledge, and can be discarded (void_change_order restores the as-signed design
+   from snapshot_before). Totals show the current numbers plus the amendment trail. */
+
+// De-render the snapshot's GHL-flavored HTML for display — MUST match
+// _shared/estimateLines.ts `deHtml` (the server is the authority; this is presentation).
+const ssDeHtml = (s) => String(s || "")
+  .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
+  .replace(/<br\s*\/?>/gi, "\n")
+  .replace(/<[^>]*>/g, "")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+  .trim();
+const ssRound2 = (n) => Math.round(n * 100) / 100;
+// Totals over the snapshot — MUST match _shared/estimateLines.ts `totalFromSnapshot`.
+const ssSnapTotals = (snap) => {
+  const lines = (snap && Array.isArray(snap.lines)) ? snap.lines : [];
+  let subtotal = 0;
+  for (const li of lines) subtotal += ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
+  subtotal = ssRound2(subtotal);
+  const discount = Number(snap && snap.discount) || 0;
+  const total = Math.max(0, discount > 0 ? ssRound2(subtotal - discount) : subtotal);
+  return { subtotal, discount, total };
+};
+const ssUsd = (n) => {
+  if (n == null || !isFinite(Number(n))) return "—";
+  const v = ssRound2(Number(n));
+  const [int, frac] = Math.abs(v).toFixed(2).split(".");
+  return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+};
+// The offered cladding set — mirrors the designer's D3_CLADDING_CHOICES (batten is a
+// legacy render-only value; it shows as its label if a row carries it, but isn't offered).
+const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
+const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
+
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) {
+  const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
+  const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
+  const [previewErr, setPreviewErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const debounceRef = useRef(null);
+
+  if (!doc || !doc.design) {
+    return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading the order…</p></div>;
+  }
+  const { design, acceptances, cos, paperwork } = doc;
+  const biz = (paperwork && paperwork.business) || {};
+  const colors = (paperwork && paperwork.colors) || [];
+  const invoice = (paperwork && paperwork.invoice) || null;
+  const snap = design.estimate_lines || { lines: [], discount: 0 };
+  const lines = Array.isArray(snap.lines) ? snap.lines : [];
+  const sel = design.selections || {};
+  const pc = design.paint_colors || {};
+  const locked = ["invoiced", "delivered"].includes(String(design.status || ""));
+  const acceptance = (acceptances || []).find((a) => a.subject === "quote") || null;
+  const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
+    .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
+  const pendingCo = (cos || []).find((c) => c.status === "pending_ack" && c.source === "design_edit") || null;
+
+  const cur = {
+    roofType: String(sel.roofType || "").trim(),
+    roofColor: String(sel.roofColor || "").trim(),
+    cladding: String(sel.cladding || ""),
+    paintStatus: (sel.paint && String(sel.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint",
+    paintBody: String(pc.body || "").trim(),
+    paintTrim: String(pc.trim || "").trim(),
+  };
+  const eff = draft || cur;
+
+  // Palette slices for the dropdowns. A stored value missing from today's palette still
+  // renders (as "(current)") — a renamed color must not silently rewrite a signed order.
+  const colorOpts = (flag, current) => {
+    const opts = colors.filter((c) => c[flag] === true && !c.allow_custom).map((c) => c.label);
+    if (current && !opts.some((l) => l.toLowerCase() === current.toLowerCase())) opts.unshift(current);
+    return opts;
+  };
+  const roofTypes = [["Shingle", colors.some((c) => c.shingle === true)], ["Metal", colors.some((c) => c.metal === true)]]
+    .filter(([, ok]) => ok).map(([t]) => t);
+
+  const queuePreview = (next) => {
+    setDraft(next); setPreview(null); setPreviewErr(null);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "stage_order_attribute_change", shortCode: o.short_code, attrs: next, dryRun: true },
+      });
+      if (error || (data && data.error)) { setPreviewErr((data && data.error) || error.message); return; }
+      setPreview(data);
+    }, 450);
+  };
+  const change = (k, v) => {
+    const next = { ...eff, [k]: v };
+    if (k === "roofType" && v !== eff.roofType) {
+      // The designer's rule: a type change resets the color to that type's first offering.
+      const flag = String(v).toLowerCase() === "metal" ? "metal" : "shingle";
+      const first = colors.find((c) => c[flag] === true && !c.allow_custom);
+      next.roofColor = first ? first.label : "";
+    }
+    queuePreview(next);
+  };
+  const discardDraft = () => { setDraft(null); setPreview(null); setPreviewErr(null); if (debounceRef.current) clearTimeout(debounceRef.current); };
+
+  const stage = async () => {
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "stage_order_attribute_change", shortCode: o.short_code, attrs: eff },
+    });
+    if (error || (data && data.error)) { setBusy(false); onMsg({ err: (data && data.error) || error.message }); return; }
+    let note;
+    if (data.changeOrderId) {
+      const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: data.changeOrderId } });
+      note = sent && sent.sent
+        ? { ok: `Change order CO-${data.coNo} staged and emailed to the customer for signature.` }
+        : { ok: `Change order CO-${data.coNo} staged. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — they can sign from their quote page link.` };
+    } else {
+      note = { ok: "Quote updated — the customer hasn't signed yet, so no change order was needed." };
+    }
+    setBusy(false); discardDraft(); onMsg(note); onChanged();
+  };
+
+  const discardStaged = async () => {
+    if (!pendingCo) return;
+    if (!window.confirm(`Discard the staged change (CO-${pendingCo.co_no}) and restore the order as the customer signed it?`)) return;
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "void_change_order", changeOrderId: pendingCo.id, reason: "Discarded from the order screen — restored to the signed configuration" },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+    onMsg({ ok: `CO-${pendingCo.co_no} discarded${data.reverted ? " — the order is back to what the customer signed" : ""}.` });
+    onChanged();
+  };
+
+  const selStyle = { fontFamily: "inherit", fontSize: 12, padding: "5px 8px", border: "1px solid #CBD5E1", borderRadius: 7, background: "#FFF", color: "#1E293B", maxWidth: 170 };
+  const th = { fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", textAlign: "left", padding: "10px 0 6px" };
+  const td = { fontSize: 13, color: "#1E293B", padding: "9px 0", borderTop: "1px solid #F1F5F9", verticalAlign: "top" };
+  const optionRows = (label, control) => (
+    <tr key={label}>
+      <td style={td}>
+        <div style={{ fontWeight: 700 }}>{label}</div>
+        <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>{control}</div>
+      </td>
+      <td style={{ ...td, textAlign: "center", color: "#94A3B8" }}>—</td>
+      <td style={{ ...td, textAlign: "right" }}></td>
+    </tr>
+  );
+
+  const totals = ssSnapTotals(snap);
+  const ssInvoicePdf = invoice && invoice.issued_by === "structurestudio" && invoice.invoice_pdf_url ? invoice.invoice_pdf_url : null;
+  const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(cur);
+  const anyBusy = busy || busyExt;
+
+  // The amendment trail: signed total + acknowledged CO snapshots — never re-summed line
+  // items, so double-counting is structurally impossible.
+  const trail = [];
+  if (acceptance && acceptance.total != null) {
+    let running = Number(acceptance.total);
+    trail.push({ label: `Signed ${fmtDate(acceptance.accepted_at)}`, amountText: ssUsd(running), tone: "base" });
+    for (const c of ackedCos) {
+      if (c.total_after_cents == null) {
+        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: "no price change", tone: "base" });
+      } else {
+        const after = c.total_after_cents / 100;
+        const delta = ssRound2(after - running);
+        running = after;
+        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: `${delta >= 0 ? "+" : "-"}${ssUsd(Math.abs(delta))} → ${ssUsd(after)}`, tone: "base" });
+      }
+    }
+    trail.push({ label: "Current total", amountText: o.total_cents == null ? "—" : money(o.total_cents), tone: "final" });
+    if (pendingCo && pendingCo.total_after_cents != null) {
+      trail.push({ label: `Pending CO-${pendingCo.co_no} (awaiting sign-off)`, amountText: `→ ${ssUsd(pendingCo.total_after_cents / 100)}`, tone: "pending" });
+    }
+  }
+
+  return (
+    <div style={{ ...S.card, padding: "20px 24px" }}>
+      {/* Letterhead */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, borderBottom: "2px solid #CBD5E1", paddingBottom: 13 }}>
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B" }}>{biz.name || "—"}</div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>
+            {[biz.phone, biz.website].filter(Boolean).join(" · ")}
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 14, fontWeight: 800, letterSpacing: 0.5, color: "#1E293B" }}>ORDER · {design.ss_quote_number}</div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>
+            Ordered {fmtDate(o.ordered_at)}
+            {invoice && invoice.invoice_number ? ` · Invoice ${invoice.invoice_number}` : " · not yet invoiced"}
+          </div>
+          <span style={{ display: "inline-block", marginTop: 6, background: st.bg, color: st.fg, borderRadius: 20, padding: "3px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+        </div>
+      </div>
+
+      {pendingCo && (
+        <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#B45309", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <b>CO-{pendingCo.co_no} is awaiting the customer's sign-off</b> — the values below include it; invoicing is blocked until they sign or you record their verbal OK.
+          <button type="button" onClick={discardStaged} disabled={anyBusy}
+            style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, cursor: "pointer", color: "#B45309", fontWeight: 700, fontSize: 12, textDecoration: "underline", fontFamily: "inherit" }}>
+            Discard staged change
+          </button>
+        </div>
+      )}
+
+      {/* Line items */}
+      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
+        <thead><tr><th style={th}>Item</th><th style={{ ...th, textAlign: "center", width: 46 }}>Qty</th><th style={{ ...th, textAlign: "right", width: 92 }}>Amount</th></tr></thead>
+        <tbody>
+          {lines.map((li, i) => {
+            const kind = String(li.kind || "");
+            const lineTotal = ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
+            let descCell = null;
+            if (!locked && kind === "paint") {
+              descCell = (
+                <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select style={selStyle} value={eff.paintStatus} onChange={(e) => change("paintStatus", e.target.value)}>
+                    <option value="Paint">Painted</option><option value="Unpaint">Unpainted</option>
+                  </select>
+                  {eff.paintStatus === "Paint" && (
+                    <>
+                      <span style={{ fontSize: 11.5, color: "#64748B" }}>Body</span>
+                      <select style={selStyle} value={eff.paintBody} onChange={(e) => change("paintBody", e.target.value)}>
+                        {colorOpts("siding", eff.paintBody).map((l) => <option key={l} value={l}>{l}</option>)}
+                      </select>
+                      <span style={{ fontSize: 11.5, color: "#64748B" }}>Trim</span>
+                      <select style={selStyle} value={eff.paintTrim} onChange={(e) => change("paintTrim", e.target.value)}>
+                        {colorOpts("trim", eff.paintTrim).map((l) => <option key={l} value={l}>{l}</option>)}
+                      </select>
+                    </>
+                  )}
+                </div>
+              );
+            } else if (!locked && kind === "roof") {
+              descCell = (
+                <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select style={selStyle} value={eff.roofType} onChange={(e) => change("roofType", e.target.value)}>
+                    {!eff.roofType && <option value="">Select…</option>}
+                    {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  {eff.roofType && (
+                    <select style={selStyle} value={eff.roofColor} onChange={(e) => change("roofColor", e.target.value)}>
+                      {colorOpts(String(eff.roofType).toLowerCase() === "metal" ? "metal" : "shingle", eff.roofColor).map((l) => <option key={l} value={l}>{l}</option>)}
+                    </select>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <React.Fragment key={i}>
+                <tr>
+                  <td style={td}>
+                    <div style={{ fontWeight: 700 }}>{li.name || "—"}</div>
+                    {descCell || (li.desc ? <div style={{ fontSize: 12, color: "#64748B", whiteSpace: "pre-wrap", marginTop: 2 }}>{ssDeHtml(li.desc)}</div> : null)}
+                  </td>
+                  <td style={{ ...td, textAlign: "center" }}>{Number(li.qty) === 1 && (kind === "paint" || kind === "roof") ? "—" : (li.qty ?? "—")}</td>
+                  <td style={{ ...td, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{ssUsd(lineTotal)}</td>
+                </tr>
+                {kind === "building" && optionRows("Cladding",
+                  locked
+                    ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding)}</span>
+                    : (
+                      <select style={selStyle} value={eff.cladding} onChange={(e) => change("cladding", e.target.value)}>
+                        {SS_CLADDING.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                      </select>
+                    ))}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {/* Staged-change banner (dryRun preview) */}
+      {dirty && (
+        <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 14px", marginTop: 10 }}>
+          {previewErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#B91C1C" }}>{previewErr}</div>}
+          {!previewErr && !preview && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#B45309" }}>Pricing the change…</div>}
+          {!previewErr && preview && (
+            <>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: "#B45309" }}>
+                This changes the order {ssUsd(preview.totalBefore)} → {ssUsd(preview.totalAfter)}
+                {preview.totalBefore != null && preview.totalAfter != null && (
+                  <> ({preview.totalAfter - preview.totalBefore >= 0 ? "+" : "-"}{ssUsd(Math.abs(ssRound2(preview.totalAfter - preview.totalBefore)))})</>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: "#92400E", whiteSpace: "pre-wrap", marginTop: 4 }}>{preview.description}</div>
+              <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>
+                {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the quote."}
+              </div>
+            </>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" onClick={stage} disabled={anyBusy || !preview}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5, opacity: anyBusy || !preview ? 0.6 : 1 }}>
+              {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the quote")}
+            </button>
+            <button type="button" onClick={discardDraft} disabled={anyBusy}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", fontSize: 12.5 }}>Discard</button>
+          </div>
+        </div>
+      )}
+
+      {/* Totals + the amendment trail */}
+      <div style={{ borderTop: "2px solid #CBD5E1", marginTop: 10, paddingTop: 9 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
+          <span>Subtotal</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.subtotal)}</span>
+        </div>
+        {totals.discount > 0 && (
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
+            <span>Discount</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>-{ssUsd(totals.discount)}</span>
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 16, fontWeight: 800, padding: "5px 0 2px", color: "#1E293B" }}>
+          <span>Total</span><span style={{ minWidth: 92, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.total)}</span>
+        </div>
+        {trail.length > 0 && (
+          <div style={{ background: "#F8FAFC", border: "1px solid #F1F5F9", borderRadius: 8, padding: "8px 12px", marginTop: 8 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 3 }}>Amendment trail</div>
+            {trail.map((t, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "2px 0",
+                color: t.tone === "pending" ? "#B45309" : t.tone === "final" ? "#1E293B" : "#64748B",
+                fontWeight: t.tone === "final" ? 800 : 500,
+                borderTop: t.tone === "final" ? "1px solid #E2E8F0" : "none",
+                marginTop: t.tone === "final" ? 3 : 0, paddingTop: t.tone === "final" ? 4 : 2 }}>
+                <span>{t.label}</span><span style={{ fontVariantNumeric: "tabular-nums" }}>{t.amountText}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Action row */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", borderTop: "1px solid #F1F5F9", marginTop: 12, paddingTop: 12 }}>
+        {ssInvoicePdf
+          ? <a href={ssInvoicePdf} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Print invoice</a>
+          : (design.ss_quote_pdf_url && <a href={design.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Print quote</a>)}
+        {ssInvoicePdf && design.ss_quote_pdf_url && (
+          <a href={design.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
+        )}
+        {design.image_url && <a href={design.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Floor plan</a>}
+        {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+        <button type="button"
+          onClick={(e) => {
+            const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+            const btn = e.currentTarget;
+            const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+            else window.prompt("Copy the customer link:", link);
+          }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Copy customer link</button>
+        <button type="button" disabled={anyBusy}
+          onClick={async () => {
+            setBusy(true); onMsg(null);
+            const { data: res, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: o.short_code } });
+            setBusy(false);
+            if (err || (res && res.error)) { onMsg({ err: (res && res.error) || err.message }); return; }
+            onMsg(res && res.sent
+              ? { ok: `Quote ${design.ss_quote_number} emailed to the customer.` }
+              : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+          }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend quote email</button>
+      </div>
+      {locked && (
+        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
+          This order is invoiced — its options are frozen. Changes go through a manual change order below.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
@@ -1332,6 +1706,44 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [totalDraft, setTotalDraft] = useState(o.total_cents == null ? "" : (o.total_cents / 100).toFixed(2));
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
+
+  // SS-mode orders (the design carries an SS quote) render the invoice-style order
+  // document (migration 127), which needs the FULL design row (the list query stays
+  // narrow), the signatures, the change orders, and the order_paperwork projection
+  // (letterhead + colors + the service-role-only invoice_sends fields).
+  const ssMode = !!(d && d.ss_quote_number);
+  const [ssDoc, setSsDoc] = useState(null);
+  const [ssReload, setSsReload] = useState(0);
+  useEffect(() => {
+    if (!ssMode || !o.short_code) return;
+    let alive = true;
+    (async () => {
+      const [dRes, aRes, cRes, pRes] = await Promise.all([
+        sb.from("designs")
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact")
+          .eq("client_id", clientId).eq("short_code", o.short_code).maybeSingle(),
+        sb.from("design_acceptances")
+          .select("subject, signer_name, accepted_at, total")
+          .eq("client_id", clientId).eq("short_code", o.short_code),
+        sb.from("change_orders")
+          .select("id, co_no, source, status, total_after_cents, acknowledged_at")
+          .eq("client_id", clientId).eq("short_code", o.short_code),
+        sb.functions.invoke("portal-settings", { body: { action: "order_paperwork", shortCode: o.short_code } }),
+      ]);
+      if (!alive) return;
+      setSsDoc({
+        design: dRes.data || null,
+        acceptances: aRes.data || [],
+        cos: cRes.data || [],
+        paperwork: (pRes.data && !pRes.data.error) ? pRes.data : null,
+      });
+    })();
+    return () => { alive = false; };
+  }, [ssMode, o.short_code, clientId, ssReload]);
+  const changedAll = () => { onChanged(); setSsReload((k) => k + 1); };
+  const ssDesign = ssDoc && ssDoc.design;
+  const ssAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "quote");
+  const ssInvoice = ssDoc && ssDoc.paperwork && ssDoc.paperwork.invoice;
 
   const saveTotal = async () => {
     const cents = centsFrom(totalDraft);
@@ -1398,58 +1810,36 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) minmax(0,1fr)", gap: 14, alignItems: "start" }} className="ss-order-grid">
         <div>
-          <div style={S.card}>
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
-              <div>
-                <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
-                <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
-                  Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
-                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : (d && d.ss_quote_number ? ` · ${d.ss_quote_number}` : "")}
+          {ssMode ? (
+            /* The invoice-style order document (migration 127) — letterhead, the priced
+               lines with live roof/cladding/paint dropdowns, the amendment trail, and the
+               action row. It replaces the old thin header card for SS orders. */
+            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
+              busyExt={busy} onMsg={setMsg} onChanged={changedAll} />
+          ) : (
+            <div style={S.card}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+                <div>
+                  <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
+                    Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
+                    {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
+                  </div>
                 </div>
+                <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
               </div>
-              <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
+                {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
-              {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
-              {/* SS-issued quote (migration 122): the printable document + the two
-                  hand-delivery tools, same trio as the Designs row and the designer
-                  success screen (Carolyn 2026-08-23). */}
-              {d && d.ss_quote_number && d.ss_quote_pdf_url && (
-                <a href={d.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
-              )}
-              {d && d.ss_quote_number && (
-                <button type="button"
-                  onClick={(e) => {
-                    const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
-                    const btn = e.currentTarget;
-                    const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
-                    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
-                    else window.prompt("Copy the customer link:", link);
-                  }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Copy customer link</button>
-              )}
-              {d && d.ss_quote_number && (
-                <button type="button" disabled={busy}
-                  onClick={async () => {
-                    setBusy(true); setMsg(null);
-                    const { data: res, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: o.short_code } });
-                    setBusy(false);
-                    if (err || (res && res.error)) { setMsg({ err: (res && res.error) || err.message }); return; }
-                    setMsg(res && res.sent
-                      ? { ok: `Quote ${d.ss_quote_number} emailed to the customer.` }
-                      : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
-                  }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>Resend quote email</button>
-              )}
-            </div>
-          </div>
+          )}
 
           {/* SS-mode orders (the design carries an SS quote) get change orders. CRM-mode
               orders don't — the decision was SS-only (Carolyn 2026-08-23). */}
-          {d && d.ss_quote_number && o.short_code && (
+          {ssMode && o.short_code && (
             <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
-              currentTotalCents={o.total_cents} onChanged={onChanged} />
+              currentTotalCents={o.total_cents} onChanged={changedAll} />
           )}
 
           <div style={S.card}>
@@ -1490,47 +1880,131 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
-              {o.total_cents == null ? "Set this order's total to track a balance" : `${money(row.paid)} of ${money(o.total_cents)} collected`}
+              {o.total_cents == null
+                ? (ssMode ? "The total arrives when the customer signs the quote" : "Set this order's total to track a balance")
+                : `${money(row.paid)} of ${money(o.total_cents)} collected`}
             </div>
+            {ssMode && o.total_cents != null && (
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.22)", marginTop: 10, paddingTop: 6 }}>
+                {[["Total", money(o.total_cents)], ["Paid", money(row.paid)], ["Balance", bal == null ? "—" : money(bal)]].map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0", color: "#D6E4F0" }}>
+                    <span>{k}</span><span style={{ fontWeight: 700, color: "#FFF", fontVariantNumeric: "tabular-nums" }}>{v}</span>
+                  </div>
+                ))}
+                <div style={{ fontSize: 10.5, color: "#B9CFE0", marginTop: 4, lineHeight: 1.45 }}>
+                  Set by the signed quote and acknowledged change orders — no hand editing.
+                </div>
+              </div>
+            )}
             {o.total_cents != null && (
               <button type="button" onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
                 style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13 }}>Record a payment</button>
             )}
           </div>
 
-          <div style={S.card}>
-            <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
-            {editTotal ? (
-              <>
-                <span style={S.lbl}>Total (from your estimate)</span>
-                <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
-                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                  <button onClick={saveTotal} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save total"}</button>
-                  {o.total_cents != null && <button onClick={() => { setEditTotal(false); setTotalDraft((o.total_cents / 100).toFixed(2)); }} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>}
-                </div>
-                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
-                  Totals fill in automatically from the accepted estimate. Type one here if it hasn't come through yet — your number always wins.
-                </div>
-              </>
-            ) : (
-              <>
-                {kv("Total", money(o.total_cents))}
-                {kv("Paid", money(row.paid))}
-                {kv("Balance", bal == null ? "—" : money(bal))}
-                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
-                  {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
-                  {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
-                </div>
-              </>
-            )}
-          </div>
+          {/* SS orders derive their total (accept → CO acks → invoice); the hand-typed
+              editor stays ONLY for design-less manual orders (Carolyn 2026-08-24). */}
+          {!ssMode && (
+            <div style={S.card}>
+              <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
+              {editTotal ? (
+                <>
+                  <span style={S.lbl}>Total (from your estimate)</span>
+                  <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button onClick={saveTotal} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save total"}</button>
+                    {o.total_cents != null && <button onClick={() => { setEditTotal(false); setTotalDraft((o.total_cents / 100).toFixed(2)); }} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
+                    Totals fill in automatically from the accepted estimate. Type one here if it hasn't come through yet — your number always wins.
+                  </div>
+                </>
+              ) : (
+                <>
+                  {kv("Total", money(o.total_cents))}
+                  {kv("Paid", money(row.paid))}
+                  {kv("Balance", bal == null ? "—" : money(bal))}
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                    {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
+                    {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Floor plan + 3D as IMAGES (Carolyn 2026-08-24: images beat an embedded PDF
+              viewer in a small card). Saved by the designer on every submit; older designs
+              without one fall back to the plan PDF link. */}
+          {ssMode && ssDesign && (
+            <div style={{ ...S.card, padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 4px 8px" }}>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>Floor plan</span>
+                {ssDesign.image_url && <a href={ssDesign.image_url} target="_blank" rel="noopener" style={{ fontSize: 11, color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open full ↗</a>}
+              </div>
+              {ssDesign.plan_image_url
+                ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener">
+                    <img src={ssDesign.plan_image_url} alt="Floor plan" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0", display: "block", background: "#FFF" }} />
+                  </a>
+                : <p style={{ fontSize: 12, color: "#94A3B8", padding: "4px 4px 2px" }}>
+                    The picture appears after the next quote submit{ssDesign.image_url ? " — the PDF above has it today" : ""}.
+                  </p>}
+            </div>
+          )}
+          {ssMode && ssDesign && (
+            <div style={{ ...S.card, padding: 12 }}>
+              <div style={{ padding: "0 4px 8px" }}>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
+              </div>
+              {ssDesign.view3d_image_url
+                ? <img src={ssDesign.view3d_image_url} alt="3D view" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0", display: "block", background: "#FFF" }} />
+                : <p style={{ fontSize: 12, color: "#94A3B8", padding: "4px 4px 2px" }}>
+                    No 3D picture yet — open the design and click 🧊 3D View, then resubmit to capture one.
+                  </p>}
+            </div>
+          )}
 
           <div style={S.card}>
             <div style={{ ...S.h2, marginBottom: 8 }}>Customer</div>
             {kv("Name", nameOf(row))}
             {kv("Phone", (d && d.contact && d.contact.phone) || "—")}
             {kv("Email", (d && d.contact && d.contact.email) || "—")}
+            {ssMode && ssDesign && ssDesign.contact && (() => {
+              const c = ssDesign.contact || {};
+              const line2 = [c.city, c.state].filter(Boolean).join(", ") + (c.zip ? ` ${c.zip}` : "");
+              const addr = [c.street, line2].filter((s) => s && String(s).trim()).join(", ");
+              return (
+                <>
+                  {kv("Address", addr || "—")}
+                  {ssAcceptance && kv("Signed", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`)}
+                  {addr && (
+                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`} target="_blank" rel="noopener"
+                      style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "block", textAlign: "center", marginTop: 8, fontSize: 12 }}>
+                      📍 View property
+                    </a>
+                  )}
+                </>
+              );
+            })()}
           </div>
+
+          {ssMode && ssDesign && (
+            <div style={S.card}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
+              {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
+              {kv("Signed", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {kv("Change orders", (() => {
+                const cs = (ssDoc && ssDoc.cos) || [];
+                const acked = cs.filter((c) => c.status === "acknowledged").length;
+                const pend = cs.filter((c) => c.status === "pending_ack").length;
+                if (!cs.length) return "none";
+                return `${acked} acknowledged${pend ? ` · ${pend} pending` : ""}`;
+              })())}
+              {kv("Invoice", ssInvoice && ssInvoice.invoice_number
+                ? `${ssInvoice.invoice_number} · ${fmtDate(ssInvoice.updated_at || ssInvoice.created_at)}`
+                : "not yet issued")}
+            </div>
+          )}
         </div>
       </div>
 

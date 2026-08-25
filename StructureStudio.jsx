@@ -8066,7 +8066,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       //    enumerate every design short_code. A plain insert needs no SELECT
       //    policy, so the listable policy can be dropped (see 042_floor_plans_no_list).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
-      const pdfPages = [{ bytes: dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.92)), w: canvas.width, h: canvas.height }];
+      const planJpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+      const pdfPages = [{ bytes: dataUrlToBytes(planJpegDataUrl), w: canvas.width, h: canvas.height }];
       const shot3d = render3DSnapshotRef.current;
       if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
       const blob = buildPdfFromJpegPages(pdfPages);
@@ -8077,6 +8078,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
       const imageUrl = urlData.publicUrl;
+
+      // 3b. The same images as plain JPEGs (migration 127): the portal's order screen shows
+      // the floor plan (and the 3D shot when one was captured) as <img> cards — an image
+      // beats an embedded PDF viewer in a small card. BEST-EFFORT: these are presentation,
+      // and a failed upload must never block the quote. Timestamped names match the widened
+      // storage policy shape ({client}/SS-<code>-plan-<ts>.jpg / -3d-<ts>.jpg) and keep the
+      // anon-no-update invariant — every submit ADDS a fresh pair.
+      let planImageUrl = null;
+      let view3dImageUrl = null;
+      try {
+        const ts = Date.now();
+        const planPath = `${C.clientId}/${shortCode}-plan-${ts}.jpg`;
+        const planUp = await supabase.storage.from("floor-plans")
+          .upload(planPath, dataUrlToBytes(planJpegDataUrl), { upsert: false, contentType: "image/jpeg", cacheControl: "0" });
+        if (!planUp.error) planImageUrl = supabase.storage.from("floor-plans").getPublicUrl(planPath).data.publicUrl;
+        if (shot3d) {
+          const shotPath = `${C.clientId}/${shortCode}-3d-${ts}.jpg`;
+          const shotUp = await supabase.storage.from("floor-plans")
+            .upload(shotPath, dataUrlToBytes(shot3d.url), { upsert: false, contentType: "image/jpeg", cacheControl: "0" });
+          if (!shotUp.error) view3dImageUrl = supabase.storage.from("floor-plans").getPublicUrl(shotPath).data.publicUrl;
+        }
+      } catch (_e) { /* image cards degrade to the PDF link; the quote is unaffected */ }
 
       // 4. Save the design row via the capability RPC (insert on first save,
       //    update on subsequent saves; keyed by the unguessable short code).
@@ -8144,6 +8167,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // New fields — n8n can use these for GHL linking + image embed
         designId: shortCode,
         imageUrl,
+        // Plain-image twins of the plan PDF (migration 127) — the order screen's sidebar
+        // cards. Persisted by submit-estimate's SS branch only; null when an upload failed.
+        planImageUrl,
+        view3dImageUrl,
         viewUrl,
         source: "StructureStudio",
         clientId: C.clientId,
