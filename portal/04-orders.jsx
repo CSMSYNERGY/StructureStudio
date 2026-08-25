@@ -1938,42 +1938,43 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             </div>
           )}
 
-          {/* Floor plan + 3D as IMAGES (Carolyn 2026-08-24: images beat an embedded PDF
-              viewer in a small card). Saved by the designer on every submit; older designs
+          {/* Floor plan + 3D as IMAGES, side by side in one card (Carolyn 2026-08-25).
+              Thumbnails, not posters: capped height, natural aspect; the click opens the
+              full-size plan/picture. Saved by the designer on every submit; older designs
               without one fall back to the plan PDF link. */}
           {ssMode && ssDesign && (
             <div style={{ ...S.card, padding: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 4px 8px" }}>
-                <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>Floor plan</span>
-                {ssDesign.image_url && <a href={ssDesign.image_url} target="_blank" rel="noopener" style={{ fontSize: 11, color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open full ↗</a>}
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 10 }}>
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 6px" }}>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>Floor plan</span>
+                    {ssDesign.image_url && <a href={ssDesign.image_url} target="_blank" rel="noopener" style={{ fontSize: 10.5, color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Full ↗</a>}
+                  </div>
+                  {ssDesign.plan_image_url
+                    ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener" title="Open the full plan"
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 140 }}>
+                        <img src={ssDesign.plan_image_url} alt="Floor plan"
+                          style={{ maxHeight: 128, maxWidth: "100%", width: "auto", display: "block" }} />
+                      </a>
+                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 140 }}>
+                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
+                      </div>}
+                </div>
+                <div>
+                  <div style={{ padding: "0 2px 6px" }}>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
+                  </div>
+                  {ssDesign.view3d_image_url
+                    ? <a href={ssDesign.view3d_image_url} target="_blank" rel="noopener" title="Open the 3D picture"
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 140 }}>
+                        <img src={ssDesign.view3d_image_url} alt="3D view"
+                          style={{ maxHeight: 128, maxWidth: "100%", width: "auto", display: "block" }} />
+                      </a>
+                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 140 }}>
+                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Open the design, click 🧊 3D View, then resubmit to capture one.</p>
+                      </div>}
+                </div>
               </div>
-              {ssDesign.plan_image_url
-                ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener" title="Open the full plan"
-                    style={{ display: "block", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 6 }}>
-                    {/* A thumbnail, not a poster (Carolyn 2026-08-25: "about 1/4 that size") —
-                        capped height, natural aspect, centered; the click opens the full plan. */}
-                    <img src={ssDesign.plan_image_url} alt="Floor plan"
-                      style={{ maxHeight: 150, maxWidth: "100%", width: "auto", display: "block", margin: "0 auto" }} />
-                  </a>
-                : <p style={{ fontSize: 12, color: "#94A3B8", padding: "4px 4px 2px" }}>
-                    The picture appears after the next quote submit{ssDesign.image_url ? " — the PDF above has it today" : ""}.
-                  </p>}
-            </div>
-          )}
-          {ssMode && ssDesign && (
-            <div style={{ ...S.card, padding: 12 }}>
-              <div style={{ padding: "0 4px 8px" }}>
-                <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
-              </div>
-              {ssDesign.view3d_image_url
-                ? <a href={ssDesign.view3d_image_url} target="_blank" rel="noopener" title="Open the 3D picture"
-                    style={{ display: "block", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 6 }}>
-                    <img src={ssDesign.view3d_image_url} alt="3D view"
-                      style={{ maxHeight: 150, maxWidth: "100%", width: "auto", display: "block", margin: "0 auto" }} />
-                  </a>
-                : <p style={{ fontSize: 12, color: "#94A3B8", padding: "4px 4px 2px" }}>
-                    No 3D picture yet — open the design and click 🧊 3D View, then resubmit to capture one.
-                  </p>}
             </div>
           )}
 
