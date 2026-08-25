@@ -58,6 +58,12 @@ export interface AcceptanceCert {
   consentText: string;
   /** 'Change order CO-2' instead of the default 'Quote' subject line. */
   subjectLabel?: string | null;
+  /** Which document this certificate is bound into. Defaults to 'Quote'. Since migration
+   *  136 the certificate rides the INVOICE for new work, so the row must not keep saying
+   *  "Quote" over an invoice number — the page is the evidence exhibit, and a mislabelled
+   *  document number is the first thing anyone disputing it would point at.
+   *  Ignored when subjectLabel is set (a change order names its own subject). */
+  docLabel?: "Quote" | "Invoice";
 }
 
 /**
@@ -95,7 +101,7 @@ export async function appendAcceptancePage(pdfBytes: Uint8Array, cert: Acceptanc
     text(value, MARGIN + 150, 11, bold);
     y -= 22;
   };
-  row(cert.subjectLabel ? "Change to" : "Quote", cert.quoteNumber + (cert.subjectLabel ? ` — ${cert.subjectLabel}` : ""));
+  row(cert.subjectLabel ? "Change to" : (cert.docLabel || "Quote"), cert.quoteNumber + (cert.subjectLabel ? ` — ${cert.subjectLabel}` : ""));
   if (cert.total != null && Number.isFinite(Number(cert.total))) row("Total", fmtMoney(Number(cert.total)));
   row("Signed by", cert.signerName);
   {

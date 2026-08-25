@@ -91,7 +91,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // state the expression; this path pays one tenant scan instead.
   const { data: rows, error: designsErr } = await admin
     .from("designs")
-    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, ss_quote_number, ss_quote_pdf_url, accepted_at")
+    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url")
     .eq("client_id", identity.clientId)
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
@@ -115,13 +115,22 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // right under the quote it amends. Cents → dollars at the edge, like `total`.
   // deno-lint-ignore no-explicit-any
   const cosByCode = new Map<string, any[]>();
+  // The most recent ACKNOWLEDGED change per code. Not shown to anyone — it is only used to
+  // work out whether a sent invoice predates an approved change, in which case the amount
+  // printed on it is no longer the amount owed and it must not be signed (migration 136).
+  const lastAckByCode = new Map<string, number>();
   if (ssMode && mine.length > 0) {
     const { data: cos } = await admin.from("change_orders")
-      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, created_at")
+      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, created_at, status, acknowledged_at")
       .eq("client_id", identity.clientId)
-      .eq("status", "pending_ack")
+      .in("status", ["pending_ack", "acknowledged"])
       .in("short_code", mine.map((d) => d.short_code));
     for (const co of cos ?? []) {
+      if (co.status === "acknowledged") {
+        const t = Date.parse(String(co.acknowledged_at || "")) || 0;
+        if (t > (lastAckByCode.get(co.short_code) ?? 0)) lastAckByCode.set(co.short_code, t);
+        continue;
+      }
       const list = cosByCode.get(co.short_code) ?? [];
       list.push({
         id: co.id,
@@ -132,6 +141,31 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         createdAt: co.created_at,
       });
       cosByCode.set(co.short_code, list);
+    }
+  }
+
+  // The invoice, when one is out (migration 136). invoice_sends has RLS with zero policies,
+  // so this service-role read is the ONLY way the customer's own page can learn that a
+  // document is waiting for their signature. The projection stays as narrow as the quote's:
+  // a number, a PDF link, and the two timestamps the card renders.
+  // deno-lint-ignore no-explicit-any
+  const invByCode = new Map<string, any>();
+  if (ssMode && mine.length > 0) {
+    const { data: invs } = await admin.from("invoice_sends")
+      .select("short_code, invoice_number, invoice_pdf_url, status, signed_at, updated_at")
+      .eq("client_id", identity.clientId)
+      .eq("issued_by", "structurestudio")
+      .in("short_code", mine.map((d) => d.short_code));
+    for (const iv of invs ?? []) {
+      if (!["created", "sent"].includes(String(iv.status))) continue;
+      const sentAt = Date.parse(String(iv.updated_at || "")) || 0;
+      invByCode.set(iv.short_code, {
+        number: iv.invoice_number ?? null,
+        pdfUrl: iv.invoice_pdf_url ?? null,
+        sentAt: iv.updated_at ?? null,
+        signedAt: iv.signed_at ?? null,
+        stale: (lastAckByCode.get(iv.short_code) ?? 0) > sentAt,
+      });
     }
   }
 
@@ -164,6 +198,20 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // is fine — it is the same capability their floor-plan URL already carries.
           quoteRef: d.short_code,
           canAccept: String(d?.status) === "sent" && !!d.ss_quote_number && !d.accepted_at,
+          // The 3D snapshot of their own building — the card's thumbnail.
+          view3dImageUrl: d.view3d_image_url || null,
+          // The invoice, once one is out (migration 136). Null until the builder sends it.
+          invoice: invByCode.get(d.short_code) ?? null,
+          // Whether the SIGN button may appear. Every condition the server enforces in
+          // customer-accept's sign_invoice is mirrored here, so the button is absent
+          // rather than present-and-then-rejected: an invoice exists, it is unsigned, it
+          // is not stale, and no change order is waiting on them.
+          canSignInvoice: (() => {
+            const iv = invByCode.get(d.short_code);
+            if (!iv || iv.signedAt || iv.stale) return false;
+            if ((cosByCode.get(d.short_code) ?? []).length > 0) return false;
+            return true;
+          })(),
           acceptedAt: d.accepted_at || null,
           ssQuote: !!d.ss_quote_number,
           changeOrders: cosByCode.get(d.short_code) ?? [],

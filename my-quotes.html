@@ -42,6 +42,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 .qc-meta{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:6px}
 .qc-date{font-size:12px;color:#64748B}
 .qc-total{font-size:15px;font-weight:700}
+.qc-thumb{display:block;width:100%;max-height:190px;object-fit:cover;border-radius:10px;margin-top:10px;background:#F1F5F9}
 .qc-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .qc-actions .btn{flex:1 1 auto;font-size:14px;padding:10px 14px}
 .footer-row{margin-top:20px;text-align:center}
@@ -518,6 +519,22 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     }
     card.appendChild(top);
 
+    // The 3D snapshot of their own building. Cheap recognition: a customer with two quotes
+    // open should not have to read numbers to tell which is which.
+    var shotUrl = safeUrl(q.view3dImageUrl);
+    if (shotUrl) {
+      var shot = document.createElement("img");
+      shot.className = "qc-thumb";
+      shot.src = shotUrl;
+      shot.alt = "";
+      shot.loading = "lazy";
+      // A broken image is worse than none — drop it rather than leaving a torn icon.
+      shot.addEventListener("error", function () {
+        if (shot.parentNode) shot.parentNode.removeChild(shot);
+      });
+      card.appendChild(shot);
+    }
+
     // Style + size line
     var styleName = q.style || q.buildingStyle;
     var sizeName = q.size || q.buildingSize;
@@ -557,12 +574,27 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       card.appendChild(changeOrderBlock(q, cos[ci] || {}));
     }
 
-    // Accepted already? Say so — the signature happened, no button needed.
+    // The invoice, once the builder has sent it. This is where the signature lives now
+    // (migration 136), so it renders ABOVE the accepted line — it is the open action.
+    var inv = q.invoice;
+    if (inv && inv.signedAt) {
+      var sgn = document.createElement("div");
+      sgn.className = "accepted-line";
+      var sgnDate = fmtDate(inv.signedAt);
+      sgn.textContent = "Invoice signed ✓" + (sgnDate ? " · " + sgnDate : "");
+      card.appendChild(sgn);
+    } else if (inv) {
+      card.appendChild(invoiceBlock(q, inv));
+    }
+
+    // Accepted already? Say so. When no invoice has arrived yet, say what happens next —
+    // otherwise an accepted quote just sits there looking like it needs something.
     if (q.acceptedAt) {
       var acc = document.createElement("div");
       acc.className = "accepted-line";
       var accDate = fmtDate(q.acceptedAt);
       acc.textContent = "Accepted ✓" + (accDate ? " · " + accDate : "");
+      if (!inv) acc.textContent += " — your invoice will follow for you to sign.";
       card.appendChild(acc);
     }
 
@@ -574,14 +606,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var actions = document.createElement("div");
       actions.className = "qc-actions";
       if (canSign) {
-        // SS mode: signing happens HERE, not on an external page.
+        // SS mode: the quote is ACCEPTED here with a click (migration 136) — no signature
+        // pad. The binding signature comes later, on the invoice.
         var signBtn = document.createElement("button");
         signBtn.type = "button";
         signBtn.className = "btn btn-primary";
         signBtn.style.width = "auto";
-        signBtn.textContent = "Review & Sign";
+        signBtn.textContent = "Review & Accept";
         signBtn.addEventListener("click", function () {
-          toggleSignPanel(card, q, signBtn);
+          toggleAcceptPanel(card, q, signBtn);
         });
         actions.appendChild(signBtn);
       } else if (acceptUrl && !q.acceptedAt) {
@@ -643,9 +676,150 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     return box;
   }
 
+  // The invoice awaiting signature, rendered inside its quote's card (migration 136).
+  // Green rather than the change order's amber: this is the expected happy path, not a
+  // complication — the customer accepted, the builder billed, one signature closes it.
+  function invoiceBlock(q, inv) {
+    var box = document.createElement("div");
+    box.style.cssText = "margin-top:12px;border:1px solid #BBF7D0;background:#F0FDF4;border-radius:10px;padding:12px";
+    var head = document.createElement("div");
+    head.style.cssText = "font-size:13px;font-weight:700;color:#15803D";
+    head.textContent = "Invoice " + (inv.number ? String(inv.number) : "") + " — ready for your signature";
+    box.appendChild(head);
+
+    var amt = fmtMoney(q.total);
+    if (amt) {
+      var totals = document.createElement("div");
+      totals.style.cssText = "font-size:15px;font-weight:700;margin-top:6px;color:#0F172A";
+      totals.textContent = amt;
+      box.appendChild(totals);
+    }
+
+    // A change approved after this invoice went out means the amount above is no longer
+    // what is owed. The server refuses the signature for that reason; saying so here beats
+    // letting them press the button and read a 409.
+    if (inv.stale) {
+      var warn = document.createElement("div");
+      warn.style.cssText = "font-size:13px;color:#92400E;margin-top:8px";
+      warn.textContent = "This invoice was issued before your latest approved change. Your builder needs to resend it before you can sign.";
+      box.appendChild(warn);
+    }
+
+    var invPdf = safeUrl(inv.pdfUrl);
+    if (invPdf) {
+      var link = document.createElement("a");
+      link.className = "btn btn-secondary";
+      link.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px;display:inline-block";
+      link.href = invPdf; link.target = "_blank"; link.rel = "noopener";
+      link.textContent = "Invoice (PDF)";
+      box.appendChild(link);
+    }
+
+    if (q.canSignInvoice === true && q.quoteRef) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-primary";
+      btn.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px";
+      btn.textContent = "Review & Sign Invoice";
+      btn.addEventListener("click", function () { toggleSignPanel(box, q, btn, null, inv); });
+      box.appendChild(btn);
+    }
+    return box;
+  }
+
+  // ── The ACCEPT panel (migration 136): name + consent, no signature pad.
+  //    Accepting a quote is not signing for it, so it must not look like signing. ──
+  function toggleAcceptPanel(card, q, btn) {
+    var existing = card.querySelector(".sign-panel");
+    if (existing) { existing.parentNode.removeChild(existing); return; }
+
+    var panel = document.createElement("div");
+    panel.className = "sign-panel";
+
+    var nameField = document.createElement("div");
+    nameField.className = "field";
+    var nameLabel = document.createElement("label");
+    nameLabel.className = "label";
+    nameLabel.textContent = "Your full name";
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.maxLength = 120;
+    nameInput.autocomplete = "name";
+    nameInput.value = custName || "";
+    nameField.appendChild(nameLabel);
+    nameField.appendChild(nameInput);
+    panel.appendChild(nameField);
+
+    // Must stay byte-identical to consentSentenceClick() in customer-accept — the server
+    // stores ITS composition verbatim as the evidence, so any drift means the customer
+    // agreed to one sentence and the record shows another.
+    var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your quote";
+    var totalText = fmtMoney(q.total);
+    var consentRow = document.createElement("label");
+    consentRow.className = "consent-row";
+    var consentBox = document.createElement("input");
+    consentBox.type = "checkbox";
+    var consentSpan = document.createElement("span");
+    consentSpan.textContent = "I accept quote " + numText + (totalText ? " for " + totalText : "") +
+      " and understand that my builder will send me an invoice to sign.";
+    consentRow.appendChild(consentBox);
+    consentRow.appendChild(consentSpan);
+    panel.appendChild(consentRow);
+
+    var errEl = document.createElement("div");
+    errEl.className = "error";
+    errEl.hidden = true;
+    panel.appendChild(errEl);
+
+    var submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "btn btn-primary";
+    submit.textContent = "Accept Quote";
+    submit.style.marginTop = "4px";
+    panel.appendChild(submit);
+
+    submit.addEventListener("click", function () {
+      setError(errEl, "");
+      var signerName = nameInput.value.trim();
+      if (!signerName) { setError(errEl, "Enter your full name."); return; }
+      if (!consentBox.checked) { setError(errEl, "Please tick the agreement box to accept."); return; }
+      submit.disabled = true;
+      submit.textContent = "Accepting…";
+      callFn("customer-accept", {
+        action: "accept_quote", token: token, quoteRef: q.quoteRef,
+        signerName: signerName, consent: true, method: "click",
+      })
+        .then(function (r) {
+          if (invalidSession(r)) {
+            token = null;
+            lsDel(tokenKey);
+            show("phone");
+            setError($("phone-error"), "Your session expired. Enter your number and we'll text you a new code.");
+            return;
+          }
+          if (r.ok && r.data && r.data.ok) {
+            loadQuotes();
+          } else {
+            setError(errEl, errText(r, "Couldn't record your acceptance. Please try again."));
+            submit.disabled = false;
+            submit.textContent = "Accept Quote";
+          }
+        })
+        .catch(function () {
+          setError(errEl, "Couldn't reach the server. Check your connection and try again.");
+          submit.disabled = false;
+          submit.textContent = "Accept Quote";
+        });
+    });
+
+    card.appendChild(panel);
+  }
+
   // ── The sign panel (SS-mode, migration 124/126): draw OR type + consent.
-  //    With `co` it signs a CHANGE ORDER (ack_change_order); without, the quote itself. ──
-  function toggleSignPanel(card, q, signBtn, co) {
+  //    With `co` it signs a CHANGE ORDER (ack_change_order); with `inv` it signs the
+  //    INVOICE (sign_invoice, migration 136). Quotes no longer reach here at all — they
+  //    are accepted with a click via toggleAcceptPanel. ──
+  function toggleSignPanel(card, q, signBtn, co, inv) {
     var existing = card.querySelector(".sign-panel");
     if (existing) { existing.parentNode.removeChild(existing); return; }
 
@@ -777,6 +951,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var afterText = fmtMoney(co.totalAfter);
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I approve change order CO-" +
         (co.coNo != null ? co.coNo : "?") + " to quote " + numText + (afterText ? " for a new total of " + afterText : "") + ".";
+    } else if (inv) {
+      // Mirrors consentSentenceInvoice() in customer-accept — see the note in
+      // toggleAcceptPanel about why these two compositions must not drift.
+      var invTotalText = fmtMoney(q.total);
+      var invNumText = inv.number != null ? String(inv.number) : "your invoice";
+      consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept invoice " +
+        invNumText + (invTotalText ? " for " + invTotalText : "") + ".";
     } else {
       var totalText = fmtMoney(q.total);
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept quote " +
@@ -794,7 +975,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var submit = document.createElement("button");
     submit.type = "button";
     submit.className = "btn btn-primary";
-    var submitLabel = co ? "Sign & Approve" : "Sign & Accept";
+    var submitLabel = co ? "Sign & Approve" : inv ? "Sign Invoice" : "Sign & Accept";
     submit.textContent = submitLabel;
     submit.style.marginTop = "4px";
     panel.appendChild(submit);
@@ -806,6 +987,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       if (!consentBox.checked) { setError(errEl, "Please tick the agreement box to sign."); return; }
       var payload = co
         ? { action: "ack_change_order", token: token, changeOrderId: co.id, signerName: signerName, consent: true, method: mode }
+        : inv
+        ? { action: "sign_invoice", token: token, quoteRef: q.quoteRef, signerName: signerName, consent: true, method: mode }
         : { action: "accept_quote", token: token, quoteRef: q.quoteRef, signerName: signerName, consent: true, method: mode };
       if (mode === "drawn") {
         if (!hasInk) { setError(errEl, "Draw your signature in the box (or switch to typing your name)."); return; }

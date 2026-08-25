@@ -951,7 +951,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         // callable directly. `delivered` passes too: re-scheduling an already-delivered
         // building (warranty rebuild) is deliberate, not an accident this guard should stop.
         if (design.status !== "invoiced" && design.status !== "delivered") {
-          return json({ error: "That building isn't invoiced yet — send the invoice first, then schedule the build from Orders." }, 409);
+          // Since migration 136 'invoiced' means the customer SIGNED the invoice, so
+          // "send the invoice" is no longer the whole remedy — naming the missing step
+          // stops an operator re-sending an invoice that already went out.
+          return json({ error: "That building isn't invoiced yet — the customer has to sign their invoice first, then schedule the build from Orders." }, 409);
         }
         // THE ROUTING RULE (Carolyn 2026-08-07): an INVENTORY sale skips the build schedule.
         // The building is already on a lot, or already being built as a spec unit under its

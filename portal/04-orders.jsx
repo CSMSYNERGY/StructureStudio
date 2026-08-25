@@ -793,7 +793,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     };
     const [{ data: dsn }, paysRes, coRes] = await Promise.all([
       codes.length
-        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url").in("short_code", codes).limit(2000)
+        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
         : Promise.resolve({ data: [] }),
       fetchAllPayments(),
       // Pending change orders (migration 126): the row wears an amber chip, and the server
@@ -920,12 +920,18 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     if (bal < 0) return { key: "over", label: "Overpaid", bg: "#FFEDD5", fg: "#9A3412" };
     if (bal === 0) return { key: "paid", label: "Paid in full", bg: "#DCFCE7", fg: "#166534" };
     if (r.paid > 0) return { key: "partial", label: "Partially paid", bg: "#DBEAFE", fg: "#1E40AF" };
-    // Nothing collected yet — and these are two different jobs. A quote the customer
-    // accepted but nobody has billed is the OWNER's move; an invoice that's out and
-    // unpaid is the CUSTOMER's. Lumping both under "Unpaid" hides the follow-up.
-    return ((r.d && r.d.status) === "accepted")
-      ? { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" }
-      : { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
+    // Nothing collected yet — and these are now THREE different jobs, each waiting on a
+    // different person. A quote the customer accepted but nobody has billed is the OWNER's
+    // move. An invoice that is out but unsigned is the CUSTOMER's (migration 136 — the
+    // signature moved to the invoice, and the design stays 'accepted' until they sign).
+    // An invoice that is signed and unpaid is the customer's too, but for money.
+    // Lumping them together hides which follow-up is actually owed.
+    if ((r.d && r.d.status) === "accepted") {
+      return (r.d && r.d.ss_invoice_sent_at)
+        ? { key: "invoiceout", label: "Awaiting signature", bg: "#FEF9C3", fg: "#854D0E" }
+        : { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" };
+    }
+    return { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
   };
 
   const all = rows || [];
@@ -953,6 +959,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   // Voided rows are fetched (they stay visible in the history) but must not be counted.
   const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
   const needsInvoice = all.filter((r) => stateOf(r).key === "needsinvoice").length;
+  const invoiceOut = all.filter((r) => stateOf(r).key === "invoiceout").length;
   const awaitingCount = all.filter((r) => stateOf(r).key === "awaiting").length;
   const needsTotal = all.filter((r) => r.o.total_cents == null).length;
 
@@ -981,14 +988,17 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
         {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
         {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
-        {tile("Awaiting payment", String(awaitingCount), "invoiced, nothing collected", "#9F1239")}
+        {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
+        {tile("Awaiting payment", String(awaitingCount), "signed, nothing collected", "#9F1239")}
         {needsTotal > 0 && tile("Needs a total", String(needsTotal), "set it on the order", null)}
       </div>
 
       <div style={S.card}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders {rows ? (query || filter !== "all" || hasFacets ? `(${shown.length} of ${all.length})` : `(${all.length})`) : ""}</div>
-          {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}{chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
+          {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}
+          {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
+          {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
           {needsTotal > 0 && chip("nototal", "Needs total")}
           {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
           <div style={{ marginLeft: "auto", minWidth: 240, flex: "0 1 300px" }}>
@@ -1382,6 +1392,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
     .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
   const pendingCo = (cos || []).find((c) => c.status === "pending_ack" && c.source === "design_edit") || null;
+  // A change approved AFTER the invoice was issued means the PDF in the customer's inbox
+  // shows the wrong amount. customer-accept refuses to let them sign a stale invoice, so
+  // the operator has to be told the remedy is "regenerate", not "wait" (migration 136).
+  const ackedAfterInvoice = !!invoice && !invoice.signed_at && ackedCos.some((c) =>
+    Date.parse(String(c.acknowledged_at || "")) > Date.parse(String(invoice.updated_at || "")));
 
   const cur = {
     roofType: String(sel.roofType || "").trim(),
@@ -1662,33 +1677,69 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       {/* THE INVOICE STEP — the missing rung Carolyn hit (2026-08-25: "I see no way for
           creating that into an invoice"). The ladder is: QUOTE (the signed offer, SST-…)
           → this order → INVOICE (the bill, SSI-…). One clear affordance per state. */}
-      {!ssInvoicePdf && !locked && (
-        design.accepted_at
-          ? (pendingCo
-            ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-                <b style={{ color: "#B45309" }}>Ready to invoice once CO-{pendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+      {!locked && (
+        !design.accepted_at
+          ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
+              <b>Quote sent — awaiting the customer's acceptance.</b> Invoicing unlocks when they accept it from their quote page (Copy customer link below, or hand them your phone).
+            </div>
+          : ssInvoicePdf
+          /* The invoice is OUT but the design is not locked, which since migration 136 can
+             only mean one thing: the customer has not signed it yet. Nothing here creates a
+             second invoice — both buttons re-send the same number. */
+          ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
+              <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
+              <div style={{ marginTop: 4, color: "#854D0E" }}>
+                They sign it from their quote page. The build schedule unlocks once they do.
               </div>
-            : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-                <button type="button" disabled={anyBusy}
-                  onClick={async () => {
-                    const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
-                    if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF; the order is marked Invoiced.`)) return;
-                    setBusy(true); onMsg(null);
-                    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
-                    setBusy(false);
-                    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
-                    onMsg(data && data.sent === false
-                      ? { err: `Invoice ${data.invoiceNumber || ""} created and the order is Invoiced, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print it or copy the customer link.` }
-                      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — this order is now Invoiced.` });
-                    onChanged();
-                  }}
-                  style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
-                  {busy ? "Working…" : "Create & send invoice"}
-                </button>
-                <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Signed {fmtDate(design.accepted_at)} — the invoice takes the next number in your sequence.</span>
-              </div>)
-          : <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b>Quote sent — awaiting the customer's signature.</b> Invoicing unlocks when they sign from their quote page (Copy customer link below, or hand them your phone).
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
+                {[["Resend invoice", false], ...(ackedAfterInvoice ? [["Regenerate & resend", true]] : [])].map(([label, regen]) => (
+                  <button key={label} type="button" disabled={anyBusy}
+                    onClick={async () => {
+                      if (!window.confirm(regen
+                        ? `Rebuild invoice ${invoice.invoice_number || ""} from the current totals and email it again?\n\nSame invoice number — the customer can't sign the outdated one.`
+                        : `Email invoice ${invoice.invoice_number || ""} to the customer again?`)) return;
+                      setBusy(true); onMsg(null);
+                      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code, ...(regen ? { regenerate: true } : {}) } });
+                      setBusy(false);
+                      if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                      onMsg(data && data.sent === false
+                        ? { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print it or copy the customer link.` }
+                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent again — still awaiting their signature.` });
+                      onChanged();
+                    }}
+                    style={{ ...S.btn(regen ? "#B45309" : "#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5, opacity: anyBusy ? 0.6 : 1 }}>
+                    {busy ? "Working…" : label}
+                  </button>
+                ))}
+              </div>
+              {ackedAfterInvoice && (
+                <div style={{ marginTop: 7, color: "#9A3412" }}>
+                  A change order was approved after this invoice went out, so the amount on it is out of date — the customer can't sign it until you regenerate.
+                </div>
+              )}
+            </div>
+          : pendingCo
+          ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
+              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{pendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+            </div>
+          : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+              <button type="button" disabled={anyBusy}
+                onClick={async () => {
+                  const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
+                  if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF. The customer signs the invoice — the order is marked Invoiced once they do.`)) return;
+                  setBusy(true); onMsg(null);
+                  const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
+                  setBusy(false);
+                  if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                  onMsg(data && data.sent === false
+                    ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.` }
+                    : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.` });
+                  onChanged();
+                }}
+                style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                {busy ? "Working…" : "Create & send invoice"}
+              </button>
+              <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Accepted {fmtDate(design.accepted_at)} — the invoice takes the next number in your sequence.</span>
             </div>
       )}
 
@@ -1799,6 +1850,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [pdfView, setPdfView] = useState(null);   // { url, title } | null
   const ssDesign = ssDoc && ssDoc.design;
   const ssAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "quote");
+  // Migration 136: the invoice carries its own acceptance row, and it is the signature
+  // that closes the sale. The quote row above may be a click with no signature at all.
+  const ssInvoiceAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "invoice");
+  const ssInvoiceSigner = (ssInvoiceAcceptance && ssInvoiceAcceptance.signer_name) || "";
   const ssInvoice = ssDoc && ssDoc.paperwork && ssDoc.paperwork.invoice;
 
   const saveTotal = async () => {
@@ -2056,7 +2111,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               return (
                 <>
                   {kv("Address", addr || "—")}
-                  {ssAcceptance && kv("Signed", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`)}
+                  {ssInvoiceAcceptance
+                    ? kv("Signed", `${fmtDate(ssInvoiceAcceptance.accepted_at)} · ${ssInvoiceAcceptance.signer_name || ""}`)
+                    : ssAcceptance && kv("Accepted", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`)}
                   {addr && (
                     <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`} target="_blank" rel="noopener"
                       style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "block", textAlign: "center", marginTop: 8, fontSize: 12 }}>
@@ -2072,7 +2129,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             <div style={S.card}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
               {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
-              {kv("Signed", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
               {kv("Change orders", (() => {
                 const cs = (ssDoc && ssDoc.cos) || [];
                 const acked = cs.filter((c) => c.status === "acknowledged").length;
@@ -2083,6 +2140,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               {kv("Invoice", ssInvoice && ssInvoice.invoice_number
                 ? `${ssInvoice.invoice_number} · ${fmtDate(ssInvoice.updated_at || ssInvoice.created_at)}`
                 : "not yet issued")}
+              {/* The signature that actually closes the sale now lives on the invoice. */}
+              {kv("Invoice signed", ssInvoice && ssInvoice.signed_at
+                ? `${fmtDate(ssInvoice.signed_at)}${ssInvoiceSigner ? ` · ${ssInvoiceSigner}` : ""}`
+                : (ssInvoice ? "awaiting the customer" : "not yet"))}
             </div>
           )}
         </div>

@@ -7,26 +7,51 @@ import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 
-// customer-accept: the CUSTOMER's electronic signature on their quote (migration 124).
+// customer-accept: every write a CUSTOMER can perform on their own paperwork (migration 124).
 //
-// customer-quotes is documented read-only and stays that way — signing is the one write a
-// customer can perform, so it gets its own function with its own narrow contract. Identity
-// comes entirely from the customer_sessions token (phone OTP, migration 108); the signature
-// only ever attaches to a design whose contact phone matches the verified session phone.
+// customer-quotes is documented read-only and stays that way — accepting and signing are the
+// only writes a customer can perform, so they get their own function with their own narrow
+// contract. Identity comes entirely from the customer_sessions token (phone OTP, migration
+// 108); a write only ever attaches to a design whose contact phone matches the session phone.
+//
+// THE LADDER (Carolyn 2026-08-25 — "I want them to accept the quote to let us know, then I
+// will [invoice]... I honestly want them to sign the invoice"):
+//
+//   accept_quote      the QUOTE is accepted with a click. Recorded, not signed.
+//   ack_change_order  a change to an accepted order is signed off (migration 126).
+//   sign_invoice      the INVOICE is SIGNED. This is the commitment, and the only thing
+//                     that moves a design to 'invoiced' — which is why the build board,
+//                     the delivery pool and the inventory claim all still read correctly
+//                     off designs.status without knowing this flow changed (migration 136).
+//
+// A click-accept still writes a design_acceptances row. It carries no signature image, but
+// it carries the evidence that decides a dispute: the OTP-verified phone, the ip, the user
+// agent, and the consent sentence stored verbatim. "Did they accept?" keeps ONE answer table.
 //
 // SS-MODE ONLY. Tenants with invoice_in_ghl != false accept on GHL's hosted estimate page;
 // this endpoint refuses them so there is exactly one accept path per tenant.
 //
-// ORDER OF WRITES (each step's failure story):
+// ORDER OF WRITES — accept_quote (each step's failure story):
 //   1. insert design_acceptances — THE record, and the concurrency claim (unique index:
 //      one 'quote' acceptance per design). Everything after is presentation.
 //   2. upload the drawn signature PNG — failure logs; the typed-name/consent/IP row stands.
+//      Skipped entirely for a click, which has no image to store.
 //   3. promote the design (status 'sent' -> 'accepted', accepted_at once) + ensure the
 //      orders row — failure logs loudly; sync-design-status cannot repair this in SS mode,
 //      so the error is surfaced in the response for support.
-//   4. countersign the quote PDF (append the acceptance certificate page, upsert same
-//      path) — best-effort, quotePdf's cosmetics-never-break-the-money-path contract.
+//   4. countersign the quote PDF — ONLY for a real signature. A clicked acceptance gets no
+//      certificate page, because the certificate now belongs to the invoice.
 //   5. email the confirmation — sendTenantEmail never throws; dark tenants just skip.
+//
+// ORDER OF WRITES — sign_invoice:
+//   1. insert design_acceptances (subject 'invoice') — the record AND the claim, exactly as
+//      above but against design_acceptances_invoice_once.
+//   2. upload the drawn signature PNG — best-effort, same story.
+//   3. stamp invoice_sends.signed_at + acceptance_id, then promote designs.status to
+//      'invoiced'. THIS ORDER MATTERS: the status flip is what unlocks scheduling, so it
+//      must never happen while the invoice row still reads unsigned.
+//   4. countersign the INVOICE PDF — best-effort.
+//   5. email the confirmation.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -54,6 +79,19 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
  *  Carolyn 2026-08-23). my-quotes.html renders the same composition client-side. */
 export function consentSentence(quoteNumber: string, totalDisplay: string | null): string {
   return `I agree that my electronic signature is as binding as a handwritten one, and I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
+}
+
+/** Accepting a quote is not signing for it. The sentence says what the customer is actually
+ *  agreeing to — that they want to go ahead, and that the binding document arrives next —
+ *  so nobody can later claim a click was presented to them as a signature. */
+export function consentSentenceClick(quoteNumber: string, totalDisplay: string | null): string {
+  return `I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""} and understand that my builder will send me an invoice to sign.`;
+}
+
+/** The invoice is the binding document now, so this is the sentence that carries the weight
+ *  the quote's used to. Same "as binding as handwritten" language, pointed at the invoice. */
+export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: string | null): string {
+  return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
 }
 
 const fmtMoney = (n: number): string => {
@@ -90,7 +128,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
 
   const action = typeof body?.action === "string" ? body.action : "";
-  if (action !== "accept_quote" && action !== "ack_change_order") return json({ error: "Unknown action" }, 400);
+  if (action !== "accept_quote" && action !== "ack_change_order" && action !== "sign_invoice") {
+    return json({ error: "Unknown action" }, 400);
+  }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const admin = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -98,13 +138,25 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   const identity = await checkSession(admin, body?.token);
   if (!identity) return json({ error: "Session expired — sign in again." }, 401);
 
+  // 'click' is a quote acceptance with no signature, and it is allowed on accept_quote ONLY.
+  // Signing off a change order or an invoice always takes a real signature — reading the
+  // method from the action rather than from the body is what stops a crafted payload from
+  // "signing" an invoice with a tick box.
+  const isClick = action === "accept_quote" && body?.method === "click";
+
   if (body?.consent !== true) {
-    return json({ error: "Please tick the agreement box to sign." }, 400);
+    return json({ error: `Please tick the agreement box to ${isClick ? "accept" : "sign"}.` }, 400);
   }
   const signerName = typeof body?.signerName === "string" ? body.signerName.trim().slice(0, 120) : "";
   if (!signerName) return json({ error: "Please enter your full name." }, 400);
 
-  const method = body?.method === "drawn" ? "drawn" : body?.method === "typed" ? "typed" : null;
+  const method = isClick
+    ? "click"
+    : body?.method === "drawn"
+    ? "drawn"
+    : body?.method === "typed"
+    ? "typed"
+    : null;
   if (!method) return json({ error: "Choose a signature style — draw or type." }, 400);
 
   let signaturePng: Uint8Array | null = null;
@@ -112,7 +164,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   if (method === "drawn") {
     signaturePng = decodeSignaturePng(body?.signatureDataUrl);
     if (!signaturePng) return json({ error: "The drawn signature didn't come through — please try again." }, 400);
-  } else {
+  } else if (method === "typed") {
     typedSignature = typeof body?.typedName === "string" ? body.typedName.trim().slice(0, 120) : "";
     if (!typedSignature) return json({ error: "Type your name to sign." }, 400);
   }
@@ -230,6 +282,223 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     return json({ ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no });
   }
 
+  // ═══ sign_invoice: the customer signs the INVOICE — the commitment (migration 136) ═══
+  //
+  // This is the step that moves a design to 'invoiced'. send_invoice deliberately no longer
+  // does, so until this runs the building cannot reach the build board or the delivery pool.
+  if (action === "sign_invoice") {
+    const code = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
+    if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) return json({ error: "Invalid quote reference." }, 400);
+
+    const { data: d, error: dErr } = await admin
+      .from("designs")
+      .select("short_code, status, contact, ss_quote_number, estimate_lines, accepted_at")
+      .eq("client_id", identity.clientId)
+      .eq("short_code", code)
+      .maybeSingle();
+    if (dErr) return dbFail(req, identity.clientId, "load the invoice", dErr);
+    const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
+    if (!d) return notYours;
+    const dPhone = String(d?.contact?.phone ?? "").replace(/\D/g, "");
+    if (!dPhone || dPhone !== identity.phoneDigits) return notYours;
+
+    const { data: settings, error: sErr } = await admin
+      .from("client_settings")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", identity.clientId)
+      .maybeSingle();
+    if (sErr) return dbFail(req, identity.clientId, "load settings", sErr);
+    if (!settings || settings.invoice_in_ghl !== false) {
+      return json({ error: "This builder handles invoicing through their own system — use the link in your email." }, 409);
+    }
+
+    // The invoice must exist and be OURS. invoice_sends is service-role only, which is why
+    // this read happens here rather than being trusted from the request.
+    const { data: inv, error: iErr } = await admin
+      .from("invoice_sends")
+      .select("invoice_number, invoice_pdf_url, status, issued_by, signed_at, updated_at")
+      .eq("client_id", identity.clientId)
+      .eq("short_code", code)
+      .maybeSingle();
+    if (iErr) return dbFail(req, identity.clientId, "load the invoice", iErr);
+    if (!inv || inv.issued_by !== "structurestudio" || !["created", "sent"].includes(String(inv.status))) {
+      return json({ error: "Your invoice isn't ready yet — your builder still has to send it." }, 409);
+    }
+    // Idempotent, and the mirror image of the quote path's refusal: there, being invoiced
+    // means "no signature needed"; here it means "already signed".
+    if (inv.signed_at || d.status === "invoiced" || d.status === "delivered") {
+      return json({ ok: true, already: true, signedAt: inv.signed_at ?? null });
+    }
+
+    // A change the customer hasn't approved must not be swept into a signature, and a
+    // change they HAVE approved makes the sent invoice out of date — the amount on the PDF
+    // is no longer the amount owed. Both are the builder's to clear, so both say so.
+    const { data: cos } = await admin
+      .from("change_orders")
+      .select("status, acknowledged_at")
+      .eq("client_id", identity.clientId)
+      .eq("short_code", code);
+    for (const c of cos ?? []) {
+      if (c.status === "pending_ack") {
+        return json({ error: "There's a change to approve before you can sign this invoice — check the change order above." }, 409);
+      }
+    }
+    const invoiceAt = Date.parse(String(inv.updated_at || "")) || 0;
+    const staleCo = (cos ?? []).some(
+      (c) => c.status === "acknowledged" && (Date.parse(String(c.acknowledged_at || "")) || 0) > invoiceAt,
+    );
+    if (staleCo) {
+      return json({ error: "This invoice was issued before your latest approved change — ask your builder to resend it." }, 409);
+    }
+
+    const invNumber = String(inv.invoice_number || "");
+    const total = totalFromSnapshot(d.estimate_lines);
+    const totalDisplay = total == null ? null : fmtMoney(total);
+    const consentText = consentSentenceInvoice(invNumber, totalDisplay);
+    const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || null;
+    const userAgent = (req.headers.get("user-agent") || "").slice(0, 300) || null;
+    let designVersion: number | null = null;
+    {
+      const { data: v } = await admin
+        .from("design_versions").select("version").eq("short_code", code)
+        .order("version", { ascending: false }).limit(1).maybeSingle();
+      designVersion = v?.version ?? null;
+    }
+
+    // ── 1. The record (and the claim, via design_acceptances_invoice_once) ──────────────
+    const acceptanceId = crypto.randomUUID();
+    const signedAtIso = new Date().toISOString();
+    const { error: insErr } = await admin.from("design_acceptances").insert({
+      id: acceptanceId,
+      client_id: identity.clientId,
+      short_code: code,
+      subject: "invoice",
+      quote_number: invNumber,
+      design_version: designVersion,
+      total,
+      method,
+      signer_name: signerName,
+      typed_signature: typedSignature,
+      consent_text: consentText,
+      phone_digits: identity.phoneDigits,
+      session_seen_name: identity.name,
+      ip,
+      user_agent: userAgent,
+      accepted_at: signedAtIso,
+    });
+    if (insErr) {
+      if (String(insErr.code) === "23505") return json({ ok: true, already: true });
+      return dbFail(req, identity.clientId, "record the signature", insErr);
+    }
+
+    // ── 2. The drawn image (best-effort) ───────────────────────────────────────────────
+    if (signaturePng) {
+      const path = `${identity.clientId}/${code}/${acceptanceId}.png`;
+      const up = await admin.storage.from("signatures").upload(path, signaturePng, { contentType: "image/png" });
+      if (up.error) {
+        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `signature upload failed: ${up.error.message}`, context: { path } }).catch(() => {});
+      } else {
+        await admin.from("design_acceptances").update({ signature_image_path: path }).eq("id", acceptanceId);
+      }
+    }
+
+    // ── 3. Stamp the invoice, THEN promote the design ──────────────────────────────────
+    // Order matters: the status flip is what unlocks scheduling, so it must never land
+    // while invoice_sends still reads unsigned. If the stamp fails we stop — an unsigned
+    // invoice with a scheduled building is the one state worth refusing outright.
+    let promoteWarning: string | null = null;
+    const { error: stampErr } = await admin.from("invoice_sends")
+      .update({ signed_at: signedAtIso, acceptance_id: acceptanceId, updated_at: signedAtIso })
+      .eq("client_id", identity.clientId).eq("short_code", code);
+    if (stampErr) {
+      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `invoice stamp failed: ${stampErr.message}`, context: { code } }).catch(() => {});
+      return json({ error: "Your signature was recorded but the invoice didn't finalize — your builder can see it and will finish up." }, 500);
+    }
+    {
+      const { error: updErr } = await admin.from("designs")
+        .update({ status: "invoiced", updated_at: signedAtIso })
+        .eq("client_id", identity.clientId).eq("short_code", code);
+      if (updErr) {
+        promoteWarning = "signed, but the status update needs attention";
+        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `invoice promote failed: ${updErr.message}`, context: { code } }).catch(() => {});
+      }
+      // Same NULL-only fill as the quote path: a rep-set total is never clobbered.
+      if (total != null) {
+        await admin.from("orders")
+          .update({ total_cents: Math.round(total * 100), total_source: "manual", updated_at: signedAtIso })
+          .eq("client_id", identity.clientId).eq("short_code", code).is("total_cents", null);
+      }
+    }
+
+    // ── 4. Countersign the INVOICE PDF (best-effort) ───────────────────────────────────
+    let signedPdf = false;
+    const prefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${identity.clientId}/`;
+    const invPdfUrl = String(inv.invoice_pdf_url || "");
+    if (invPdfUrl.startsWith(prefix)) {
+      try {
+        const res = await fetch(invPdfUrl, { signal: AbortSignal.timeout(10_000) });
+        if (res.ok) {
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          const countersigned = await appendAcceptancePage(bytes, {
+            businessName: settings.business_name || null,
+            quoteNumber: invNumber,
+            total,
+            signerName,
+            method: method as "drawn" | "typed",
+            signaturePng,
+            typedSignature,
+            acceptedAtIso: signedAtIso,
+            ip,
+            consentText,
+            docLabel: "Invoice",
+          });
+          const storagePath = invPdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
+          const up = await admin.storage.from("floor-plans")
+            .upload(storagePath, countersigned, { contentType: "application/pdf", upsert: true });
+          signedPdf = !up.error;
+          if (up.error) console.warn("countersigned invoice upload failed:", up.error.message);
+        }
+      } catch (e) {
+        console.warn("invoice countersign failed:", (e as Error).message);
+      }
+    }
+
+    // ── 5. Confirmation email ──────────────────────────────────────────────────────────
+    const to = String(d?.contact?.email || "").trim();
+    if (to) {
+      const content = acceptanceEmail({
+        businessName: settings.business_name || identity.clientId,
+        phone: settings.business_phone || null,
+        website: settings.business_website || null,
+        logoUrl: settings.business_logo_url || null,
+        quoteNumber: invNumber,
+        total,
+        signerName,
+        acceptedAtIso: signedAtIso,
+        pdfUrl: invPdfUrl || null,
+        quoteTerms: settings.quote_terms || null,
+        docWord: "invoice",
+        method: method as "drawn" | "typed",
+      });
+      await sendTenantEmail(admin, identity.clientId, {
+        kind: "acceptance",
+        shortCode: code,
+        to,
+        subject: content.subject,
+        html: content.html,
+        text: content.text,
+      });
+    }
+
+    return json({
+      ok: true,
+      signedAt: signedAtIso,
+      invoiceNumber: invNumber,
+      signedPdf,
+      ...(promoteWarning ? { warning: promoteWarning } : {}),
+    });
+  }
+
   // ═══ accept_quote ═══
   const quoteRef = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
   if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid quote reference." }, 400);
@@ -272,7 +541,12 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
   // ── Evidence snapshot inputs ─────────────────────────────────────────────────────────
   const total = totalFromSnapshot(design.estimate_lines);
-  const consentText = consentSentence(String(design.ss_quote_number), total == null ? null : fmtMoney(total));
+  const totalDisplay = total == null ? null : fmtMoney(total);
+  // A click and a signature agree to DIFFERENT sentences, and the stored text is the
+  // evidence — so it is chosen by what the customer actually did, never by a request field.
+  const consentText = method === "click"
+    ? consentSentenceClick(String(design.ss_quote_number), totalDisplay)
+    : consentSentence(String(design.ss_quote_number), totalDisplay);
   const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || null;
   const userAgent = (req.headers.get("user-agent") || "").slice(0, 300) || null;
   let designVersion: number | null = null;
@@ -369,10 +643,14 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
   // ── 4. Countersign the PDF (best-effort) ─────────────────────────────────────────────
   // Only a URL in OUR storage under THIS tenant's prefix is ever fetched server-side.
+  //
+  // A CLICK GETS NO CERTIFICATE PAGE. The acceptance certificate asserts a signature, and
+  // stamping one onto a quote the customer only clicked would misrepresent what they did.
+  // The certificate now rides the invoice, which is the document they actually sign.
   let signedPdf = false;
   const expectedPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${identity.clientId}/`;
   const quotePdfUrl = String(design.ss_quote_pdf_url || "");
-  if (quotePdfUrl.startsWith(expectedPrefix)) {
+  if (method !== "click" && quotePdfUrl.startsWith(expectedPrefix)) {
     try {
       const res = await fetch(quotePdfUrl, { signal: AbortSignal.timeout(10_000) });
       if (res.ok) {
@@ -414,6 +692,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       acceptedAtIso,
       pdfUrl: signedPdf ? quotePdfUrl : (quotePdfUrl || null),
       quoteTerms: settings.quote_terms || null,
+      method,
     });
     await sendTenantEmail(admin, identity.clientId, {
       kind: "acceptance",
@@ -431,6 +710,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     quoteNumber: design.ss_quote_number,
     signedPdf,
     signaturePath: signaturePath ? true : method === "typed",
+    mode: method === "click" ? "click" : "signature",
     ...(promoteWarning ? { warning: promoteWarning } : {}),
   });
 }));

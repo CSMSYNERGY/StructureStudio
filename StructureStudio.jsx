@@ -3792,6 +3792,84 @@ function disposeSubtree(obj, sharedMats) {
   d3UnbindFixtureMats(mats);
 }
 
+// A default 3/4 view of the building, rendered OFF-SCREEN, with no 3D modal involved.
+//
+// WHY THIS EXISTS. The quote's 3D page and the customer's quote-card thumbnail only ever
+// appeared when someone had opened the 3D view and pressed "Use this view in my quote".
+// Most reps never do, so most customers received paperwork showing a floor plan and nothing
+// that looks like a building — the single most persuasive thing we can put in front of them.
+// This is the fallback, taken at submit time when no shot was armed.
+//
+// It deliberately reuses the D3Viewer's OWN framing (34° lens, dist = R*3.66, the front
+// three-quarter OUT map keyed on frontWall) rather than inventing a camera: the fallback and
+// the hand-picked shot should look like the same product, and a second set of magic numbers
+// would drift from the first the next time either is tuned.
+//
+// Never throws — every caller treats a null as "no 3D page", which is exactly the behaviour
+// that shipped before this existed.
+async function renderDefault3DShot(p) {
+  let renderer = null;
+  let model = null;
+  try {
+    const { THREE } = await loadThree();
+    const W = 1200, H = 900;
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(1);
+    renderer.setClearColor("#E7EEF5", 1);
+    if (THREE.SRGBColorSpace && "outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#E7EEF5");
+    const spec = p.style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
+    const bodyCss = p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body, p.bodyColors) : (spec.colors.body || D3_COLORS.body);
+    const trimCss = p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim, p.trimColors) : (spec.colors.trim || D3_COLORS.trim);
+    const roofCss = p.roofColorHex || spec.colors.roof || D3_COLORS.roof;
+    model = buildShed3DModel(THREE, {
+      bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec,
+      roofColor: roofCss, roofType: p.roofType, items: p.items, itemTypes: p.itemTypes,
+      bodyColor: bodyCss, trimColor: trimCss, frontWall: p.frontWall,
+      scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures,
+    });
+    scene.add(model.root);
+    scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
+
+    const fw = p.frontWall || "south";
+    const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
+    const R = Math.max(p.bldgW, p.bldgH) * 0.5 + D3.WALL_H;
+    const dist = R * 3.66;
+    const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
+    const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+    const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
+    sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
+    scene.add(sun);
+    const camera = new THREE.PerspectiveCamera(34, W / H, 0.1, dist * 10);
+    camera.position.set(camX, dist * 0.5, camZ);
+    camera.lookAt(0, D3.WALL_H * 0.45, 0);
+
+    renderer.render(scene, camera);
+    // Catalog fixture photos (a door's real photo on its slab) load asynchronously. Reading
+    // the canvas before they land ships a building with blank doors, so wait the same
+    // bounded 1.5s the shutter waits and re-render if any arrived.
+    if (d3FixtureTexturesPending() > 0) {
+      await d3WaitFixtureTextures(1500);
+      renderer.render(scene, camera);
+    }
+    const url = cv.toDataURL("image/jpeg", 0.9);
+    // A lost context yields "data:," — treat that as no snapshot rather than a broken page.
+    if (!url || url.length < 512) return null;
+    return { url, w: W, h: H };
+  } catch (_e) {
+    return null;
+  } finally {
+    if (model) { try { disposeShed3DModel(model); } catch (_e) { /* nothing left to free */ } }
+    if (renderer) {
+      try { renderer.dispose(); if (renderer.forceContextLoss) renderer.forceContextLoss(); } catch (_e) { /* context already gone */ }
+    }
+  }
+}
+
 // Free every geometry/material a buildShed3DModel() group holds — Three.js
 // doesn't GC WebGL resources, and drag-to-move rebuilds the model live.
 function disposeShed3DModel(model) {
@@ -8781,7 +8859,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       pctx.drawImage(canvas, cropX, 0, cropW, cropH, 0, 0, cropW, cropH);
       const planJpegDataUrl = planCanvas.toDataURL("image/jpeg", 0.92);
       const pdfPages = [{ bytes: dataUrlToBytes(fullSheetDataUrl), w: canvas.width, h: canvas.height }];
-      const shot3d = render3DSnapshotRef.current;
+      // An armed shot always wins — if the rep framed the building deliberately, that is
+      // the view the customer should see. Only when nobody opened 3D at all do we render a
+      // default one, so a quote is never sent without a picture of the building.
+      let shot3d = render3DSnapshotRef.current;
+      if (!shot3d) {
+        shot3d = await renderDefault3DShot({
+          bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
+          painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
+          scale, mgX, mgY,
+          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight),
+          roofType: sel.roofType,
+          roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
+          fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
+        });
+      }
       if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
       const blob = buildPdfFromJpegPages(pdfPages);
       const { error: upErr } = await supabase.storage

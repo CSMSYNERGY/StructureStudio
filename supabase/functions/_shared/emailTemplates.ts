@@ -80,6 +80,13 @@ export interface AcceptanceEmailInput {
   /** The (now countersigned) quote PDF. */
   pdfUrl?: string | null;
   quoteTerms?: string | null;
+  /** Which document this confirms. 'quote' (accepted — the invoice comes next) or
+   *  'invoice' (signed — the commitment). Defaults to 'quote', so existing callers are
+   *  byte-identical. The layout is shared because the two emails differ only in wording. */
+  docWord?: "quote" | "invoice";
+  /** How they agreed. A 'click' acceptance is NOT a signature and must not be described as
+   *  one — the email is the customer's own record of what they did. Defaults to a signature. */
+  method?: "drawn" | "typed" | "click";
 }
 
 export interface InvoiceEmailInput {
@@ -92,6 +99,11 @@ export interface InvoiceEmailInput {
   /** Hosted invoice page. null -> the CTA button is omitted entirely. */
   invoiceUrl?: string | null;
   quoteTerms?: string | null;
+  /** The customer's my-quotes page, where the invoice is signed. When present it TAKES OVER
+   *  the CTA and invoiceUrl is demoted to a plain "view the PDF" link — the button has to
+   *  lead somewhere the customer can act, and a PDF is a dead end for a document that now
+   *  needs their signature. */
+  signUrl?: string | null;
 }
 
 export interface TestEmailInput {
@@ -348,16 +360,40 @@ export function acceptanceEmail(input: AcceptanceEmailInput): EmailContent {
   const d = new Date(input.acceptedAtIso);
   const when = isNaN(d.getTime()) ? oneLine(input.acceptedAtIso) : d.toISOString().slice(0, 10);
 
-  const rows = [detailRow("Quote #", esc(num))];
+  const isInvoice = input.docWord === "invoice";
+  const doc = isInvoice ? "invoice" : "quote";
+  const Doc = isInvoice ? "Invoice" : "Quote";
+  const signed = input.method !== "click";
+  // You ACCEPT a quote and you SIGN an invoice — the verb follows the document, not the
+  // gesture. (A drawn signature on a quote was still "accepted" before this change, and
+  // the white-label test pins that wording.) The BY-LABEL is the opposite: it describes
+  // what the customer physically did, so a click must never read as "Signed by".
+  const verb = isInvoice ? "signed" : "accepted";
+  const byLabel = signed ? "Signed by" : "Accepted by";
+  const pdfLabel = signed ? `View your signed ${doc} (PDF)` : `View your ${doc} (PDF)`;
+  // The one line that differs in substance rather than tense: a clicked quote acceptance is
+  // the only state where something is still expected FROM the customer, so it says so.
+  const lead = isInvoice
+    ? `Thank you! You signed invoice ${esc(num)} from ${esc(name)}. A copy is below for your records.`
+    : signed
+    ? `Thank you! You accepted your quote from ${esc(name)}. A copy of the signed document is attached below for your records.`
+    : `Thank you! You accepted your quote from ${esc(name)}. Your invoice will follow shortly for you to sign.`;
+  const leadText = isInvoice
+    ? `Thank you! You signed invoice ${num} from ${name}.`
+    : signed
+    ? `Thank you! You accepted your quote from ${name}.`
+    : `Thank you! You accepted your quote from ${name}. Your invoice will follow shortly for you to sign.`;
+
+  const rows = [detailRow(`${Doc} #`, esc(num))];
   if (money) rows.push(detailRow("Total", esc(money)));
-  rows.push(detailRow("Signed by", esc(signer)));
+  rows.push(detailRow(byLabel, esc(signer)));
   rows.push(detailRow("Date", esc(when)));
 
   const pdfLink = input.pdfUrl
-    ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your signed quote (PDF)</a></p>`
+    ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">${esc(pdfLabel)}</a></p>`
     : "";
 
-  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">Thank you! You accepted your quote from ${esc(name)}. A copy of the signed document is attached below for your records.</p>
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${lead}</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
               ${rows.join("\n")}
             </table>
@@ -366,24 +402,24 @@ export function acceptanceEmail(input: AcceptanceEmailInput): EmailContent {
   const text: string[] = [
     name,
     "",
-    `Thank you! You accepted your quote from ${name}.`,
+    leadText,
     "",
-    `Quote #: ${num}`,
+    `${Doc} #: ${num}`,
   ];
   if (money) text.push(`Total: ${money}`);
-  text.push(`Signed by: ${signer}`, `Date: ${when}`, "");
-  if (input.pdfUrl) text.push(`Signed quote (PDF): ${input.pdfUrl}`);
+  text.push(`${byLabel}: ${signer}`, `Date: ${when}`, "");
+  if (input.pdfUrl) text.push(`${pdfLabel}: ${input.pdfUrl}`);
   text.push(...textFooter(input));
 
   return {
-    subject: `You accepted quote ${num} from ${name}`,
+    subject: `You ${verb} ${doc} ${num} from ${name}`,
     html: htmlShell({
       businessName: name,
       logoUrl: input.logoUrl,
       phone: input.phone,
       website: input.website,
       quoteTerms: input.quoteTerms,
-      preheader: `Quote ${num} accepted - thank you!`,
+      preheader: `${Doc} ${num} ${verb} - thank you!`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",
@@ -395,36 +431,52 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   const num = oneLine(input.invoiceNumber);
   const money = formatMoney(input.total);
 
+  const toSign = !!input.signUrl;
   const rows = [detailRow("Invoice #", esc(num)), detailRow("Amount due", esc(money))];
-  const cta = input.invoiceUrl ? ctaButton(input.invoiceUrl, "View Invoice") : "";
+  const cta = toSign
+    ? ctaButton(input.signUrl!, "Review & Sign Your Invoice")
+    : input.invoiceUrl
+    ? ctaButton(input.invoiceUrl, "View Invoice")
+    : "";
+  // Demoted, not dropped: some customers just want the paperwork.
+  const pdfLink = toSign && input.invoiceUrl
+    ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.invoiceUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View the invoice (PDF)</a></p>`
+    : "";
+  const lead = toSign
+    ? `Thank you for your business. Your invoice from ${esc(name)} is ready for your signature.`
+    : `Thank you for your business. Your invoice from ${esc(name)} is ready.`;
 
-  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">Thank you for your business. Your invoice from ${esc(name)} is ready.</p>
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${lead}</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
               ${rows.join("\n")}
             </table>
-            ${cta}`;
+            ${cta}
+            ${pdfLink}`;
 
   const text: string[] = [
     name,
     "",
-    `Thank you for your business. Your invoice from ${name} is ready.`,
+    toSign
+      ? `Thank you for your business. Your invoice from ${name} is ready for your signature.`
+      : `Thank you for your business. Your invoice from ${name} is ready.`,
     "",
     `Invoice #: ${num}`,
     `Amount due: ${money}`,
     "",
   ];
-  if (input.invoiceUrl) text.push(`View your invoice: ${input.invoiceUrl}`);
+  if (toSign) text.push(`Review and sign your invoice: ${input.signUrl}`);
+  if (input.invoiceUrl) text.push(`${toSign ? "Invoice (PDF)" : "View your invoice"}: ${input.invoiceUrl}`);
   text.push(...textFooter(input));
 
   return {
-    subject: `Invoice ${num} from ${name}`,
+    subject: toSign ? `Invoice ${num} from ${name} - ready to sign` : `Invoice ${num} from ${name}`,
     html: htmlShell({
       businessName: name,
       logoUrl: input.logoUrl,
       phone: input.phone,
       website: input.website,
       quoteTerms: input.quoteTerms,
-      preheader: `Your invoice from ${name} - ${money}.`,
+      preheader: toSign ? `Your invoice from ${name} - ${money}. Sign to confirm.` : `Your invoice from ${name} - ${money}.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",
