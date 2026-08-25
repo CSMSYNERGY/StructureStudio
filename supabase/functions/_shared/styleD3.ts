@@ -14,6 +14,20 @@
 
 export const D3_ROOF_TYPES = ["shed", "gable", "gambrel"] as const;
 
+// The four claddings the renderer can draw, in the order Carolyn names them
+// (2026-08-24): "panel siding, lap siding, board and batten, and metal".
+//
+// These are the ids in the renderer's D3_CLADDING table, so a style spec can now
+// name any of them. Until 2026-08-25 this list was effectively ["batten","lap"]
+// inline below, which meant a style could never persist `panel` or `agpanel` —
+// the sanitiser rewrote them to null WITHOUT erroring, and null renders as panel.
+// That is why "set this style to Metal" appeared to save and read back as Panel.
+//
+// `null` is still legal and still means "unset". It normalises to `panel` in the
+// renderer (d3NormalizeCladding), which is what every existing row already does —
+// so widening this list changes nothing for a style nobody re-saves.
+export const D3_SIDING_VALUES = ["panel", "lap", "batten", "agpanel"] as const;
+
 // Room for a genuinely steep roof and a deep overhang, but not for the values that
 // make the renderer produce nonsense (a "pitch" of 40 draws a spike through the sky).
 const CLAMPS: Record<string, [number, number]> = {
@@ -23,6 +37,9 @@ const CLAMPS: Record<string, [number, number]> = {
   kneeU: [0, 1],                // gambrel knee, fraction of half-span
   kneeRise: [0, 1],
   ridgeRise: [0, 1.5],
+  // Rafter-tail spacing in INCHES, because that is the unit a builder measures
+  // on-centre in. 8 is tighter than any real framing, 96 looser than any.
+  tailSpacingIn: [8, 96],
 };
 
 const num = (v: unknown): number | null => {
@@ -46,6 +63,8 @@ export type D3Spec = {
   colors: Record<string, string>;
   wallHeightFt?: number;
   roofMaterial?: string;
+  gableVent?: { widthFrac: number };
+  claddingChoices?: string[];
 };
 
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
@@ -59,14 +78,30 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     return { ok: false, error: `Unknown roof type "${type}" — expected shed, gable or gambrel.` };
   }
   const roof: Record<string, unknown> = { type };
-  for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise"]) {
+  for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
+  // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
+  // Urban style, read off a walk-around video; "fascia" = the painted trim board the
+  // renderer has always drawn.
+  //
+  // ABSENT is deliberate and means fascia. The renderer tests `=== "open"`, so every
+  // row that predates this field keeps its exact render, and the deep-equal on `roof`
+  // in styleD3.test.ts keeps passing. Emitting a default here would fail that test AND
+  // silently write the default into every tenant's column the first time a builder
+  // opens and saves the calibration panel.
+  //
+  // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would
+  // throw on a key with no entry.
+  if (rawRoof.eave === "open" || rawRoof.eave === "fascia") roof.eave = rawRoof.eave;
 
-  // Anything that is not one of the two renderable sidings means "plain", which is
-  // what the renderer already does with null. Matches the AI validator's posture.
-  const siding = (src.siding === "batten" || src.siding === "lap") ? src.siding : null;
+  // Anything that is not a renderable cladding means "unset", which the renderer
+  // draws as panel siding. Matches the AI validator's posture: drop what we cannot
+  // draw rather than argue with it.
+  const siding = (D3_SIDING_VALUES as readonly string[]).includes(String(src.siding))
+    ? String(src.siding)
+    : null;
 
   const colors: Record<string, string> = {};
   const rawColors = (src.colors && typeof src.colors === "object") ? src.colors : {};
@@ -82,6 +117,36 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // roof with it before any customer roof-type pick. Same posture as siding —
   // anything unknown means "unset".
   if (src.roofMaterial === "shingle" || src.roofMaterial === "metal") d3.roofMaterial = src.roofMaterial;
+
+  // A louvered gable vent at both ends, sized as a fraction of the span. Absent means
+  // no vent, which is what every row that predates this field says by omission.
+  //
+  // Height is NOT a field: real gable vents run about 2:1 wide-to-tall and the renderer
+  // derives it, so there is one number to get wrong instead of two.
+  const gvRaw = src.gableVent;
+  if (gvRaw && typeof gvRaw === "object") {
+    const w = num((gvRaw as Record<string, unknown>).widthFrac);
+    if (w !== null && w > 0) d3.gableVent = { widthFrac: Math.min(0.6, Math.max(0.05, w)) };
+  }
+
+  // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
+  // which is what every existing row says by omission.
+  //
+  // Per-style rather than per-tenant on purpose: a Horse Shelter can be metal while a
+  // Lofted Cabin is not, and `building_styles.d3` already round-trips through this
+  // sanitiser, is already emitted per style by get_config, and already has both save
+  // paths. A tenant-level flag would need a migration, a get_config regenerated from
+  // pg_get_functiondef, and a new save action — days of work for a worse answer.
+  //
+  // Rebuilt from D3_SIDING_VALUES rather than filtered from the caller's array, so the
+  // stored order is always canonical and unknown ids cannot ride along.
+  if (Array.isArray(src.claddingChoices)) {
+    const offered = src.claddingChoices as unknown[];
+    const picked = (D3_SIDING_VALUES as readonly string[]).filter((id) => offered.includes(id));
+    // Every box unticked would leave the customer no cladding at all. That is a slip,
+    // not an instruction, so it reads as "unset" and falls back to all four.
+    if (picked.length) d3.claddingChoices = picked;
+  }
 
   // A spec is a handful of numbers. Anything approaching this size is either a mistake
   // or someone using a customer-visible jsonb column as free storage.
@@ -121,12 +186,21 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
     "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>
   },
-  "siding": "batten" | "lap" | null,
+  "siding": "panel" | "lap" | "batten" | "agpanel" | null,
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
   "wallHeightFt": <estimated wall height, typically 6-10; doors are about 6.5 ft tall, use them for scale>
 }
 
-Judge the roof type from the silhouette: one slope = shed, two = gable, four (a break partway down each side) = gambrel. "batten" means vertical boards with raised strips over the seams; "lap" means horizontal overlapping boards. Colors are the dominant UNPAINTED material colors. Estimate conservatively and use typical values when a photo does not show something.`;
+Judge the roof type from the silhouette: one slope = shed, two = gable, four (a break partway down each side) = gambrel.
+
+SIDING is what the wall surface is made of:
+- "panel" — flat vertical sheets with narrow grooves cut INTO them every 8 inches or so, all flush with each other. Sold as SmartSide, DuraTemp or T1-11. This is the most common; use it when the wall reads as plain vertical sheeting.
+- "lap" — horizontal boards, each overlapping the one below, casting a shadow line every few inches.
+- "batten" — vertical boards about 12-18 inches apart with a narrow strip of trim laid ON TOP of each seam, standing proud of the wall. If you can see raised strips with gaps between them, it is batten, not panel.
+- "agpanel" — ribbed metal sheeting, with regular raised ribs running vertically and a metallic sheen.
+Use null only if the frames genuinely do not show the wall surface.
+
+Colors are the dominant UNPAINTED material colors. Estimate conservatively and use typical values when a photo does not show something.`;
 
 // The walk-around-video variant of the prompt above. Same output shape, because it feeds
 // the same sanitiser and the same renderer — but three things differ enough to be worth a
@@ -143,6 +217,13 @@ Judge the roof type from the silhouette: one slope = shed, two = gable, four (a 
 //   3. SHAPE is the whole point. Size, colour and material are configurator settings the
 //      customer changes afterwards, so a colour the model is unsure of costs nothing and a
 //      roof type it gets wrong costs everything.
+//
+// `siding` is deliberately ABSENT from this prompt (2026-08-25). It used to be here, and
+// because the model answers every key it was asked for, EVERY walk-around draft overwrote
+// the builder's cladding choice with a guess read off ground-level frames. Dropping the key
+// is why applyDraftedShape no longer carries a siding line: a prompt that never mentions it
+// cannot return it, which is a stronger guarantee than a caller remembering not to apply it.
+// The builder picks cladding from a four-way list one field below the video button.
 //
 // `observed` is deliberately OUTSIDE the spec. sanitizeD3Spec rebuilds from known keys and
 // drops it, which is what we want — it is a note for the builder about what the video
@@ -163,7 +244,6 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
     "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>
   },
-  "siding": "batten" | "lap" | null,
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
   "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6.5 ft, use it for scale>,
   "observed": {

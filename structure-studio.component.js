@@ -1947,9 +1947,30 @@ const D3_CLADDING = {
   agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
   batten:  { id: "batten",  label: "Board & Batten", tex: "groove",  relief: "batten", stepFt: 1.5,  tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
 };
-// The customer-selectable set, in the order Carolyn listed them. `batten` is deliberately
-// absent -- it is a legacy value we still RENDER, not one we offer.
-const D3_CLADDING_CHOICES = ["lap", "panel", "agpanel"];
+// The customer-selectable set, in the order Carolyn named them on 2026-08-24: "panel
+// siding, lap siding, board and batten, and metal". `batten` joined the list that day --
+// it was rendered but never offered, which is why board & batten could only ever appear
+// on a style whose stored spec already said so.
+//
+// A style may NARROW this via `d3.claddingChoices` (see d3CladdingChoicesFor below) --
+// not every builder sells every cladding, and metal in particular is far from universal.
+const D3_CLADDING_CHOICES = ["panel", "lap", "batten", "agpanel"];
+
+// Which claddings a given style offers the customer. A style may narrow the list via
+// `d3.claddingChoices` -- plenty of builders sell no metal siding at all -- but a style
+// that says nothing offers all four, which is what every existing row says by omission.
+//
+// Rebuilt by filtering OUR list rather than trusting theirs, so the dropdown order is
+// always canonical and a stale id in the column cannot reach D3_CLADDING[id].label and
+// throw. An empty result means the builder unticked everything, which is a slip rather
+// than an instruction -- honouring it literally would leave the customer no cladding to
+// pick at all -- so it falls back to the full list.
+function d3CladdingChoicesFor(styleCfg) {
+  const narrowed = styleCfg && styleCfg.d3 && Array.isArray(styleCfg.d3.claddingChoices)
+    ? D3_CLADDING_CHOICES.filter((id) => styleCfg.d3.claddingChoices.indexOf(id) !== -1)
+    : [];
+  return narrowed.length ? narrowed : D3_CLADDING_CHOICES;
+}
 
 // Every value `building_styles.d3.siding` can already hold, mapped onto the table above.
 // This is the whole backward-compatibility story and it needs NO migration: today `null`
@@ -1980,6 +2001,11 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // The style's default roof MATERIAL (shingle|metal) — texture + surface
     // response even before the customer picks a roof type; their pick wins.
     roofMaterial: o.roofMaterial === "metal" || o.roofMaterial === "shingle" ? o.roofMaterial : (base.roofMaterial || null),
+    // A louvered gable vent, tenant override over the built-in default. This MUST be
+    // named here: the literal drops what it does not list, and because openCalEditor
+    // seeds from this resolver and onSaveSpec writes the draft back, a dropped key is
+    // erased from the column the first time a builder opens and saves the panel.
+    gableVent: (o.gableVent && o.gableVent.widthFrac > 0) ? o.gableVent : (base.gableVent || null),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
 }
@@ -2807,6 +2833,14 @@ function buildShed3DModel(THREE, p) {
   const roofGroup = new THREE.Group();
   const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const OV = roofCfg.overhang != null ? roofCfg.overhang : D3.OVERHANG;
+  // Eave finish. An AFFIRMATIVE test on purpose: absent, null, "fascia" and any junk
+  // all fall through to the fascia branch, so no tenant who has not opted in moves.
+  const EAVE_OPEN = roofCfg.eave === "open";
+  // Raw, unpainted 2x stock for the tails. Created lazily so a model with no open eave
+  // never mints it — a material built and never attached to a mesh is never reached by
+  // the disposal walk, and is the one thing here that could actually leak.
+  let _tailMat = null;
+  const tailMat = () => (_tailMat || (_tailMat = mat(D3_COLORS.bench, { roughness: 0.95 })));
   const fw = frontWall || (bldgH >= bldgW ? "north" : "west");
   const frontNS = fw === "north" || fw === "south";
   // Profile u-axis: the axis the roof profile spans across. For gable/gambrel
@@ -2942,11 +2976,53 @@ function buildShed3DModel(THREE, p) {
     const lowEnd = A[1] <= B[1] ? A : B;
     if (lowEnd[1] <= H + 0.01) {
       const towardLow = lowEnd === A ? -1 : 1;
-      const edgeU = lowEnd[0] + towardLow * ux * OV + nx * (D3.ROOF_T / 2 + 0.02);
-      const edgeY = lowEnd[1] + towardLow * uy * OV + ny * (D3.ROOF_T / 2 + 0.02);
-      const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
-      fascia.position.set(edgeU, edgeY - 0.14, L / 2);
-      rg.add(fascia);
+      // The eave end ON the slope line. Every eave detail registers against this point:
+      // at a free edge jointExt returns OV, so the slab's end face is the plane through
+      // here. Factored out of the fascia's own expression WITHOUT reordering its float
+      // ops, so the fascia below is bit-for-bit where it has always been.
+      const eaveU = lowEnd[0] + towardLow * ux * OV;
+      const eaveY = lowEnd[1] + towardLow * uy * OV;
+      if (!EAVE_OPEN) {
+        const edgeU = eaveU + nx * (D3.ROOF_T / 2 + 0.02);
+        const edgeY = eaveY + ny * (D3.ROOF_T / 2 + 0.02);
+        const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
+        fascia.position.set(edgeU, edgeY - 0.14, L / 2);
+        rg.add(fascia);
+      } else {
+        // OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
+        // the roof deck at 24 in on centre. On the building this was measured from it is
+        // the highest-contrast element there is, and a painted fascia is precisely what
+        // it is NOT: the two are alternatives, never both.
+        const TAIL_W = 0.125;                 // 1.5 in stock, measured ALONG the ridge (z)
+        const TAIL_H = 0.34;                  // tall enough that the top buries in the slab
+        const TAIL_DROP = 3.5 / 12;           // visible projection below the deck underside
+        // The slab underside sits at n = +0.02. Dropping the tail's bottom face
+        // TAIL_DROP below that puts its top at n = +0.068 — inside the slab's
+        // [0.02, 0.22] band, so nothing pokes through the roof and no daylight shows
+        // between tail and deck.
+        const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
+        const tailLen = OV + 0.5;             // outboard face flush with the slab end,
+                                              // inboard end buried behind the wall
+        const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
+        const tailY = eaveY - towardLow * uy * (tailLen / 2) + ny * tailN;
+        const tailRot = Math.atan2(dy, du);   // same rotation as the slab it hangs under
+        const addTail = (z) => {
+          const tl = box(tailMat(), tailLen, TAIL_H, TAIL_W);
+          tl.rotation.z = tailRot;
+          tl.position.set(tailU, tailY, z);
+          rg.add(tl);
+        };
+        // COUNT IS A RULE, not a number. Bays are laid across the wall span z in [0, L]
+        // and rounded to whole bays, so both gable walls always carry an end rafter and
+        // no stub bay is left over. An 8x8 at 24 o.c. gives 4 bays and 5 tails, which is
+        // exactly what the walk-around video shows.
+        const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
+        for (let z = 0; z <= L + 1e-6; z += tailStep) addTail(Math.min(z, L));
+        // Fly-rafter tails, one under each rake about 10 in outboard of the gable wall.
+        // Skipped when the overhang is too shallow to hold one.
+        const flyOut = Math.min(OV - 0.1, 10 / 12);
+        if (flyOut > 0.15) { addTail(-flyOut); addTail(L + flyOut); }
+      }
     }
     // Ridge cap: one angled board LYING ON each slope that reaches the peak
     // (both halves of a gable, the upper legs of a gambrel) — a flat box can
@@ -2982,6 +3058,71 @@ function buildShed3DModel(THREE, p) {
       rg.add(rake);
     });
   });
+  // ── Louvered gable vent, both ends ──────────────────────────────────────────────────
+  // Applied boxes proud of the extrusion's end CAPS (local z = 0 and z = L), NOT a hole
+  // in the profile: one hole extrudes the whole length L and punches out through the far
+  // gable as a tunnel, which reveals nothing (the prism is solid) and whose inner faces
+  // belong to the soffit material that "look inside" ghosts. Applied is also how casing,
+  // muntins, relief strips, fascia, rake and ridge cap are every one of them built.
+  const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
+  if (gv && gv.widthFrac > 0 && profPeak > H + 0.9) {
+    // Horizontal extent of the gable polygon at height y. Generic on purpose: ridgeOffset
+    // skews a gable and a gambrel end is a five-point pentagon, so a hard-coded
+    // (S/2)*(1 - (y-H)/rise) would be right for exactly one of the three roof types.
+    const profSpanAt = (y) => {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i + 1 < dedup.length; i++) {
+        const P = dedup[i], Q = dedup[i + 1];
+        if ((P[1] - y) * (Q[1] - y) > 1e-12) continue;   // both ends the same side of y
+        const dY = Q[1] - P[1];
+        if (Math.abs(dY) < 1e-9) {
+          lo = Math.min(lo, P[0], Q[0]); hi = Math.max(hi, P[0], Q[0]);
+        } else {
+          const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / dY);
+          lo = Math.min(lo, u); hi = Math.max(hi, u);
+        }
+      }
+      return hi > lo ? [lo, hi] : null;
+    };
+    const vCy = H + (profPeak - H) * 0.5;                // centred in the gable triangle
+    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
+    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
+    // Shrink to fit. The TOP corners are the tight point, and two passes converge because
+    // a narrower vent is also shorter and therefore has more room above it.
+    for (let k = 0; k < 3; k++) {
+      const sp = profSpanAt(vCy + vH / 2);
+      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
+      if (vW <= avail) break;
+      vW = Math.max(0, avail); vH = vW / 2;
+    }
+    const spC = profSpanAt(vCy);
+    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
+    if (vW >= 0.8 && vH >= 0.35) {
+      const ventMat = mat("#2A2E33", { roughness: 0.9 });
+      const ltex = d3MakeTexture(THREE, "lap");          // blade lines, same trick the
+      if (ltex) {                                        // roll-up door already uses
+        ltex.repeat.set(1, Math.max(3, Math.round(vH / 0.25)));
+        ventMat.map = ltex; ventMat.needsUpdate = true;
+      }
+      const F = 0.12;                                    // trim board width
+      // The cap plane is the wall MID-plane, so 0.15 only reaches the siding face:
+      // 0.20 for the trim and 0.16 for the louvers leaves the blades recessed inside
+      // their own frame, which is what reads as louvered rather than as a grey rectangle.
+      [[0, -1], [L, 1]].forEach(function (end) {
+        const z0 = end[0], s = end[1];
+        const put = (m, w, h, d, du_, dy_, off) => {
+          const b = box(m, w, h, d);
+          b.position.set(vCu + du_, vCy + dy_, z0 + s * off);
+          rg.add(b);
+        };
+        put(ventMat, vW, vH, 0.06, 0, 0, 0.16);                        // louver face
+        put(trimMat, vW + F * 2, F, 0.10, 0, (vH + F) / 2, 0.20);      // head
+        put(trimMat, vW + F * 2, F, 0.10, 0, -(vH + F) / 2, 0.20);     // sill
+        put(trimMat, F, vH + F * 2, 0.10, -(vW + F) / 2, 0, 0.20);     // left jamb
+        put(trimMat, F, vH + F * 2, 0.10, (vW + F) / 2, 0, 0.20);      // right jamb
+      });
+    }
+  }
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
   roofGroup.add(rg);
@@ -5175,10 +5316,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
-  // Cladding is a FIXED triple (we ship a texture for each; a tenant cannot invent a
-  // fourth), so it is a constant list like roofTypes rather than a catalog read. Empty
-  // string = "builder's standard", i.e. fall through to the style's own d3.siding, which
-  // is what every existing design does today.
+  // Cladding is a fixed FOUR (we ship a texture for each; a tenant cannot invent a fifth),
+  // narrowable per style. Empty string = "builder's standard", i.e. fall through to the
+  // style's own d3.siding, which is what every existing design does today.
+  //
+  // Keyed off the CURRENTLY SELECTED style, so switching style re-reads the list. A
+  // customer mid-design on a metal-capable style who switches to one that is not keeps
+  // sel.cladding pointing at "agpanel" -- harmless, because the estimate resolves it
+  // through D3_CLADDING and the 3D renderer draws whatever the id says; the dropdown
+  // simply no longer offers it. Clearing it instead would silently undo a deliberate pick
+  // the moment someone browsed a neighbouring style.
   //
   // Offered ONLY where 3D is on for this viewer. Cladding is visual-only in v1 -- the pick
   // manifests nowhere but the 3D view (plus a line of text on the estimate) -- so on a
@@ -5186,7 +5333,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // every public designer without opt-in (audit 2026-08-19). Gating it on view3dOn keeps
   // an ungranted tenant's page byte-identical to before cladding existed, and the control
   // appears together with 3D as each builder is switched on.
-  const claddingChoices = view3dOn ? D3_CLADDING_CHOICES : [];
+  const claddingChoices = view3dOn
+    ? d3CladdingChoicesFor(C.buildingStyles.find((s) => s.value === sel.style))
+    : [];
   // The paint option renders inline beside the Roof Options (same row), not in
   // the option list below — see the Size/Roof/Paint row and renderPaintFields.
   const paintOpt = visibleOptions.find((o) => o.type === "counter" && o.id === "paint") || null;
@@ -7621,12 +7770,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Colours are left alone for the same reason plus a better one: the customer repaints the
   // building in the configurator anyway, so a colour averaged off one overcast clip is not
   // worth overwriting a deliberate choice with.
+  // 2026-08-25: this no longer carries a siding line at all. VIDEO_SHAPE_PROMPT stopped
+  // ASKING for siding, which is a stronger guarantee than a caller remembering not to
+  // apply it: a prompt that never mentions cladding cannot return a guess about it. The
+  // old two-value allow-list here would also have quietly become WRONG the moment the
+  // vocabulary widened to four, because it would have kept waving batten and lap through
+  // while silently dropping panel and metal.
   const applyDraftedShape = (d3) => setAdminCal((p) => ({
     ...p,
     spec: {
       ...p.spec,
       roof: { ...p.spec.roof, ...((d3 && d3.roof) || {}) },
-      siding: (d3 && (d3.siding === "batten" || d3.siding === "lap")) ? d3.siding : p.spec.siding,
       wallHeightFt: (d3 && d3.wallHeightFt) || p.spec.wallHeightFt,
     },
   }));
@@ -8912,9 +9066,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
                   <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                    <option value="gable">gable</option>
-                    <option value="shed">shed</option>
-                    <option value="gambrel">gambrel</option>
+                    {/* "Single slant" is what ShedPro and Carolyn both call a shed roof.
+                        The value stays "shed" -- this is a label, not a new roof type. */}
+                    <option value="gable">Gable (two slopes)</option>
+                    <option value="shed">Single slant (shed roof)</option>
+                    <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
@@ -8929,13 +9085,53 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
                   <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (standard look)
-                  <select value={adminCal.spec.siding || ""} onChange={(e) => calSet({ siding: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                    <option value="">plain</option>
-                    <option value="batten">batten (vertical)</option>
-                    <option value="lap">lap (horizontal)</option>
+                {/* The empty "plain" option is gone (2026-08-25). It was the LABEL FOR null,
+                    which the renderer draws as panel siding -- so it named a thing the
+                    customer never sees and meant nothing to the builder reading it.
+                    Normalising the value through d3NormalizeCladding maps a stored null to
+                    "panel", so an untouched style shows exactly what it already renders and
+                    the pixels do not move; the first save just writes it down explicitly. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (this style&rsquo;s standard)
+                  <select value={d3NormalizeCladding(adminCal.spec.siding)} onChange={(e) => calSet({ siding: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="panel">Panel siding (SmartSide, DuraTemp, T1-11)</option>
+                    <option value="lap">Lap siding</option>
+                    <option value="batten">Board &amp; batten</option>
+                    <option value="agpanel">Metal</option>
                   </select>
                 </label>
+              </div>
+              {/* Which of the four this style OFFERS the customer. Carolyn, 2026-08-24:
+                  "they don't offer metal here, but there's some other clients that do."
+
+                  All four ticked is the SAME as saying nothing, so that case stores
+                  nothing at all -- an untouched style keeps a spec byte-identical to the
+                  one it has today, and a builder who never opens this row is unaffected. */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: "#92400E", fontWeight: 700, marginBottom: 4 }}>Cladding this style offers the customer</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+                  {D3_CLADDING_CHOICES.map((id) => {
+                    const offered = d3CladdingChoicesFor({ d3: adminCal.spec });
+                    const on = offered.indexOf(id) !== -1;
+                    return (
+                      <label key={id} style={{ fontSize: 11, color: "#92400E", display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => {
+                            const next = D3_CLADDING_CHOICES.filter((c) => (c === id ? !on : offered.indexOf(c) !== -1));
+                            // Nothing ticked is a slip, not an instruction -- it would leave
+                            // the customer no cladding at all -- and everything ticked is the
+                            // default. Both store `undefined`, which JSON.stringify drops, so
+                            // the column stays absent rather than growing a list saying nothing.
+                            const store = (next.length === 0 || next.length === D3_CLADDING_CHOICES.length) ? undefined : next;
+                            calSet({ claddingChoices: store });
+                          }}
+                        />
+                        {D3_CLADDING[id].label}
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
               {adminCal.spec.roof.type === "gambrel" && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
