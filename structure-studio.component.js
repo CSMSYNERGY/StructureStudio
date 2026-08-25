@@ -8269,6 +8269,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // than resetting it to a slab.
       gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : p.spec.gableVent,
       foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : p.spec.foundation,
+      // Third top-level field, same trap: the renderer textures the roof from this before
+      // any customer roof-type pick, so a video that read "metal" and had it dropped here
+      // would show shingles on a metal building and look like the model got it wrong.
+      roofMaterial: (d3 && (d3.roofMaterial === "shingle" || d3.roofMaterial === "metal")) ? d3.roofMaterial : p.spec.roofMaterial,
     },
   }));
   const copyCalJson = () => {

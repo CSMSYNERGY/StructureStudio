@@ -309,3 +309,25 @@ Deno.test("a video reply that saw none of it leaves every new field unset", () =
   assert(!("gableVent" in (r.d3 as Record<string, unknown>)), "no vent seen must mean no vent set");
   assert(!("foundation" in (r.d3 as Record<string, unknown>)), "an unseen base must not default to slab");
 });
+
+Deno.test("roofMaterial and the appendages survive a video reply", () => {
+  // roofMaterial is the THIRD top-level field the draft merge dropped before anyone
+  // noticed — the renderer textures the roof from it, so losing it shows shingles on a
+  // metal building and reads as the model getting it wrong. Lean-to and dormer ride on
+  // `roof`, so the spread merge already carried them; this pins that they survive the
+  // SANITISER, which is the other place they could vanish.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.4, "leanToWidthFt": 8, "leanToDropFt": 1.5,
+              "leanToSide": "left", "dormerWidthFt": 4, "dormerRiseFt": 2, "dormerOffsetU": 0.5 },
+    "roofMaterial": "metal", "colors": {}, "wallHeightFt": 8
+  }`);
+  assert(r.ok, "the reply the prompt asks for must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roofMaterial, "metal");
+  assertEquals(r.d3.roof.leanToWidthFt, 8);
+  assertEquals(r.d3.roof.leanToSide, "left");
+  assertEquals(r.d3.roof.dormerWidthFt, 4);
+  const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(bare.ok, "minimal spec accepted");
+  if (bare.ok) assert(!("roofMaterial" in (bare.d3 as Record<string, unknown>)), "absent stays absent");
+});

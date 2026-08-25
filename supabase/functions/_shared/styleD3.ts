@@ -280,10 +280,17 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
     "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>,
     "eave": "open" | "fascia",
-    "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>
+    "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>,
+    "leanToWidthFt": <only if an open lean-to runs along one long side: how far it projects, in feet>,
+    "leanToDropFt": <how far the lean-to's outer edge sits below the main eave, in feet, typically 1-2>,
+    "leanToSide": "left" | "right",
+    "dormerWidthFt": <only if a dormer sits on a roof slope: its width in feet>,
+    "dormerRiseFt": <how far the dormer stands above the slope, in feet>,
+    "dormerOffsetU": <0..1: where along the slope it sits, 0.5 being halfway up>
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the wall width, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab",
+  "roofMaterial": "shingle" | "metal",
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
   "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6.5 ft, use it for scale>,
   "observed": {
@@ -309,6 +316,12 @@ WALL HEIGHT: the wall at the eave, not at the peak.
 EAVE FINISH, from a frame looking along a long side at the underside of the roof edge. There are two possibilities and they look nothing alike once you know to look: a continuous painted board running the whole length, level and unbroken, is "fascia"; a repeating row of raw unpainted wood blocks projecting below the roof with gaps of open air between them is "open" — exposed rafter tails, which give the bottom of the roof a sawtooth outline rather than a straight line. If it is "open", count the blocks along a run you can measure against the wall and give the spacing in inches — 24 is the common one, 16 the next. If you cannot see under the eave in any frame, omit both keys rather than guessing; omitting them means the fascia we already draw.
 
 GABLE VENT: a louvered opening set in the gable triangle, above the top of the wall. Give its width as a fraction of the WALL's width, not of the triangle. Omit the whole gableVent object if the gable ends carry no vent — that is common and is not a failure to see one.
+
+ROOF MATERIAL: asphalt shingles are laid in overlapping courses, so the slope carries a horizontal line every few inches and the surface looks granular. Metal is long continuous panels running UP the slope with raised ribs a foot or so apart, and it catches light in hard streaks rather than evenly. Judge it from the frame where the roof fills most of the picture; on an overcast day the giveaway is the direction of the lines — across the slope means shingle, up it means metal.
+
+LEAN-TO: an open roofed section running along one LONG side, its outer edge carried on posts rather than a wall — a porch or an equipment bay. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen by someone standing outside facing the doors.
+
+DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and where it sits along that slope as a fraction from eave to ridge. Omit all three keys if the roof is unbroken, which is the common case.
 
 FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
 
