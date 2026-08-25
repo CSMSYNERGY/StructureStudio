@@ -45,6 +45,16 @@ verify_jwt = false
 # monday.com posts here. Authenticated by a shared secret (FEEDBACK_SYNC_SECRET).
 verify_jwt = false
 
+[functions.email-inbound]
+# The inbound-email return leg: a customer's reply POSTs here server-to-server and cannot
+# carry a Supabase JWT, so verification stays OFF and auth is a shared secret in the URL
+# (?key= <-> EMAIL_INBOUND_SECRET) compared in constant time -- the postmark-events pattern.
+# Flip this to true and every customer reply silently stops reaching the CRM: the gateway
+# 401s the delivery BEFORE the function runs, so nothing is logged anywhere and the
+# conversation just quietly goes one-way again. That is exactly how billing-webhook broke
+# for months in 2026-07.
+verify_jwt = false
+
 [functions.postmark-events]
 # Postmark posts delivery/bounce/spam-complaint events here server-to-server. Authenticated
 # by a shared secret in the URL (?key= ⇄ POSTMARK_WEBHOOK_SECRET) compared in constant time —

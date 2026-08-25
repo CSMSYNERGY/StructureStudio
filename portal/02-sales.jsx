@@ -924,7 +924,9 @@ const CRM_CHIPS = [
   { key: "all", label: "All", types: null },
   { key: "activities", label: "Activities", types: ["activity"] },
   { key: "notes", label: "Notes", types: ["note"] },
-  { key: "emails", label: "Emails", types: ["email"] },
+  // Both directions under one chip. Carolyn: "I want to be able to see my emails and only
+  // emails in a quick and easy way" — a conversation split across two filters is not that.
+  { key: "emails", label: "Emails", types: ["email", "email_in"] },
   { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
@@ -1234,7 +1236,19 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   {/* A note renders as the highlighted card she liked; system events render
                       as plain text. That contrast is what makes a human entry findable in a
                       feed that is mostly machine output. */}
-                  {e.type === "note" ? (
+                  {e.type === "email_in" ? (
+                    /* A REPLY LOOKS LIKE THE CUSTOMER SPEAKING. Tinted, indented and
+                       attributed, so a human message is findable in a feed that is otherwise
+                       machine output — the same reason a note is a yellow card. Getting this
+                       wrong would bury the one thing in the conversation somebody wrote. */
+                    <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 6, padding: "7px 9px" }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#1D4ED8", marginBottom: 2 }}>
+                        ↩ {e.actor || "Customer"} replied
+                      </div>
+                      {e.title && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{e.title}</div>}
+                      {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", marginTop: 2 }}>{e.body}</div>}
+                    </div>
+                  ) : e.type === "note" ? (
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>
                   ) : (
                     <div>

@@ -39,7 +39,9 @@ export type FeedEvent = {
 export const CRM_FEED_TYPES = {
   activity: ["activity"],
   note: ["note"],
-  email: ["email"],
+  // Both directions under one chip: Carolyn asked to "see my emails and only emails in a
+  // quick and easy way", and a conversation split across two filters is not that.
+  email: ["email", "email_in"],
   // NO SMS TYPE, DELIBERATELY. An earlier version reserved one "so SMS drops in later".
   // Ahsan, 2026-08-25: "we are not using Twilio for conversation or campaigns. We are only
   // using Twilio to get the code to log in. That's it. For conversation, we are using
@@ -73,7 +75,7 @@ export async function buildCrmFeed(
 
   const q = <T>(p: Promise<T>) => p.then((r: any) => r?.data ?? []).catch(() => []);
 
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts] = await Promise.all([
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound] = await Promise.all([
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
     // Email is the conversation channel, so this read has to cover BOTH scopes: document
@@ -100,6 +102,19 @@ export async function buildCrmFeed(
     q(opts.contactId
       ? admin.from("crm_activities").select("id, kind, subject, due_at, done, done_at, created_at, short_code").eq("client_id", clientId).eq("contact_id", opts.contactId)
       : admin.from("crm_activities").select("id, kind, subject, due_at, done, done_at, created_at, short_code").eq("client_id", clientId).in("short_code", codes)),
+    // INBOUND — the customer's own words. Same both-scopes `or` as the outbound read: a
+    // reply threaded via In-Reply-To carries a short_code, one matched only by sender
+    // address carries just the contact.
+    (codes.length || opts.contactId)
+      ? q(admin.from("email_inbound")
+          .select("id, short_code, contact_id, from_email, from_name, subject, body_text, received_at")
+          .eq("client_id", clientId)
+          .or([
+            codes.length ? `short_code.in.(${codes.join(",")})` : null,
+            opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
+          ].filter(Boolean).join(","))
+          .order("received_at", { ascending: false }).limit(80))
+      : Promise.resolve([]),
   ]);
 
   for (const d of designs as any[]) {
@@ -159,6 +174,19 @@ export async function buildCrmFeed(
   }
   for (const n of notes as any[]) {
     push({ id: `n:${n.id}`, type: "note", at: iso(n.created_at), title: "Note", body: n.body, code: n.short_code, pinned: !!n.pinned, actor: n.created_by, icon: "note" });
+  }
+  // A REPLY IS A FIRST-CLASS EVENT, and it renders as the customer's own words. `email_in`
+  // rather than `email` so the chip can show a conversation both ways while the Emails
+  // filter still catches it -- see CRM_FEED_TYPES.email.
+  for (const r of inbound as any[]) {
+    push({
+      id: `in:${r.id}`, type: "email_in", at: iso(r.received_at),
+      title: r.subject || "(no subject)",
+      body: r.body_text || null,
+      actor: r.from_name || r.from_email,
+      code: r.short_code, icon: "email_in",
+      meta: { from: r.from_email, inbound: true },
+    });
   }
   for (const a of acts as any[]) {
     push({ id: `a:${a.id}`, type: "activity", at: iso(a.done ? (a.done_at || a.created_at) : a.created_at), title: `${labelActivity(a.kind)}: ${a.subject}`, body: a.done ? "Completed" : (a.due_at ? `Due ${a.due_at}` : "No due date"), code: a.short_code, meta: { kind: a.kind, done: !!a.done, dueAt: a.due_at, id: a.id }, icon: a.kind });
