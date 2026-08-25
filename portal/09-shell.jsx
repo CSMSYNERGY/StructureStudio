@@ -648,13 +648,10 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
-          {/* 3D is gated the same way every paid add-on is: featureOn reads
-              entitlement.features, which portal-billing now computes from a THREE-branch
-              map. view_3d is `grantable`, so it is deliberately NOT covered by the
-              exempt/transition blankets - an operator grant (or a real subscription) is
-              the only way in, which is what "not all clients need to see it" requires.
-              Operators are never gated by featureOn, so CSM Synergy always sees it. */}
-          {view3dUnlocked ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
+          {/* 3D Design has no nav entry any more (Carolyn 2026-08-25): it is live inside
+              the Designer (view3d prop) and calibration lives in Settings → Designer, so
+              the standalone tab came off the rail. The /portal/view-3d route and its
+              render block stay so old deep links still land somewhere sensible. */}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
