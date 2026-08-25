@@ -1945,7 +1945,11 @@ const D3_CLADDING = {
   lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
   agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
-  batten:  { id: "batten",  label: "Board & Batten", tex: "groove",  relief: "batten", stepFt: 1.5,  tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
+  // reliefTrim: the proud strip takes TRIM colour, not body. Carolyn, 2026-08-24: board and
+  // batten is "boards further apart and it has like a piece of TRIM over the top of it".
+  // It is a flag rather than a string compare on id so a future cladding can opt in.
+  // `rib` deliberately does NOT: a metal rib is the same sheet of steel, not a second board.
+  batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40, reliefTrim: true },
 };
 // The customer-selectable set, in the order Carolyn named them on 2026-08-24: "panel
 // siding, lap siding, board and batten, and metal". `batten` joined the list that day --
@@ -2106,7 +2110,7 @@ function d3CssColor(v, fallback) {
 // stays white-based) and a BUMP canvas (grayscale relief) at 512px, with a
 // seeded PRNG so the variegation is identical every session — a quote PDF
 // captured today must match one captured tomorrow.
-const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel"]);
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "bnb"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -2219,6 +2223,33 @@ function _d3RasterKind(kind) {
       const bg = b.createLinearGradient(0, y, 0, y + board);                  // board tilt
       bg.addColorStop(0, "#9a9a9a"); bg.addColorStop(0.9, "#6f6f6f"); bg.addColorStop(1, "#2f2f2f");
       b.fillStyle = bg; b.fillRect(0, y, N, board);
+    }
+  } else if (kind === "bnb") {
+    // Board & batten: wide plain boards with a butt seam every half-tile, and NO grooves.
+    //
+    // batten used to reuse the T1-11 "groove" raster, which cuts a groove every ~8 inches
+    // while the proud battens step every 18 -- two patterns at incommensurable spacings on
+    // the same wall. That mismatch is why it never read as board & batten no matter how the
+    // relief was tuned: 4.0 and 1.5 share no common multiple, so a drawn groove landed under
+    // a batten roughly once every twelve feet and looked like a mistake everywhere else.
+    //
+    // Two seams per 512px tile at tileFtU 3.0 puts one every 1.5 ft -- exactly where the
+    // relief loop places a batten -- so the drawn seam and the physical strip coincide BY
+    // CONSTRUCTION rather than by tuning.
+    const seam = N / 2;
+    for (let x = 0; x < N; x += seam) {                // per-board tone
+      const v = 0.94 + rng() * 0.10;
+      const gray = Math.round(246 * Math.min(1.02, v));
+      g.fillStyle = `rgb(${gray},${gray},${gray})`;
+      g.fillRect(x, 0, seam, N);
+    }
+    for (let i = 0; i < 26; i++) {                     // faint vertical grain
+      g.fillStyle = `rgba(0,0,0,${0.012 + rng() * 0.022})`;
+      g.fillRect(rng() * N, 0, 1 + rng() * 2, N);
+    }
+    for (let x = 0; x < N; x += seam) {                // the butt seam the batten covers
+      g.fillStyle = "rgba(0,0,0,0.28)"; g.fillRect(x, 0, 2, N);
+      b.fillStyle = "#5c5c5c"; b.fillRect(x, 0, 2, N);
     }
   } else {
     // "groove" — vertical T1-11 style panel: grooves with soft shoulders + grain.
@@ -2490,6 +2521,12 @@ function buildShed3DModel(THREE, p) {
   const mat = (color, extra) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.0, ...(extra || {}) });
   const wallMat = mat(bodyColor);
   const trimMat = mat(trimColor);
+  // Battens are trim-coloured but need their OWN material, not trimMat. trimMat's other
+  // users -- corner posts, fascia, rake boards -- all live in roofGroup, which "look
+  // inside" hides wholesale, so trimMat has never needed a ghost path. Battens live in
+  // wallsGroup and must ghost WITH the walls; teaching trimMat to ghost instead would also
+  // ghost every opening casing, which is a visible change nobody asked for.
+  const battenMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
   // Catalog fixture photos. Resolved LIVE from the catalog by fixtureItemId
   // rather than stamped on the item at placement (unlike price/name, which must
@@ -2610,6 +2647,31 @@ function buildShed3DModel(THREE, p) {
     return b;
   };
 
+  // WORLD-FEET UVs for a roof slab -- and the fix for a defect that shipped with the very
+  // first textured roof, because this was the ONE textured surface with no UV rewrite.
+  //
+  // A slab is box(w = along the SLOPE, h = thickness, d = along the RIDGE), and stock
+  // BoxGeometry maps its top face u -> local x and v -> local z. So u ran DOWN THE SLOPE
+  // and v ran ALONG THE RIDGE, while both rasters are drawn on exactly the opposite
+  // assumption:
+  //   * metal draws its standing seams at constant canvas-x, i.e. constant u -- so the
+  //     seams came out running ALONG THE EAVE. Real standing seam runs eave-to-ridge.
+  //   * shingle draws its course shadows at constant canvas-y, i.e. constant v -- so the
+  //     courses came out running UP THE SLOPE. Real courses run along the eave.
+  // Each is wrong in the opposite direction, so ONE axis swap fixes both. Carolyn's note
+  // about the walls -- "metal runs up and down, not this way" (2026-08-24) -- was the same
+  // defect on a smaller surface; the walls were already right, the roof never was.
+  //
+  // u = feet along the ridge, v = feet down the slope, the same unit wallBox uses, so the
+  // repeat numbers beside it read as real dimensions instead of tile counts. Phase is
+  // arbitrary here (nothing on a roof has to line up with a wall origin), so the box's own
+  // centred coordinates go straight in.
+  const d3RoofSlabUVs = (slab) => {
+    const uvA = slab.geometry.attributes.uv, posA = slab.geometry.attributes.position;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getZ(i), posA.getX(i));
+    uvA.needsUpdate = true;
+  };
+
   // Opening vertical extent: item-stamped fields first (Phase 5 — placed items
   // carry openingHeightFt/sillFt), D3 defaults for legacy designs.
   // Catalog fixtures carry their real size as widthIn/heightIn instead of the
@@ -2692,8 +2754,9 @@ function buildShed3DModel(THREE, p) {
           const bs = clad.stepFt;
           const halfW = clad.relief === "rib" ? 0.05 : 0.07;
           const depth = clad.relief === "rib" ? 0.05 : 0.1;
+          const reliefMat = clad.reliefTrim ? battenMat : wallMat;
           for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
-            wg.add(wallBox(wallMat, wf, a - halfW, a + halfW, 0, H, T / 2 + 0.03, depth));
+            wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, 0, H, T / 2 + 0.03, depth));
           }
         } else {
           for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
@@ -2898,8 +2961,68 @@ function buildShed3DModel(THREE, p) {
   // fixes, with a false green light.
   const gableMat = mat(bodyColor);
   const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false });
+  // U-PHASE. ExtrudeGeometry's WorldUVGenerator gives the caps UVs in profile-space feet,
+  // which is the same unit wallBox uses -- but a DIFFERENT ORIGIN. The wall's u runs 0..S
+  // from the wall origin; the cap's runs -S/2..+S/2 from the building centre. So the two
+  // are out of phase by exactly S/2 unless the half-span happens to be a whole number of
+  // tiles. On a 14 ft wall at tileFtU 3.0 that is a third of a tile: every groove, rib and
+  // seam visibly jogs sideways as it crosses the plate line. Shifting u by S/2 lines them
+  // up. v needs no shift -- both conventions already measure height from y = 0, which is
+  // why the horizontal lap courses were the one pattern that always matched.
+  {
+    const guv = gableGeom.attributes.uv;
+    if (guv) {
+      for (let i = 0; i < guv.count; i++) guv.setX(i, guv.getX(i) + S / 2);
+      guv.needsUpdate = true;
+    }
+  }
   rg.add(new THREE.Mesh(gableGeom,
     (gableGeom.groups && gableGeom.groups.length === 2) ? [wallMat, gableMat] : gableMat));
+
+  // Height of the roof profile at a given profile-u. The profile is just the dedup'd top
+  // polyline, so one piecewise-linear walk serves gable, gambrel and shed alike.
+  const profYAt = (u) => {
+    for (let i = 0; i + 1 < dedup.length; i++) {
+      const A = dedup[i], B = dedup[i + 1];
+      const lo = Math.min(A[0], B[0]), hi = Math.max(A[0], B[0]);
+      if (u < lo - 1e-6 || u > hi + 1e-6) continue;
+      if (Math.abs(B[0] - A[0]) < 1e-6) return Math.max(A[1], B[1]);
+      return A[1] + ((u - A[0]) / (B[0] - A[0])) * (B[1] - A[1]);
+    }
+    return H;
+  };
+
+  // PROUD RELIEF DOES NOT STOP AT THE PLATE LINE.
+  //
+  // The clad.relief loop lives inside buildOneWall and runs nowhere else, so on a batten or
+  // metal style the PHYSICAL vertical strips stopped dead at the wall plate while the flat
+  // texture on the cap carried on above them. From any three-quarter view that reads exactly
+  // as "the siding doesn't go straight up" -- which is what Carolyn has now said three times
+  // (2026-08-18, and again 2026-08-24: "this going up, it has to go straight up"). Giving
+  // the cap the wall texture, which is what the 08-18 fix did, was necessary and not
+  // sufficient: the texture matched and the geometry still stopped.
+  //
+  // Strips are placed at u = k*stepFt - S/2 so they stay IN PHASE with the wall strips
+  // below, which step from the wall origin -- the same S/2 that just fixed the texture.
+  // Each is clipped to the profile above it, so it stops on the roof line instead of poking
+  // through the slab. They live in rg, so "look inside" hides them with the roof, exactly
+  // like the cap they sit on.
+  if (clad.relief === "batten" || clad.relief === "rib") {
+    const bs = clad.stepFt;
+    const halfW = clad.relief === "rib" ? 0.05 : 0.07;
+    const depth = clad.relief === "rib" ? 0.05 : 0.1;
+    const reliefMat = clad.reliefTrim ? battenMat : wallMat;
+    for (let k = 1; k * bs < S; k++) {
+      const u = k * bs - S / 2;
+      const yTop = profYAt(u);
+      if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
+      [-(depth / 2) - 0.02, L + (depth / 2) + 0.02].forEach((z) => {
+        const st = box(reliefMat, halfW * 2, yTop - H, depth);
+        st.position.set(u, (H + yTop) / 2, z);
+        rg.add(st);
+      });
+    }
+  }
   // Roof texture: metal standing-seam vs shingle courses. The customer's
   // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
   // fills in before any pick — a bare flat-color slab was the single biggest
@@ -2908,9 +3031,25 @@ function buildShed3DModel(THREE, p) {
   const roofKind = p.roofType === "Metal" ? "metal"
     : p.roofType === "Shingle" ? "shingle"
     : (p.styleSpec && (p.styleSpec.roofMaterial === "metal" || p.styleSpec.roofMaterial === "shingle") ? p.styleSpec.roofMaterial : "shingle");
+  // Roof tile size in FEET, as (along the ridge, down the slope), paired with the
+  // world-feet UV rewrite on each slab. A `repeat` without that rewrite anchors nothing --
+  // the same lesson the walls learned in the 2026-08-19 audit, where a repeat whose comment
+  // claimed world anchoring was in fact dividing each face's own 0..1 span.
+  //
+  // metal: the raster lays 4 standing-seam pans across one 512px tile, so 6 ft along the
+  //   ridge puts a seam every 18 inches -- a real pan width. It is uniform down the pan,
+  //   so the second number only bounds anisotropy.
+  // shingle: 6 tabs across and 8 courses down per tile, so 6 x 4 ft gives 12-inch tabs and
+  //   a 6-inch course exposure.
+  //
+  // The old expression was Math.round(S / 1.5) into the u slot -- a tile COUNT derived from
+  // the profile span, fed to an axis that was itself the wrong one. On a 12 ft half-span
+  // that packed about 9 tiles x 4 pans into the slope: a line every 2.4 inches. Corduroy.
+  const roofTileU = 6.0;                               // along the ridge
+  const roofTileV = roofKind === "metal" ? 8.0 : 4.0;  // down the slope
   const roofTex = d3MakeTexture(THREE, roofKind);
   if (roofTex) {
-    roofTex.repeat.set(Math.max(2, Math.round(S / (roofKind === "metal" ? 1.5 : 2.5))), Math.max(2, Math.round(L / 2.5)));
+    roofTex.repeat.set(1 / roofTileU, 1 / roofTileV);
     roofMat.map = roofTex; roofMat.needsUpdate = true;
     const roofBump = d3MakeBumpTexture(THREE, roofKind);
     if (roofBump) { roofBump.repeat.copy(roofTex.repeat); roofMat.bumpMap = roofBump; roofMat.bumpScale = roofKind === "metal" ? 0.5 : 0.35; }
@@ -2960,6 +3099,7 @@ function buildShed3DModel(THREE, p) {
     const extA = jointExt(A, -ux, -uy);      // the slab extends beyond A along -u
     const extB = jointExt(B, ux, uy);
     const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, L + OV * 2);
+    d3RoofSlabUVs(slab);
     slab.rotation.z = Math.atan2(dy, du);
     const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
     slab.position.set(
@@ -3031,7 +3171,11 @@ function buildShed3DModel(THREE, p) {
     if (roofCfg.type !== "shed" && highEnd[1] >= profPeak - 0.01) {
       const towardHigh = highEnd === A ? -1 : 1;
       const CAPW = 0.55;
+      // Same rewrite as the slabs: a standing-seam ridge cap really does carry its seams
+      // across it, and without this the cap keeps stock 0..1 UVs and reads as flat colour
+      // beside a correctly tiled roof.
       const capBoard = box(roofMat, CAPW, 0.06, L + OV * 2);
+      d3RoofSlabUVs(capBoard);
       capBoard.rotation.z = Math.atan2(dy, du);
       capBoard.position.set(
         highEnd[0] - towardHigh * ux * (CAPW / 2 - 0.06) + nx * (D3.ROOF_T + 0.05),
@@ -3084,16 +3228,22 @@ function buildShed3DModel(THREE, p) {
       }
       return hi > lo ? [lo, hi] : null;
     };
-    const vCy = H + (profPeak - H) * 0.5;                // centred in the gable triangle
+    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
+    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
+    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
+    // shrink by a third to clear the rakes while the same vent on a sill fits at full
+    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
+    const VENT_SILL = 2 / 12;
     let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
     let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    // Shrink to fit. The TOP corners are the tight point, and two passes converge because
+    let vCy = H + VENT_SILL + vH / 2;
+    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
     // a narrower vent is also shorter and therefore has more room above it.
     for (let k = 0; k < 3; k++) {
       const sp = profSpanAt(vCy + vH / 2);
       const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
       if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
     }
     const spC = profSpanAt(vCy);
     const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
@@ -3239,8 +3389,8 @@ function buildShed3DModel(THREE, p) {
   // trim materials that per-wall disposal must keep (their maps ride along, so
   // the siding texture survives too). builtFrontWall lets the flush detect a
   // FRONT flip, which needs the full path (roof + ground labels re-home).
-  const sharedMats = new Set([wallMat, trimMat]);
-  const model = { root, envGroup, wallMat, trimMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
+  const sharedMats = new Set([wallMat, trimMat, battenMat]);
+  const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -3527,6 +3677,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           e.model.gableMat.depthWrite = !e.interior;
           e.model.gableMat.needsUpdate = true;
         }
+        if (e.model.battenMat) {
+          // Board & batten's proud strips sit ON the walls in wallsGroup, so without this
+          // "look inside" leaves a cage of opaque battens floating over a ghosted building.
+          e.model.battenMat.transparent = !!e.interior;
+          e.model.battenMat.opacity = e.interior ? 0.14 : 1;
+          e.model.battenMat.depthWrite = !e.interior;
+          e.model.battenMat.needsUpdate = true;
+        }
         // Every caller changed what casts or shows shadow (rebuild flush, roof
         // toggle, look-inside) - re-render the cached shadow map next frame.
         e.renderer.shadowMap.needsUpdate = true;
@@ -3675,6 +3833,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         e.model.wallMat.color.set(liveBodyCss);
         if (e.model.gableMat) e.model.gableMat.color.set(liveBodyCss);
         e.model.trimMat.color.set(liveTrimCss);
+        // Battens are trim-coloured, and they are a separate material, so they need the
+        // write too -- otherwise picking a trim swatch recolours everything except the one
+        // detail that makes board & batten legible.
+        if (e.model.battenMat) e.model.battenMat.color.set(liveTrimCss);
         render();
       };
       // ── 3D placement pipeline (every item class, §10.4) ──
