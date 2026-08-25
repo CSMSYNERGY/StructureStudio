@@ -8260,6 +8260,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ...p.spec,
       roof: { ...p.spec.roof, ...((d3 && d3.roof) || {}) },
       wallHeightFt: (d3 && d3.wallHeightFt) || p.spec.wallHeightFt,
+      // gableVent and foundation are TOP-LEVEL, so a `roof`-only merge silently drops
+      // them and the video draft looks like it read nothing about vents or skids. Each
+      // keeps its existing value when the model omits the key, so "the frames never
+      // showed the bottom of the building" leaves the builder's setting alone rather
+      // than resetting it to a slab.
+      gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : p.spec.gableVent,
+      foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : p.spec.foundation,
     },
   }));
   const copyCalJson = () => {

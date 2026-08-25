@@ -272,3 +272,40 @@ Deno.test("foundation round-trips skids/slab, is omitted when absent, drops junk
     if (r.ok) assert(!("foundation" in (r.d3 as Record<string, unknown>)), `${JSON.stringify(junk)} must not persist`);
   }
 });
+
+Deno.test("a full video reply carries the eave, vent and foundation through the sanitiser", () => {
+  // The end-to-end shape of what VIDEO_SHAPE_PROMPT now asks for. If a future prompt edit
+  // renames one of these keys, this fails here rather than silently producing drafts that
+  // look right and set nothing — which is exactly what the prompt did before 2026-08-25,
+  // when it predated all four fields.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.42, "overhang": 1.0, "eave": "open", "tailSpacingIn": 24 },
+    "gableVent": { "widthFrac": 0.25 },
+    "foundation": "skids",
+    "colors": { "body": "#CDB794", "trim": "#BBB29C", "roof": "#46443F" },
+    "wallHeightFt": 7,
+    "observed": { "confidence": "high" }
+  }`);
+  assert(r.ok, "the reply the prompt asks for must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.eave, "open");
+  assertEquals(r.d3.roof.tailSpacingIn, 24);
+  assertEquals(r.d3.gableVent, { widthFrac: 0.25 });
+  assertEquals(r.d3.foundation, "skids");
+});
+
+Deno.test("a video reply that saw none of it leaves every new field unset", () => {
+  // "I could not see under the eave" and "there is no vent" must both come back as
+  // ABSENCE, so the client merge keeps whatever the builder already had.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.42, "overhang": 1.0 },
+    "colors": {}, "wallHeightFt": 7,
+    "observed": { "eave": "unclear", "vents": "none", "confidence": "low" }
+  }`);
+  assert(r.ok, "a partial read is still a valid spec");
+  if (!r.ok) return;
+  assert(!("eave" in r.d3.roof), "an unreadable eave must not default to fascia in the spec");
+  assert(!("tailSpacingIn" in r.d3.roof), "spacing is meaningless without an open eave");
+  assert(!("gableVent" in (r.d3 as Record<string, unknown>)), "no vent seen must mean no vent set");
+  assert(!("foundation" in (r.d3 as Record<string, unknown>)), "an unseen base must not default to slab");
+});

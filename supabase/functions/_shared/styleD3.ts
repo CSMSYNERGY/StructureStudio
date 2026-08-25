@@ -278,8 +278,12 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "overhang": <feet the roof projects past the wall, typically 0.3-1.5>,
     "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
-    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>
+    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>,
+    "eave": "open" | "fascia",
+    "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>
   },
+  "gableVent": { "widthFrac": <vent width as a fraction of the wall width, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
+  "foundation": "skids" | "slab",
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
   "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6.5 ft, use it for scale>,
   "observed": {
@@ -301,6 +305,12 @@ PITCH: find a frame looking straight at a gable end and read the slope of the ro
 OVERHANG: how far the roof edge stands out past the wall below it, in feet, judged against a door for scale. Some styles are sold on a deliberately wide eave, so this number carries the look — do not default it to a middle value if the frames show a wide one.
 
 WALL HEIGHT: the wall at the eave, not at the peak.
+
+EAVE FINISH, from a frame looking along a long side at the underside of the roof edge. There are two possibilities and they look nothing alike once you know to look: a continuous painted board running the whole length, level and unbroken, is "fascia"; a repeating row of raw unpainted wood blocks projecting below the roof with gaps of open air between them is "open" — exposed rafter tails, which give the bottom of the roof a sawtooth outline rather than a straight line. If it is "open", count the blocks along a run you can measure against the wall and give the spacing in inches — 24 is the common one, 16 the next. If you cannot see under the eave in any frame, omit both keys rather than guessing; omitting them means the fascia we already draw.
+
+GABLE VENT: a louvered opening set in the gable triangle, above the top of the wall. Give its width as a fraction of the WALL's width, not of the triangle. Omit the whole gableVent object if the gable ends carry no vent — that is common and is not a failure to see one.
+
+FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
 
 Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
 
