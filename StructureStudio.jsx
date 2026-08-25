@@ -2061,7 +2061,34 @@ const D3_SWATCHES = [
   { label: "Green", css: "#4F6F52" },
   { label: "Brown", css: "#6B4F3A" },
 ];
-function d3SwatchCss(label, fallback) {
+// The tenant's own catalog rows for a paint slot, in the {label, css} shape both the 3D
+// swatch row and d3SwatchCss speak. `allowCustom` rows are excluded: that row is a
+// "type your own" affordance rather than a colour, and it carries no hex, so it would
+// render as a dead grey chip.
+function d3PaintPool(colors, kind) {
+  return (Array.isArray(colors) ? colors : [])
+    .filter((c) => c && c.hex && !c.allowCustom && (kind === "trim" ? c.trim : c.siding))
+    .map((c) => ({ label: c.label, css: c.hex }));
+}
+
+// `pool` is the tenant's catalog (see d3PaintPool) and wins when it has the label.
+// Optional and last-resort-free by design: omit it and this behaves exactly as it always
+// has, so every existing call site is unchanged.
+//
+// Why it exists: the 2D picker has always read C.colors, while 3D read a hardcoded nine.
+// A customer picking "Mountain Red" in 2D got d3CssColor()'s CSS-NAME GUESS in 3D --
+// new Option().style parsing a colour name that is not a CSS colour -- so the two views
+// of the same building disagreed. The D3_SWATCHES fallback stays underneath for labels
+// the catalog does not carry, which is what keeps an already-saved design rendering after
+// its tenant deletes a colour (save_colors is a full-list replace, so that happens).
+function d3SwatchCss(label, fallback, pool) {
+  if (Array.isArray(pool)) {
+    const hit = pool.find((x) => x.label === label);
+    if (hit && hit.css) return hit.css;
+  }
+  return d3SwatchCssBuiltIn(label, fallback);
+}
+function d3SwatchCssBuiltIn(label, fallback) {
   const s = D3_SWATCHES.find((x) => x.label === label);
   return s ? s.css : d3CssColor(label, fallback);
 }
@@ -3455,7 +3482,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -3558,8 +3585,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // Live paint colors — swatch picks update these and recolor materials in
       // place; drag rebuilds read the same vars so colors survive rebuilds.
       // Unpainted falls back to the STYLE's natural material colors.
-      let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
-      let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
+      let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body, bodyColors) : (spec.colors.body || D3_COLORS.body);
+      let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim, trimColors) : (spec.colors.trim || D3_COLORS.trim);
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
       const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures }));
       scene.add(model.root);
@@ -3823,8 +3850,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // Swatch picks recolor the live materials in place — no rebuild needed.
       // Clearing paint returns to the style's natural material colors.
       const setLiveColors = (bodyLabel, trimLabel) => {
-        liveBodyCss = bodyLabel ? d3SwatchCss(bodyLabel, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
-        liveTrimCss = trimLabel ? d3SwatchCss(trimLabel, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
+        liveBodyCss = bodyLabel ? d3SwatchCss(bodyLabel, D3_COLORS.body, bodyColors) : (spec.colors.body || D3_COLORS.body);
+        liveTrimCss = trimLabel ? d3SwatchCss(trimLabel, D3_COLORS.trim, trimColors) : (spec.colors.trim || D3_COLORS.trim);
         const e = engineRef.current;
         if (!e) return;
         e.model.wallMat.color.set(liveBodyCss);
@@ -4503,15 +4530,24 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         {/* Paint colors: labels land in paintColors (and the estimate); swatch hex drives the 3D */}
         {paintEnabled && (
           <div style={{ display: "flex", gap: 14, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-            {["body", "trim"].map((kind) => (
+            {["body", "trim"].map((kind) => {
+              // The tenant's catalog if they have one for this slot, otherwise the built-in
+              // nine. NOT hidden-when-empty: junior-barns -- the demo tenant -- has no named
+              // colours at all (migration 009 says so), so hiding would strip a working
+              // control off the expo demo to make a point about consistency. Falling back
+              // leaves every existing tenant exactly as they are and upgrades the ones who
+              // have actually built a palette.
+              const sw = (kind === "trim" ? trimColors : bodyColors);
+              const pool = (sw && sw.length) ? sw : D3_SWATCHES;
+              return (
               <div key={kind} style={{ display: "flex", gap: 5, alignItems: "center" }}>
                 <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>{kind}</span>
-                {D3_SWATCHES.map((s) => (
+                {pool.map((s) => (
                   <button key={s.label} title={s.label} onClick={() => pickColor(kind, s.label)} disabled={phase !== "ready"}
                     style={{ width: 20, height: 20, borderRadius: 99, background: s.css, cursor: "pointer", padding: 0, border: paintSel[kind] === s.label ? "2px solid #FBBF24" : "1px solid #334155" }} />
                 ))}
               </div>
-            ))}
+            );})}
             <button onClick={() => pickColor("none")} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#94A3B8", border: "1px solid #334155", borderRadius: 7, padding: "4px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✕ No paint</button>
           </div>
         )}
@@ -4611,7 +4647,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -4656,8 +4692,8 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       scene.background = new THREE.Color("#E7EEF5");
 
       const specOf = (p) => p.style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
-      const bodyOf = (p) => (p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body) : (specOf(p).colors.body || D3_COLORS.body));
-      const trimOf = (p) => (p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim) : (specOf(p).colors.trim || D3_COLORS.trim));
+      const bodyOf = (p) => (p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body, p.bodyColors) : (specOf(p).colors.body || D3_COLORS.body));
+      const trimOf = (p) => (p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim, p.trimColors) : (specOf(p).colors.trim || D3_COLORS.trim));
       const roofOf = (p) => p.roofColorHex || specOf(p).colors.roof || D3_COLORS.roof;
       const buildArgs = (p, fw) => {
         const spec = specOf(p);
@@ -5371,6 +5407,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the default stamps on included-chip / 3D placements.
   const doorPaintColors = useMemo(() => (Array.isArray(C.colors) ? C.colors : []).filter((c) => c && c.door), [C.colors]);
   const windowColorList = useMemo(() => (Array.isArray(C.windowColors) ? C.windowColors : []), [C.windowColors]);
+  // Memoized, not inline at the mount: the docked 3D panel keeps props alive across
+  // rebuilds, and handing it a fresh array identity on every keystroke is how a cheap
+  // prop turns into a churning one.
+  const bodyPaintPool = useMemo(() => d3PaintPool(C.colors, "body"), [C.colors]);
+  const trimPaintPool = useMemo(() => d3PaintPool(C.colors, "trim"), [C.colors]);
   // Ramp is self-contained now (SIMPLE_RAMP_CFG), driven by the Ramp settings — NOT the built-in
   // `ramp` layout item. Custom mode → the ramp picker (catalog styles); simple mode + offered → the
   // simple ramp tool; otherwise render-only (old ramps still draw, but no new placement).
@@ -9307,14 +9348,43 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
               )}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
-                {["body", "trim", "roof"].map((k) => (
+                {/* Carolyn, 2026-08-24: "this body color and trim color and roof color needs to
+                    go with the colors that are in THEIR database ... it's going to be so much
+                    easier for them."
+
+                    The hex box STAYS. These three are the UNPAINTED natural-material colours
+                    -- bare wood, galvalume -- which are deliberately not paint-catalog rows,
+                    and styleD3.ts enforces hex-only on the column. The picker is sugar over
+                    the same input: choosing a catalog colour writes its hex into the field, so
+                    there is no server change, no migration and no new save action. A builder
+                    who wants a colour that is not in their catalog can still type one.
+
+                    Roof pulls from shingle OR metal rows because the unpainted roof colour is
+                    a roofing product, not a paint. */}
+                {["body", "trim", "roof"].map((k) => {
+                  const pool = (Array.isArray(C.colors) ? C.colors : []).filter((c) =>
+                    (k === "body" ? c.siding : k === "trim" ? c.trim : (c.shingle || c.metal)) && c.hex && !c.allowCustom);
+                  return (
                   <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
                     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                       <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                       <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
                     </div>
+                    {/* Hidden rather than shown-empty when the tenant has no colours of this
+                        kind on file: an empty picker beside a working text box reads as broken. */}
+                    {pool.length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => { if (e.target.value) calSetColor(k, e.target.value); }}
+                        title="Pick from your colour catalog"
+                        style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginTop: 4, fontWeight: 400 }}
+                      >
+                        <option value="">Pick from your colours…</option>
+                        {pool.map((c) => <option key={c.label} value={c.hex}>{c.label}</option>)}
+                      </select>
+                    )}
                   </label>
-                ))}
+                );})}
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
                 {photoLabels.map((side, i) => (
@@ -9401,7 +9471,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           painted={false} paintBody="" paintTrim=""
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
-          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
@@ -9465,7 +9535,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     painted={false} paintBody="" paintTrim=""
                     roofType="" roofColorHex=""
                     frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-                    fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+                    fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
                     /* Nothing drags on this surface, and no canEdit: there is no plan to edit
                        here, so the panel's "⛶ Edit in 3D" footer never renders. */
                     suspended={false}
@@ -10364,7 +10434,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
-              fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+              fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
               suspended={Boolean(dragging || resizing)}
               canEdit={!planLocked}
               onEdit={() => { setDock3D(false); setShow3D(true); }}
@@ -11081,7 +11151,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
-          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
