@@ -1314,12 +1314,52 @@ function textOnAccent(hex) {
 // Progressive US phone formatter: "8163003600" -> "(816) 300-3600".
 // Caps at 10 digits; partial inputs format as "(816", "(816) 30", etc.
 // Display only — strip back to digits before sending to GHL.
+// Display formatter for the customer's phone field. Also the onChange transform, so
+// whatever this returns is what gets STORED in designs.contact and read by every
+// downstream matcher.
+//
+// 🚨 IT USED TO DESTROY DATA. The old body opened with:
+//
+//     const d = (v || "").replace(/\D/g, "").slice(0, 10);
+//
+// On an eleven-digit number typed with its country code, `slice(0, 10)` keeps the
+// leading 1 as the start of the area code and THROWS THE LAST DIGIT AWAY:
+//
+//     "+1 707 362 5667"  ->  digits 17073625667  ->  sliced 1707362566  ->  "(170) 736-2566"
+//
+// The number is not merely formatted oddly, it is unrecoverable — the final digit exists
+// nowhere in the row afterwards. Two live contacts were found in this state on 2026-08-25
+// when migration 130's backfill grouped designs by phone and the same person appeared
+// twice, once under each spelling. Any note or activity written against a contact would
+// have landed on whichever of their two rows they happened to create that day.
+//
+// The rules below are ported from `formatPhone` in the portal, which has always been
+// correct. They are duplicated rather than shared because the portal and the designer are
+// separate bundles with no common scope; if a third caller ever appears, that is the point
+// to lift this into a shared module rather than copy it again.
+//
+// The load-bearing change is that there is NO TRUNCATION anywhere. Anything this cannot
+// confidently format is returned untouched, because passing a number through unstyled is
+// recoverable and silently shortening one is not.
 function formatPhoneDisplay(v) {
-  const d = (v || "").replace(/\D/g, "").slice(0, 10);
-  if (d.length === 0) return "";
-  if (d.length <= 3) return `(${d}`;
-  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
-  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  const raw = String(v == null ? "" : v);
+  const t = raw.trim();
+  // An explicit non-US country code: leave it completely alone. A US mask applied to a UK
+  // or Mexican number produces something that looks valid and is not.
+  if (/^\+/.test(t) && !/^\+\s*1\b/.test(t) && !/^\+\s*1\d/.test(t)) return raw;
+  const plus1Typed = /^\+\s*1/.test(t);
+  let d = raw.replace(/\D/g, "");
+  let cc = false;
+  if (plus1Typed && d[0] === "1") { d = d.slice(1); cc = true; }
+  else if (d.length === 11 && d[0] === "1") { d = d.slice(1); cc = true; }
+  // Still too long after removing a country code — an extension, a typo, or a format we do
+  // not know. Hand it back verbatim. This is the line the old version did not have.
+  if (d.length > 10) return raw;
+  const p = cc ? "+1 " : "";
+  if (!d) return cc ? "+1 " : "";
+  if (d.length <= 3) return p + d;
+  if (d.length <= 6) return `${p}(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `${p}(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
 }
 
 // Lazy-load Google Maps JS API via the official inline bootstrap loader. Resolves
