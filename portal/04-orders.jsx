@@ -1394,12 +1394,17 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) 
   const eff = draft || cur;
 
   // Palette slices for the dropdowns. A stored value missing from today's palette still
-  // renders (as "(current)") — a renamed color must not silently rewrite a signed order.
+  // renders — a renamed color must not silently rewrite a signed order. An EMPTY stored
+  // value gets an explicit "(not chosen)" option: without one the browser displays the
+  // first option while the select's value stays "", and what the rep sees isn't what
+  // would be staged.
   const colorOpts = (flag, current) => {
     const opts = colors.filter((c) => c[flag] === true && !c.allow_custom).map((c) => c.label);
     if (current && !opts.some((l) => l.toLowerCase() === current.toLowerCase())) opts.unshift(current);
+    if (!current) opts.unshift("");
     return opts;
   };
+  const optLabel = (l) => (l === "" ? "(not chosen)" : l);
   const roofTypes = [["Shingle", colors.some((c) => c.shingle === true)], ["Metal", colors.some((c) => c.metal === true)]]
     .filter(([, ok]) => ok).map(([t]) => t);
 
@@ -1546,11 +1551,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) 
                     <>
                       <span style={{ fontSize: 11.5, color: "#64748B" }}>Body</span>
                       <select style={selStyle} value={eff.paintBody} onChange={(e) => change("paintBody", e.target.value)}>
-                        {colorOpts("siding", eff.paintBody).map((l) => <option key={l} value={l}>{l}</option>)}
+                        {colorOpts("siding", eff.paintBody).map((l) => <option key={l} value={l}>{optLabel(l)}</option>)}
                       </select>
                       <span style={{ fontSize: 11.5, color: "#64748B" }}>Trim</span>
                       <select style={selStyle} value={eff.paintTrim} onChange={(e) => change("paintTrim", e.target.value)}>
-                        {colorOpts("trim", eff.paintTrim).map((l) => <option key={l} value={l}>{l}</option>)}
+                        {colorOpts("trim", eff.paintTrim).map((l) => <option key={l} value={l}>{optLabel(l)}</option>)}
                       </select>
                     </>
                   )}
@@ -1565,7 +1570,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) 
                   </select>
                   {eff.roofType && (
                     <select style={selStyle} value={eff.roofColor} onChange={(e) => change("roofColor", e.target.value)}>
-                      {colorOpts(String(eff.roofType).toLowerCase() === "metal" ? "metal" : "shingle", eff.roofColor).map((l) => <option key={l} value={l}>{l}</option>)}
+                      {colorOpts(String(eff.roofType).toLowerCase() === "metal" ? "metal" : "shingle", eff.roofColor).map((l) => <option key={l} value={l}>{optLabel(l)}</option>)}
                     </select>
                   )}
                 </div>

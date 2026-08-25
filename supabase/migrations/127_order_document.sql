@@ -27,6 +27,12 @@ alter table public.designs
   add column if not exists plan_image_url   text,
   add column if not exists view3d_image_url text;
 
+-- The bucket's mime allowlist gated harder than the policy (uploads died 415 before the
+-- name shape was ever checked) — the JPEG twins need image/jpeg admitted too.
+update storage.buckets
+   set allowed_mime_types = array['application/pdf','image/jpeg']
+ where id = 'floor-plans';
+
 drop policy if exists floor_plans_code_insert on storage.objects;
 create policy floor_plans_code_insert on storage.objects
   for insert
