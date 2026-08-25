@@ -637,12 +637,14 @@ function Dashboard({ session }) {
           {navItem("delivery-schedule", "Delivery Schedule")}
           {navItem("repairs", "Repairs")}
           {navItem("commissions", "Commissions")}
-          {/* Config surface like Settings, so gated the same way: admins, plus anyone
-              holding settings_quickbooks (migration 100) — navHidden reads that area via
-              TAB_AREA, the same map the clamp and the content render use, so all three
-              surfaces agree (audit 2026-08-20). Kept OUT of NONADMIN_TABS: a plain
-              "user" role with no area grant still never sees or reaches it. */}
-          {navItem("quickbooks", "QuickBooks")}
+          {/* QuickBooks has no nav entry any more (Carolyn 2026-08-24): it is a config
+              surface, not workspace work, and it is already mounted a second time at
+              Settings → QuickBooks — which is where the links people actually hold point
+              (/portal/settings/quickbooks). The /portal/quickbooks route, its render
+              block and ICONS.quickbooks all stay, so old deep links still land on the
+              real page: same treatment 3D Design got below. Its gating is unchanged —
+              admins plus settings_quickbooks holders (migration 100), enforced by
+              TAB_AREA and the clamp, neither of which reads the nav. */}
         </nav>
 
         <div className="ss-navlabel">Coming Soon</div>
