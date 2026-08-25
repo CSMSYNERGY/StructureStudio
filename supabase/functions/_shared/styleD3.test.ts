@@ -212,3 +212,19 @@ Deno.test("the measured Urban spec survives the sanitiser intact", () => {
   assertEquals(r.d3.roof, { type: "gable", pitch: 0.42, overhang: 1, tailSpacingIn: 24, eave: "open" });
   assertEquals(r.d3.gableVent, { widthFrac: 0.25 });
 });
+
+Deno.test("foundation round-trips skids/slab, is omitted when absent, drops junk", () => {
+  const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(bare.ok, "minimal spec accepted");
+  if (bare.ok) assert(!("foundation" in (bare.d3 as Record<string, unknown>)), "absent stays absent, so no existing row grows a slab it did not ask for");
+  for (const v of ["skids", "slab"]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: v });
+    assert(r.ok, `${v} accepted`);
+    if (r.ok) assertEquals(r.d3.foundation, v);
+  }
+  for (const junk of ["piers", "", 3, null, {}]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: junk });
+    assert(r.ok, "junk is dropped, never an error");
+    if (r.ok) assert(!("foundation" in (r.d3 as Record<string, unknown>)), `${JSON.stringify(junk)} must not persist`);
+  }
+});

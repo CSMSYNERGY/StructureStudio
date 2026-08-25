@@ -1988,6 +1988,179 @@ function d3NormalizeCladding(v) {
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
 }
 
+// The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
+// plus the slope segments that get roof slabs.
+//
+// Extracted out of buildShed3DModel on 2026-08-25 so the calibration panel can DRAW the
+// same profile the renderer builds. Two implementations of a gambrel knee would drift on
+// the first change, and a drawing that disagrees with the 3D is worse than no drawing --
+// the whole point of it is that a builder can trust it.
+//
+// Pure: no THREE, no DOM. `tallNeg` picks which end of a shed roof is the high one.
+function d3RoofProfile(roofCfg, S, H, tallNeg) {
+  const cfg = roofCfg || {};
+  const prof = [], slopes = [];
+  if (cfg.type === "shed") {
+    const rise = S * (cfg.pitch || 0.25);
+    const A = tallNeg ? [-S / 2, H + rise] : [-S / 2, H];
+    const B = tallNeg ? [S / 2, H] : [S / 2, H + rise];
+    prof.push([-S / 2, H], A, B, [S / 2, H]);
+    slopes.push([A, B]);
+  } else if (cfg.type === "gambrel") {
+    const s2 = S / 2;
+    const kU = s2 * (cfg.kneeU || 0.55);
+    const kY = H + s2 * (cfg.kneeRise || 0.55);
+    const rY = H + s2 * (cfg.ridgeRise || 0.8);
+    prof.push([-s2, H], [-kU, kY], [0, rY], [kU, kY], [s2, H]);
+    slopes.push([[-s2, H], [-kU, kY]], [[-kU, kY], [0, rY]], [[0, rY], [kU, kY]], [[kU, kY], [s2, H]]);
+  } else {
+    const rise = (S / 2) * (cfg.pitch || 0.4);
+    // ridgeOffset shifts the ridge toward one eave (saltbox-style asymmetry).
+    const ru = S * Math.max(-0.35, Math.min(0.35, cfg.ridgeOffset || 0));
+    prof.push([-S / 2, H], [ru, H + rise], [S / 2, H]);
+    slopes.push([[-S / 2, H], [ru, H + rise]], [[ru, H + rise], [S / 2, H]]);
+  }
+  // Drop consecutive duplicate points (the shed profile produces one); the open edge
+  // auto-closes along the wall-plate line.
+  const dedup = prof.filter((pt, i) => i === 0 || Math.abs(pt[0] - prof[i - 1][0]) > 1e-6 || Math.abs(pt[1] - prof[i - 1][1]) > 1e-6);
+  return { prof, slopes, dedup };
+}
+
+// Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
+// point of the elevation drawing -- Carolyn spent two and a half minutes on 2026-08-24
+// failing to match a real gambrel because every control was a dimensionless ratio against
+// a referent nothing on screen named ("half in span. Nine. Okay, well that's kind of
+// crazy"). Rounded to the nearest inch; 12" rolls up.
+function d3FtIn(ft) {
+  if (!isFinite(ft)) return "";
+  const neg = ft < 0;
+  let whole = Math.floor(Math.abs(ft));
+  let inch = Math.round((Math.abs(ft) - whole) * 12);
+  if (inch === 12) { whole += 1; inch = 0; }
+  return (neg ? "-" : "") + whole + "' " + inch + '"';
+}
+
+// A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
+// the SAME profile builder the 3D renderer uses, so the drawing cannot disagree with the
+// building beside it.
+//
+// This exists because of one specific failure. On 2026-08-24 Carolyn spent two and a half
+// minutes trying to match a real gambrel and could not work out which number to change:
+// "I couldn't figure out which numbers to change here ... Half in span. Nine. Okay, well
+// that's kind of crazy ... I want them to be able to put in EXACTLY like what this is so
+// that they can get this angle to be exactly the way theirs is." The controls are
+// dimensionless ratios against a referent nothing on screen named -- `s2 = S / 2` is her
+// "half in span", and it appears nowhere in the UI. Every dimension here is therefore
+// annotated in FEET AND INCHES, with the ratio in small text underneath, and focusing an
+// input highlights the dimension it drives.
+//
+// Deliberately SVG and not a second 3D view: the preview beside it is a perspective
+// three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL
+// context that should not grow overlay complexity.
+function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
+  const roof = (spec && spec.roof) || {};
+  const m = /^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
+  // Mirrors buildShed3DModel's default front wall for a building with no doors placed --
+  // fw = bldgH >= bldgW ? "north" : "west" -- which is what the calibration preview shows.
+  // tallNeg is true for both of those, so the shed's high end is always on the left here.
+  const frontNS = d >= w;
+  const uAxisIsX = roof.type === "shed" ? !frontNS : frontNS;
+  const S = uAxisIsX ? w : d;
+  const H = (spec && spec.wallHeightFt) || 8;
+  const OV = roof.overhang != null ? roof.overhang : 0.6;
+  const dedup = d3RoofProfile(roof, S, H, true).dedup;
+  let peak = H;
+  dedup.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+
+  const VW = 360, VH = 210, PL = 54, PR = 54, PT = 14, PB = 34;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const sc = Math.min(innerW / Math.max(S + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = (u) => PL + innerW / 2 + u * sc;
+  const Y = (y) => PT + innerH - y * sc;
+
+  // Overhang: extend the outermost slope segment past the wall by OV measured HORIZONTALLY,
+  // which is how the renderer measures it (OV is feet past the wall, not along the rafter).
+  const ext = (far, near) => {
+    const dx = near[0] - far[0], dy = near[1] - far[1];
+    if (Math.abs(dx) < 1e-6) return near;
+    const k = OV / Math.abs(dx);
+    return [near[0] + dx * k, near[1] + dy * k];
+  };
+  const eaveL = dedup.length > 1 ? ext(dedup[1], dedup[0]) : dedup[0];
+  const eaveR = dedup.length > 1 ? ext(dedup[dedup.length - 2], dedup[dedup.length - 1]) : dedup[dedup.length - 1];
+  const roofPts = [eaveL].concat(dedup, [eaveR]).map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const on = (k) => focusKey === k;
+  const dimStroke = (k) => ({ stroke: on(k) ? HL : DIM, strokeWidth: on(k) ? 2 : 1 });
+  const tick = (x, y1, y2, k) => <line x1={x} y1={y1} x2={x} y2={y2} {...dimStroke(k)} />;
+  const label = (x, y, main, sub, k, anchor) => (
+    <g>
+      <text x={x} y={y} textAnchor={anchor || "middle"} style={{ fontSize: 10, fontWeight: 800, fill: on(k) ? HL : INK }}>{main}</text>
+      {sub ? <text x={x} y={y + 9} textAnchor={anchor || "middle"} style={{ fontSize: 8, fill: DIM }}>{sub}</text> : null}
+    </g>
+  );
+
+  const isGam = roof.type === "gambrel";
+  const s2 = S / 2;
+  const kU = s2 * (roof.kneeU || 0.55), kY = H + s2 * (roof.kneeRise || 0.55);
+  const rY = H + s2 * (roof.ridgeRise || 0.8);
+  const ru = S * Math.max(-0.35, Math.min(0.35, roof.ridgeOffset || 0));
+  const pitch = roof.pitch != null ? roof.pitch : (roof.type === "shed" ? 0.25 : 0.4);
+
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
+      {/* ground + wall box */}
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      <rect x={X(-s2)} y={Y(H)} width={s2 * 2 * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      <polyline points={roofPts} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
+
+      {/* WALL HEIGHT, left */}
+      {tick(PL - 22, Y(0), Y(H), "wallHeightFt")}
+      <line x1={PL - 26} y1={Y(H)} x2={PL - 18} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      <line x1={PL - 26} y1={Y(0)} x2={PL - 18} y2={Y(0)} {...dimStroke("wallHeightFt")} />
+      {label(PL - 30, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+
+      {/* PEAK, right -- read-only, the number a builder actually measures against */}
+      {tick(VW - PR + 22, Y(0), Y(peak), null)}
+      {label(VW - PR + 26, (Y(0) + Y(peak)) / 2, d3FtIn(peak), "peak", null, "start")}
+
+      {/* SPAN, bottom */}
+      <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
+      {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
+
+      {/* OVERHANG, at the left eave */}
+      <line x1={X(eaveL[0])} y1={Y(eaveL[1]) - 9} x2={X(-s2)} y2={Y(eaveL[1]) - 9} {...dimStroke("overhang")} />
+      {label((X(eaveL[0]) + X(-s2)) / 2, Y(eaveL[1]) - 12, d3FtIn(OV), "eave", "overhang")}
+
+      {/* PITCH -- as x:12, which is the only way a builder states a roof slope */}
+      {!isGam && label(X(ru) + (X(s2) - X(ru)) / 2, Y((H + peak) / 2) - 4,
+        `${Math.round(pitch * 12)}:12`, `pitch ${(+pitch).toFixed(2)}`, "pitch")}
+
+      {/* RIDGE OFFSET -- only when it is actually doing something */}
+      {!isGam && Math.abs(ru) > 0.01 && (
+        <g>
+          <line x1={X(0)} y1={Y(peak) - 8} x2={X(ru)} y2={Y(peak) - 8} {...dimStroke("ridgeOffset")} />
+          {label((X(0) + X(ru)) / 2, Y(peak) - 11, d3FtIn(Math.abs(ru)), "ridge shift", "ridgeOffset")}
+        </g>
+      )}
+
+      {/* GAMBREL -- the three controls she could not decode */}
+      {isGam && (
+        <g>
+          <line x1={X(0)} y1={Y(kY) + 10} x2={X(kU)} y2={Y(kY) + 10} {...dimStroke("kneeU")} />
+          {label((X(0) + X(kU)) / 2, Y(kY) + 22, d3FtIn(kU), "knee out", "kneeU")}
+          {tick(X(kU) + 16, Y(H), Y(kY), "kneeRise")}
+          {label(X(kU) + 20, (Y(H) + Y(kY)) / 2, d3FtIn(kY - H), "knee up", "kneeRise", "start")}
+          {tick(X(0) - 16, Y(H), Y(rY), "ridgeRise")}
+          {label(X(0) - 20, (Y(H) + Y(rY)) / 2, d3FtIn(rY - H), "ridge up", "ridgeRise", "end")}
+        </g>
+      )}
+    </svg>
+  );
+}
+
 // Resolve a style's 3D appearance: tenant config override (the style entry's
 // `d3` object) over the built-in per-style defaults, over the generic gable.
 // sidingOverride (from d3SidingOverride) wins over everything — it's the
@@ -2010,6 +2183,9 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // seeds from this resolver and onSaveSpec writes the draft back, a dropped key is
     // erased from the column the first time a builder opens and saves the panel.
     gableVent: (o.gableVent && o.gableVent.widthFrac > 0) ? o.gableVent : (base.gableVent || null),
+    // Named for the same reason gableVent is: the literal drops what it does not list,
+    // and the calibration panel round-trips through this resolver.
+    foundation: (o.foundation === "skids" || o.foundation === "slab") ? o.foundation : (base.foundation || null),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
 }
@@ -2629,9 +2805,45 @@ function buildShed3DModel(THREE, p) {
   const nLbl = d3MakeGroundLabel(THREE, "N", Math.max(1.6, lblH * 1.2));
   if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -D3.FLOOR_T + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
   root.add(envGroup);
-  const floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
-  floor.position.y = -D3.FLOOR_T / 2;
-  root.add(floor);
+  // Base. A slab by default; runners when the style says so. Everything below is drawn
+  // INSIDE the slab's own 0.35 ft band, on purpose: the ground plane, every ramp's rise
+  // (which reads D3.FLOOR_T for its drop) and the compass labels are all pinned to that
+  // depth, so raising the building to make room for skids would silently leave every ramp
+  // short. Same envelope, different reading.
+  // `floor` stays in the OUTER scope because the shadow pass below still needs the base
+  // mesh by name, whichever branch made it.
+  let floor;
+  if ((p.styleSpec && p.styleSpec.foundation) !== "skids") {
+    floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
+    floor.position.y = -D3.FLOOR_T / 2;
+    root.add(floor);
+  } else {
+    // A portable building sits on runners. The shadow gap under the deck is what says
+    // "this gets delivered" instead of "this was poured here".
+    const DECK_T = 0.12;
+    const SKID_T = D3.FLOOR_T - DECK_T;      // reads as a 4x4 under a thin deck
+    const SKID_W = 3.5 / 12;
+    const deck = box(mat(D3_COLORS.floor), bldgW + 0.2, DECK_T, bldgH + 0.2);
+    deck.position.y = -DECK_T / 2;
+    root.add(deck);
+    floor = deck;
+    // Runners follow the LONG axis, the way they are framed and the way a trailer pulls
+    // them, and the COUNT is a rule — no unsupported run wider than about 4 ft — so it
+    // scales with the building instead of being a number that is right for one size.
+    const alongX = bldgW >= bldgH;
+    const across = alongX ? bldgH : bldgW;
+    const nSkid = Math.max(2, Math.round(across / 4));
+    const inset = Math.min(1.0, across * 0.14);
+    for (let i = 0; i < nSkid; i++) {
+      const t = nSkid === 1 ? 0.5 : i / (nSkid - 1);
+      const at = -across / 2 + inset + t * (across - 2 * inset);
+      const sk = alongX
+        ? box(mat(D3_COLORS.bench), bldgW + 0.2, SKID_T, SKID_W)
+        : box(mat(D3_COLORS.bench), SKID_W, SKID_T, bldgH + 0.2);
+      sk.position.set(alongX ? 0 : at, -DECK_T - SKID_T / 2, alongX ? at : 0);
+      root.add(sk);
+    }
+  }
 
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
   // wall, N = exterior normal. `along` runs west→east on N/S walls and
@@ -2939,32 +3151,11 @@ function buildShed3DModel(THREE, p) {
   const uAxisIsX = roofCfg.type === "shed" ? !frontNS : frontNS;
   const S = uAxisIsX ? bldgW : bldgH;   // profile span
   const L = uAxisIsX ? bldgH : bldgW;   // extrusion length
-  const prof = [];    // profile polygon points [u, y], eave→ridge→eave
-  const slopes = [];  // top edges [[A,B], …] that get roof slabs
-  if (roofCfg.type === "shed") {
-    const rise = S * (roofCfg.pitch || 0.25);
-    const tallNeg = fw === "north" || fw === "west";
-    const A = tallNeg ? [-S / 2, H + rise] : [-S / 2, H];
-    const B = tallNeg ? [S / 2, H] : [S / 2, H + rise];
-    prof.push([-S / 2, H], A, B, [S / 2, H]);
-    slopes.push([A, B]);
-  } else if (roofCfg.type === "gambrel") {
-    const s2 = S / 2;
-    const kU = s2 * (roofCfg.kneeU || 0.55);
-    const kY = H + s2 * (roofCfg.kneeRise || 0.55);
-    const rY = H + s2 * (roofCfg.ridgeRise || 0.8);
-    prof.push([-s2, H], [-kU, kY], [0, rY], [kU, kY], [s2, H]);
-    slopes.push([[-s2, H], [-kU, kY]], [[-kU, kY], [0, rY]], [[0, rY], [kU, kY]], [[kU, kY], [s2, H]]);
-  } else {
-    const rise = (S / 2) * (roofCfg.pitch || 0.4);
-    // ridgeOffset shifts the ridge toward one eave (saltbox-style asymmetry).
-    const ru = S * Math.max(-0.35, Math.min(0.35, roofCfg.ridgeOffset || 0));
-    prof.push([-S / 2, H], [ru, H + rise], [S / 2, H]);
-    slopes.push([[-S / 2, H], [ru, H + rise]], [[ru, H + rise], [S / 2, H]]);
-  }
-  // Drop consecutive duplicate points (the shed profile produces one) before
-  // building the shape; the open edge auto-closes along the wall-plate line.
-  const dedup = prof.filter((pt, i) => i === 0 || Math.abs(pt[0] - prof[i - 1][0]) > 1e-6 || Math.abs(pt[1] - prof[i - 1][1]) > 1e-6);
+  // One profile builder, shared with the calibration panel's elevation drawing.
+  const _rp = d3RoofProfile(roofCfg, S, H, fw === "north" || fw === "west");
+  const prof = _rp.prof;      // profile polygon points [u, y], eave→ridge→eave
+  const slopes = _rp.slopes;  // top edges [[A,B], …] that get roof slabs
+  const dedup = _rp.dedup;
   const shape = new THREE.Shape();
   dedup.forEach((pt, i) => (i === 0 ? shape.moveTo(pt[0], pt[1]) : shape.lineTo(pt[0], pt[1])));
   const rg = new THREE.Group(); // local space: x = profile u, y = up, z = 0..L along the ridge
@@ -6062,6 +6253,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // four-side reference photos, preview live, save to the config row.
   const [adminCal, setAdminCal] = useState(null);        // { styleValue, spec, photos: [url×4] } | null
   const [adminCalMsg, setAdminCalMsg] = useState(null);  // {ok, msg} | null
+  // Which calibration input has focus, so the elevation can highlight the dimension that
+  // input drives. This IS the answer to "I couldn't figure out which numbers to change".
+  const [calFocus, setCalFocus] = useState(null);
   const [adminCalBusy, setAdminCalBusy] = useState(false);
   const [adminCalPreview, setAdminCalPreview] = useState(false);
   // Walk-around video → shape. `urls` caches the uploaded frames so a re-draft re-spends
@@ -9266,6 +9460,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   )}
                 </div>
               )}
+              {/* The drawing sits directly ABOVE the numbers it explains, and directly
+                  beside the reference-photo thumbnails, so "film it, then nudge the
+                  drawing" becomes the obvious workflow. The fitting engine already exists
+                  (walk-around video / draft from photos) -- it was just undiscoverable
+                  behind a wall of raw ratios. */}
+              <div style={{ marginBottom: 8 }}>
+                <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} />
+                <div style={{ fontSize: 10, color: "#A16207", marginTop: 3 }}>
+                  End elevation at {sel.size || "this size"}. Click a number below and its dimension lights up.
+                </div>
+              </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
                   <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
@@ -9277,16 +9482,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </select>
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("overhang")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("ridgeOffset")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
-                  <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("wallHeightFt")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {/* The empty "plain" option is gone (2026-08-25). It was the LABEL FOR null,
                     which the renderer draws as panel siding -- so it named a thing the
@@ -9339,13 +9544,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {adminCal.spec.roof.type === "gambrel" && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("kneeU")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Knee rise (× half-span)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("kneeRise")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge rise (× half-span)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("ridgeRise")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 </div>
               )}

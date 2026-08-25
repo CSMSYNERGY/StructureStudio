@@ -40,7 +40,29 @@ const CLAMPS: Record<string, [number, number]> = {
   // Rafter-tail spacing in INCHES, because that is the unit a builder measures
   // on-centre in. 8 is tighter than any real framing, 96 looser than any.
   tailSpacingIn: [8, 96],
+
+  // LEAN-TO and DORMER (2026-08-25). Both are ADDITIVE keys on `roof` rather than new
+  // `roof.type` values, and that choice is load-bearing rather than stylistic.
+  //
+  // A new roof TYPE would be a live production hazard: one Supabase project serves beta
+  // and production, `building_styles.d3` is one shared table, and the production
+  // renderer's profile builder has an `else` branch that catches every unknown type and
+  // draws a GABLE. So a builder calibrating "leanto" on beta would immediately show
+  // production customers a plain gable on that style. As extra keys, an older renderer
+  // simply does not read them and draws the base building correctly -- the appendage is
+  // missing, which is honest, rather than the roof being wrong, which is not.
+  //
+  // A lean-to exists iff leanToWidthFt > 0; a dormer iff dormerWidthFt > 0. Zero is the
+  // off switch, which is why every lower bound here is 0 rather than a real minimum.
+  leanToWidthFt: [0, 16],     // feet the appendage projects past the eave wall
+  leanToDropFt: [0, 6],       // how far its outer edge falls below the main eave
+  dormerWidthFt: [0, 12],     // along the ridge
+  dormerRiseFt: [0, 6],       // above the slope it sits on
+  dormerOffsetU: [-1, 1],     // where along the span, as a fraction of the half-span
 };
+
+// Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
+const D3_LEANTO_SIDES = ["left", "right"] as const;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -64,6 +86,7 @@ export type D3Spec = {
   wallHeightFt?: number;
   roofMaterial?: string;
   gableVent?: { widthFrac: number };
+  foundation?: string;
   claddingChoices?: string[];
 };
 
@@ -78,9 +101,17 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     return { ok: false, error: `Unknown roof type "${type}" — expected shed, gable or gambrel.` };
   }
   const roof: Record<string, unknown> = { type };
-  for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn"]) {
+  // ⚠️ A CLAMPS entry is not enough — a key missing from THIS list is dropped silently,
+  // which looks to a builder exactly like "the save didn't work". Add to both.
+  for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn",
+                   "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
+  }
+  // Which eave the lean-to hangs off. Only meaningful when leanToWidthFt > 0; stored
+  // regardless so toggling the width back up remembers the side.
+  if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
+    roof.leanToSide = String(rawRoof.leanToSide);
   }
   // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
   // Urban style, read off a walk-around video; "fascia" = the painted trim board the
@@ -128,6 +159,11 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     const w = num((gvRaw as Record<string, unknown>).widthFrac);
     if (w !== null && w > 0) d3.gableVent = { widthFrac: Math.min(0.6, Math.max(0.05, w)) };
   }
+
+  // What the building sits on. "skids" draws runners under a thin deck — the shadow gap
+  // that says a building is portable rather than poured. Absent means the slab the
+  // renderer has always drawn, so no existing row moves.
+  if (src.foundation === "skids" || src.foundation === "slab") d3.foundation = src.foundation;
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
   // which is what every existing row says by omission.
