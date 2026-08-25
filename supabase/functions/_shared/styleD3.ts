@@ -32,9 +32,13 @@ export const D3_SIDING_VALUES = ["panel", "lap", "batten", "agpanel"] as const;
 // make the renderer produce nonsense (a "pitch" of 40 draws a spike through the sky).
 const CLAMPS: Record<string, [number, number]> = {
   pitch: [0, 2],
-  ridgeOffset: [-0.35, 0.35],   // saltbox shift, as a fraction of the half-span
+  ridgeOffset: [-0.35, 0.35],   // saltbox shift, as a fraction of the FULL span (d3RoofProfile: ru = S * ridgeOffset)
   overhang: [0, 3],             // feet past the wall
   kneeU: [0, 1],                // gambrel knee, fraction of half-span
+  // BOTH rises are measured from the WALL PLATE, not from each other: d3RoofProfile does
+  // kY = H + s2*kneeRise and rY = H + s2*ridgeRise off the same H. Describing ridgeRise as
+  // "above the knee" anywhere makes every drafted gambrel come out inside-out, because the
+  // model then reports the leftover and the renderer reads it as the whole height.
   kneeRise: [0, 1],
   ridgeRise: [0, 1.5],
   // Rafter-tail spacing in INCHES, because that is the unit a builder measures
@@ -142,8 +146,15 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   }
 
   const d3: D3Spec = { roof, siding, colors };
+  // Wall height is CLAMPED into range rather than dropped, but only from a plausible band.
+  // Dropping a 4.5 threw away a good near-miss and left the style default (often 8) standing,
+  // which is further from the truth than the bound would have been. Clamping everything is
+  // the opposite mistake: a model that answers in INCHES returns 96, and clamping that to 14
+  // draws a two-storey wall on a garden shed. So anything a human could plausibly have meant
+  // in feet gets pulled to the nearest bound, and anything outside that is a different unit
+  // or a hallucination and is dropped, leaving the builder's own value alone.
   const wh = num(src.wallHeightFt);
-  if (wh !== null && wh >= 5 && wh <= 14) d3.wallHeightFt = wh;
+  if (wh !== null && wh >= 3 && wh <= 20) d3.wallHeightFt = Math.min(14, Math.max(5, wh));
   // The style's default roof MATERIAL (2026-08-15): the renderer textures the
   // roof with it before any customer roof-type pick. Same posture as siding —
   // anything unknown means "unset".
@@ -216,11 +227,11 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
   "roof": {
     "type": "shed" | "gable" | "gambrel",
     "pitch": <rise over run, e.g. 0.33 for 4:12>,
-    "ridgeOffset": <-0.35..0.35, gable only: shifts the ridge toward one eave for a saltbox look; 0 if centred>,
+    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
     "overhang": <feet the roof projects past the wall, typically 0.3-1.0>,
     "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
-    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>
+    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>
   },
   "siding": "panel" | "lap" | "batten" | "agpanel" | null,
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
@@ -274,11 +285,11 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
   "roof": {
     "type": "shed" | "gable" | "gambrel",
     "pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,
-    "ridgeOffset": <-0.35..0.35, gable only: shifts the ridge toward one eave for a saltbox look; 0 if centred>,
+    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
     "overhang": <feet the roof projects past the wall, typically 0.3-1.5>,
     "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
-    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>,
+    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>,
     "eave": "open" | "fascia",
     "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>,
     "leanToWidthFt": <only if an open lean-to runs along one long side: how far it projects, in feet>,
@@ -286,7 +297,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "leanToSide": "left" | "right",
     "dormerWidthFt": <only if a dormer sits on a roof slope: its width in feet>,
     "dormerRiseFt": <how far the dormer stands above the slope, in feet>,
-    "dormerOffsetU": <0..1: where along the slope it sits, 0.5 being halfway up>
+    "dormerOffsetU": <-0.85..0.85: how far the dormer sits from the ridge line toward one eave, as a fraction of the half-span. This is a SIDEWAYS position across the roof, not a distance up the slope: 0 puts it on the ridge, 0.5 halfway out to the eave, and the sign picks the side (negative = left, positive = right, seen from outside facing the doors)>
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the wall width, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab",
@@ -321,7 +332,7 @@ ROOF MATERIAL: asphalt shingles are laid in overlapping courses, so the slope ca
 
 LEAN-TO: an open roofed section running along one LONG side, its outer edge carried on posts rather than a wall — a porch or an equipment bay. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen by someone standing outside facing the doors.
 
-DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and where it sits along that slope as a fraction from eave to ridge. Omit all three keys if the roof is unbroken, which is the common case.
+DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and how far ACROSS the roof it sits -- measured sideways from the ridge line toward one eave, as a fraction of the half-span, negative for the left side and positive for the right as seen from outside facing the doors. Omit all three keys if the roof is unbroken, which is the common case.
 
 FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
 

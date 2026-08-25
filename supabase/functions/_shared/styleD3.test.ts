@@ -73,6 +73,28 @@ Deno.test("a video reply parses to a clean spec and drops observed", () => {
   assert(!("observed" in (r.d3 as Record<string, unknown>)), "observed must not reach the stored spec");
 });
 
+Deno.test("wallHeightFt clamps a near-miss and drops a wrong-unit answer", () => {
+  const wh = (v: unknown) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, wallHeightFt: v });
+    assert(r.ok, "the roof is valid, so the spec is accepted whatever the height says");
+    return r.ok ? r.d3.wallHeightFt : undefined;
+  };
+  // In range: untouched.
+  assertEquals(wh(7), 7, "a plausible height passes through");
+  assertEquals(wh(5), 5, "the low bound is inclusive");
+  assertEquals(wh(14), 14, "the high bound is inclusive");
+  // Near-miss: pulled to the bound. Before 2026-08-25 these were DROPPED, which left the
+  // style default (often 8) standing -- further from the truth than the bound.
+  assertEquals(wh(4.5), 5, "a low near-miss clamps up rather than vanishing");
+  assertEquals(wh(16), 14, "a high near-miss clamps down rather than vanishing");
+  // Wrong unit or nonsense: dropped, so the builder's own value survives. Clamping 96 in
+  // would draw a two-storey wall on a garden shed and look like the model read it that way.
+  assertEquals(wh(96), undefined, "inches are not feet");
+  assertEquals(wh(0), undefined, "zero is not a wall");
+  assertEquals(wh(-8), undefined, "negative is not a wall");
+  assertEquals(wh("tall"), undefined, "non-numeric is dropped");
+});
+
 Deno.test("sanitizeD3Spec always emits siding, which is why the video merge cannot trust it", () => {
   // The regression applyDraftedShape guards: `siding` is present and null even though the
   // model never mentioned cladding, so a `!== undefined` check would wipe the builder's

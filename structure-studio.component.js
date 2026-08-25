@@ -2226,6 +2226,14 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // Named for the same reason gableVent is: the literal drops what it does not list,
     // and the calibration panel round-trips through this resolver.
     foundation: (o.foundation === "skids" || o.foundation === "slab") ? o.foundation : (base.foundation || null),
+    // Third field named for the same reason as the two above, and the one that was actually
+    // missing until 2026-08-25. It is worse than the others because the cladding checkboxes
+    // READ this spec too (`d3CladdingChoicesFor({ d3: adminCal.spec })`): a style that offers
+    // two claddings opened with all four ticked, and saving that screen -- without touching a
+    // checkbox -- wrote the widened list back. The narrowing was lost twice over, on display
+    // and on save. `undefined` rather than `null` matches what the checkbox handler stores,
+    // so an unnarrowed style keeps the key ABSENT from the column instead of growing a null.
+    claddingChoices: Array.isArray(o.claddingChoices) ? o.claddingChoices : (base.claddingChoices || undefined),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
 }
@@ -8272,6 +8280,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const applyDraftedSpec = (d3) => setAdminCal((p) => ({
     ...p,
     spec: {
+      // ...p.spec FIRST, for the same reason d3ResolveStyleSpec names every key: an object
+      // literal keeps only what it lists. Without this line a photo draft silently blanked
+      // roofMaterial, gableVent, foundation and claddingChoices -- fields the model is never
+      // even ASKED about by SPEC_PROMPT, so they could only ever be erased, never replaced.
+      ...p.spec,
       roof: { ...p.spec.roof, ...(d3.roof || {}) },
       siding: d3.siding !== undefined ? d3.siding : p.spec.siding,
       colors: { ...p.spec.colors, ...(d3.colors || {}) },

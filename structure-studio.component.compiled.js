@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 900675fcb5b1)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 127ff9d37d7c)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -598,7 +598,14 @@ roofMaterial:o.roofMaterial==="metal"||o.roofMaterial==="shingle"?o.roofMaterial
 // erased from the column the first time a builder opens and saves the panel.
 gableVent:o.gableVent&&o.gableVent.widthFrac>0?o.gableVent:base.gableVent||null,// Named for the same reason gableVent is: the literal drops what it does not list,
 // and the calibration panel round-trips through this resolver.
-foundation:o.foundation==="skids"||o.foundation==="slab"?o.foundation:base.foundation||null,wallHeightFt:customerWallHeightFt||o.wallHeightFt||styleCfg&&styleCfg.wallHeightFt||globalWallHeightFt||0};}// Carolyn (2026-07-02): horizontal lap siding is THE universal upgrade —
+foundation:o.foundation==="skids"||o.foundation==="slab"?o.foundation:base.foundation||null,// Third field named for the same reason as the two above, and the one that was actually
+// missing until 2026-08-25. It is worse than the others because the cladding checkboxes
+// READ this spec too (`d3CladdingChoicesFor({ d3: adminCal.spec })`): a style that offers
+// two claddings opened with all four ticked, and saving that screen -- without touching a
+// checkbox -- wrote the widened list back. The narrowing was lost twice over, on display
+// and on save. `undefined` rather than `null` matches what the checkbox handler stores,
+// so an unnarrowed style keeps the key ABSENT from the column instead of growing a null.
+claddingChoices:Array.isArray(o.claddingChoices)?o.claddingChoices:base.claddingChoices||undefined,wallHeightFt:customerWallHeightFt||o.wallHeightFt||styleCfg&&styleCfg.wallHeightFt||globalWallHeightFt||0};}// Carolyn (2026-07-02): horizontal lap siding is THE universal upgrade —
 // vertical groove panel is standard everywhere. When the customer's selected
 // options say "lap siding", the 3D walls switch to horizontal lap boards.
 // Explicit config wins: `siding3d: { optionId, lapValue }` in the config blob
@@ -2321,7 +2328,7 @@ setAdminCalVideo({busy:false,step:null,err:null,count:0,urls:null,observed:null,
 if(setup3d&&setup3d.onLoadStyle3D){setup3d.onLoadStyle3D(s.value).then(function(meta){if(!meta)return;setAdminCal(function(p){return p&&p.styleValue===s.value&&Array.isArray(meta.photos)&&meta.photos.length?_objectSpread(_objectSpread({},p),{},{photos:meta.photos.filter(Boolean).concat(["","","",""]).slice(0,4)}):p;});setScan(function(p){return _objectSpread(_objectSpread({},p),{},{status:meta.modelStatus||"none",aiReady:meta.aiReady!==false});});})["catch"](function(){/* a convenience read; never block the editor */});}};var calSet=function calSet(patch){return setAdminCal(function(p){return _objectSpread(_objectSpread({},p),{},{spec:_objectSpread(_objectSpread({},p.spec),patch)});});};var calSetRoof=function calSetRoof(patch){return setAdminCal(function(p){return _objectSpread(_objectSpread({},p),{},{spec:_objectSpread(_objectSpread({},p.spec),{},{roof:_objectSpread(_objectSpread({},p.spec.roof),patch)})});});};var calSetColor=function calSetColor(k,v){return setAdminCal(function(p){return _objectSpread(_objectSpread({},p),{},{spec:_objectSpread(_objectSpread({},p.spec),{},{colors:_objectSpread(_objectSpread({},p.spec.colors),{},_defineProperty({},k,v))})});});};var calSetPhoto=function calSetPhoto(i,v){return setAdminCal(function(p){var ph=p.photos.slice();ph[i]=v;return _objectSpread(_objectSpread({},p),{},{photos:ph});});};// A drafted spec MERGES into the draft rather than replacing it: the model reports only
 // what the photos actually show, so anything it leaves out keeps the value the editor
 // (or the style default) already had.
-var applyDraftedSpec=function applyDraftedSpec(d3){return setAdminCal(function(p){return _objectSpread(_objectSpread({},p),{},{spec:{roof:_objectSpread(_objectSpread({},p.spec.roof),d3.roof||{}),siding:d3.siding!==undefined?d3.siding:p.spec.siding,colors:_objectSpread(_objectSpread({},p.spec.colors),d3.colors||{}),wallHeightFt:d3.wallHeightFt||p.spec.wallHeightFt}});});};// The SHAPE-only merge, for a draft read off a walk-around video. It deliberately does
+var applyDraftedSpec=function applyDraftedSpec(d3){return setAdminCal(function(p){return _objectSpread(_objectSpread({},p),{},{spec:_objectSpread(_objectSpread({},p.spec),{},{roof:_objectSpread(_objectSpread({},p.spec.roof),d3.roof||{}),siding:d3.siding!==undefined?d3.siding:p.spec.siding,colors:_objectSpread(_objectSpread({},p.spec.colors),d3.colors||{}),wallHeightFt:d3.wallHeightFt||p.spec.wallHeightFt})});});};// The SHAPE-only merge, for a draft read off a walk-around video. It deliberately does
 // NOT reuse applyDraftedSpec above: sanitizeD3Spec ALWAYS emits `siding` — line 69 of
 // _shared/styleD3.ts collapses anything it does not recognise to null — so
 // `d3.siding !== undefined` is true even when the model said nothing about cladding, and
