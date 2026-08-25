@@ -891,8 +891,10 @@ const CRM_SECTIONS = [
 // missing tab reads as "not built", a greyed one reads as "next", and she is showing this
 // at a trade show.
 const CRM_TABS = [
-  { key: "activity", label: "Activity", enabled: (c) => c.canEdit },
-  { key: "note", label: "Notes", enabled: (c) => c.canEdit },
+  // "Not available yet" (the default hint) reads as NOT BUILT, which is the wrong story for
+  // a tab that is merely out of this person's reach — it is built, they just cannot write.
+  { key: "activity", label: "Activity", enabled: (c) => c.canEdit, hint: "You don't have permission to log activities." },
+  { key: "note", label: "Notes", enabled: (c) => c.canEdit, hint: "You don't have permission to add notes." },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
   // NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE. Ahsan, 2026-08-25:
@@ -911,7 +913,17 @@ const CRM_TABS = [
   // a composer. Needs an address to write to — a contact with neither an email nor a design
   // is a browsing artefact, and offering a compose box that cannot send is worse than not
   // offering one.
-  { key: "email", label: "Email", enabled: (c) => c.canEdit && !!(c.contact && c.contact.email), hint: "This contact has no email address on file." },
+  // The hint is a FUNCTION because two different things disable this tab, and a fixed
+  // string told the wrong story: a rep without contacts:edit was shown "this contact has no
+  // email address" while the address sat rendered directly above it. A tooltip that blames
+  // the data for a permissions problem sends someone off editing a contact that is fine.
+  {
+    key: "email", label: "Email",
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.email),
+    hint: (c) => (c.canEdit
+      ? "This contact has no email address on file."
+      : "You don't have permission to email contacts."),
+  },
   { key: "files", label: "Files", enabled: () => false, hint: "Needs a contact-scoped storage bucket." },
   { key: "documents", label: "Documents", enabled: () => true },
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
@@ -990,6 +1002,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
   const [mailMsg, setMailMsg] = useState(null);
+  const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1035,6 +1048,28 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     });
     setBusy(false);
     if (!error) { setDraft(""); load(); }
+  };
+
+  // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
+  // since 131, with `crm_complete_activity` to tick one off and a Focus block promising
+  // "scheduled activities appear here" — but nothing in the UI could ever CREATE one, so the
+  // tab was enabled and inert and Focus could only ever be empty. This is that missing half.
+  const saveActivity = async () => {
+    const subject = act.subject.trim();
+    if (!subject) return;
+    setBusy(true);
+    const { error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_save_activity", kind: act.kind, subject,
+        // A date-only input is midday-anchored, the same trick the payments and change-order
+        // screens use: UTC midnight renders as the PREVIOUS day for every US timezone.
+        dueAt: act.dueAt ? new Date(act.dueAt + "T12:00:00").toISOString() : null,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    if (!error) { setAct({ kind: "call", subject: "", dueAt: "" }); load(); }
   };
 
   const sendEmail = async () => {
@@ -1149,7 +1184,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               {CRM_TABS.filter((t) => !t.when || t.when(ctx)).map((t) => {
                 const on = t.enabled(ctx);
                 return (
-                  <button key={t.key} disabled={!on} title={on ? "" : (t.hint || "Not available yet")}
+                  <button key={t.key} disabled={!on}
+                    title={on ? "" : (typeof t.hint === "function" ? t.hint(ctx) : (t.hint || "Not available yet"))}
                     onClick={() => { if (on) setTab(t.key); }}
                     style={{
                       background: tab === t.key && on ? "#EEF2FF" : "transparent",
@@ -1180,6 +1216,84 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                 </div>
               </div>
             )}
+            {/* ACTIVITY. Kind first, because "call" and "deadline" read completely
+                differently in the feed, and the kind is what the icon and label key on. */}
+            {tab === "activity" && canEdit && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
+                  {["call", "meeting", "task", "deadline", "lunch"].map((k) => (
+                    <button key={k} type="button" onClick={() => setAct((p) => ({ ...p, kind: k }))}
+                      style={{
+                        background: act.kind === k ? ACCENT : "#F1F5F9", color: act.kind === k ? "#FFF" : "#475569",
+                        border: "none", borderRadius: 999, padding: "3px 11px", fontSize: 11.5, fontWeight: 700,
+                        cursor: "pointer", textTransform: "capitalize",
+                      }}>{k}</button>
+                  ))}
+                </div>
+                <input value={act.subject} onChange={(e) => setAct((p) => ({ ...p, subject: e.target.value }))}
+                  placeholder="What needs doing? e.g. Call back about the loft"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input type="date" value={act.dueAt} onChange={(e) => setAct((p) => ({ ...p, dueAt: e.target.value }))}
+                    style={{ ...S.sel, width: "auto" }} />
+                  <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Leave the date blank for an undated task.</span>
+                  <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !act.subject.trim()} onClick={saveActivity}>
+                    {busy ? "Saving…" : "Save activity"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* DOCUMENTS. Everything this record has actually produced, as links. The tab was
+                enabled and rendered nothing, which reads as a broken page rather than an
+                empty one — and on a record with a quote there is never nothing to show. */}
+            {tab === "documents" && (
+              <div style={{ marginBottom: 12 }}>
+                {(() => {
+                  const docs = [];
+                  (data.designs || []).forEach((d) => {
+                    const what = [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code;
+                    if (d.ss_quote_pdf_url) docs.push({ k: `q:${d.short_code}`, label: `Quote ${d.ss_quote_number || ""}`.trim() + ` — ${what}`, url: d.ss_quote_pdf_url });
+                    if (d.image_url) docs.push({ k: `p:${d.short_code}`, label: `Floor plan — ${what}`, url: d.image_url });
+                  });
+                  if (docs.length === 0) {
+                    return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No documents yet. A quote PDF appears here as soon as one is sent.</div>;
+                  }
+                  return docs.map((doc) => (
+                    <a key={doc.k} href={doc.url} target="_blank" rel="noopener"
+                      style={{
+                        display: "block", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
+                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, textDecoration: "none",
+                      }}>📄 {doc.label}</a>
+                  ));
+                })()}
+              </div>
+            )}
+
+            {/* INVOICE. Invoicing lives on the order, which is where payments, change orders
+                and the schedule already are — a second invoice button on a second screen is
+                how two sources of truth for money get built. So this routes rather than
+                duplicates, and says plainly what the customer still has to do. */}
+            {tab === "invoice" && kind === "design" && (
+              <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
+                <div style={{ fontSize: 12.5, color: "#475569" }}>
+                  This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
+                  payments, change orders and build schedule for the same building.
+                </div>
+                <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                  The customer signs the invoice; the order is marked Invoiced once they do.
+                </div>
+                {/* A LINK, not a navigate() call: `navigate` is a useCallback inside
+                    Dashboard (09-shell) and is not in scope in this part — calling it here
+                    would throw on click. The route is real, so an anchor is both correct
+                    and survives someone reorganising the shell. */}
+                <a href="/portal/orders"
+                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8, display: "inline-block", textDecoration: "none" }}>
+                  Open Orders
+                </a>
+              </div>
+            )}
+
             {tab === "note" && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}

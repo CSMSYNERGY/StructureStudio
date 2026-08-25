@@ -3804,16 +3804,31 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // is NOT an error — the per-record flags refresh and the status stays pending.
     const verified = rsDomainVerified(d);
     const dnsRecords = dnsRecordsOf(d);
-    const domainStatus = verified ? "verified" : "pending";
+    // ⚠️ DO NOT COLLAPSE EVERY NON-VERIFIED STATE INTO "pending". Resend's domain enum is
+    // not_started | pending | verified | failed | temporary_failure, and this used to map
+    // all four failures to "pending" — so a domain Resend had GIVEN UP on displayed as
+    // "waiting for the crawler" forever. That is the worst possible reading: the tenant
+    // sits watching a spinner that will never resolve, and the operator has nothing to act
+    // on. `failed` is a real column value (107's CHECK allows it), so say so, and carry the
+    // provider's own word out in the response for support.
+    const providerStatus = String(d.status || "");
+    const givenUp = providerStatus === "failed" || providerStatus === "temporary_failure";
+    const domainStatus = verified ? "verified" : givenUp ? "failed" : "pending";
     const { error: upErr } = await admin.from("client_settings").update({
       email_domain_status: domainStatus,
       email_dns_records: dnsRecords,
       email_verified_at: verified ? new Date().toISOString() : null,
-      email_last_error: null,
+      // Authored, never provider text — but it must name the state, because "pending" and
+      // "we stopped checking" call for completely different actions from the tenant.
+      email_last_error: givenUp
+        ? (providerStatus === "temporary_failure"
+          ? "Your domain passed before but failed a re-check. Confirm the DNS records below are still published, then check again."
+          : "Your provider stopped checking this domain. Confirm every DNS record below is published exactly as shown, then check again — or disconnect and reconnect the domain to start over.")
+        : null,
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your domain's verification state", upErr);
-    return json({ ok: true, verified, domainStatus, dnsRecords });
+    return json({ ok: true, verified, domainStatus, providerStatus, dnsRecords });
   }
 
   if (action === "email_activate") {

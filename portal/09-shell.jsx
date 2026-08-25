@@ -849,13 +849,22 @@ function Dashboard({ session }) {
                 Consolidating the two LISTS into one tab is the remaining half and is
                 deliberately not done here: it touches six hardcoded "designs" literals in
                 this file plus the landing clamp, and it is not what makes the demo. */}
+            {/* ⚠️ canEdit WAS `ssCanRead(myAccess, "contacts") === "edit"`, which was ALWAYS
+                FALSE: ssCanRead returns a BOOLEAN (01-core), so it compared `true` to the
+                string "edit". The whole conversation half of the record page — Activity,
+                Notes and the Email composer — was therefore disabled for EVERY user in the
+                product, owners and operators included, while the server happily accepted
+                those same writes. Worse, the Email tab's hint then blamed the contact ("no
+                email address on file") in front of a contact whose address is rendered
+                directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
+                admin or owner always holds it, otherwise read the area out of the map. */}
             {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
                 recordId={sub.slice(2)}
                 isAdmin={canAdmin}
-                canEdit={ssCanRead(myAccess, "contacts") === "edit"}
+                canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
                 onBack={() => navigate(activeTab, null)}
                 onNavigate={(k, id) => navigate(k === "contact" ? "leads" : "designs", (k === "contact" ? "c-" : "d-") + id)}
                 onOpenDesign={(code) => openInDesigner(code)}
