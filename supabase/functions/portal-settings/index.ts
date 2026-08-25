@@ -1041,7 +1041,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
     // builder click a button that can only fail: the Anthropic key is an edge secret, so the
     // browser has no other way to know whether the feature is configured.
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")) });
+    // WALLET, read here rather than only in portal-billing, because the calibration panel
+    // has to show "$20 · balance $140" BEFORE the builder clicks. Learning the price from
+    // a 402 after waiting thirty seconds for a generation is the worst possible ordering.
+    // Fails soft to nulls: a wallet read that errors must not blank the whole catalog.
+    let wallet: { balanceCents: number; heldCents: number; priceCents: number | null; meterActive: boolean } | null = null;
+    try {
+      const [acct, price] = await Promise.all([
+        admin.from("wallet_accounts").select("balance_cents, held_cents").eq("client_id", clientId).maybeSingle(),
+        admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
+      ]);
+      wallet = {
+        balanceCents: Number(acct.data?.balance_cents ?? 0),
+        heldCents: Number(acct.data?.held_cents ?? 0),
+        // Redacted when visible is false, the same posture portal-billing takes on
+        // billing_plans.price_cents — the projection and the revoke are both load-bearing.
+        priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
+        meterActive: Boolean(price.data?.active),
+      };
+    } catch (_) { wallet = null; }
+
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -1830,8 +1850,76 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
     // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
     // cap query above already failed soft for the read case.
-    const { error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null });
+    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: fromVideo ? "video" : "photos" }).select("id").single();
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
+
+    // ── WALLET HOLD ────────────────────────────────────────────────────────────────
+    // Ordered deliberately: the API-key check, then the daily cap, then the ai_style_calls
+    // row, THEN the money, then the model call.
+    //
+    //   * the key check first, or we hold $20 against a call that cannot happen;
+    //   * the daily cap before the hold, because it bounds OUR exposure even for a paying
+    //     tenant and a runaway loop must not churn hold/release pairs;
+    //   * the hold last, immediately before the fetch, so the window in which money is
+    //     reserved is as small as it can be.
+    //
+    // ⚠️ THE WALLET FAILS CLOSED. This is the INVERSE of everything else in this codebase
+    // and the inversion is deliberate. Entitlement fails open (CLAUDE.md) because a
+    // transient error must never paywall a paying customer, and that costs nothing. The
+    // daily-cap count above fails open for the same reason. Failing open on a WALLET means
+    // performing a $20 service free, spending real Anthropic dollars, and having no record
+    // of either. Failing closed costs one blocked generation with an honest message, on a
+    // feature that is optional and occasional. A reader who has internalised "entitlement
+    // fails open" will want to fix this; do not.
+    //
+    // Only the VIDEO path charges. Ahsan, 2026-08-25: "when a 3D model is created using
+    // the uploaded video". The $20 is priced off the video's Anthropic cost, and the photo
+    // path is slated for removal.
+    let holdId: number | null = null;
+    if (fromVideo) {
+      const { data: hold, error: holdErr } = await admin
+        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: String(payload.idempotencyKey ?? "").slice(0, 120) || null, p_user: userId ?? null })
+        .maybeSingle() as { data: any; error: any };
+      if (holdErr) {
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_hold_failed", message: `Wallet hold failed, refusing the generation: ${holdErr.message}` });
+        return json({ error: "The billing meter is unavailable right now - please try again shortly." }, 503);
+      }
+      const err = hold?.err ?? null;
+      if (err === "insufficient_funds") {
+        // Clean up the cap row: it recorded a call that will not happen, and would
+        // otherwise burn one of their ten free daily drafts on a refusal.
+        if (ledgerRow?.id) await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
+        return json({
+          error: `This 3D generation costs $${((hold?.price_cents ?? 2000) / 100).toFixed(2)} and your wallet has $${((hold?.balance_after ?? 0) / 100).toFixed(2)}. Add funds in Settings → Billing.`,
+          code: "insufficient_funds",
+          priceCents: hold?.price_cents ?? null,
+          balanceCents: hold?.balance_after ?? null,
+        }, 402);   // 402 matches portal-billing's decline status
+      }
+      if (err === "hold_in_flight") {
+        if (ledgerRow?.id) await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
+        return json({ error: "A 3D generation is already running for this account - wait for it to finish." }, 409);
+      }
+      if (err === "meter_unknown") {
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_meter_missing", message: "usage_prices has no video_3d_generation row" });
+        return json({ error: "The billing meter is unavailable right now - please try again shortly." }, 503);
+      }
+      // `meter_inactive` is the ARMING RAIL, not a failure: the migration seeds the price
+      // with active = false so this function can be deployed and proven a no-op before one
+      // boolean turns the charge on. holdId stays null and the generation runs free.
+      if (!err) holdId = hold?.hold_id ?? null;
+    }
+
+    // From here on, every exit path must either capture or release the hold. A generation
+    // that fails is not the builder's fault and must not cost them $20 -- and a release is
+    // a local decrement of a number that never moved, where a refund would be a second
+    // mutation that can itself fail (see portal-billing's void/refund/closed_unknown
+    // ladder, which exists precisely because that is hard).
+    const releaseHold = async (reason: string) => {
+      if (holdId == null) return;
+      const { error } = await admin.rpc("wallet_release", { p_hold_id: holdId, p_reason: reason });
+      if (error) await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_release_failed", message: `Could not release hold ${holdId}: ${error.message}` });
+    };
 
     let res: Response;
     try {
@@ -1855,19 +1943,58 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         }),
       });
     } catch (e) {
+      await releaseHold("fetch failed");            // never reached Anthropic
       return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
     }
     if (!res.ok) {
+      await releaseHold(`upstream ${res.status}`);  // our 429/500 is not the builder's fault
       const body = (await res.text()).slice(0, 300);
       return json({ error: `AI service returned ${res.status}: ${body}` }, 502);
     }
     const data = await res.json().catch(() => null) as any;
     const text = data?.content?.[0]?.text ?? "";
     const drafted = parseModelSpec(text);
-    if (!drafted.ok) return json({ error: drafted.error }, 502);
+    if (!drafted.ok) {
+      // The model answered unusably. The builder got nothing, so charging for our own
+      // parse failure buys a support ticket and teaches them not to trust the feature.
+      await releaseHold("unparseable spec");
+      await logEdgeError({ fn: "portal-settings", req, clientId, code: "ai_spec_unparseable", message: `Model reply did not parse: ${drafted.error}` });
+      return json({ error: drafted.error }, 502);
+    }
+
+    // ── CAPTURE ────────────────────────────────────────────────────────────────────
+    // Token usage was previously PARSED AND DISCARDED. Storing it is what makes "do tell
+    // me how much it does use" (Carolyn, 2026-08-24) answerable from one query instead of
+    // a guess. Note Anthropic FETCHES the frames from our public bucket URLs, so image
+    // tokens dominate input_tokens and the per-generation cost scales with SS_VID_FRAMES --
+    // a future "more frames = better spec" tweak is also a cost change, and this is what
+    // makes that visible rather than surprising.
+    let balanceCents: number | null = null;
+    if (holdId != null) {
+      const u = data?.usage ?? null;
+      const inTok = Number(u?.input_tokens ?? 0), outTok = Number(u?.output_tokens ?? 0);
+      // Sonnet list price, in cents per token. Kept here rather than in a table because it
+      // is OUR cost basis, not a tenant-facing price; the tokens themselves are stored raw
+      // so a rate correction can be applied retrospectively without losing anything.
+      const costCents = Math.round((inTok * 0.0003 + outTok * 0.0015) * 100) / 100;
+      const { data: bal, error: capErr2 } = await admin.rpc("wallet_capture", {
+        p_hold_id: holdId, p_cost_cents: Math.round(costCents), p_usage: u, p_ref_id: String(ledgerRow?.id ?? ""),
+      });
+      if (capErr2) {
+        // The generation SUCCEEDED and we could not take the money. Do not fail the
+        // request over it -- the builder has their model. Record it loudly instead; the
+        // hold will age out and auto-release, which is the safe direction for them.
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_capture_failed", message: `Hold ${holdId} not captured after a successful generation: ${capErr2.message}` });
+      } else {
+        balanceCents = typeof bal === "number" ? bal : null;
+        if (ledgerRow?.id) await admin.from("ai_style_calls").update({ charged_cents: 2000, wallet_tx_id: holdId }).eq("id", ledgerRow.id);
+      }
+    }
+
     // `frames` makes a silent truncation visible; `observed` is the builder-facing note
-    // about doors, windows and vents, which the spec has no field for.
-    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, observed: fromVideo ? parseObservedNotes(text) : null });
+    // about doors, windows and vents, which the spec has no field for; `balanceCents` lets
+    // the panel show the new balance without a second round trip.
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, observed: fromVideo ? parseObservedNotes(text) : null, balanceCents });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;

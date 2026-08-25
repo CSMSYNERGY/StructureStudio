@@ -236,7 +236,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Money is a separate grant from configuration — 056's own words: "Adding an operator
     // should never silently grant the ability to charge a client's card." set_billing sets
     // the discount and the exemption that every later charge is computed from.
-    if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants")
+    if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants"
+         || String(action ?? "") === "wallet_credit" || String(action ?? "") === "wallet_adjust"
+         || String(action ?? "") === "wallet_set_limits")
         && !identity.canBill) {
       return json({ error: "This operator account cannot change billing." }, 403);
     }
@@ -729,6 +731,83 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // needs SMTP), and either way we return a one-time set-password link the
       // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
       // Settings) or "user" (Designs & Leads only).
+      // ── WALLET, OPERATOR SIDE ───────────────────────────────────────────────────────
+      // Every one of these is an APPEND. Deliberately NOT modelled on set_feature_grants'
+      // replace-the-whole-set shape: the 2026-08-19 audit found real bugs in that pattern
+      // (stale rows surviving, granted_by wiped), and an append is structurally immune to
+      // the entire class. It also means the ledger cannot be rewritten by a later call --
+      // an append-only ledger whose balance can be silently overwritten is not a ledger.
+      case "wallet_credit": {
+        // Comp credits: the demo lever, and the goodwill lever ("that one failed on us,
+        // here's $20 back"). MEMO IS REQUIRED -- a comp is a commercial act and should say
+        // why, the same argument 109_feature_grants makes for granted_by.
+        const clientId = reqStr(p.clientId, "clientId");
+        const amountCents = Math.round(Number(p.amountCents));
+        if (!Number.isFinite(amountCents) || amountCents <= 0) throw new Error("A positive amount is required.");
+        if (amountCents > 500000) throw new Error("That credit is over the $5,000 single-entry limit.");
+        const memo = reqStr(p.memo, "memo").slice(0, 300);
+        const { data: exists } = await sb.from("client_configs")
+          .select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+        const { data: bal, error } = await sb.rpc("wallet_credit", {
+          p_client_id: clientId, p_amount_cents: amountCents, p_kind: "grant",
+          p_ref_type: "operator", p_ref_id: null, p_memo: memo,
+          p_idem: String(p.idempotencyKey ?? "").slice(0, 120) || null, p_actor: null,
+        });
+        if (error) throw new Error(error.message);
+        return json({ ok: true, balanceCents: bal });
+      }
+
+      case "wallet_adjust": {
+        // Signed correction, INCLUDING zeroing out. Never a delete, never an UPDATE of the
+        // balance: zeroing is an `adjustment` row for -balance_cents with a memo, so the
+        // history still explains how the number got where it is.
+        const clientId = reqStr(p.clientId, "clientId");
+        const amountCents = Math.round(Number(p.amountCents));
+        if (!Number.isFinite(amountCents) || amountCents === 0) throw new Error("A non-zero amount is required.");
+        if (Math.abs(amountCents) > 500000) throw new Error("That adjustment is over the $5,000 single-entry limit.");
+        const memo = reqStr(p.memo, "memo").slice(0, 300);
+        const { data: bal, error } = await sb.rpc("wallet_credit", {
+          p_client_id: clientId, p_amount_cents: amountCents, p_kind: "adjustment",
+          p_ref_type: "operator", p_ref_id: null, p_memo: memo,
+          p_idem: String(p.idempotencyKey ?? "").slice(0, 120) || null, p_actor: null,
+        });
+        if (error) throw new Error(error.message);
+        return json({ ok: true, balanceCents: bal });
+      }
+
+      case "wallet_set_limits": {
+        // metered_exempt is the EXEMPTION -- not a new flag. An exempt tenant still gets a
+        // ledger row, at $0, so "how many generations did this tenant run and what did they
+        // cost us" stays answerable for internal accounts, which are exactly the ones most
+        // likely to run a lot of them.
+        const clientId = reqStr(p.clientId, "clientId");
+        const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
+        if (p.meteredExempt !== undefined) patch.metered_exempt = Boolean(p.meteredExempt);
+        if (p.monthlyAiCostCapCents !== undefined) {
+          const c = p.monthlyAiCostCapCents === null ? null : Math.round(Number(p.monthlyAiCostCapCents));
+          if (c !== null && (!Number.isFinite(c) || c < 0)) throw new Error("The cost cap must be a positive number of cents, or blank.");
+          patch.monthly_ai_cost_cap_cents = c;
+        }
+        const { error } = await sb.from("wallet_accounts").upsert(patch, { onConflict: "client_id" });
+        if (error) throw new Error(error.message);
+        return json({ ok: true });
+      }
+
+      case "wallet_status": {
+        // Operator read, and the ONLY place cost_cents is ever served. This is our gross
+        // margin on a $20 charge; a tenant must never see it (portal-billing's wallet
+        // projection deliberately omits the column entirely).
+        const clientId = reqStr(p.clientId, "clientId");
+        const [acct, txs, recon] = await Promise.all([
+          sb.from("wallet_accounts").select("*").eq("client_id", clientId).maybeSingle(),
+          sb.from("wallet_transactions").select("id, kind, amount_cents, balance_after_cents, meter_kind, state, cost_cents, memo, created_at")
+            .eq("client_id", clientId).order("created_at", { ascending: false }).limit(25),
+          sb.from("wallet_reconcile").select("*").eq("client_id", clientId).maybeSingle(),
+        ]);
+        return json({ ok: true, account: acct.data ?? null, transactions: txs.data ?? [], reconcile: recon.data ?? null });
+      }
+
       case "set_feature_grants": {
         // EARLY ACCESS: switch a feature on for ONE builder before it goes on sale.
         // Carolyn 2026-08-18 — "I would like to be able to see the 3D as I'm in beta, but not

@@ -447,11 +447,59 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // an owner gets the commercial detail: what this business pays, what discount it has,
     // whether a card is on file, or the checkout keys to put a new one there.
     const mine = canRead("settings_billing");
+
+    // WALLET. Behind the same field filter as the rest of the commercial detail: a
+    // balance is what this business has paid for, so it belongs with `discount` and
+    // `hasCard`, not with `entitlement`.
+    //
+    // Labels are authored HERE, server-side, so the browser never maps a `kind` enum to
+    // English and drifts from it. `cost_cents` and `usage` are never selected — that
+    // column is our gross margin on a $20 charge and is the single worst thing in this
+    // schema for a tenant to read.
+    let wallet: Record<string, unknown> | null = null;
+    if (mine) {
+      try {
+        const [acct, price, txs] = await Promise.all([
+          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt").eq("client_id", clientId).maybeSingle(),
+          admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible").eq("active", true).order("sort_order"),
+          admin.from("wallet_transactions").select("id, kind, amount_cents, meter_kind, state, memo, created_at")
+            .eq("client_id", clientId).in("state", ["posted", "held"]).order("created_at", { ascending: false }).limit(10),
+        ]);
+        const meters = (price.data ?? []).map((p: any) => ({
+          kind: p.kind, label: p.label, unitLabel: p.unit_label,
+          priceCents: p.visible === false ? null : Number(p.price_cents),
+        }));
+        const label = (t: any) => {
+          if (t.kind === "topup") return "Added funds";
+          if (t.kind === "grant") return "Credit from CSM Synergy";
+          if (t.kind === "adjustment") return t.memo ? `Adjustment — ${t.memo}` : "Adjustment";
+          if (t.kind === "refund") return "Refund";
+          if (t.meter_kind === "video_3d_generation") return "3D generation from a video";
+          return "Usage";
+        };
+        wallet = {
+          balanceCents: Number(acct.data?.balance_cents ?? 0),
+          heldCents: Number(acct.data?.held_cents ?? 0),
+          exempt: Boolean(acct.data?.metered_exempt),
+          meters,
+          transactions: (txs.data ?? []).map((t: any) => ({
+            id: t.id, label: label(t), amountCents: Number(t.amount_cents),
+            pending: t.state === "held", at: t.created_at,
+          })),
+        };
+      } catch (_) {
+        // A wallet read must never take the Billing tab down with it — `status` is the
+        // action that decides whether the whole portal is locked.
+        wallet = null;
+      }
+    }
+
     return json({
       configured,
       entitlement,
       ...(mine
         ? {
+          wallet,
           hasCard: Boolean(vaultId),
           discount: { percent: discountPct, features: discountFeatures },
           plans: publicPlans,

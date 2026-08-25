@@ -879,6 +879,85 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         </div>
       )}
 
+      {/* WALLET — prepaid credit for metered usage. Carolyn, 2026-08-24: "like GHL has a
+          wallet on there ... put it in the billing, in the billing portion. A wallet for
+          usage cases."
+
+          Sits ABOVE "Your subscription" on purpose: once 3D is live this is what a builder
+          opens the tab to check weekly, while the subscription summary is a monthly glance.
+          It is also the shape she pointed at in Framed-UP — balance, what's left, what it
+          costs — translated from a monthly quota to prepaid money.
+
+          Renders even at a zero balance, and even before Deposyt is connected. That is the
+          whole point: a real balance really does drop when a generation runs, which is what
+          makes the September demo honest without a merchant account attached. */}
+      {data && data.wallet && (() => {
+        const w = data.wallet;
+        const avail = (w.balanceCents || 0) - (w.heldCents || 0);
+        const video = (w.meters || []).find((m) => m.kind === "video_3d_generation") || null;
+        const price = video && video.priceCents ? video.priceCents : 0;
+        const left = price > 0 ? Math.floor(Math.max(0, avail) / price) : null;
+        // Green at a generation or more in hand, amber below one, red at nothing. The same
+        // three-state read as SUB_BADGE, so the tab has one visual language.
+        const tone = w.exempt ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Non-billable" }
+          : left === null || left >= 1 ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Ready" }
+          : avail > 0 ? { bg: "#FFFBEB", bd: "#FDE68A", fg: "#92400E", t: "Low balance" }
+          : { bg: "#FEF2F2", bd: "#FECACA", fg: "#991B1B", t: "Empty" };
+        const stat = (label, value) => (
+          <div style={{ minWidth: 120 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#1E293B", marginTop: 3 }}>{value}</div>
+          </div>
+        );
+        return (
+          <div style={S.card}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+              <div style={{ ...S.h2, marginBottom: 0 }}>Wallet</div>
+              <span style={{ background: tone.bg, border: `1px solid ${tone.bd}`, color: tone.fg, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>{tone.t}</span>
+            </div>
+            <div style={{ display: "flex", gap: 26, flexWrap: "wrap", marginBottom: 14 }}>
+              {stat("Balance", fmt$(Math.max(0, avail)))}
+              {left !== null && stat("3D generations left", left)}
+              {(w.heldCents || 0) > 0 && stat("Reserved", fmt$(w.heldCents))}
+            </div>
+            {video && video.priceCents ? (
+              <p style={{ fontSize: 13, color: "#475569", marginTop: 0 }}>
+                <strong>{fmt$(video.priceCents)}</strong> per {video.unitLabel} — {video.label}.
+                Text messages and email will draw on the same wallet as they arrive.
+              </p>
+            ) : (
+              <p style={{ fontSize: 13, color: "#64748B", marginTop: 0 }}>
+                Nothing is metered on your account yet. When 3D generation and texting switch on, they draw from here.
+              </p>
+            )}
+            {/* ADD FUNDS is deliberately not a button yet. Carolyn, 2026-08-24: "I will
+                connect the wallet to Deposyt AFTER — just set the infrastructure up right
+                now." Stubbing a checkout that pretends to charge would be worse than
+                saying so; if someone clicks this at the expo, the honest sentence IS the
+                demo. Same voice as the "online checkout isn't switched on yet" notice. */}
+            <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600 }}>
+              Adding funds online isn't switched on yet — contact CSM Synergy to top up your wallet.
+            </div>
+            {(w.transactions || []).length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>Recent activity</div>
+                {w.transactions.map((t) => (
+                  <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
+                    <span style={{ color: "#475569" }}>
+                      {t.label}
+                      {t.pending && <span style={{ color: "#92400E", fontWeight: 700 }}> · pending</span>}
+                    </span>
+                    <span style={{ fontWeight: 700, color: t.amountCents < 0 ? "#991B1B" : "#065F46", whiteSpace: "nowrap" }}>
+                      {t.amountCents < 0 ? "−" : "+"}{fmt$(Math.abs(t.amountCents))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* At-a-glance subscription summary — total spend, status, and next renewal, above the
           per-feature detail. Derived from the same live subscriptions; no extra backend call. */}
       {data && liveSubs.length > 0 && (() => {
