@@ -1948,8 +1948,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 {ssDesign.image_url && <a href={ssDesign.image_url} target="_blank" rel="noopener" style={{ fontSize: 11, color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open full ↗</a>}
               </div>
               {ssDesign.plan_image_url
-                ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener">
-                    <img src={ssDesign.plan_image_url} alt="Floor plan" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0", display: "block", background: "#FFF" }} />
+                ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener" title="Open the full plan"
+                    style={{ display: "block", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 6 }}>
+                    {/* A thumbnail, not a poster (Carolyn 2026-08-25: "about 1/4 that size") —
+                        capped height, natural aspect, centered; the click opens the full plan. */}
+                    <img src={ssDesign.plan_image_url} alt="Floor plan"
+                      style={{ maxHeight: 150, maxWidth: "100%", width: "auto", display: "block", margin: "0 auto" }} />
                   </a>
                 : <p style={{ fontSize: 12, color: "#94A3B8", padding: "4px 4px 2px" }}>
                     The picture appears after the next quote submit{ssDesign.image_url ? " — the PDF above has it today" : ""}.
@@ -1962,7 +1966,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
               </div>
               {ssDesign.view3d_image_url
-                ? <img src={ssDesign.view3d_image_url} alt="3D view" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0", display: "block", background: "#FFF" }} />
+                ? <a href={ssDesign.view3d_image_url} target="_blank" rel="noopener" title="Open the 3D picture"
+                    style={{ display: "block", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 6 }}>
+                    <img src={ssDesign.view3d_image_url} alt="3D view"
+                      style={{ maxHeight: 150, maxWidth: "100%", width: "auto", display: "block", margin: "0 auto" }} />
+                  </a>
                 : <p style={{ fontSize: 12, color: "#94A3B8", padding: "4px 4px 2px" }}>
                     No 3D picture yet — open the design and click 🧊 3D View, then resubmit to capture one.
                   </p>}
