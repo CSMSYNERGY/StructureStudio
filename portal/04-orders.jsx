@@ -809,36 +809,38 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
     const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
     const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
-    setRows(list.map((o) => {
-      const ps = payByOrder[o.id] || [];
-      return {
-        o, d: byCode[o.short_code] || null, pays: ps,
-        paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
-        coPending: pendingCo.has(o.short_code),
-      };
-    }));
+    setRows(list
+      // SS ORDERS ONLY (Carolyn 2026-08-24: "the Orders tab should NOT show any orders
+      // from GHL — only the SS invoices/orders"). The designs_ensure_order trigger mints
+      // a row for EVERY accepted/invoiced design, GHL-quoted ones included — those rows
+      // stay in the table (other code may care), but this tab is the ledger of paperwork
+      // StructureStudio issued: the design carries an ss_quote_number, or the order has no
+      // design at all (a future manual/walk-in order is SS-native by definition).
+      .filter((o) => !o.short_code || (byCode[o.short_code] && byCode[o.short_code].ss_quote_number))
+      .map((o) => {
+        const ps = payByOrder[o.id] || [];
+        return {
+          o, d: byCode[o.short_code] || null, pays: ps,
+          paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
+          coPending: pendingCo.has(o.short_code),
+        };
+      }));
   }, [clientId]);
 
-  // Pull fresh totals + externally-collected payments from GHL, then re-read.
-  // Kept separate from load(): recording a payment re-reads the tables (instant),
-  // while this hits the GHL API and only runs on mount and on Refresh.
+  // Refresh = re-read the tables. This used to also pull totals/statuses from GHL
+  // (sync-design-status over every order's code), but Orders is SS paperwork only now
+  // (Carolyn 2026-08-24): the GHL-quoted orders it refreshed are no longer shown, and SS
+  // designs are fenced out of that sync by design — so the GHL leg refreshed nothing this
+  // tab renders and cost a GHL API read per mount. Statuses on SS orders are written
+  // locally (customer-accept / send_invoice) and arrive with the plain read.
   const [syncing, setSyncing] = useState(false);
   const syncFromGhl = useCallback(async () => {
     setSyncing(true);
-    try {
-      const { data: ords } = await sb.from("orders").select("short_code").eq("client_id", clientId).limit(2000);
-      const codes = (ords || []).map((o) => o.short_code).filter(Boolean);
-      if (codes.length) await sb.functions.invoke("sync-design-status", { body: { shortCodes: codes } });
-    } catch (_e) { /* non-fatal: the tables still render what we already have */ }
-    setSyncing(false);
     await load();
-  }, [clientId, load]);
+    setSyncing(false);
+  }, [load]);
 
-  const didSync = useRef(false);
-  useEffect(() => {
-    load();
-    if (!didSync.current) { didSync.current = true; syncFromGhl(); }
-  }, [load, syncFromGhl]);
+  useEffect(() => { load(); }, [load]);
 
   // Which buildings are already on the board or on a load, and which orders are lot sales.
   // Only fetched when this person can actually act on it — a read of the schedule is still
@@ -1009,7 +1011,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
 
         {all.length === 0 && (
           <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
-            No orders yet. An order appears here automatically as soon as a customer accepts their quote.
+            No orders yet. An order appears here automatically as soon as a customer signs a
+            StructureStudio quote. (Quotes and invoices issued through your CRM live in your
+            CRM — this page only tracks the paperwork StructureStudio issues.)
           </p>
         )}
         {all.length > 0 && shown.length === 0 && (
