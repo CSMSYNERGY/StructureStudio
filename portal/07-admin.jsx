@@ -620,14 +620,217 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
   );
 }
 
+// ── Billing (global) ─────────────────────────────────────────────────────────
+// Operator revenue dashboard. ONE read (get_billing_overview) returns raw rows and every
+// metric is a memo over them, so the KPI cards and the table can never disagree (FramedUp's
+// SubscribersPage pattern). MRR counts active + past_due — a grace-period tenant is still
+// expected revenue — never cancelled; annual plans are normalized /12. Comped/exempt tenants
+// have no subscription rows at all, which keeps them out of MRR structurally; they get their
+// own card so they are visible rather than invisible.
+// Dates render as UTC calendar dates: gateway billing dates ARE calendar dates, and
+// local-zone rendering shifts them a day either side of midnight (FramedUp's billingDay bug).
+const admDay = (iso) => iso ? new Date(iso).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" }) : "—";
+
+function AdmBillingStat({ label, value, sub }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 800, color: "#1E293B", lineHeight: 1.2, marginTop: 2 }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function AdmBilling() {
+  const [data, setData] = useState(null);            // null = loading
+  const [err, setErr] = useState(null);
+  const [q, setQ] = useState("");
+  const [openId, setOpenId] = useState(null);        // expanded subscription row
+  const [showCancelled, setShowCancelled] = useState(true);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    try { setData(await adminApi("get_billing_overview")); }
+    catch (e) {
+      setErr(e.message || "Could not load billing.");
+      setData({ subscriptions: [], tenants: [], alerts: { unknown: [], declined30: 0 } });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const subs = (data && data.subscriptions) || [];
+  const tenants = (data && data.tenants) || [];
+  const alerts = (data && data.alerts) || { unknown: [], declined30: 0 };
+
+  const report = useMemo(() => {
+    const paying = subs.filter((s) => s.status === "active" || s.status === "past_due");
+    const mrrCents = (s) => Math.round((s.price_cents || 0) / (s.billing_interval === "annual" ? 12 : 1));
+    const mrr = paying.reduce((t, s) => t + mrrCents(s), 0);
+    const byPlan = new Map();
+    for (const s of paying) {
+      const k = s.plan_name || s.plan_id;
+      byPlan.set(k, (byPlan.get(k) || 0) + mrrCents(s));
+    }
+    return {
+      mrr,
+      byPlan: [...byPlan.entries()].sort((a, b) => b[1] - a[1]),
+      active: subs.filter((s) => s.status === "active").length,
+      pastDue: subs.filter((s) => s.status === "past_due"),
+      cancelled: subs.filter((s) => s.status === "cancelled").length,
+      payingBuilders: new Set(paying.map((s) => s.client_id)).size,
+      exempt: tenants.filter((t) => t.billing_exempt),
+      grantCount: tenants.reduce((t, r) => t + (r.grant_count || 0), 0),
+    };
+  }, [subs, tenants]);
+
+  const rows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return subs
+      .filter((s) => showCancelled || s.status !== "cancelled")
+      .filter((s) => !needle || [s.company_name, s.client_id, s.plan_name].some((v) => String(v || "").toLowerCase().indexOf(needle) !== -1));
+  }, [subs, q, showCancelled]);
+
+  const statusChip = (s) => {
+    if (s.status === "active") return <AdmChip tone="good">Active</AdmChip>;
+    if (s.status === "past_due") return <AdmChip tone="warn">Past due</AdmChip>;
+    if (s.status === "cancelled") return <AdmChip tone="neutral">Cancelled</AdmChip>;
+    return <AdmChip tone="neutral">{s.status || "—"}</AdmChip>;
+  };
+  const TH = { textAlign: "left", fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const TD = { fontSize: 13, color: "#1E293B", padding: "9px 10px", borderBottom: "1px solid #F1F5F9", whiteSpace: "nowrap" };
+
+  if (data === null) return <div style={S.card}><CardHead title="Billing" desc="Loading subscriptions…" /></div>;
+
+  return (
+    <div>
+      {err && <div style={S.err}>{err}</div>}
+
+      {/* closed_unknown FIRST and loud: it means a card may have been charged with nothing
+          recorded, and that plan's checkout is blocked for that tenant until reconciled. */}
+      {alerts.unknown.length > 0 && (
+        <div style={{ ...S.card, border: "1px solid #FCA5A5", background: "#FEF2F2" }}>
+          <CardHead title={`⚠️ ${alerts.unknown.length} unverified charge${alerts.unknown.length === 1 ? "" : "s"}`}
+            desc="A checkout whose outcome could not be confirmed — the card may have been charged with nothing recorded. Reconcile at the gateway; that tenant's checkout for the plan stays blocked until the row is resolved." />
+          {alerts.unknown.map((u, i) => (
+            <div key={i} style={{ ...ADM_ROW, fontSize: 12.5 }}>
+              <span style={{ fontWeight: 700 }}>{u.client_id}</span>
+              <span style={{ color: "#64748B" }}>{u.plan_id}</span>
+              <span style={{ color: "#991B1B", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{u.detail || "no detail"}</span>
+              <span style={{ color: "#94A3B8" }}>{u.sale_txn ? `txn ${u.sale_txn}` : ""} · {admDay(u.created_at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginBottom: 12 }}>
+        <div style={S.card}>
+          <AdmBillingStat label="Monthly revenue" value={money(report.mrr) + "/mo"}
+            sub={`${report.payingBuilders} paying builder${report.payingBuilders === 1 ? "" : "s"} · annual plans counted /12`} />
+          {report.byPlan.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
+              {report.byPlan.map(([name, cents]) => (
+                <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#475569", padding: "2px 0" }}>
+                  <span>{name}</span><span style={{ fontWeight: 700 }}>{money(cents)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Subscriptions" value={report.active}
+            sub={`active · ${report.pastDue.length} past due · ${report.cancelled} cancelled`} />
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Billing health" value={report.pastDue.length === 0 && alerts.unknown.length === 0 ? "OK" : `${report.pastDue.length + alerts.unknown.length} ⚠`}
+            sub={`${report.pastDue.length} past due · ${alerts.unknown.length} unverified · ${alerts.declined30} declined in 30 days`} />
+          {report.pastDue.map((s) => (
+            <div key={s.id} style={{ fontSize: 12.5, color: "#92400E", marginTop: 4 }}>
+              {s.company_name} — {s.plan_name}, since {admDay(s.past_due_since)}
+            </div>
+          ))}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Comped / exempt" value={report.exempt.length}
+            sub={`exempt builders (not in MRR) · ${report.grantCount} feature grant${report.grantCount === 1 ? "" : "s"}`} />
+          {report.exempt.slice(0, 6).map((t) => (
+            <div key={t.client_id} style={{ fontSize: 12.5, color: "#475569", marginTop: 4 }}>
+              {t.company_name || t.client_id}{t.exempt_until ? ` · until ${admDay(t.exempt_until)}` : ""}{t.discount_percent ? ` · ${t.discount_percent}% off` : ""}
+            </div>
+          ))}
+          {report.exempt.length > 6 && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 4 }}>+{report.exempt.length - 6} more</div>}
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <CardHead title="Subscribers" count={rows.length}
+          desc="Every subscription across the platform. Amounts are what the gateway actually bills — founding members keep their locked amount when list prices change."
+          right={<button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>Refresh</button>} />
+        <SearchInput value={q} onChange={setQ} placeholder="Search builder or plan…" />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#64748B", marginBottom: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} />
+          <span>Show cancelled</span>
+        </label>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={TH}>Builder</th><th style={TH}>Plan</th><th style={TH}>Interval</th>
+              <th style={{ ...TH, textAlign: "right" }}>Amount</th><th style={TH}>Status</th>
+              <th style={TH}>Started</th><th style={TH}>Renews</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((s) => (
+                <React.Fragment key={s.id}>
+                  <tr onClick={() => setOpenId(openId === s.id ? null : s.id)} style={{ cursor: "pointer", background: openId === s.id ? "#F8FAFC" : "transparent" }}>
+                    <td style={TD}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <AdmTile name={s.company_name} size={26} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 700 }}>{s.company_name}</div>
+                          <div style={{ fontSize: 11, color: "#94A3B8" }}>{s.client_id}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style={TD}>{s.plan_name}</td>
+                    <td style={TD}>{s.billing_interval === "annual" ? "Yearly" : s.billing_interval === "monthly" ? "Monthly" : "—"}</td>
+                    <td style={{ ...TD, textAlign: "right", fontWeight: 700 }}>
+                      {money(s.price_cents)}
+                      {s.list_price_cents != null && s.list_price_cents !== s.price_cents &&
+                        <span style={{ color: "#94A3B8", fontWeight: 400, textDecoration: "line-through", marginLeft: 6 }}>{money(s.list_price_cents)}</span>}
+                    </td>
+                    <td style={TD}>{statusChip(s)}</td>
+                    <td style={TD}>{admDay(s.created_at)}</td>
+                    <td style={TD}>{s.status === "cancelled" ? (s.paid_through ? `paid thru ${admDay(s.paid_through)}` : "—") : admDay(s.paid_through)}</td>
+                  </tr>
+                  {openId === s.id && (
+                    <tr><td colSpan={7} style={{ ...TD, background: "#F8FAFC", fontSize: 12.5, color: "#475569", whiteSpace: "normal" }}>
+                      Subscription <code>{s.id}</code> · period {admDay(s.current_period_start)} → {admDay(s.current_period_end)}
+                      {s.past_due_since ? <> · past due since {admDay(s.past_due_since)}</> : null}
+                      {s.canceled_at ? <> · cancelled {admDay(s.canceled_at)}</> : null}
+                      {s.list_price_cents != null && s.list_price_cents !== s.price_cents ? <> · list {money(s.list_price_cents)}, charged {money(s.price_cents)}</> : null}
+                    </td></tr>
+                  )}
+                </React.Fragment>
+              ))}
+              {rows.length === 0 && (
+                <tr><td colSpan={7} style={{ ...TD, color: "#94A3B8", textAlign: "center", padding: 24 }}>No subscriptions{q ? " match the search" : " yet"}.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── The shell ────────────────────────────────────────────────────────────────
-// Six sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
+// Seven sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
 // Items" wrote one tenant's row while "Master Items" read the platform-wide palette, and
 // they sat adjacent in one undifferentiated pill row with nothing saying so. The tab order
 // is also the onboarding order: create the client, give the owner a login, give them
 // styles, then items, then prices.
 const ADM_TABS = [
   ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
+  ["billing", "Billing",         "Subscribers, revenue and billing health across the platform",   "global"],
   ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
@@ -777,6 +980,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
         <AdmClients clients={clients} features={features} sel={sel}
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
       )}
+      {sub === "billing" && <AdmBilling />}
       {sub === "master" && <AdmMaster master={master} />}
 
       {needsClient && !sel && clients && (

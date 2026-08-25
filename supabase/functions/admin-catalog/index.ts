@@ -4,6 +4,7 @@ import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { paidThroughOf } from "../_shared/billingPeriods.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -226,6 +227,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   // break-glass console out of every write while telling it the account is read-only.
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
+    "get_billing_overview",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -299,6 +301,82 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           };
         });
         return json({ ok: true, clients, features });
+      }
+      case "get_billing_overview": {
+        // Operator revenue dashboard (portal Admin → Billing tab). Returns RAW rows and the
+        // UI computes MRR/health metrics client-side in memos — FramedUp's
+        // get_admin_subscribers pattern, so the numbers on screen and the rows in the table
+        // can never disagree. The billing_* tables are service-role only; this action is
+        // their only cross-tenant reader.
+        // ⛔ NEVER return billing_customers.vault_id — an NMI vault id is a bearer
+        // capability for charging that card. This response carries no vault data at all.
+        const [subsRes, plansRes, cfgRes, csRes, grantsRes] = await Promise.all([
+          sb.from("billing_subscriptions")
+            .select("id, client_id, plan_id, status, price_cents, list_price_cents, current_period_start, current_period_end, past_due_since, canceled_at, created_at")
+            .order("created_at", { ascending: false }),
+          // Inactive plans included on purpose: a subscription's meaning is historical, and
+          // a retired plan must still render its name (FramedUp hit this exact blank).
+          sb.from("billing_plans").select("id, name, feature, billing_interval, required"),
+          sb.from("client_configs").select("client_id, company_name"),
+          sb.from("client_settings").select("client_id, billing_exempt, billing_exempt_until, discount_percent"),
+          sb.from("client_feature_grants").select("client_id, feature, expires_at"),
+        ]);
+        if (subsRes.error) throw subsRes.error;
+        if (plansRes.error) throw plansRes.error;
+        if (cfgRes.error) throw cfgRes.error;
+        const planById = new Map((plansRes.data ?? []).map((r: any) => [r.id, r]));
+        const nameById = new Map((cfgRes.data ?? []).map((r: any) => [r.client_id, r.company_name]));
+        const subscriptions = (subsRes.data ?? []).map((s: any) => {
+          const plan = planById.get(s.plan_id);
+          const interval = plan?.billing_interval ?? "month";
+          // current_period_end goes stale after the first gateway renewal (billing-webhook's
+          // periodEnd is dead data — NMI sends next_charge_date '1970-01-01'), so the display
+          // date is the calendar roll-forward, the same math portal-billing's entitlement uses.
+          const paid = paidThroughOf(s, interval);
+          return {
+            ...s,
+            company_name: nameById.get(s.client_id) ?? s.client_id,
+            plan_name: plan?.name ?? s.plan_id,
+            feature: plan?.feature ?? null,
+            billing_interval: plan?.billing_interval ?? null,
+            required: Boolean(plan?.required),
+            paid_through: Number.isFinite(paid) ? new Date(paid).toISOString() : null,
+          };
+        });
+        // Support alerts. closed_unknown = a checkout whose outcome could not be verified —
+        // the customer may have been charged with nothing recorded, and that plan's checkout
+        // is BLOCKED for them until reconciled, so operators must see these.
+        const { data: unknownRows } = await sb.from("billing_charge_attempts")
+          .select("client_id, plan_id, detail, sale_txn, created_at")
+          .eq("state", "closed_unknown").order("created_at", { ascending: false });
+        const since30 = new Date(Date.now() - 30 * 86400000).toISOString();
+        const { count: declined30 } = await sb.from("billing_charge_attempts")
+          .select("id", { count: "exact", head: true })
+          .eq("state", "closed_declined").gte("created_at", since30);
+        // Tenant billing posture: exempt/comped accounts have no subscription rows, which is
+        // what keeps them out of MRR — surfaced separately so they're visible, not invisible.
+        const csById = new Map((csRes.data ?? []).map((r: any) => [r.client_id, r]));
+        const grantCount = new Map<string, number>();
+        for (const g of (grantsRes.data ?? []) as any[]) {
+          grantCount.set(g.client_id, (grantCount.get(g.client_id) ?? 0) + 1);
+        }
+        const tenants = (cfgRes.data ?? []).map((c: any) => {
+          const s = csById.get(c.client_id);
+          return {
+            client_id: c.client_id,
+            company_name: c.company_name,
+            billing_exempt: Boolean(s?.billing_exempt),
+            exempt_until: s?.billing_exempt_until ?? null,
+            discount_percent: Number(s?.discount_percent) || 0,
+            grant_count: grantCount.get(c.client_id) ?? 0,
+          };
+        });
+        return json({
+          ok: true,
+          subscriptions,
+          tenants,
+          alerts: { unknown: unknownRows ?? [], declined30: declined30 ?? 0 },
+        });
       }
       case "get_master": {
         // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
