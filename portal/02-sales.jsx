@@ -2,6 +2,15 @@
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
 function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null }) {
+  // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
+  // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
+  // pipelines ... this may become the pipeline view."
+  //
+  // It is a VIEW over rows this table already loads, not a second data path — which is
+  // exactly why it is cheap and why it lives here rather than in its own tab. The same
+  // search, the same facets and the same status chips narrow both renderings, so a filter a
+  // builder sets in the list is still set when they flip to the board.
+  const [view, setView] = useState("list");
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
   const [unitSerials, setUnitSerials] = useState({});
@@ -197,7 +206,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       <CardHead
         title="Designs"
         count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
-        right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
+        right={(
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
+              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => (
+                <button key={k} onClick={() => setView(k)}
+                  style={{
+                    background: view === k ? ACCENT : "#FFF", color: view === k ? "#FFF" : "#334155",
+                    border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                  }}>{label}</button>
+              ))}
+            </div>
+            <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+          </div>
+        )}
       />
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -229,7 +251,51 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
-      {rows && filtered.length > 0 && (
+      {/* ── PIPELINE BOARD ──────────────────────────────────────────────────────────
+          Columns are the stage KINDS, and a design's column is DERIVED from the status the
+          system can prove — accepted is won, invoiced is invoiced. There is no drag here on
+          purpose: dragging implies the rep sets the stage, and `designs.status` is a
+          read-only projection that sync-design-status overwrites on every list load, so a
+          dragged card would snap back and look broken. Moving a deal by hand needs the
+          local crm_stages table, which is the next increment, not this one. */}
+      {rows && filtered.length > 0 && view === "pipeline" && (
+        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
+            {CRM_STAGES.map((st) => {
+              const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
+              return (
+                <div key={st.kind} style={{ flex: "1 0 190px", minWidth: 190, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8" }}>{cards.length}</span>
+                  </div>
+                  {cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
+                  {cards.map((r) => {
+                    const c = r.contact || {}; const s = r.selections || {};
+                    return (
+                      <button key={r.short_code} type="button"
+                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code) : (onOpenDesign && onOpenDesign(r.short_code)))}
+                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 9px", marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.name || c.email || c.phone || "—"}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>
+                          {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3, display: "flex", justifyContent: "space-between", gap: 6 }}>
+                          <span>{fmtDate(r.created_at)}</span>
+                          {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {rows && filtered.length > 0 && view === "list" && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>

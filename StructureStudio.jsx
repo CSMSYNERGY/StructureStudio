@@ -9421,7 +9421,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A plain const, deliberately: everything from here down is JSX held in a variable, and
   // a hook below the calibrationOnly early return would change hook order between the two
   // returns (React #310 — this file has form for it).
-  const photoLabels = adminCalVideo.count ? ["View 1", "View 2", "View 3", "View 4"] : ["Front", "Back", "Left", "Right"];
+  // The four Front/Back/Left/Right slots are GONE. Ahsan on the 2026-08-24 call, when
+  // Carolyn asked "are you still thinking of leaving that in there?": "No, I'll remove it
+  // because now we have added the video option now."
+  //
+  // What survives is the same four slots used READ-ONLY as thumbnails of the frames the
+  // walk-around video produced -- the video path spreads four of its eight frames across
+  // them, and seeing what the model actually looked at is the whole reason a builder trusts
+  // the drafted shape. `d3_photos` and upload_style_photo stay exactly as they are; only the
+  // manual entry path and the photo-draft button are removed.
+  const photoLabels = ["View 1", "View 2", "View 3", "View 4"];
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
@@ -9775,23 +9784,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 );})}
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
-                {photoLabels.map((side, i) => (
-                  <label key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{side} photo{setup3d ? "" : " URL"}
-                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                      <input type="text" placeholder="https://…" value={adminCal.photos[i] || ""} onChange={(e) => calSetPhoto(i, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                      {/* In the portal a builder picks a file; the host uploads it and hands
-                          back a URL. The public page has no session, so it stays URL-only. */}
-                      {setup3d && setup3d.onUploadPhoto && (
-                        <label title="Upload a photo" style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "6px 8px", cursor: adminCalBusy ? "wait" : "pointer", flexShrink: 0, marginBottom: 0 }}>
-                          ⬆
-                          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={adminCalBusy}
-                            onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; calUploadPhoto(i, f); }}
-                            style={{ display: "none" }} />
-                        </label>
-                      )}
-                      {adminCal.photos[i] ? <img src={adminCal.photos[i]} alt={side} style={{ width: 44, height: 32, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", flexShrink: 0 }} /> : null}
+                {/* READ-ONLY. These are the frames the walk-around video produced, shown so a
+                    builder can see what the model actually looked at -- not slots to fill in.
+                    Nothing renders at all before a video has been read, rather than four
+                    empty boxes implying there is something to do here. */}
+                {adminCalVideo.count > 0 && photoLabels.map((side, i) => (
+                  adminCal.photos[i] ? (
+                    <div key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>
+                      {side}
+                      <div style={{ marginTop: 3 }}>
+                        <img src={adminCal.photos[i]} alt={side} style={{ width: "100%", maxWidth: 120, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D" }} />
+                      </div>
                     </div>
-                  </label>
+                  ) : null
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -9832,11 +9837,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {/* Disabled with a reason when the Anthropic key is not set on the server: the
                     browser cannot see an edge secret, so `aiReady` from the catalog action is the
                     only way to avoid offering a button that always fails. */}
-                <button onClick={calibrateFromPhotos} disabled={adminCalBusy || scan.aiReady === false}
-                  title={scan.aiReady === false ? "AI drafting isn't switched on for this site yet — tune the numbers by hand, or ask CSM Synergy to enable it." : "Read the roof, siding and colours off the photos"}
-                  style={{ ...S.btn(adminCalBusy || scan.aiReady === false ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
-                  {adminCalBusy ? "Working…" : "✨ Draft from photos (AI)"}
-                </button>
+                {/* "Draft from photos (AI)" removed 2026-08-25 with the four manual slots it
+                    fed. One way in -- the walk-around video -- rather than two paths to the
+                    same spec, one of which asked a builder to stage four photographs.
+                    calibrateFromPhotos and onDraftFromPhotos remain wired for the operator
+                    scan path; only this entry point is gone. */}
                 <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
                   {adminCalBusy ? "Saving…" : (setup3d ? "Save 3D look" : "Save to config")}
                 </button>
