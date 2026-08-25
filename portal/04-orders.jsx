@@ -1359,7 +1359,7 @@ const ssUsd = (n) => {
 const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
 const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null }) {
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
@@ -1692,15 +1692,24 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             </div>
       )}
 
-      {/* Action row */}
+      {/* Action row. The documents open IN A POPUP (Carolyn 2026-08-25), not a tab —
+          the viewer's own toolbar carries print/download. */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", borderTop: "1px solid #F1F5F9", marginTop: 12, paddingTop: 12 }}>
-        {ssInvoicePdf
-          ? <a href={ssInvoicePdf} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Print invoice</a>
-          : (design.ss_quote_pdf_url && <a href={design.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Print quote</a>)}
-        {ssInvoicePdf && design.ss_quote_pdf_url && (
-          <a href={design.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
-        )}
-        {design.image_url && <a href={design.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Floor plan</a>}
+        {(() => {
+          const docBtn = (label, url, title) => (
+            <button type="button" onClick={() => (onPreview ? onPreview(url, title) : window.open(url, "_blank"))}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>{label}</button>
+          );
+          return (
+            <>
+              {ssInvoicePdf
+                ? docBtn("Print invoice", ssInvoicePdf, `Invoice ${invoice.invoice_number || ""}`)
+                : (design.ss_quote_pdf_url && docBtn("Print quote", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`))}
+              {ssInvoicePdf && design.ss_quote_pdf_url && docBtn("Quote (PDF)", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`)}
+              {design.image_url && docBtn("Floor plan", design.image_url, "Floor plan")}
+            </>
+          );
+        })()}
         {/* IN-PORTAL designer, never the public ?id= page — staff browsing there fires
             capture-lead/draft saves and corrupts the tenant's Contacts activity. */}
         {o.short_code && onOpenDesign && (
@@ -1784,6 +1793,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     return () => { alive = false; };
   }, [ssMode, o.short_code, clientId, ssReload]);
   const changedAll = () => { onChanged(); setSsReload((k) => k + 1); };
+  // In-portal document viewer (Carolyn 2026-08-25: PDFs open in a popup, not another
+  // tab). Browsers render PDFs (and images) natively in an iframe; the viewer's own
+  // toolbar carries print/download, and an escape hatch opens the real tab.
+  const [pdfView, setPdfView] = useState(null);   // { url, title } | null
   const ssDesign = ssDoc && ssDoc.design;
   const ssAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "quote");
   const ssInvoice = ssDoc && ssDoc.paperwork && ssDoc.paperwork.invoice;
@@ -1858,7 +1871,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
             <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
-              busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign} />
+              busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
+              onPreview={(url, title) => setPdfView({ url, title })} />
           ) : (
             <div style={S.card}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
@@ -1872,7 +1886,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
+                {d && d.image_url && (
+                  <button type="button" onClick={() => setPdfView({ url: d.image_url, title: "Floor plan" })}
+                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>View floor plan (PDF)</button>
+                )}
                 {/* IN-PORTAL designer, never the public ?id= page (capture-lead/draft saves). */}
                 {o.short_code && onOpenDesign && (
                   <button type="button" onClick={() => onOpenDesign(o.short_code)}
@@ -1990,17 +2007,20 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 6px" }}>
                     <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>Floor plan</span>
-                    {ssDesign.image_url && <a href={ssDesign.image_url} target="_blank" rel="noopener" style={{ fontSize: 10.5, color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Full ↗</a>}
+                    {ssDesign.image_url && (
+                      <button type="button" onClick={() => setPdfView({ url: ssDesign.image_url, title: "Floor plan" })}
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 10.5, color: ACCENT, fontWeight: 700, fontFamily: "inherit" }}>Full ↗</button>
+                    )}
                   </div>
-                  {/* The plan reads best tall (Carolyn 2026-08-25: double the height, same
-                      width) — plans are portrait, the 3D shot is landscape, so the two
-                      frames deliberately differ. */}
+                  {/* Both frames match at 280 tall (Carolyn 2026-08-25); clicks open the
+                      in-portal viewer popup, never another tab. */}
                   {ssDesign.plan_image_url
-                    ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener" title="Open the full plan"
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280 }}>
+                    ? <button type="button" title="Open the full plan"
+                        onClick={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
                         <img src={ssDesign.plan_image_url} alt="Floor plan"
                           style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
-                      </a>
+                      </button>
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
                       </div>}
@@ -2010,12 +2030,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
                   </div>
                   {ssDesign.view3d_image_url
-                    ? <a href={ssDesign.view3d_image_url} target="_blank" rel="noopener" title="Open the 3D picture"
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 140 }}>
+                    ? <button type="button" title="Open the 3D picture"
+                        onClick={() => setPdfView({ url: ssDesign.view3d_image_url, title: "3D view" })}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
                         <img src={ssDesign.view3d_image_url} alt="3D view"
-                          style={{ maxHeight: 128, maxWidth: "100%", width: "auto", display: "block" }} />
-                      </a>
-                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 140 }}>
+                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
+                      </button>
+                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Open the design, click 🧊 3D View, then resubmit to capture one.</p>
                       </div>}
                 </div>
@@ -2066,6 +2087,23 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           )}
         </div>
       </div>
+
+      {pdfView && (
+        <div onClick={(e) => { if (e.target === e.currentTarget) setPdfView(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+          <div style={{ background: "#FFF", borderRadius: 14, width: "min(900px, 96vw)", height: "min(88vh, 1100px)", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800 }}>{pdfView.title}</div>
+              <a href={pdfView.url} target="_blank" rel="noopener"
+                style={{ marginLeft: "auto", color: "#CFE0EC", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>Open in tab ↗</a>
+              <button type="button" onClick={() => setPdfView(null)}
+                style={{ background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+            </div>
+            {/* The browser's own viewer: its toolbar carries print + download. */}
+            <iframe src={pdfView.url} title={pdfView.title} style={{ flex: 1, width: "100%", border: "none", background: "#525659" }} />
+          </div>
+        </div>
+      )}
 
       {payOpen && (
         <div onClick={(e) => { if (e.target === e.currentTarget) setPayOpen(false); }}
