@@ -1268,7 +1268,10 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
           {co.status === "acknowledged" && (
             <div style={{ fontSize: 12, color: "#15803D", fontWeight: 600, marginTop: 6 }}>
               {co.ack_method === "verbal"
-                ? `Verbal — ${co.verbal_rep_name}, conversation on ${fmtDate(co.verbal_conversation_date)}${co.verbal_note ? ` (${co.verbal_note})` : ""}`
+                /* verbal_conversation_date is DATE-ONLY: parsed bare it reads as UTC
+                   midnight and renders the previous local day. Midday anchor, the same
+                   trick recordPayment and the schedule use. */
+                ? `Verbal — ${co.verbal_rep_name}, conversation on ${fmtDate(co.verbal_conversation_date + "T12:00:00")}${co.verbal_note ? ` (${co.verbal_note})` : ""}`
                 : `Signed by the customer${co.acknowledged_at ? ` · ${fmtDate(co.acknowledged_at)}` : ""}`}
             </div>
           )}

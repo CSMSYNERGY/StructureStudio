@@ -3817,6 +3817,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         await admin.from("designs")
           .update({ status: "invoiced", updated_at: nowIso() })
           .eq("client_id", clientId).eq("short_code", shortCode);
+        // The invoiced total becomes the order's total when none is set (SS designs are
+        // skipped by the GHL total sync, so nothing else ever fills it). NULL-only: a
+        // rep-set or CO-acknowledged number is never clobbered.
+        if (totalNum != null) {
+          await admin.from("orders")
+            .update({ total_cents: Math.round(totalNum * 100), total_source: "manual", updated_at: nowIso() })
+            .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);
+        }
         if (d.inventory_unit_id) {
           await claimUnitSale(d.inventory_unit_id, shortCode, "invoice");
         }

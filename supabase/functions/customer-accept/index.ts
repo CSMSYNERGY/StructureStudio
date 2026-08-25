@@ -353,6 +353,18 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     if (ordErr) {
       logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `order ensure failed: ${ordErr.message}`, context: { quoteRef } }).catch(() => {});
     }
+    // The signed total becomes the order's total (SS mode has no GHL total sync — its
+    // step 8 skips designs with no estimate — so without this the order reads "Needs
+    // total" forever). 'manual' is the source that both the repricer and this write
+    // respect: only a NULL total is filled, a rep-set number is never clobbered.
+    if (total != null) {
+      const { error: totErr } = await admin.from("orders")
+        .update({ total_cents: Math.round(total * 100), total_source: "manual", updated_at: acceptedAtIso })
+        .eq("client_id", identity.clientId).eq("short_code", quoteRef).is("total_cents", null);
+      if (totErr) {
+        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `order total fill failed: ${totErr.message}`, context: { quoteRef } }).catch(() => {});
+      }
+    }
   }
 
   // ── 4. Countersign the PDF (best-effort) ─────────────────────────────────────────────
