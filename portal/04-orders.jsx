@@ -1992,13 +1992,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>Floor plan</span>
                     {ssDesign.image_url && <a href={ssDesign.image_url} target="_blank" rel="noopener" style={{ fontSize: 10.5, color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Full ↗</a>}
                   </div>
+                  {/* The plan reads best tall (Carolyn 2026-08-25: double the height, same
+                      width) — plans are portrait, the 3D shot is landscape, so the two
+                      frames deliberately differ. */}
                   {ssDesign.plan_image_url
                     ? <a href={ssDesign.image_url || ssDesign.plan_image_url} target="_blank" rel="noopener" title="Open the full plan"
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 140 }}>
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280 }}>
                         <img src={ssDesign.plan_image_url} alt="Floor plan"
-                          style={{ maxHeight: 128, maxWidth: "100%", width: "auto", display: "block" }} />
+                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
                       </a>
-                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 140 }}>
+                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
                       </div>}
                 </div>
