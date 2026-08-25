@@ -8066,8 +8066,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       //    enumerate every design short_code. A plain insert needs no SELECT
       //    policy, so the listable policy can be dropped (see 042_floor_plans_no_list).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
-      const planJpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
-      const pdfPages = [{ bytes: dataUrlToBytes(planJpegDataUrl), w: canvas.width, h: canvas.height }];
+      const fullSheetDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+      // The PLAN-ONLY image (Carolyn 2026-08-25): everywhere the PNG is used — the order
+      // screen's floor-plan card — the sheet's bottom customer-info band is noise, so the
+      // image crops to the drawing: the full visible band above TEXT_AREA_H vertically,
+      // and the plan plus a label margin horizontally (wall labels + rotated dimensions
+      // sit ~70px outside the walls). The PDF keeps the FULL sheet — it IS the document.
+      const dpr2 = canvas.width / cW;
+      const cropX = Math.max(0, Math.round((mgX - 70) * dpr2));
+      const cropW = Math.min(canvas.width - cropX, Math.round((pW + 140) * dpr2));
+      const cropH = Math.round((cH - TEXT_AREA_H) * dpr2);
+      const planCanvas = document.createElement("canvas");
+      planCanvas.width = cropW; planCanvas.height = cropH;
+      const pctx = planCanvas.getContext("2d");
+      pctx.fillStyle = "#FFF"; pctx.fillRect(0, 0, cropW, cropH);
+      pctx.drawImage(canvas, cropX, 0, cropW, cropH, 0, 0, cropW, cropH);
+      const planJpegDataUrl = planCanvas.toDataURL("image/jpeg", 0.92);
+      const pdfPages = [{ bytes: dataUrlToBytes(fullSheetDataUrl), w: canvas.width, h: canvas.height }];
       const shot3d = render3DSnapshotRef.current;
       if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
       const blob = buildPdfFromJpegPages(pdfPages);
