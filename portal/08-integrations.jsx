@@ -566,11 +566,30 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // So the table shows a fourth, advisory row. `advisory` keeps it out of the verified
   // tally: Resend does not check DMARC, so it can never report this one as verified, and a
   // permanent grey dot next to a correct record would read as broken.
-  const dnsAdvisory = dns.length > 0 && status.domain
+  // ⚠️ BUILD THIS FROM THE PROVIDER'S DOMAIN, NOT OUR STORED STRING. Resend normalizes what
+  // it is handed — give it "www.example.com" and it registers DKIM, MX and SPF against
+  // "example.com" — so the two can silently disagree. When they did (2026-08-26) this row
+  // told a tenant to publish _dmarc.www.csmsynergy.com, which protects nothing, with reports
+  // going to carolyn@www.csmsynergy.com, an address that cannot receive mail. Meanwhile the
+  // apex already had a correct _dmarc record.
+  //
+  // The record hostnames Resend RETURNED are the fact; our stored domain is only a claim.
+  // Derive the apex from them and fall back to our copy only when there are none.
+  const dnsApex = (() => {
+    const dkim = dns.find((r) => String(r.host || "").startsWith("resend._domainkey."));
+    if (dkim) return String(dkim.host).replace(/^resend\._domainkey\./, "");
+    const send = dns.find((r) => String(r.host || "").startsWith("send."));
+    if (send) return String(send.host).replace(/^send\./, "");
+    return String(status.domain || "").replace(/^www\./, "");
+  })();
+  const dnsAdvisory = dns.length > 0 && dnsApex
     ? [{
       type: "TXT",
-      host: "_dmarc." + status.domain,
-      value: "v=DMARC1; p=none; rua=mailto:" + (status.fromAddress || "you@" + status.domain),
+      host: "_dmarc." + dnsApex,
+      // The reports address has to be one that RECEIVES mail. A fromAddress on some other
+      // host would send every DMARC report into a black hole, so it is used only when it
+      // sits on this apex.
+      value: "v=DMARC1; p=none; rua=mailto:" + (status.fromAddress && status.fromAddress.endsWith("@" + dnsApex) ? status.fromAddress : "you@" + dnsApex),
       verified: false,
       advisory: true,
     }]

@@ -386,7 +386,12 @@ async function regenerateQuotePdf(
       .select("method, signer_name, typed_signature, signature_image_path, accepted_at, ip, consent_text, total")
       .eq("client_id", clientId).eq("short_code", shortCode).eq("subject", "quote")
       .maybeSingle();
-    if (acc) {
+    // ONLY a real signature earns a certificate page. Since migration 136 a quote is
+    // accepted with a CLICK, and `method` would otherwise fall through the ternary below to
+    // "typed" and print a certificate asserting a typed signature over an empty name — a
+    // document claiming more than the customer actually did. Legacy signed quotes still
+    // carry theirs, because the rule reads the stored method rather than a version flag.
+    if (acc && (acc.method === "drawn" || acc.method === "typed")) {
       let signaturePng: Uint8Array | null = null;
       if (acc.signature_image_path) {
         try {
@@ -3703,6 +3708,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     domain = domain.split(/[/?#]/)[0];               // pasted with a path/query
     domain = domain.split(":")[0];                   // pasted with a port
     domain = domain.replace(/\.+$/, "");             // trailing dot(s)
+    // A LEADING www. IS NEVER A SENDING DOMAIN, and leaving it produced a silent split
+    // brain: Resend normalizes "www.example.com" to "example.com" and registers the DKIM,
+    // MX and SPF records against the APEX, while we stored the www form. Every downstream
+    // reader then disagreed with the provider — the From address became
+    // carolyn@www.csmsynergy.com (a host with no DKIM), the DMARC helper row pointed at
+    // _dmarc.www.csmsynergy.com, and the reports address was one that cannot receive mail.
+    // It cost a real tenant an afternoon on 2026-08-26. Nobody sends mail from a www host,
+    // so there is no case where stripping this is wrong.
+    domain = domain.replace(/^www\./, "");
     if (!/^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) {
       return json({ error: "That doesn't look like a domain — enter just the part after the @, like yourbusiness.com." }, 400);
     }
@@ -4032,7 +4046,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         .select("id, label, hex, siding, trim, shingle, metal, allow_custom, is_default, sort_order")
         .eq("client_id", clientId).eq("active", true).order("sort_order", { ascending: true }),
       admin.from("invoice_sends")
-        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at")
+        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at, signed_at, acceptance_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
     ]);
     if (colRes.error) return dbFail(req, clientId, "read your colors", colRes.error);
@@ -4418,6 +4432,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
                 invoiceNumber: String(prior.invoice_number),
                 total: totalFromSnapshot(d.estimate_lines) ?? "",
                 invoiceUrl: prior.invoice_pdf_url, quoteTerms: cs2?.quote_terms,
+                signUrl: myQuotesUrl(clientId, req),
               }),
             });
             if (out2.sent) {
@@ -4430,7 +4445,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
           return json({ error: "This design was already invoiced." }, 400);
         }
         if (dStatus !== "accepted" && !d.accepted_at) {
-          return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept and sign from their quote page.` }, 400);
+          return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept it from their quote page, then you invoice them and they sign that.` }, 400);
         }
 
         // Pending change order blocks invoicing (Carolyn 2026-08-23). 42P01 = the
@@ -4469,14 +4484,21 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         });
         if (claimIns.error) {
           const { data: prior } = await admin.from("invoice_sends")
-            .select("status, issued_by, invoice_number, invoice_pdf_url, updated_at, attempts")
+            .select("status, issued_by, invoice_number, invoice_pdf_url, updated_at, attempts, signed_at")
             .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
           if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
           const st = String(prior.status || "");
-          if (st === "sent") {
-            return json({ error: `Invoice ${prior.invoice_number ?? ""} was already sent for this design.` }, 400);
+          // SIGNED PAPERWORK IS FROZEN — the one refusal that outranks everything below.
+          if (prior.signed_at) {
+            return json({ error: `Invoice ${prior.invoice_number ?? ""} has already been signed by the customer.` }, 400);
           }
-          if (st === "created") {
+          if (st === "sent") {
+            // Before migration 136 this was the end of the road: sent meant done. Now the
+            // customer still has to SIGN, so an unsigned invoice has to stay re-sendable —
+            // a lost email would otherwise strand the order with no operator remedy at all.
+            recoveredNumber = prior.invoice_number ? String(prior.invoice_number) : null;
+            recoveredPdfUrl = prior.invoice_pdf_url ? String(prior.invoice_pdf_url) : null;
+          } else if (st === "created") {
             // The invoice EXISTS (number + document) but was never emailed → re-send only.
             recoveredNumber = prior.invoice_number ? String(prior.invoice_number) : null;
             recoveredPdfUrl = prior.invoice_pdf_url ? String(prior.invoice_pdf_url) : null;
@@ -4487,6 +4509,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
             }
           }
           await setClaim({ status: st === "created" ? "created" : "claimed", issued_by: "structurestudio", error: null, attempts: (Number(prior.attempts) || 1) + 1 });
+          // REGENERATE: an acknowledged change order after the invoice went out means the
+          // amount printed on it is no longer the amount owed, and the customer's sign
+          // button refuses a stale invoice for exactly that reason. Dropping the recovered
+          // URL sends the builder below down the build path again, which upserts the SAME
+          // storage path under the SAME number — a corrected document, not a second invoice.
+          if (payload.regenerate === true) recoveredPdfUrl = null;
         }
 
         // Number — allocated ONCE; the recovery path reuses it, never re-numbers.
@@ -4570,6 +4598,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
               total: totalNum == null ? "" : totalNum,
               invoiceUrl: invoicePdfUrl,
               quoteTerms: cur0?.quote_terms,
+              // The CTA has to land where they can SIGN. A link straight to the PDF is a
+              // dead end for a document that now needs their signature (migration 136).
+              signUrl: myQuotesUrl(clientId, req),
             }),
           });
           sent = out.sent;
@@ -4586,8 +4617,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         await setClaim(sent
           ? { status: "sent", error: null }
           : { status: "created", error: `email not sent: ${sendReason}`.slice(0, 500) });
+        // ⚠️ THE STATUS DELIBERATELY DOES NOT MOVE HERE (migration 136). Sending an invoice
+        // no longer completes the sale — the CUSTOMER'S SIGNATURE does, and customer-accept's
+        // sign_invoice is the only writer of 'invoiced' now. This matters far beyond
+        // bookkeeping: SOLD = INVOICED is what gates the build board (portal-schedule
+        // create_job), the delivery pool and the Orders schedule column, so flipping it here
+        // would put an UNSIGNED building in front of a build crew. ss_invoice_sent_at is the
+        // browser-readable "invoice is out, waiting on them" signal the Orders tab renders
+        // instead — invoice_sends itself is service-role only and unreadable there.
         await admin.from("designs")
-          .update({ status: "invoiced", updated_at: nowIso() })
+          .update({ ss_invoice_sent_at: nowIso(), updated_at: nowIso() })
           .eq("client_id", clientId).eq("short_code", shortCode);
         // The invoiced total becomes the order's total when none is set (SS designs are
         // skipped by the GHL total sync, so nothing else ever fills it). NULL-only: a
