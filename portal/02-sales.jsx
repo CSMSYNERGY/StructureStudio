@@ -823,8 +823,19 @@ const CRM_TABS = [
   { key: "note", label: "Notes", enabled: (c) => c.canEdit },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
-  { key: "whatsapp", label: "WhatsApp", enabled: () => false, hint: "Arrives when the Twilio account is connected." },
-  { key: "email", label: "Email", enabled: () => false, hint: "Sent quotes and invoices already show in History below." },
+  // NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE. Ahsan, 2026-08-25:
+  // "we are not using Twilio for conversation or campaigns. We are only using Twilio to get
+  // the code to log in. That's it. For conversation, we are using emails."
+  //
+  // An earlier version of this registry carried a greyed WhatsApp tab hinted "arrives when
+  // the Twilio account is connected" — a promise that was never going to be kept, sitting on
+  // a screen Carolyn shows at a trade show. A greyed tab says "next"; removing it says "not
+  // part of this product", which is the truth. Twilio's only job here is the Verify code
+  // that logs a customer into my-quotes, and that needs no phone number, no messaging
+  // service and no A2P registration.
+  //
+  // Conversations ARE email. That is why the Email tab is the one that grows a composer.
+  { key: "email", label: "Email", enabled: () => false, hint: "Sending from here is next; quotes and invoices already sent show in History below." },
   { key: "files", label: "Files", enabled: () => false, hint: "Needs a contact-scoped storage bucket." },
   { key: "documents", label: "Documents", enabled: () => true },
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },

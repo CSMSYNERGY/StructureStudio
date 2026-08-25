@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 535d69bae6b9)
+// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 c7ff3b0ae2a9)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -472,7 +472,19 @@ var CRM_SECTIONS=[{key:"summary",title:"Summary",when:function when(){return tru
 // actions that you can take." Disabled tabs render GREYED WITH A TOOLTIP, never hidden: a
 // missing tab reads as "not built", a greyed one reads as "next", and she is showing this
 // at a trade show.
-var CRM_TABS=[{key:"activity",label:"Activity",enabled:function enabled(c){return c.canEdit;}},{key:"note",label:"Notes",enabled:function enabled(c){return c.canEdit;}},{key:"scheduler",label:"Meeting scheduler",enabled:function enabled(){return false;},hint:"Arrives with the calendar integration."},{key:"call",label:"Call",enabled:function enabled(){return false;},hint:"Arrives with the phone integration."},{key:"whatsapp",label:"WhatsApp",enabled:function enabled(){return false;},hint:"Arrives when the Twilio account is connected."},{key:"email",label:"Email",enabled:function enabled(){return false;},hint:"Sent quotes and invoices already show in History below."},{key:"files",label:"Files",enabled:function enabled(){return false;},hint:"Needs a contact-scoped storage bucket."},{key:"documents",label:"Documents",enabled:function enabled(){return true;}},{key:"invoice",label:"Invoice",when:function when(c){return c.kind==="design";},enabled:function enabled(c){return c.isAdmin&&normStatus(c.record&&c.record.status)==="accepted";}}];// History chips. `types` is the SAME vocabulary the server emits (see _shared/crmFeed.ts's
+var CRM_TABS=[{key:"activity",label:"Activity",enabled:function enabled(c){return c.canEdit;}},{key:"note",label:"Notes",enabled:function enabled(c){return c.canEdit;}},{key:"scheduler",label:"Meeting scheduler",enabled:function enabled(){return false;},hint:"Arrives with the calendar integration."},{key:"call",label:"Call",enabled:function enabled(){return false;},hint:"Arrives with the phone integration."},// NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE. Ahsan, 2026-08-25:
+// "we are not using Twilio for conversation or campaigns. We are only using Twilio to get
+// the code to log in. That's it. For conversation, we are using emails."
+//
+// An earlier version of this registry carried a greyed WhatsApp tab hinted "arrives when
+// the Twilio account is connected" — a promise that was never going to be kept, sitting on
+// a screen Carolyn shows at a trade show. A greyed tab says "next"; removing it says "not
+// part of this product", which is the truth. Twilio's only job here is the Verify code
+// that logs a customer into my-quotes, and that needs no phone number, no messaging
+// service and no A2P registration.
+//
+// Conversations ARE email. That is why the Email tab is the one that grows a composer.
+{key:"email",label:"Email",enabled:function enabled(){return false;},hint:"Sending from here is next; quotes and invoices already sent show in History below."},{key:"files",label:"Files",enabled:function enabled(){return false;},hint:"Needs a contact-scoped storage bucket."},{key:"documents",label:"Documents",enabled:function enabled(){return true;}},{key:"invoice",label:"Invoice",when:function when(c){return c.kind==="design";},enabled:function enabled(c){return c.isAdmin&&normStatus(c.record&&c.record.status)==="accepted";}}];// History chips. `types` is the SAME vocabulary the server emits (see _shared/crmFeed.ts's
 // CRM_FEED_TYPES), so a chip can never ask for a type that does not exist — the
 // RANK/STATUS_RANK class of bug, headed off rather than repeated.
 var CRM_CHIPS=[{key:"all",label:"All",types:null},{key:"activities",label:"Activities",types:["activity"]},{key:"notes",label:"Notes",types:["note"]},{key:"emails",label:"Emails",types:["email"]},{key:"documents",label:"Documents",types:["change_order","invoice_created","invoice_sent"]},{key:"deals",label:"Deals",types:["design_created","design_version","accepted","quote_opened"],when:function when(c){return c.kind==="contact";}},{key:"invoices",label:"Invoices",types:["invoice_created","invoice_sent"],when:function when(c){return c.kind==="design";}},{key:"changelog",label:"Changelog",types:["design_version","status_change","lead_captured"]}];// The stage bar. Carolyn's own stage names, from her Pipedrive screen.

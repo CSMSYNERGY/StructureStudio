@@ -40,10 +40,14 @@ export const CRM_FEED_TYPES = {
   activity: ["activity"],
   note: ["note"],
   email: ["email"],
-  // Reserved NOW so SMS drops in later without a shell, page or route change: one source
-  // below, `enabled: true` on two registry entries, one Twilio webhook. Carolyn is still
-  // setting up the Twilio account, so the seam is proved rather than the feature shipped.
-  sms: ["sms", "whatsapp"],
+  // NO SMS TYPE, DELIBERATELY. An earlier version reserved one "so SMS drops in later".
+  // Ahsan, 2026-08-25: "we are not using Twilio for conversation or campaigns. We are only
+  // using Twilio to get the code to log in. That's it. For conversation, we are using
+  // emails." Twilio's entire job in this product is the Verify code for my-quotes.
+  //
+  // A reserved seam for a feature nobody intends to build is not foresight, it is a
+  // misleading comment that survives long enough for someone to act on it. Conversations
+  // are email, and `email` above is where that grows.
   document: ["quote_pdf", "invoice_pdf", "change_order"],
   deal: ["design_created", "design_version", "stage_change", "accepted", "quote_opened"],
   invoice: ["invoice_created", "invoice_sent", "payment"],
