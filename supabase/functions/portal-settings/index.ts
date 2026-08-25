@@ -27,6 +27,7 @@ import {
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
+import { buildCrmFeed } from "../_shared/crmFeed.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -142,6 +143,16 @@ const GATES: GateTable = {
 
   // ── Workspace ────────────────────────────────────────────────────────────
   contact_activity: { area: "contacts", level: "view" },
+
+  // ── CRM record page (the merged Contacts + Designs view) ─────────────────
+  // `any:` because one page serves both a contact and a design, and a rep who can see
+  // designs but not contacts should still reach a design record. Mirrors `catalog`'s shape.
+  crm_record:            { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
+  crm_feed:              { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
+  crm_save_note:         { area: "contacts", level: "edit" },
+  crm_delete_note:       { area: "contacts", level: "edit" },
+  crm_save_activity:     { area: "contacts", level: "edit" },
+  crm_complete_activity: { area: "contacts", level: "edit" },
   delete_design:    { area: "designs", level: "edit" },
   // NOT inventory:edit. A sales rep's preset is inventory:'view', and this only tags a
   // design they just created with the unit it was quoted from — gating it on inventory:edit
@@ -3024,6 +3035,126 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // one contact's designs — version history (what they changed) + GHL estimate events
   // (sent / viewed / accepted / invoiced). Read-only; any linked account may call it
   // (same posture as sync-design-status: tenant-scoped reads, no settings exposure).
+  // ── CRM RECORD PAGE ────────────────────────────────────────────────────────────────
+  // ONE action serves both contexts, because Carolyn's whole ask was that they are the
+  // same screen: "the view of being in an opportunity and the view of being in a person
+  // are different, but they're the same. You get the same look, the same work."
+  //
+  // ⚠️ The page must get ALL of its data from here and never from a direct sb.from() in
+  // the browser. designs/payments RLS is scoped to current_client_id(), so in operator
+  // view-as a direct read returns NOTHING — which is exactly why DesignsTable and
+  // LeadsTable already take a fetchDesigns prop wired to operator-portal. Going through
+  // this action means resolveTenant handles targetClientId and app_operators for free.
+  if (action === "crm_record") {
+    const kind = payload.kind === "design" ? "design" : "contact";
+    const id = String(payload.id ?? "").slice(0, 64);
+    if (!id) return json({ error: "A record id is required." }, 400);
+
+    let contact: any = null;
+    let codes: string[] = [];
+    let designs: any[] = [];
+
+    if (kind === "contact") {
+      const { data: c } = await admin.from("crm_contacts").select("*").eq("client_id", clientId).eq("id", id).maybeSingle();
+      if (!c) return json({ error: "That contact no longer exists." }, 404);
+      contact = c;
+      const { data: ds } = await admin.from("designs")
+        .select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url")
+        .eq("client_id", clientId).eq("contact_id", id).order("created_at", { ascending: false });
+      designs = ds ?? [];
+      codes = designs.map((d: any) => d.short_code);
+    } else {
+      const { data: d } = await admin.from("designs")
+        .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url")
+        .eq("client_id", clientId).eq("short_code", id).maybeSingle();
+      if (!d) return json({ error: "That design no longer exists." }, 404);
+      designs = [d];
+      codes = [d.short_code];
+      if (d.contact_id) {
+        const { data: c } = await admin.from("crm_contacts").select("*").eq("client_id", clientId).eq("id", d.contact_id).maybeSingle();
+        contact = c ?? null;
+      }
+      // Fall back to the jsonb blob for a design predating the backfill, so the Person
+      // panel is never empty on an old record.
+      if (!contact && d.contact) contact = { id: null, name: d.contact.name, phone: d.contact.phone, email: d.contact.email };
+    }
+
+    const feed = await buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true });
+    // Focus = open activities, soonest first. This is the crm_activities_focus index.
+    const { data: focus } = await admin.from("crm_activities")
+      .select("id, kind, subject, due_at, assignee_user_id, short_code")
+      .eq("client_id", clientId).eq("done", false)
+      .or(contact?.id ? `contact_id.eq.${contact.id}` : `short_code.in.(${codes.join(",") || "''"})`)
+      .order("due_at", { ascending: true, nullsFirst: false }).limit(25);
+
+    return json({ ok: true, kind, contact, designs, feed, focus: focus ?? [] });
+  }
+
+  if (action === "crm_feed") {
+    const codes = Array.isArray(payload.codes) ? payload.codes.map((c: unknown) => String(c).slice(0, 32)).slice(0, 200) : [];
+    const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
+    const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true });
+    return json({ ok: true, feed });
+  }
+
+  if (action === "crm_save_note") {
+    const body = String(payload.body ?? "").trim().slice(0, 8000);
+    if (!body) return json({ error: "A note needs some text." }, 400);
+    const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
+    const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
+    if (!contactId && !shortCode) return json({ error: "A note must attach to a contact or a design." }, 400);
+    const row: Record<string, unknown> = { client_id: clientId, body, created_by: userId ?? null };
+    if (contactId) row.contact_id = contactId;
+    if (shortCode) row.short_code = shortCode;
+    if (payload.id) {
+      const { error } = await admin.from("crm_notes").update({ body, pinned: Boolean(payload.pinned) })
+        .eq("client_id", clientId).eq("id", String(payload.id));
+      if (error) return dbFail(req, clientId, "save that note", error);
+      return json({ ok: true });
+    }
+    row.pinned = Boolean(payload.pinned);
+    const { data, error } = await admin.from("crm_notes").insert(row).select("id").single();
+    if (error) return dbFail(req, clientId, "save that note", error);
+    return json({ ok: true, id: data?.id });
+  }
+
+  if (action === "crm_delete_note") {
+    // SOFT delete: a note is evidence of what a customer was told and when.
+    const { error } = await admin.from("crm_notes").update({ deleted_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("id", String(payload.id ?? ""));
+    if (error) return dbFail(req, clientId, "delete that note", error);
+    return json({ ok: true });
+  }
+
+  if (action === "crm_save_activity") {
+    const KINDS = ["call", "meeting", "task", "deadline", "email", "lunch"];
+    const kind = KINDS.includes(String(payload.kind)) ? String(payload.kind) : "task";
+    const subject = String(payload.subject ?? "").trim().slice(0, 300);
+    if (!subject) return json({ error: "An activity needs a subject." }, 400);
+    const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
+    const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
+    if (!contactId && !shortCode) return json({ error: "An activity must attach to a contact or a design." }, 400);
+    const row: Record<string, unknown> = {
+      client_id: clientId, kind, subject,
+      due_at: payload.dueAt ? new Date(String(payload.dueAt)).toISOString() : null,
+      assignee_user_id: userId ?? null, created_by: userId ?? null,
+    };
+    if (contactId) row.contact_id = contactId;
+    if (shortCode) row.short_code = shortCode;
+    const { data, error } = await admin.from("crm_activities").insert(row).select("id").single();
+    if (error) return dbFail(req, clientId, "save that activity", error);
+    return json({ ok: true, id: data?.id });
+  }
+
+  if (action === "crm_complete_activity") {
+    const done = payload.done !== false;
+    const { error } = await admin.from("crm_activities")
+      .update({ done, done_at: done ? new Date().toISOString() : null })
+      .eq("client_id", clientId).eq("id", String(payload.id ?? ""));
+    if (error) return dbFail(req, clientId, "update that activity", error);
+    return json({ ok: true });
+  }
+
   if (action === "contact_activity") {
     const codes: string[] = Array.isArray(payload?.codes)
       ? payload.codes.map((c: unknown) => String(c)).filter(Boolean).slice(0, 50)
