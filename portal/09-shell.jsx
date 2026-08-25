@@ -866,7 +866,11 @@ function Dashboard({ session }) {
                        "to be loaded" pool (the pool is a query over sold units without a
                        sale stop), so this just takes the dispatcher there — no focus/
                        hand-off state to keep in sync. */
-                    onScheduleDelivery={() => navigate("delivery-schedule")} />
+                    onScheduleDelivery={() => navigate("delivery-schedule")}
+                    /* IN-PORTAL designer, same as every other Open in this app — the public
+                       ?id= page silently captures leads/drafts, so staff must never browse
+                       a customer's design there. */
+                    onOpenDesign={openInDesigner} />
                 : <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).

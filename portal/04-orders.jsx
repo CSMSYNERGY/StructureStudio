@@ -748,7 +748,7 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null }) {
+function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null }) {
   const [rows, setRows] = useState(null);   // null = loading; [{order, design, paid}]
   const [error, setError] = useState(null);
   const [schedLinks, setSchedLinks] = useState(null);   // { byDesign, saleDesigns, … }
@@ -959,7 +959,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   if (error) return <div style={S.err}>Couldn't load orders: {error}</div>;
   if (rows === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading orders…</div>;
 
-  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} />;
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} />;
 
   const tile = (label, value, note, accent) => (
     <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
@@ -1359,7 +1359,7 @@ const ssUsd = (n) => {
 const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
 const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) {
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
@@ -1659,6 +1659,39 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) 
         )}
       </div>
 
+      {/* THE INVOICE STEP — the missing rung Carolyn hit (2026-08-25: "I see no way for
+          creating that into an invoice"). The ladder is: QUOTE (the signed offer, SST-…)
+          → this order → INVOICE (the bill, SSI-…). One clear affordance per state. */}
+      {!ssInvoicePdf && !locked && (
+        design.accepted_at
+          ? (pendingCo
+            ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
+                <b style={{ color: "#B45309" }}>Ready to invoice once CO-{pendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+              </div>
+            : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+                <button type="button" disabled={anyBusy}
+                  onClick={async () => {
+                    const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
+                    if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF; the order is marked Invoiced.`)) return;
+                    setBusy(true); onMsg(null);
+                    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
+                    setBusy(false);
+                    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                    onMsg(data && data.sent === false
+                      ? { err: `Invoice ${data.invoiceNumber || ""} created and the order is Invoiced, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print it or copy the customer link.` }
+                      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — this order is now Invoiced.` });
+                    onChanged();
+                  }}
+                  style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                  {busy ? "Working…" : "Create & send invoice"}
+                </button>
+                <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Signed {fmtDate(design.accepted_at)} — the invoice takes the next number in your sequence.</span>
+              </div>)
+          : <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
+              <b>Quote sent — awaiting the customer's signature.</b> Invoicing unlocks when they sign from their quote page (Copy customer link below, or hand them your phone).
+            </div>
+      )}
+
       {/* Action row */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", borderTop: "1px solid #F1F5F9", marginTop: 12, paddingTop: 12 }}>
         {ssInvoicePdf
@@ -1668,7 +1701,12 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) 
           <a href={design.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
         )}
         {design.image_url && <a href={design.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Floor plan</a>}
-        {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+        {/* IN-PORTAL designer, never the public ?id= page — staff browsing there fires
+            capture-lead/draft saves and corrupts the tenant's Contacts activity. */}
+        {o.short_code && onOpenDesign && (
+          <button type="button" onClick={() => onOpenDesign(o.short_code)}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+        )}
         <button type="button"
           onClick={(e) => {
             const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
@@ -1699,7 +1737,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged }) 
   );
 }
 
-function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf }) {
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
   const [amount, setAmount] = useState("");
@@ -1820,7 +1858,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
             <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
-              busyExt={busy} onMsg={setMsg} onChanged={changedAll} />
+              busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign} />
           ) : (
             <div style={S.card}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
@@ -1835,7 +1873,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
-                {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
+                {/* IN-PORTAL designer, never the public ?id= page (capture-lead/draft saves). */}
+                {o.short_code && onOpenDesign && (
+                  <button type="button" onClick={() => onOpenDesign(o.short_code)}
+                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+                )}
               </div>
             </div>
           )}
