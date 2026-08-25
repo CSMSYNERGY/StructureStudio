@@ -126,6 +126,50 @@ Deno.test("claddingChoices: absent and empty both mean all four", () => {
   assert(allJunk.ok && !("claddingChoices" in allJunk.d3), "all-unknown falls back to unset");
 });
 
+Deno.test("lean-to and dormer round-trip as additive roof keys, clamped", () => {
+  // They are extra keys on `roof` rather than new roof TYPES on purpose: one shared
+  // building_styles.d3 serves beta and production, and the production profile builder's
+  // `else` draws a GABLE for any type it does not know. A new type would therefore show
+  // production a plain gable the moment someone calibrated a lean-to on beta. Extra keys
+  // degrade to "appendage missing", which is honest; a wrong roof is not.
+  const r = sanitizeD3Spec({
+    roof: {
+      type: "gable", pitch: 0.4,
+      leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left",
+      dormerWidthFt: 4, dormerRiseFt: 2.5, dormerOffsetU: 0.45,
+    },
+  });
+  assert(r.ok, "spec should be accepted");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.leanToWidthFt, 8);
+  assertEquals(r.d3.roof.leanToSide, "left");
+  assertEquals(r.d3.roof.dormerWidthFt, 4);
+  assertEquals(r.d3.roof.dormerOffsetU, 0.45);
+
+  // Clamped, not rejected -- same posture as every other numeric here.
+  const c = sanitizeD3Spec({
+    roof: { type: "gable", pitch: 0.4, leanToWidthFt: 999, dormerOffsetU: -7, leanToDropFt: -3 },
+  });
+  assert(c.ok, "out-of-range values clamp rather than erroring");
+  if (!c.ok) return;
+  assertEquals(c.d3.roof.leanToWidthFt, 16, "capped at the widest real lean-to");
+  assertEquals(c.d3.roof.dormerOffsetU, -1, "held inside the span");
+  assertEquals(c.d3.roof.leanToDropFt, 0, "a negative drop is zero, not a rise");
+
+  // An unknown side is dropped rather than stored, so the renderer's default (right) wins.
+  const s = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, leanToSide: "north" } });
+  assert(s.ok && !("leanToSide" in s.d3.roof), "an unknown side never persists");
+});
+
+Deno.test("a style that mentions neither stays byte-identical", () => {
+  // The whole back-compat claim in one assertion: adding five clamps and a side enum must
+  // not put a single new key on a spec that did not ask for them.
+  const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(r.ok, "minimal spec accepted");
+  if (!r.ok) return;
+  assertEquals(Object.keys(r.d3.roof).sort(), ["pitch", "type"]);
+});
+
 Deno.test("parseObservedNotes lifts the block, collapses newlines and caps length", () => {
   const o = parseObservedNotes(VIDEO_REPLY);
   assert(o !== null, "observed should parse");

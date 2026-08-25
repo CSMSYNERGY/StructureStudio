@@ -3207,6 +3207,89 @@ function buildShed3DModel(THREE, p) {
     return H;
   };
 
+  // ── LEAN-TO (2026-08-25) ──────────────────────────────────────────────────────────
+  // A shed-roofed appendage off ONE eave wall: the second of the two things "lean-to"
+  // means in this trade. The first -- a standalone single-slope building -- has always
+  // shipped as roof.type "shed", which is why that option now reads "Single slant".
+  //
+  // ADDITIVE, not a new roof type, and that is load-bearing rather than stylistic. One
+  // Supabase project serves beta and production off one `building_styles.d3` table, and
+  // the production profile builder's `else` catches every unknown type and draws a GABLE.
+  // A new type would therefore show production customers a plain gable the moment someone
+  // calibrated a lean-to on beta. As extra keys, an older renderer ignores them and draws
+  // the base building -- the appendage is missing, which is honest, rather than the roof
+  // being wrong, which is not.
+  //
+  // Lives in rg, so "look inside" hides it with the roof. That is the right reading: you
+  // are looking inside the MAIN building, and an open lean-to has no inside.
+  const leanW = roofCfg.leanToWidthFt || 0;
+  if (leanW > 0.5) {
+    const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
+    const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
+    const u0 = dir * (S / 2), u1 = u0 + dir * leanW;
+    const y0 = H, y1 = H - drop;
+    const du = u1 - u0, dy = y1 - y0;
+    const slen = Math.sqrt(du * du + dy * dy) || 1;
+    const ux = du / slen, uy = dy / slen;
+    // One slab, running from the main wall out past the free edge by the eave overhang.
+    const lslab = box(roofMat, slen + OV, D3.ROOF_T, L + OV * 2);
+    d3RoofSlabUVs(lslab);
+    lslab.rotation.z = Math.atan2(dy, du);
+    lslab.position.set((u0 + u1) / 2 + ux * OV / 2,
+                       (y0 + y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2,
+                       L / 2);
+    rg.add(lslab);
+    // Posts at the free edge. Two is what a shed lot actually builds under 12 ft; longer
+    // runs get a third rather than an unsupported header.
+    const nPost = L > 12 ? 3 : 2;
+    const inset = Math.min(0.8, L * 0.08);
+    for (let i = 0; i < nPost; i++) {
+      const t = nPost === 1 ? 0.5 : i / (nPost - 1);
+      const post = box(trimMat, 0.3, y1, 0.3);
+      post.position.set(u1, y1 / 2, inset + t * (L - 2 * inset));
+      rg.add(post);
+    }
+    const hdr = box(trimMat, 0.35, 0.5, L);     // header tying the posts together
+    hdr.position.set(u1, y1 - 0.25, L / 2);
+    rg.add(hdr);
+  }
+
+  // ── DORMER (2026-08-25) ──────────────────────────────────────────────────────────
+  // COSMETIC BY CONSTRUCTION, and that is a deliberate limit rather than a shortcut.
+  // There is no CSG in this renderer, so the dormer sits ON the slope and intersects the
+  // roof slab instead of cutting a hole through it. From outside that reads correctly --
+  // the dormer face is opaque either way -- and "look inside" hides the whole roofGroup,
+  // so the missing opening is never visible from within either. A real roof cut-out needs
+  // a boolean op this engine has no business growing three weeks before a trade show.
+  //
+  // Skipped on a shed roof: a dormer on a single slope is a shed dormer, which is a
+  // different massing, and drawing a gable dormer there would be wrong rather than simple.
+  const dormW = roofCfg.dormerWidthFt || 0;
+  if (dormW > 0.5 && roofCfg.type !== "shed") {
+    const dRise = roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5;
+    // offsetU is a fraction of the HALF-SPAN, so it reads the way kneeU does. Held off
+    // the ridge and the eave so the dormer cannot overhang either edge.
+    const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
+    const dU = (S / 2) * fr;
+    const baseY = profYAt(dU);
+    const dDepth = 2.0;
+    const dormMat = mat(bodyColor);
+    const body = box(dormMat, dDepth, dRise, dormW);
+    body.position.set(dU, baseY + dRise / 2, L / 2);
+    rg.add(body);
+    // A little gable cap, so it does not read as a packing crate glued to the roof.
+    const capRise = Math.max(0.5, dormW * 0.22);
+    const half = dormW / 2;
+    const clen = Math.sqrt(half * half + capRise * capRise);
+    [-1, 1].forEach((sgn) => {
+      const cap = box(roofMat, dDepth + 0.6, D3.ROOF_T, clen);
+      d3RoofSlabUVs(cap);
+      cap.rotation.x = sgn * Math.atan2(capRise, half);
+      cap.position.set(dU, baseY + dRise + capRise / 2, L / 2 + sgn * half / 2);
+      rg.add(cap);
+    });
+  }
+
   // PROUD RELIEF DOES NOT STOP AT THE PLATE LINE.
   //
   // The clad.relief loop lives inside buildOneWall and runs nowhere else, so on a batten or
@@ -9538,6 +9621,42 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     );
                   })}
                 </div>
+              </div>
+              {/* LEAN-TO and DORMER. Both are off at zero width, which is why they sit in
+                  their own row rather than the main grid -- a builder who wants neither
+                  should not have to read four controls to establish that. */}
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to width (ft, 0 = none)
+                  <input type="number" step="0.5" min="0" value={adminCal.spec.roof.leanToWidthFt != null ? adminCal.spec.roof.leanToWidthFt : 0} onChange={(e) => calSetRoof({ leanToWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                {(adminCal.spec.roof.leanToWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to drop (ft)
+                    <input type="number" step="0.25" min="0" value={adminCal.spec.roof.leanToDropFt != null ? adminCal.spec.roof.leanToDropFt : 1} onChange={(e) => calSetRoof({ leanToDropFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {(adminCal.spec.roof.leanToWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to side
+                    <select value={adminCal.spec.roof.leanToSide || "right"} onChange={(e) => calSetRoof({ leanToSide: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="right">Right eave</option>
+                      <option value="left">Left eave</option>
+                    </select>
+                  </label>
+                )}
+                {adminCal.spec.roof.type !== "shed" && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
+                    <input type="number" step="0.5" min="0" value={adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0} onChange={(e) => calSetRoof({ dormerWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
+                    <input type="number" step="0.25" min="0" value={adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5} onChange={(e) => calSetRoof({ dormerRiseFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer position (&minus;1 &hellip; 1)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45} onChange={(e) => calSetRoof({ dormerOffsetU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
               </div>
               {adminCal.spec.roof.type === "gambrel" && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
