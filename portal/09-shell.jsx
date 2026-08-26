@@ -1,3 +1,17 @@
+// The `leads` tab no longer renders anything — it rewrites itself into the merged
+// Contacts & Designs section. Kept rather than deleted because /portal/leads is a link
+// people already have: it is in release notes, in bookmarks, and in any ?view= URL an
+// operator has shared. Deleting the tab would 404 all of them; redirecting self-corrects
+// the URL and lands them where the content actually lives.
+//
+// `replace` so the alias does not sit in history and trap the back button on it.
+function LeadsRedirect({ sub, navigate }) {
+  useEffect(() => {
+    navigate("designs", sub && /^[cd]-/.test(sub) ? sub : "people", true);
+  }, [sub]);
+  return null;
+}
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -627,8 +641,9 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
-          {navItem("designs", "Designs")}
-          {navItem("leads", "Contacts")}
+          {/* ONE item. Carolyn, 2026-08-24: "these two needs to be consolidated." The views
+              live inside it (Contacts / Designs / Pipeline) rather than as sibling tabs. */}
+          {navItem("designs", "Contacts & Designs")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
           {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
@@ -858,6 +873,10 @@ function Dashboard({ session }) {
                 email address on file") in front of a contact whose address is rendered
                 directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
                 admin or owner always holds it, otherwise read the area out of the map. */}
+            {/* `leads` is a REDIRECT ALIAS now, kept so old bookmarks, release-note links and
+                any ?view= URL still land somewhere real. It rewrites itself to the merged tab
+                and preserves a record sub, so /portal/leads/c-<id> still opens that contact. */}
+            {activeTab === "leads" ? <LeadsRedirect sub={sub} navigate={navigate} /> : null}
             {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
@@ -865,12 +884,31 @@ function Dashboard({ session }) {
                 recordId={sub.slice(2)}
                 isAdmin={canAdmin}
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
-                onBack={() => navigate(activeTab, null)}
-                onNavigate={(k, id) => navigate(k === "contact" ? "leads" : "designs", (k === "contact" ? "c-" : "d-") + id)}
+                onBack={() => navigate("designs", sub.charAt(0) === "c" ? "people" : "deals")}
+                onNavigate={(k, id) => navigate("designs", (k === "contact" ? "c-" : "d-") + id)}
                 onOpenDesign={(code) => openInDesigner(code)}
               />
             ) : null}
+            {/* CONTACTS | DESIGNS, as views of one section. The switch rides on `sub`, so each
+                view is linkable, the back button works, and a rep can send someone straight to
+                /portal/designs/people. Contacts is the DEFAULT because that is the view Carolyn
+                demonstrated — a person first, their buildings alongside. */}
             {!gateLocked && activeTab === "designs" && !(sub && /^[cd]-/.test(sub)) && (
+              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                {[["people", "Contacts"], ["deals", "Designs"]].map(([k, label]) => {
+                  const on = (sub || "people") === k;
+                  return (
+                    <button key={k} type="button" onClick={() => navigate("designs", k)}
+                      style={{
+                        background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155",
+                        border: "1px solid " + (on ? ACCENT : "#E2E8F0"), borderRadius: 8,
+                        padding: "7px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                      }}>{label}</button>
+                  );
+                })}
+              </div>
+            )}
+            {!gateLocked && activeTab === "designs" && sub === "deals" && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
                 isAdmin={canAdmin}
@@ -878,10 +916,10 @@ function Dashboard({ session }) {
                 onOpenRecord={(code) => navigate("designs", "d-" + code)}
                 onOpenDesign={openInDesigner} />
             )}
-            {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
+            {!gateLocked && activeTab === "designs" && (!sub || sub === "people") && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
+                onOpenRecord={(contactId) => navigate("designs", "c-" + contactId)}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (

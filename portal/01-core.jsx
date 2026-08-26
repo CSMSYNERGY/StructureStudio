@@ -203,7 +203,14 @@ const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
-  designs: ["Designs", "Customer designs and submitted quotes"],
+  // ONE SECTION, not two. Carolyn, 2026-08-24, after walking Pipedrive: "designs, contacts,
+  // pipelines ... these two needs to be consolidated." Contacts and Designs are two views of
+  // the same sales record — a person, and the buildings they are quoting — and keeping them
+  // in separate nav items is what made her click back and forth in the first place.
+  //
+  // The tab id stays `designs` so every existing deep link, ?view= URL and bookmark keeps
+  // working. `leads` survives below purely as a redirect alias.
+  designs: ["Contacts & Designs", "Everyone who has enquired, and what they are quoting"],
   leads: ["Contacts", "Everyone who has submitted a design"],
   orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
   releases: ["What's New", "Latest features and fixes"],
@@ -264,7 +271,9 @@ const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
-  designs: "designs",
+  // The merged tab shows both, so EITHER area is enough to see it — gating on "designs"
+  // alone would hide contacts from someone who is allowed to read them.
+  designs: ["designs", "contacts"],
   leads: "contacts",
   inventory: "inventory",
   orders: "orders",
@@ -308,6 +317,9 @@ function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
   if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
   const area = TAB_AREA[tab];
+  // An ARRAY means "any of these is enough" — the merged Contacts & Designs tab. Mirrors
+  // the server's `{ any: [...] }` gate shape so the two cannot drift.
+  if (Array.isArray(area)) return area.some((a) => ssCanRead(access, a));
   return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
 }
 
