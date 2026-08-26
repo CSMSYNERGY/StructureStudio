@@ -228,12 +228,17 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   }
 
   // ── Phone formatting: live US format to (NNN) NNN-NNNN ──
+  // NEVER truncates. Dropping surplus digits used to turn "(816) 300-3600 ext 12" into
+  // (181) 630-0360 -- a DIFFERENT, possibly real person, texted a login code for someone
+  // else's quotes. Over-long input keeps every digit, so the exactly-10 guard in
+  // requestCode rejects it with a visible message instead of silently texting a stranger.
   function digitsOf(v) {
     var d = String(v || "").replace(/\D/g, "");
     if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);   // pasted +1 numbers
-    return d.slice(0, 10);
+    return d;
   }
   function fmtPhone(d) {
+    if (d.length > 10) return d;   // not a US number -- show it back exactly, never reshape
     if (d.length > 6) return "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
     if (d.length > 3) return "(" + d.slice(0, 3) + ") " + d.slice(3);
     if (d.length > 0) return "(" + d;

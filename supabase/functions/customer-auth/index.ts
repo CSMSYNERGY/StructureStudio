@@ -226,11 +226,17 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     // this function holds that role, but a missing row or a blank name simply omits the
     // override and Twilio falls back to the service default. A customer must never fail to
     // log in because their builder left a settings field empty.
+    // Falls back to the config row's company_name — the same pair customer-quotes and the
+    // portal shell read — so a tenant with no client_settings row still gets their own name
+    // in the code text instead of ours, matching the header their customer is looking at.
     let brand = "";
     {
-      const { data: bs } = await sb.from("client_settings")
-        .select("business_name").eq("client_id", clientId).maybeSingle();
-      brand = typeof bs?.business_name === "string" ? bs.business_name : "";
+      const [bsRes, cfgRes] = await Promise.all([
+        sb.from("client_settings").select("business_name").eq("client_id", clientId).maybeSingle(),
+        sb.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+      ]);
+      const name = bsRes.data?.business_name || cfgRes.data?.company_name;
+      brand = typeof name === "string" ? name : "";
     }
 
     try {

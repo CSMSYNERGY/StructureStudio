@@ -658,7 +658,33 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       ``,
       `Thanks!`,
     ].filter((l) => l !== undefined).join("\n");
-    return `mailto:?subject=${encodeURIComponent(`DNS records to add for ${dom}`)}&body=${encodeURIComponent(body)}`;
+    const build = (b) => `mailto:?subject=${encodeURIComponent(`DNS records to add for ${dom}`)}&body=${encodeURIComponent(b)}`;
+    const full = build(body);
+    // ⚠️ Windows/Outlook stop reading a mailto: at ~2,083 characters, and they TRUNCATE
+    // rather than refuse -- the webmaster would get an email ending mid-record, with the
+    // DMARC row (always last, always the one nobody else supplies) the first thing lost.
+    // Measured 1,869 chars for csmsynergy.com and 2,079 for a 44-char domain, because a
+    // 1024-bit DKIM value alone is ~218 chars and percent-encoding inflates every newline
+    // to 3. So the prose is what gets dropped, never a record: the records ARE the email.
+    if (full.length <= 1900) return full;
+    const terse = [
+      `Hi,`,
+      ``,
+      `Please add these DNS records for ${dom}:`,
+      ``,
+      lines,
+      ``,
+      dnsAdvisory.length > 0 ? `The DMARC record is recommended, not required — without it mail from a new domain\noften lands in spam. "p=none" only asks for reports; it never blocks mail.` : ``,
+      ``,
+      `This does not affect the website or existing email. Thanks!`,
+    ].filter((l) => l !== undefined).join("\n");
+    const short = build(terse);
+    // Even terse can overflow (many records, or a long domain). Better a short email the
+    // webmaster can reply to than a long one that arrives cut in half -- the on-screen
+    // table with its per-row Copy buttons is still the complete source.
+    return short.length <= 1900
+      ? short
+      : build(`Hi,\n\nPlease add the DNS records for ${dom} that I am sending separately —\nthere are ${dnsRows.length} of them and they are too long for one email.\n\nThanks!`);
   })();
   const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
 
@@ -852,6 +878,23 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 Deactivating instantly reverts to sending through your CRM — nothing else changes.
               </p>
             </div>
+            {/* Verified is not forever: a DNS host migration, a zone rebuild or a webmaster
+                tidying up "unused" TXT records drops these silently, and the first symptom is
+                mail going to spam. The records have to stay reachable AFTER verification, not
+                only while chasing it -- so the same button lives here too. */}
+            {webmasterMailto && (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
+                <a href={webmasterMailto}
+                  title="Opens your email program with the records already written out"
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "inline-block" }}>
+                  ✉️ Email these records to my webmaster
+                </a>
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
+                  Changing DNS host or rebuilding your website? Send these to whoever does it —
+                  removing them stops your email verifying and sends it to spam.
+                </p>
+              </div>
+            )}
           </div>
 
           <div style={S.card}>
