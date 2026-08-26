@@ -3361,9 +3361,25 @@ function buildShed3DModel(THREE, p) {
     const halfW = clad.relief === "rib" ? 0.05 : 0.07;
     const depth = clad.relief === "rib" ? 0.05 : 0.1;
     const reliefMat = clad.reliefTrim ? battenMat : wallMat;
+    // ⚠️ CLIP TO THE LOWEST PROFILE ACROSS THE STRIP'S WIDTH, NEVER ITS CENTRE.
+    // A batten is a BOX: its top is flat. The roof above it is not. Taking profYAt(u) at the
+    // strip's centre puts that flat top at the centre height, so on any slope the upper
+    // corner stands proud of the roof plane by halfW x slope — about an inch and a half on a
+    // gambrel's lower pitch, which is exactly the row of red slivers poking through the
+    // shingles along the rake and at the knee (reported 2026-08-26 with a screenshot:
+    // "I need uniformity in this, it should not break").
+    //
+    // Sampling both edges is not enough on a gambrel: the KNEE is a peak that can sit inside
+    // a strip, where both edges read lower than the middle. So every profile vertex falling
+    // within the strip is sampled too, and the minimum wins. The strip then always stops ON
+    // or just under the roof line — never through it — at every u, on every roof type.
     for (let k = 1; k * bs < S; k++) {
       const u = k * bs - S / 2;
-      const yTop = profYAt(u);
+      let yTop = Math.min(profYAt(u - halfW), profYAt(u), profYAt(u + halfW));
+      for (let i = 0; i < dedup.length; i++) {
+        const vx = dedup[i][0];
+        if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
+      }
       if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
       [-(depth / 2) - 0.02, L + (depth / 2) + 0.02].forEach((z) => {
         const st = box(reliefMat, halfW * 2, yTop - H, depth);

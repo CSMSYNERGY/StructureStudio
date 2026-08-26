@@ -220,8 +220,21 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       return json({ error: MSG_TOO_MANY_CODES }, 429);
     }
 
+    // The tenant's own name brands the code text (see twSanitizeBrand). Read here rather
+    // than at the tenant check above so a `verify_code` call never pays for it — only the
+    // send needs it. Best-effort by construction: `client_settings` is service-role-only and
+    // this function holds that role, but a missing row or a blank name simply omits the
+    // override and Twilio falls back to the service default. A customer must never fail to
+    // log in because their builder left a settings field empty.
+    let brand = "";
+    {
+      const { data: bs } = await sb.from("client_settings")
+        .select("business_name").eq("client_id", clientId).maybeSingle();
+      brand = typeof bs?.business_name === "string" ? bs.business_name : "";
+    }
+
     try {
-      await twStartVerification(e164);
+      await twStartVerification(e164, brand);
     } catch (e) {
       if (e instanceof TwilioNotConfigured) {
         return json({ error: MSG_NOT_CONFIGURED }, 503);
