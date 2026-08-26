@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
-import { timingSafeEqual, parseAddress, messageIds, stripQuoted } from "../_shared/emailInbound.ts";
+import { timingSafeEqual, parseAddress, messageIds, stripQuoted, parseReplyToken } from "../_shared/emailInbound.ts";
 
 // Inbound email → the CRM conversation. The return leg that makes a conversation two-way.
 //
@@ -81,7 +81,29 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   let contactId: string | null = null;
   let shortCode: string | null = null;
 
-  const candidates = [...messageIds(inReplyTo), ...messageIds(referencesRaw)];
+  // 0. THE ADDRESS IT WAS SENT TO. Strongest signal by far, and the reason a builder can
+  //    hold a real conversation: we chose that address when we sent, so there is nothing to
+  //    infer. Tried before the headers because headers are the thing clients mangle.
+  const token = parseReplyToken(to.email);
+  if (token) {
+    const dom = to.email.split("@")[1] ?? "";
+    const { data: cs } = await admin.from("client_settings")
+      .select("client_id").eq("inbound_domain", dom).maybeSingle();
+    if (cs?.client_id) {
+      clientId = cs.client_id;
+      if (token.kind === "design") {
+        shortCode = token.id;
+        // Carry the contact across too, so a design reply also shows on the person.
+        const { data: d } = await admin.from("designs")
+          .select("contact_id").eq("short_code", token.id).eq("client_id", clientId).maybeSingle();
+        contactId = d?.contact_id ?? null;
+      } else {
+        contactId = token.id;
+      }
+    }
+  }
+
+  const candidates = clientId ? [] : [...messageIds(inReplyTo), ...messageIds(referencesRaw)];
   if (candidates.length) {
     const { data: sent } = await admin.from("email_sends")
       .select("client_id, short_code, contact_id, provider_message_id")

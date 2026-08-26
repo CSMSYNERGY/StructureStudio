@@ -3133,12 +3133,37 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // sender's own address is the correct destination, it needs no new column, and it is
     // resolved SERVER-SIDE from the JWT rather than trusted from the body, so nobody can
     // route a customer's replies at a third party.
+    // PREFERRED: a routable address on the TENANT'S OWN inbound subdomain, so the reply
+    // comes back into the portal and the customer only ever sees the builder's domain.
+    //
+    //   d.SS-9R8UHJGTDJ@reply.jrbarns.com   → that design
+    //   c.<contact-uuid>@reply.jrbarns.com  → that person
+    //
+    // The token is in the ADDRESS rather than relying on In-Reply-To because the address is
+    // the one thing that always survives: it is what the customer's mail client puts in the
+    // To field. References headers get stripped and rewritten by real clients constantly.
+    //
+    // FALLBACK: the staff member who wrote it. Every tenant is in this state until they
+    // configure an inbound domain, and it is a genuinely good fallback — the reply reaches a
+    // human immediately, it just does not appear in the portal.
     let replyTo: string | undefined;
     try {
-      const { data: u } = await admin.auth.admin.getUserById(userId ?? "");
-      const addr = u?.user?.email;
-      if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
-    } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
+      const { data: cs } = await admin.from("client_settings")
+        .select("inbound_domain, inbound_status").eq("client_id", clientId).maybeSingle();
+      const dom = String(cs?.inbound_domain ?? "").trim().toLowerCase();
+      if (dom && cs?.inbound_status === "active") {
+        // Lowercased because a local part is compared case-insensitively in practice and
+        // the webhook lowercases before matching; short codes are uppercase on the row.
+        replyTo = (shortCode ? `d.${shortCode}` : `c.${contactId}`).toLowerCase() + "@" + dom;
+      }
+    } catch (_) { /* fall through to the sender's own address */ }
+    if (!replyTo) {
+      try {
+        const { data: u } = await admin.auth.admin.getUserById(userId ?? "");
+        const addr = u?.user?.email;
+        if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
+      } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
+    }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and

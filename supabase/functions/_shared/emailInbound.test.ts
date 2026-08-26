@@ -9,7 +9,7 @@
 // stripper just means the customer's sentence disappears. That is exactly the class of
 // failure worth pinning.
 
-import { timingSafeEqual, parseAddress, messageIds, stripQuoted } from "./emailInbound.ts";
+import { timingSafeEqual, parseAddress, messageIds, stripQuoted, parseReplyToken } from "./emailInbound.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -75,4 +75,31 @@ Deno.test("stripQuoted keeps the whole body when it cannot find a boundary", () 
   // A reply that is ONLY quoted text still returns something rather than an empty string —
   // an empty body in the feed reads as a bug, not as an empty message.
   assert(stripQuoted("> only quoted text").length > 0, "never returns empty when there was content");
+});
+
+Deno.test("parseReplyToken routes a reply from the address it was sent to", () => {
+  // THE PRIMARY ROUTING SIGNAL. Stronger than In-Reply-To because the address is the one
+  // thing that always survives a round trip — it is what the customer's client puts in To.
+  assertEquals(parseReplyToken("d.ss-9r8uhjgtdj@reply.jrbarns.com"),
+    { kind: "design", id: "SS-9R8UHJGTDJ" });
+  assertEquals(parseReplyToken("c.847ff3f8-2004-4d81-b87e-01140887cefe@reply.jrbarns.com"),
+    { kind: "contact", id: "847ff3f8-2004-4d81-b87e-01140887cefe" });
+  // Case-insensitive: a client may echo the address in any case.
+  assertEquals(parseReplyToken("D.SS-9R8UHJGTDJ@Reply.JrBarns.com")!.id, "SS-9R8UHJGTDJ");
+});
+
+Deno.test("parseReplyToken refuses anything that is not our token", () => {
+  // A stranger mailing the inbound domain must NOT be routed onto someone's record. Every
+  // one of these has to return null so the webhook falls through to header/sender matching
+  // and, failing that, stores the row unmatched rather than filing it wrongly.
+  for (const bad of [
+    "info@jrbarns.com",            // a normal address on the same domain
+    "d.@reply.jrbarns.com",        // empty id
+    "x.SS-123@reply.jrbarns.com",  // unknown prefix
+    "dSS-123@reply.jrbarns.com",   // missing separator
+    "d.SS 123@reply.jrbarns.com",  // space in the id
+    "", null, undefined,
+  ]) {
+    assertEquals(parseReplyToken(bad), null, `must refuse ${JSON.stringify(bad)}`);
+  }
 });

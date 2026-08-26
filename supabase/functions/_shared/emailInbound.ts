@@ -60,3 +60,26 @@ export function stripQuoted(body: string): string {
   const kept = (at > 0 ? text.slice(0, at) : text).trim();
   return kept || text.trim();
 }
+
+/** Decode the routing token we put in the Reply-To local part.
+ *
+ *   d.ss-9r8uhjgtdj@reply.jrbarns.com  -> { kind: "design",  id: "SS-9R8UHJGTDJ" }
+ *   c.<uuid>@reply.jrbarns.com         -> { kind: "contact", id: "<uuid>" }
+ *
+ * This is the PRIMARY routing signal, ahead of In-Reply-To, because the address is the one
+ * thing that always survives a round trip: it is what the customer's mail client puts in
+ * the To field. References and In-Reply-To headers get stripped and rewritten by real
+ * clients all the time — Outlook especially — which is why header matching alone left
+ * replies unfiled.
+ *
+ * Short codes are uppercase on the row but lowercase in an address, so the design id is
+ * re-uppercased. A uuid is already lowercase.
+ */
+export function parseReplyToken(addr: unknown): { kind: "design" | "contact"; id: string } | null {
+  const local = String(addr ?? "").trim().toLowerCase().split("@")[0];
+  const m = /^([dc])\.([a-z0-9-]{4,64})$/.exec(local);
+  if (!m) return null;
+  return m[1] === "d"
+    ? { kind: "design", id: m[2].toUpperCase() }
+    : { kind: "contact", id: m[2] };
+}
