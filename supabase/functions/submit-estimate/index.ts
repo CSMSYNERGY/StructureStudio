@@ -109,7 +109,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl, email_template_copy")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -1595,6 +1595,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           quoteTerms: quoteTerms || null,
         })
         : estimateEmail({
+          templateCopy: settings.email_template_copy,
           businessName,
           logoUrl: businessLogoUrl || null,
           phone: businessPhone || null,
@@ -1831,6 +1832,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // (recording the pre-redirect recipient as intended_email), the dark guards,
           // and the email_sends ledger — and it never throws.
           const content = estimateEmail({
+          templateCopy: settings.email_template_copy,
             businessName,
             logoUrl: businessLogoUrl || null,
             phone: businessPhone || null,

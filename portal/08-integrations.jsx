@@ -466,6 +466,21 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   const [fromName, setFromName] = useState("");
   const [fromLocal, setFromLocal] = useState("info");
   // Verification feedback + per-row copy state (pending state)
+  // Tenant wording for the document emails (migration 138). Seeded from email_status.
+  const [tplKind, setTplKind] = useState("estimate");
+  const [tpl, setTpl] = useState({});           // { estimate:{subject,intro}, ... }
+  const [tplMsg, setTplMsg] = useState(null);
+  // Seed the wording boxes ONCE from the server. A ref rather than a "is it empty?" test,
+  // and an effect rather than a render-time set: the empty check would have been true
+  // forever for a tenant with no saved copy, so setting state on it during render was an
+  // infinite loop waiting for a background refresh to trigger it. The ref also means a
+  // later refresh never clobbers what someone is halfway through typing.
+  const tplSeeded = useRef(false);
+  useEffect(() => {
+    if (tplSeeded.current || !status || !status.templateCopy) return;
+    tplSeeded.current = true;
+    setTpl(status.templateCopy);
+  }, [status]);
   const [checkNote, setCheckNote] = useState(null);
   const [copied, setCopied] = useState(null);   // "v<i>" | "fail:v<i>" | null
   // Test send (verified state)
@@ -595,7 +610,58 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     }]
     : [];
   const dnsRows = dns.concat(dnsAdvisory);
+
+  // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────
+  // Her words: "so many people are going to be like, I don't know anything about this."
+  // The tenant is a shed builder; the person who can actually add a TXT record is their web
+  // guy, and the gap between those two people is where domain verification dies. She
+  // explicitly ruled out the auto-detect-their-DNS-host idea for now — "let's not right
+  // now... instead let's put in here, email this to my webmaster."
+  //
+  // mailto: and nothing else. No send from our servers: the builder's own client puts it in
+  // their Sent folder, uses whatever address their webmaster already answers, and keeps the
+  // reply on a thread they own. It also means this works with zero backend, which matters
+  // because the tenants who need it most are the ones whose sending is NOT yet verified.
+  //
+  // ⚠️ The DMARC row goes in the email. It is the one Resend never returns, and pasting
+  // exactly what the portal shows without it is what put a live A/B test in Gmail's spam
+  // folder (2026-08-21). A webmaster who adds three records and stops has done the work and
+  // still gets spam-foldered, and nobody would know why.
+  const webmasterMailto = (() => {
+    if (dnsRows.length === 0) return "";
+    const dom = dnsApex || status.domain || "our domain";
+    const lines = dnsRows.map((r, i) => {
+      const bits = [
+        `${i + 1}. ${r.type} record${r.advisory ? "  (recommended — see note below)" : ""}`,
+        `   Name/Host: ${r.host}`,
+        `   Value:     ${r.value}`,
+      ];
+      // An MX without its priority cannot be created — same reason it is on screen.
+      if (r.priority != null) bits.push(`   Priority:  ${r.priority}`);
+      return bits.join("\n");
+    }).join("\n\n");
+    const body = [
+      `Hi,`,
+      ``,
+      `Please add the following DNS records for ${dom}. They let our quoting software send`,
+      `email from our own address instead of a shared one, and they prove to Gmail and`,
+      `Outlook that the mail really is from us.`,
+      ``,
+      lines,
+      ``,
+      dnsAdvisory.length > 0
+        ? `Note on the DMARC record: it is marked recommended rather than required. Our provider\ndoes not check it, so nothing will report it missing — but without it mail from a new\ndomain frequently lands in spam. "p=none" only asks for reports; it never blocks mail.`
+        : ``,
+      ``,
+      `Nothing else needs changing — this does not affect the website or existing email.`,
+      `Please let me know once they are in and I will run the verification check.`,
+      ``,
+      `Thanks!`,
+    ].filter((l) => l !== undefined).join("\n");
+    return `mailto:?subject=${encodeURIComponent(`DNS records to add for ${dom}`)}&body=${encodeURIComponent(body)}`;
+  })();
   const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
+
   const fromAddress = status.fromAddress || (status.fromLocal && status.domain ? `${status.fromLocal}@${status.domain}` : "");
 
   return (
@@ -729,8 +795,21 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               style={{ ...S.btn("#92400E", "#FFF"), opacity: busy ? 0.6 : 1 }}>
               {busy ? "Checking…" : "Check verification"}
             </button>
+            {webmasterMailto && (
+              <a href={webmasterMailto}
+                title="Opens your email program with the records already written out"
+                style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", textDecoration: "none", display: "inline-block" }}>
+                ✉️ Email this to my webmaster
+              </a>
+            )}
             {checkNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{checkNote}</span>}
           </div>
+          {webmasterMailto && (
+            <p style={{ fontSize: 12, color: "#92400E", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
+              Not the person who manages your website? The button above opens your email program with
+              every record written out, ready to send to whoever does.
+            </p>
+          )}
           <p style={{ fontSize: 12, color: "#92400E", marginTop: 12, marginBottom: 0 }}>
             DNS changes can take up to an hour to appear — keep this tab open and check again.
           </p>
@@ -795,6 +874,51 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 {testResult.err || testResult.ok}
               </div>
             )}
+            {/* ── YOUR WORDING ────────────────────────────────────────────────────────
+                Carolyn, 2026-08-21: "I don't know what it's going to take to create like a
+                template that they can edit."
+
+                What is editable is the SUBJECT and the OPENING LINE — the two things that
+                are genuinely the builder's voice. The branded header, the quote/total rows,
+                the buttons and the PDF links stay ours, because those are the parts that DO
+                something and a wording edit has no business near them. Logo and colours are
+                already theirs under Branding, which is the "images" half of the ask.
+                Plain text only: markup is refused with a message, not silently stripped. */}
+            <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+              <div style={S.lbl}>Your wording</div>
+              <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"} and they fill in automatically.
+              </div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                {[["estimate", "Estimate"], ["quote", "Quote"], ["invoice", "Invoice"]].map(([k, label]) => (
+                  <button key={k} type="button" onClick={() => setTplKind(k)}
+                    style={{ background: tplKind === k ? ACCENT : "#FFF", color: tplKind === k ? "#FFF" : "#334155", border: "1px solid " + (tplKind === k ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                ))}
+              </div>
+              <input
+                value={(tpl[tplKind] && tpl[tplKind].subject) || ""}
+                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), subject: e.target.value } }))}
+                placeholder={"Subject — e.g. Your " + tplKind + " {number} from {business}"}
+                style={{ ...S.input, marginBottom: 6 }} />
+              <textarea
+                value={(tpl[tplKind] && tpl[tplKind].intro) || ""}
+                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), intro: e.target.value } }))}
+                rows={3}
+                placeholder="Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."
+                style={{ ...S.input, resize: "vertical" }} />
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
+                  onClick={async () => {
+                    setBusy(true); setTplMsg(null);
+                    const { data: r, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "email_save_template", copy: tpl } });
+                    setBusy(false);
+                    const e2 = (r && r.error) || (err && err.message);
+                    setTplMsg(e2 ? { err: e2 } : { ok: "Saved." });
+                  }}>Save wording</button>
+                {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
+                {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
+              </div>
+            </div>
             {sends.length > 0 && (
               <div style={{ marginTop: 14 }}>
                 <div style={S.lbl}>Recent sends</div>

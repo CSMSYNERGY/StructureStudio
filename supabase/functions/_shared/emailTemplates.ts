@@ -27,6 +27,12 @@ export interface EmailContent {
 }
 
 export interface EstimateEmailInput {
+  /** Per-tenant subject/intro overrides — client_settings.email_template_copy (138).
+   *  Untyped jsonb by nature; tenantCopy() validates and drops anything unusable. */
+  templateCopy?: unknown;
+  /** Used only by the {customer} token in tenant copy. */
+  customerName?: string;
+
   businessName: string;
   logoUrl?: string | null;
   phone?: string | null;
@@ -236,6 +242,45 @@ function textFooter(input: { businessName: string; phone?: string | null; websit
   return lines;
 }
 
+/** Per-tenant SUBJECT / INTRO overrides (migration 138).
+ *
+ * ⚠️ COPY ONLY, NEVER HTML. A builder edits the two things that are genuinely theirs — the
+ * subject line and the opening sentence. Everything structural (the branded header, the
+ * detail rows, the CTA, the PDF links, the footer) stays owned by this file, because those
+ * are the parts of the email that DO something and a wording edit has no business near
+ * them. It is also the difference between a template feature and an injection surface
+ * pointed at a customer's inbox.
+ *
+ * Tokens are substituted here and the VALUES are escaped by the caller for the HTML path,
+ * so a tenant cannot smuggle markup through {business} either. An unknown token is left
+ * verbatim rather than blanked: a stray "{foo}" reads as a typo the builder can see and
+ * fix, where an empty gap reads as our bug.
+ */
+export type TemplateCopy = { subject?: string; intro?: string };
+
+export function tenantCopy(raw: unknown, kind: string): TemplateCopy {
+  if (!raw || typeof raw !== "object") return {};
+  const byKind = (raw as Record<string, unknown>)[kind];
+  if (!byKind || typeof byKind !== "object") return {};
+  const o = byKind as Record<string, unknown>;
+  const take = (v: unknown) => {
+    const t = typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
+    // Anything with a tag in it is a builder pasting HTML in; drop the whole field rather
+    // than half-escaping it into gibberish, so the shipped wording shows instead.
+    return t && !/[<>]/.test(t) ? t.slice(0, 300) : "";
+  };
+  const out: TemplateCopy = {};
+  const sub = take(o.subject), intro = take(o.intro);
+  if (sub) out.subject = sub;
+  if (intro) out.intro = intro;
+  return out;
+}
+
+export function fillTokens(tpl: string, vals: Record<string, string>): string {
+  return String(tpl || "").replace(/\{(\w+)\}/g, (whole, k) =>
+    Object.prototype.hasOwnProperty.call(vals, k) ? String(vals[k] ?? "") : whole);
+}
+
 export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const num = oneLine(input.estimateNumber);
@@ -264,7 +309,18 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     ? `<p style="margin:${input.pdfUrl ? "8px" : "18px"} 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.formalPdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your ${word} (PDF)</a></p>`
     : "";
 
-  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">Thank you for designing your building with ${esc(name)}. Your ${word} is ready.</p>
+  // Tenant copy, if they wrote any. Values are escaped for the HTML path; the plain-text
+  // path below uses the raw ones.
+  const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
+  const tokens = { business: name, number: num, total: money, building, customer: oneLine(input.customerName ?? "") };
+  const introRaw = copy.intro
+    ? fillTokens(copy.intro, tokens)
+    : `Thank you for designing your building with ${name}. Your ${word} is ready.`;
+  const introHtml = copy.intro
+    ? esc(introRaw)
+    : `Thank you for designing your building with ${esc(name)}. Your ${word} is ready.`;
+
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${introHtml}</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
               ${rows.join("\n")}
             </table>
@@ -273,7 +329,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const text: string[] = [
     name,
     "",
-    `Thank you for designing your building with ${name}. Your ${word} is ready.`,
+    introRaw,
     "",
     `${Word} #: ${num}`,
   ];
@@ -287,7 +343,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   text.push(...textFooter(input));
 
   return {
-    subject: `Your ${word} ${num} from ${name}`,
+    subject: copy.subject ? fillTokens(copy.subject, tokens) : `Your ${word} ${num} from ${name}`,
     html: htmlShell({
       businessName: name,
       logoUrl: input.logoUrl,

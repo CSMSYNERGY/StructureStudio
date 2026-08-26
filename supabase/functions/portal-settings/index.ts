@@ -136,6 +136,7 @@ const GATES: GateTable = {
   // every customer-facing email looks like).
   email_status:         { area: "settings_email", level: "view" },
   email_connect_domain: { area: "settings_email", level: "edit" },
+  email_save_template: { area: "settings_email", level: "edit" },
   email_verify_domain:  { area: "settings_email", level: "edit" },
   email_activate:       { area: "settings_email", level: "edit" },
   email_send_test:      { area: "settings_email", level: "edit" },
@@ -3689,7 +3690,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "email_status") {
     const { data: s, error } = await admin
       .from("client_settings")
-      .select("email_provider, email_domain, email_from_local, email_from_name, email_domain_status, email_dns_records, email_verified_at, email_last_error")
+      .select("email_provider, email_domain, email_from_local, email_from_name, email_domain_status, email_dns_records, email_verified_at, email_last_error, email_template_copy")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your email sending settings", error);
@@ -3705,6 +3706,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({
       clientId, // operator view-as tripwire (the qbo_status pattern)
       platformReady: resendConfigured(),
+      // So the Email Sending screen prefills the wording boxes without a second round trip.
+      templateCopy: s?.email_template_copy ?? null,
       domainStatus: s?.email_domain_status ?? "not_configured",
       domain,
       fromName: s?.email_from_name ?? null,
@@ -3720,6 +3723,44 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         error: r.error ?? null, bounceReason: r.bounce_reason ?? null, createdAt: r.created_at,
       })),
     });
+  }
+
+  // Per-tenant SUBJECT / INTRO copy for the document emails (migration 138).
+  //
+  // ⚠️ COPY ONLY. The stored value is plain text with {token} placeholders — never HTML.
+  // A free-HTML template authored by a tenant would be an injection surface pointed at a
+  // customer's inbox, and would also let a wording edit silently break the quote link and
+  // the totals table, which are the parts of the email that actually do something.
+  // tenantCopy() in _shared/emailTemplates.ts re-validates on the way OUT as well, so a row
+  // written before this check existed still cannot inject.
+  if (action === "email_save_template") {
+    const KINDS = ["estimate", "quote", "invoice"];
+    const raw = payload?.copy;
+    if (!raw || typeof raw !== "object") return json({ error: "Nothing to save." }, 400);
+    const clean: Record<string, { subject?: string; subjectLen?: number; intro?: string }> = {};
+    for (const kind of KINDS) {
+      const v = (raw as any)[kind];
+      if (!v || typeof v !== "object") continue;
+      const take = (x: unknown) => {
+        const t = typeof x === "string" ? x.replace(/\s+/g, " ").trim() : "";
+        if (!t) return "";
+        // Refuse LOUDLY rather than stripping: a builder who pasted markup needs to be told,
+        // not to have it silently vanish and wonder which half saved.
+        if (/[<>]/.test(t)) throw new Error(`Remove the < > characters from the ${kind} ${x === v.subject ? "subject" : "message"} — this is plain text, not HTML.`);
+        return t.slice(0, 300);
+      };
+      try {
+        const subject = take(v.subject), intro = take(v.intro);
+        if (subject || intro) clean[kind] = { ...(subject ? { subject } : {}), ...(intro ? { intro } : {}) };
+      } catch (e) {
+        return json({ error: e instanceof Error ? e.message : "That template could not be saved." }, 400);
+      }
+    }
+    const { error } = await admin.from("client_settings")
+      .update({ email_template_copy: Object.keys(clean).length ? clean : null })
+      .eq("client_id", clientId);
+    if (error) return dbFail(req, clientId, "save that email wording", error);
+    return json({ ok: true, copy: clean });
   }
 
   if (action === "email_connect_domain") {
