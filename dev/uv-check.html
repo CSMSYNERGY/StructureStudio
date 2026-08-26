@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>roof UV orientation check</title>
+<pre id="out">running…</pre>
+<script type="module">
+// Dev harness: which way do u and v actually run on a roof surface, in WORLD space?
+//
+// This defect has now shipped twice. First on the main slopes, where every roof texture ran
+// 90 degrees wrong for both materials from the day roofs were first textured. Then on the
+// dormer cap, which was given the main slopes' UV rewrite even though its box is built with
+// x and z transposed -- so the fix for the first bug quietly created the second.
+//
+// It keeps happening because the orientation is invisible in the source. You cannot read
+// `box(w, h, d)` plus a rotation and see which way a shingle course will run, and the honest
+// check -- look at it -- needs a GPU, a tenant, a style with a dormer, and someone who knows
+// what a wrong roof looks like. So it got assumed instead, twice.
+//
+// This reads the geometry rather than rendering it, so it needs none of that. Open it after
+// touching any roof slab, and read the three vectors, not just the PASS.
+//
+// NOTE the invariant is stated without naming a world axis, deliberately: see check().
+const THREE = await import("https://esm.sh/three@0.167.0");
+
+const D3_ROOF_T = 0.35;
+
+// The two UV rewrites, copied verbatim from structure-studio.component.js.
+const d3RoofSlabUVs = (slab) => {
+  const uvA = slab.geometry.attributes.uv, posA = slab.geometry.attributes.position;
+  for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getZ(i), posA.getX(i));
+  uvA.needsUpdate = true;
+};
+const d3RoofSlabUVsT = (slab) => {
+  const uvA = slab.geometry.attributes.uv, posA = slab.geometry.attributes.position;
+  for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i), posA.getZ(i));
+  uvA.needsUpdate = true;
+};
+const box = (w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial());
+
+// Take the TOP face's vertices and solve for the world direction in which u increases and
+// the world direction in which v increases. Least-squares over the face's 4 corners.
+function uvAxes(mesh) {
+  mesh.updateMatrixWorld(true);
+  const pos = mesh.geometry.attributes.position, uv = mesh.geometry.attributes.uv;
+  const norm = mesh.geometry.attributes.normal;
+  const pts = [];
+  for (let i = 0; i < pos.count; i++) {
+    // BoxGeometry face order puts +Y (top) normals on one group; pick them by normal.
+    if (norm.getY(i) > 0.9) {
+      const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+      mesh.localToWorld(v);
+      pts.push({ u: uv.getX(i), v: uv.getY(i), p: v });
+    }
+  }
+  // Fit p = p0 + U*u + V*v  by picking pairs that vary in only one of u/v.
+  const findDir = (key, other) => {
+    for (let i = 0; i < pts.length; i++) for (let j = 0; j < pts.length; j++) {
+      const d = pts[j][key] - pts[i][key], o = pts[j][other] - pts[i][other];
+      if (Math.abs(d) > 1e-6 && Math.abs(o) < 1e-6) {
+        return pts[j].p.clone().sub(pts[i].p).divideScalar(d).normalize();
+      }
+    }
+    return null;
+  };
+  return { U: findDir("u", "v"), V: findDir("v", "u") };
+}
+
+const fmt = (v) => v ? `(${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)})` : "n/a";
+const lines = [];
+// The invariant is stated WITHOUT naming a world axis. A dormer's own ridge runs
+// perpendicular to the main roof's, so "the ridge is world Z" holds for the main slopes and
+// is false for the cap -- an assertion written that way marks the correct fix as a failure,
+// which is exactly what the first run of this harness did.
+//
+// What actually has to be true on any roof surface, whichever way it faces:
+//   u runs along the RIDGE  -> horizontal, so no Y component
+//   v runs DOWN THE SLOPE   -> must climb, so a non-zero Y component
+//   and the two are perpendicular.
+// A shingle raster draws its courses at constant v and a metal raster its seams at constant
+// u, so those two facts are the whole of "courses follow the eave, seams run to the ridge".
+const check = (label, mesh, expect) => {
+  const { U, V } = uvAxes(mesh);
+  const uVertical = Math.abs(U.y);          // want ~0: the ridge is level
+  const vClimb = Math.abs(V.y);             // want >0: v goes up the slope
+  const perp = Math.abs(U.dot(V));          // want ~0
+  const ok = uVertical < 0.02 && vClimb > 0.05 && perp < 0.02;
+  lines.push(
+    `${label}\n` +
+    `   u increases toward ${fmt(U)}   |Y|=${uVertical.toFixed(3)} (want ~0, ridge is level)\n` +
+    `   v increases toward ${fmt(V)}   |Y|=${vClimb.toFixed(3)} (want >0, climbs the slope)\n` +
+    `   u.v = ${perp.toFixed(3)} (want ~0)\n` +
+    `   => ${ok ? "PASS" : "FAIL"} -- ${expect}\n`
+  );
+};
+
+// ── main gable slab: box(w = slope, h = thick, d = ridge), rotation.z tilts it ──
+{
+  const pitch = 0.4, slen = 8, L = 16, OV = 0.6;
+  const du = 8, dy = pitch * 8;
+  const slab = box(slen + OV * 2, D3_ROOF_T, L + OV * 2);
+  d3RoofSlabUVs(slab);
+  slab.rotation.z = Math.atan2(dy, du);
+  slab.position.set(0, 8, L / 2);
+  check("MAIN SLOPE  (d3RoofSlabUVs)", slab, "should PASS: this is the reference convention");
+}
+
+// ── dormer gable cap: box(x = ridge, h = thick, z = slope), rotation.x tilts it ──
+{
+  const dDepth = 2.0, dormW = 4, capRise = Math.max(0.5, dormW * 0.22);
+  const half = dormW / 2, clen = Math.sqrt(half * half + capRise * capRise);
+  const capNew = box(dDepth + 0.6, D3_ROOF_T, clen);
+  d3RoofSlabUVsT(capNew);
+  capNew.rotation.x = Math.atan2(capRise, half);
+  capNew.position.set(0, 10, 8);
+  check("DORMER CAP  (d3RoofSlabUVsT -- the fix)", capNew, "should PASS: matches the main slope's convention");
+
+  const capOld = box(dDepth + 0.6, D3_ROOF_T, clen);
+  d3RoofSlabUVs(capOld);                    // the OLD, transposed-by-mistake call
+  capOld.rotation.x = Math.atan2(capRise, half);
+  capOld.position.set(0, 10, 8);
+  check("DORMER CAP  (d3RoofSlabUVs -- what shipped)", capOld, "expected to FAIL: axes swapped");
+}
+
+document.getElementById("out").textContent = lines.join("\n");
+</script>

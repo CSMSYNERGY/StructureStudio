@@ -2959,6 +2959,23 @@ function buildShed3DModel(THREE, p) {
     uvA.needsUpdate = true;
   };
 
+  // Same idea, for a slab whose box axes are TRANSPOSED relative to the main slopes: local
+  // x along the ridge, local z down the slope. The dormer cap is built that way because it
+  // is rotated about X to tilt it, so its rafter length has to lie on z -- which means the
+  // rewrite above lands u and v the wrong way round and leaves the dormer 90 degrees off
+  // from the roof it sits on. Two helpers rather than one clever one: the axis convention
+  // is a property of how each box was constructed, and a caller that has to pass a flag is
+  // a caller that will eventually pass the wrong flag.
+  //
+  // Do NOT "simplify" this by skipping the rewrite on transposed slabs. Stock BoxGeometry
+  // UVs run 0..1 per face, and the repeat beside it is in 1/feet -- a 0..1 face would draw
+  // a fraction of a single tile, stretched over the whole cap.
+  const d3RoofSlabUVsT = (slab) => {
+    const uvA = slab.geometry.attributes.uv, posA = slab.geometry.attributes.position;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i), posA.getZ(i));
+    uvA.needsUpdate = true;
+  };
+
   // Opening vertical extent: item-stamped fields first (Phase 5 — placed items
   // carry openingHeightFt/sillFt), D3 defaults for legacy designs.
   // Catalog fixtures carry their real size as widthIn/heightIn instead of the
@@ -3334,7 +3351,7 @@ function buildShed3DModel(THREE, p) {
     const clen = Math.sqrt(half * half + capRise * capRise);
     [-1, 1].forEach((sgn) => {
       const cap = box(roofMat, dDepth + 0.6, D3.ROOF_T, clen);
-      d3RoofSlabUVs(cap);
+      d3RoofSlabUVsT(cap);   // x = ridge, z = slope -- transposed vs the main slabs
       cap.rotation.x = sgn * Math.atan2(capRise, half);
       cap.position.set(dU, baseY + dRise + capRise / 2, L / 2 + sgn * half / 2);
       rg.add(cap);
@@ -3811,6 +3828,25 @@ function disposeSubtree(obj, sharedMats) {
   d3UnbindFixtureMats(mats);
 }
 
+// The colour pipeline, in ONE place, for every renderer that draws this building.
+//
+// There are three of them -- the full-screen modal, the docked panel, and the off-screen
+// fallback below -- and their configuration had drifted: both live viewers tone-mapped,
+// the fallback did not. ACES is not a subtle grade. It rolls off saturated colour hard, so
+// the SAME hex rendered visibly different depending on which renderer drew it, and the one
+// that disagreed was the one nobody watches being made -- the shot that goes in the
+// customer's quote. Carolyn, 2026-08-25, looking at a red building: "the color isn't
+// showing up in here correctly."
+//
+// Anything that changes how a colour is turned into a pixel belongs here. What stays at the
+// call sites is what genuinely differs per surface -- pixel ratio, shadow maps,
+// preserveDrawingBuffer, clear colour -- each of which is a documented deliberate choice.
+function d3ConfigureRenderer(THREE, renderer) {
+  if (THREE.SRGBColorSpace && "outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+}
+
 // A default 3/4 view of the building, rendered OFF-SCREEN, with no 3D modal involved.
 //
 // WHY THIS EXISTS. The quote's 3D page and the customer's quote-card thumbnail only ever
@@ -3837,7 +3873,7 @@ async function renderDefault3DShot(p) {
     renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(1);
     renderer.setClearColor("#E7EEF5", 1);
-    if (THREE.SRGBColorSpace && "outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+    d3ConfigureRenderer(THREE, renderer);
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#E7EEF5");
@@ -3985,8 +4021,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       // Filmic tone mapping is what lets the PBR materials read as real
       // surfaces — flat Linear output was a big part of the "toy render" look.
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.15;
+      // Shared with the panel and the off-screen shot: see d3ConfigureRenderer.
+      d3ConfigureRenderer(THREE, renderer);
       // The sun is a fixed directional light with a fixed ortho shadow camera,
       // so the shadow map is VIEW-INDEPENDENT: orbiting re-renders the same
       // depth map for nothing (a full 2048² PCFSoft pass per pointermove).
@@ -5076,7 +5112,12 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // during render (not in an effect) so a flush scheduled this frame already
   // sees this frame's values — this is what avoids the frozen-props trap.
   const pRef = useRef(null);
-  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt };
+  // bodyColors/trimColors are IN here deliberately. They were destructured above and then
+  // left out of this object, so bodyOf/trimOf below resolved a tenant's paint label with an
+  // undefined pool -- past the catalog lookup, past the built-in nine, down to
+  // d3CssColor's CSS-name guess. "Mountain Red" is not a CSS colour name, so the panel drew
+  // a fallback while the modal beside it drew the real hex off the same design.
+  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, fitHeightFt };
 
   // Every geometry input that is NOT `items`, flattened to a scalar string.
   // d3ResolveStyleSpec returns a fresh object (with fresh nested roof/colors)
@@ -5088,7 +5129,12 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // The hand-picked version silently missed roofMaterial, roof.overhang and the gambrel
   // knee numbers, so two styles differing only in those left a stale roof standing beside
   // a corrected plan until some unrelated edit happened to force a full rebuild.
-  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0]);
+  // The colour POOLS are part of the signature too, for the same reason the whole style
+  // spec is: a label resolves through them, so editing a swatch's hex in the catalog
+  // changes what this model should draw without changing any label. Leaving them out meant
+  // the corrected colour appeared everywhere except the panel, until some unrelated edit
+  // forced a rebuild.
+  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0, bodyColors, trimColors]);
 
   useEffect(() => {
     let disposed = false;
@@ -5100,8 +5146,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.15;
+      d3ConfigureRenderer(THREE, renderer);
       // Same view-independent sun as the modal: orbiting must not re-render the
       // depth map. Every geometry mutation below re-arms needsUpdate by hand.
       renderer.shadowMap.autoUpdate = false;
