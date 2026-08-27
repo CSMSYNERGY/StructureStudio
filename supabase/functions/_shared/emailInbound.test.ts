@@ -11,7 +11,7 @@
 
 import {
   timingSafeEqual, parseAddress, messageIds, stripQuoted, parseReplyToken,
-  envelopeRecipients, buildThreadMessageId, parseThreadMessageId,
+  envelopeRecipients, buildThreadMessageId, parseThreadMessageId, buildReplyAddress,
 } from "./emailInbound.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -105,6 +105,41 @@ Deno.test("parseReplyToken refuses anything that is not our token", () => {
   ]) {
     assertEquals(parseReplyToken(bad), null, `must refuse ${JSON.stringify(bad)}`);
   }
+});
+
+Deno.test("buildReplyAddress round-trips with parseReplyToken", () => {
+  // The two must agree exactly, or a reply we asked for cannot be read back.
+  const a = buildReplyAddress("reply.jrbarns.com", "active", { shortCode: "SS-9R8UHJGTDJ" });
+  assertEquals(a, "d.ss-9r8uhjgtdj@reply.jrbarns.com");
+  assertEquals(parseReplyToken(a), { kind: "design", id: "SS-9R8UHJGTDJ" });
+
+  const cid = "847ff3f8-2004-4d81-b87e-01140887cefe";
+  const c = buildReplyAddress("reply.jrbarns.com", "active", { contactId: cid });
+  assertEquals(c, `c.${cid}@reply.jrbarns.com`);
+  assertEquals(parseReplyToken(c), { kind: "contact", id: cid });
+
+  // A design wins: it is the more specific fact, and it is what the customer is replying about.
+  assertEquals(buildReplyAddress("reply.x.com", "active", { shortCode: "SS-1", contactId: cid }),
+    "d.ss-1@reply.x.com");
+});
+
+Deno.test("buildReplyAddress refuses anything but a genuinely active domain", () => {
+  // ⚠️ THE ONE THAT MATTERS. 'pending' means the tenant typed a domain but never proved MX
+  // control. Returning an address here points Reply-To at dead MX, so the customer's reply
+  // bounces back to the CUSTOMER and the builder never learns they tried — strictly worse
+  // than the staff-inbox fallback that null selects.
+  assertEquals(buildReplyAddress("reply.x.com", "pending", { shortCode: "SS-1" }), null);
+  assertEquals(buildReplyAddress("reply.x.com", "off", { shortCode: "SS-1" }), null);
+  assertEquals(buildReplyAddress("reply.x.com", null, { shortCode: "SS-1" }), null);
+  assertEquals(buildReplyAddress("reply.x.com", undefined, { shortCode: "SS-1" }), null);
+  // No domain configured at all — every tenant is in this state today.
+  assertEquals(buildReplyAddress(null, "active", { shortCode: "SS-1" }), null);
+  assertEquals(buildReplyAddress("", "active", { shortCode: "SS-1" }), null);
+  assertEquals(buildReplyAddress("notadomain", "active", { shortCode: "SS-1" }), null);
+  // Nothing to reference: a `test` send has neither. Guarded rather than templated, or this
+  // renders the literal address `c.null@reply.x.com` and mail bounces off a real domain.
+  assertEquals(buildReplyAddress("reply.x.com", "active", {}), null);
+  assertEquals(buildReplyAddress("reply.x.com", "active", { shortCode: null, contactId: null }), null);
 });
 
 Deno.test("envelopeRecipients reads the envelope for every provider shape", () => {

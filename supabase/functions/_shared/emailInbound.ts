@@ -84,6 +84,41 @@ export function parseReplyToken(addr: unknown): { kind: "design" | "contact"; id
     : { kind: "contact", id: m[2] };
 }
 
+/** Build the routable reply address — the exact inverse of parseReplyToken, and its neighbour
+ *  so the two spellings can never drift apart.
+ *
+ *   d.ss-9r8uhjgtdj@reply.jrbarns.com   → that design
+ *   c.<contact-uuid>@reply.jrbarns.com  → that person
+ *
+ * Returns null unless the tenant's inbound domain is genuinely ACTIVE and there is something
+ * to reference. Null is the signal to fall back to a real human's inbox, which is a good
+ * outcome — the reply reaches someone immediately, it just does not appear in the portal.
+ *
+ * ⚠️ 'pending' MUST NOT PRODUCE AN ADDRESS. A tenant who has typed the domain but not proved
+ * MX control has no working mailbox there, and a Reply-To pointing at dead MX means the
+ * customer's reply bounces back to the CUSTOMER while the builder learns nothing. The old
+ * behaviour — a staff member's own address — is strictly better than that, so the bar for
+ * replacing it is a domain that has actually been verified.
+ *
+ * Lowercased throughout: a local part is compared case-insensitively in practice, short codes
+ * are uppercase on the row, and the webhook lowercases before matching.
+ */
+export function buildReplyAddress(
+  inboundDomain: unknown,
+  inboundStatus: unknown,
+  ref: { shortCode?: string | null; contactId?: string | null },
+): string | null {
+  const dom = String(inboundDomain ?? "").trim().toLowerCase();
+  if (!dom || !dom.includes(".") || String(inboundStatus ?? "") !== "active") return null;
+  const local = ref.shortCode
+    ? `d.${String(ref.shortCode).trim()}`
+    : (ref.contactId ? `c.${String(ref.contactId).trim()}` : "");
+  // A send with neither a design nor a contact has nothing to route back to. Guarded rather
+  // than templated, or a null id renders the literal address `c.null@reply.<domain>`.
+  if (local === "d." || local === "c." || !local) return null;
+  return `${local.toLowerCase()}@${dom}`;
+}
+
 /** The SMTP envelope recipients (RCPT TO), which is the only recipient a sender cannot forge.
  *
  * ⚠️ THIS IS A SECURITY BOUNDARY, not a convenience. The `To:` header is written by whoever

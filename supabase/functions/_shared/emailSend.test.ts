@@ -166,6 +166,8 @@ const VERIFIED = {
   beta_email: null,
 };
 const PENDING = { ...VERIFIED, email_domain_status: "pending" };
+/** A tenant whose inbound subdomain is connected AND verified. */
+const INBOUND_ON = { ...VERIFIED, inbound_domain: "reply.example.com", inbound_status: "active" };
 
 function setup() {
   Deno.env.set("RESEND_API_KEY", "test-resend-key");
@@ -292,6 +294,58 @@ Deno.test("verified with no from-name/local set → info@domain, named business_
     assert(res.sent, "must send");
     const body = JSON.parse(fetches[0].body ?? "{}");
     assertEquals(body.from, '"Example Barns LLC" <info@mail.example.com>');
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("an estimate send routes replies back into the portal", async () => {
+  setup();
+  try {
+    // THE BUG THIS PINS. MAIL is kind:"estimate" and passes NO replyTo, exactly as
+    // submit-estimate does. The routing address used to be computed inside portal-settings'
+    // crm_send_email — one of ten call sites — so a customer replying to their quote, by far
+    // the likeliest reply in the product, reached nobody. Deriving it in sendTenantEmail is
+    // what lights up all ten paths.
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: INBOUND_ON });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(res.sent, "must send");
+    const body = JSON.parse(fetches[0].body ?? "{}");
+    assertEquals(body.reply_to, "d.ss-test123456@reply.example.com",
+      "a quote reply must come back to the design, with no caller plumbing");
+    // And the threading Message-ID rides along on the same send.
+    assert(String(body.headers?.["Message-ID"] ?? "").startsWith("<ss.tenant-1.d.ss-test123456."),
+      `Message-ID must encode tenant and design, got ${JSON.stringify(body.headers)}`);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("the routing address BEATS a caller's replyTo, and only when inbound is active", async () => {
+  setup();
+  try {
+    // Caller passes a staff address; a verified inbound domain outranks it, because a reply
+    // in the portal beats a reply in one person's inbox.
+    let fetches = stubFetch(() => jsonResponse(OK_SEND));
+    let db = stubAdmin({ settings: INBOUND_ON });
+    await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, replyTo: "staff@example.com" });
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, "d.ss-test123456@reply.example.com");
+
+    // 'pending' must LOSE to the staff address. A domain whose MX is unproven sends the
+    // customer's reply into a bounce, and the builder never learns they tried — strictly
+    // worse than the inbox that was working before.
+    fetches = stubFetch(() => jsonResponse(OK_SEND));
+    db = stubAdmin({ settings: { ...INBOUND_ON, inbound_status: "pending" } });
+    await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, replyTo: "staff@example.com" });
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, "staff@example.com");
+
+    // No inbound domain at all — every tenant today — and no caller address either: the key
+    // must be absent from the wire rather than present and null.
+    fetches = stubFetch(() => jsonResponse(OK_SEND));
+    db = stubAdmin({ settings: VERIFIED });
+    await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!("reply_to" in JSON.parse(fetches[0].body ?? "{}")), "omitted, not null");
   } finally {
     teardown();
   }
