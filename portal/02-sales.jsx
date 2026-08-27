@@ -537,6 +537,71 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // Inventory masters are lot buildings, not contacts — exclude on both paths (they
     // have an empty contact, so they'd otherwise group as a nameless short_code row).
     const notInventoryLead = (r) => r.status !== "inventory";
+    // Grouping is a FUNCTION rather than a straight-line block because this list paints
+    // TWICE: once on the cached statuses the moment the rows arrive, and again when the
+    // GHL sync comes back.
+    //
+    // Carolyn, 2026-08-26, three separate times: "the contact page always takes a while to
+    // load ... this is the only page that takes that long." It was the only slow one
+    // because it was the only list that awaited sync-design-status BEFORE its first
+    // setRows, so `rows` sat at null — the "Loading…" state — for a whole round-trip over
+    // every short code in the tenant. DesignsTable had always painted its cached rows
+    // first and synced after (see its load()); this is that same shape, finally.
+    //
+    // She read the delay as a scale problem and asked for pagination. Pagination is worth
+    // having, but it would not have fixed this: the wait was one round-trip, not 30 rows.
+    const paint = (rowsIn, browsingIn) => {
+      // Group by person: normalized phone, else email, else name (fallback: short_code).
+      const normPhone = (p) => String(p || "").replace(/\D/g, "");
+      const groups = new Map();
+      rowsIn.forEach((r) => { // newest-first
+        const c = r.contact || {};
+        const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
+        let g = groups.get(key);
+        // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
+        // wins the > comparison below — seeded at "sent", a draft-only contact could never
+        // display as Draft (its -1 never beats 0).
+        if (!g) { g = { key, contactId: null, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
+        // The real crm_contacts id, once migration 130 has stamped it. Absent until the
+        // backfill runs, which is why the record link below is conditional rather than assumed.
+        if (!g.contactId && r.contact_id) g.contactId = r.contact_id;
+        g.count += 1;
+        g.codes.push(r.short_code);                     // newest-first (list order)
+        // Accumulate design-level searchable text (building + estimate #) so a lead is
+        // findable by those too — they aren't columns here but the requirement is all-fields.
+        const gsel = r.selections || {};
+        g.search += " " + [titleCase(gsel.style), gsel.size, r.ghl_estimate_number, r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : ""].filter(Boolean).join(" ");
+        if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
+        if (!g.email && c.email) g.email = c.email;
+        if (!g.phone && c.phone) g.phone = c.phone;
+        const act = r.updated_at || r.created_at;
+        if (act > g.lastActivity) g.lastActivity = act;
+        if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
+        const st = normStatus(r.status);
+        // was `RANK[st]`: the refactor that replaced LeadsTable's private RANK copy with the
+        // shared STATUS_RANK missed this one usage, so load() threw ReferenceError on the
+        // first design row and Contacts sat on "Loading…" forever.
+        if (STATUS_RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
+      });
+      // Browsing leads join the same list, SUPPRESSED once the person has a real design —
+      // matched by normalized phone first, then email, the same identity rules the design
+      // grouping itself uses. A browsing lead who later submits simply becomes their design
+      // row; the browsing entry disappears rather than duplicating them.
+      const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
+      browsingIn.forEach((l) => {
+        const em = String(l.email || "").trim().toLowerCase();
+        if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
+        groups.set("lead-" + l.id, {
+          key: "lead-" + l.id, browsing: true, source: l.source,
+          name: l.name || "", email: l.email || "", phone: l.phone || "",
+          count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
+          latestCode: null, topStatus: "browsing",
+          search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
+          codes: [],
+        });
+      });
+      setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+    };
     if (fetchDesigns) {
       // Operator view-as: rows from operator-portal (service-role, audit-logged);
       // live status sync skipped (owner-JWT-bound) — cached statuses show.
@@ -559,7 +624,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         .eq("client_id", clientId).order("updated_at", { ascending: false });
       browsing = cl || [];
     } catch (_e) { /* leads are additive */ }
-    // Freshen fulfillment status from GHL (read-only projection); non-fatal.
+    // PAINT NOW, on the cached statuses. Everything below only ever improves them.
+    paint(list, browsing);
+    // Freshen fulfillment status from GHL (read-only projection); non-fatal. The rows
+    // are already on screen by now — this only repaints them, at the tail below.
     if (list.length > 0) {
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
@@ -568,56 +636,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       } catch (_e) { /* keep cached statuses */ }
     }
     }
-    // Group by person: normalized phone, else email, else name (fallback: short_code).
-    const normPhone = (p) => String(p || "").replace(/\D/g, "");
-    const groups = new Map();
-    list.forEach((r) => { // list is newest-first
-      const c = r.contact || {};
-      const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
-      let g = groups.get(key);
-      // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
-      // wins the > comparison below — seeded at "sent", a draft-only contact could never
-      // display as Draft (its -1 never beats 0).
-      if (!g) { g = { key, contactId: null, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
-      // The real crm_contacts id, once migration 130 has stamped it. Absent until the
-      // backfill runs, which is why the record link below is conditional rather than assumed.
-      if (!g.contactId && r.contact_id) g.contactId = r.contact_id;
-      g.count += 1;
-      g.codes.push(r.short_code);                     // newest-first (list order)
-      // Accumulate design-level searchable text (building + estimate #) so a lead is
-      // findable by those too — they aren't columns here but the requirement is all-fields.
-      const gsel = r.selections || {};
-      g.search += " " + [titleCase(gsel.style), gsel.size, r.ghl_estimate_number, r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : ""].filter(Boolean).join(" ");
-      if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
-      if (!g.email && c.email) g.email = c.email;
-      if (!g.phone && c.phone) g.phone = c.phone;
-      const act = r.updated_at || r.created_at;
-      if (act > g.lastActivity) g.lastActivity = act;
-      if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
-      const st = normStatus(r.status);
-      // was `RANK[st]`: the refactor that replaced LeadsTable's private RANK copy with the
-      // shared STATUS_RANK missed this one usage, so load() threw ReferenceError on the
-      // first design row and Contacts sat on "Loading…" forever.
-      if (STATUS_RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
-    });
-    // Browsing leads join the same list, SUPPRESSED once the person has a real design —
-    // matched by normalized phone first, then email, the same identity rules the design
-    // grouping itself uses. A browsing lead who later submits simply becomes their design
-    // row; the browsing entry disappears rather than duplicating them.
-    const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
-    browsing.forEach((l) => {
-      const em = String(l.email || "").trim().toLowerCase();
-      if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
-      groups.set("lead-" + l.id, {
-        key: "lead-" + l.id, browsing: true, source: l.source,
-        name: l.name || "", email: l.email || "", phone: l.phone || "",
-        count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
-        latestCode: null, topStatus: "browsing",
-        search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
-        codes: [],
-      });
-    });
-    setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+    paint(list, browsing);
   }, [fetchDesigns]);
 
   useEffect(() => { load(); }, [load]);
