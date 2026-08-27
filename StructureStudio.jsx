@@ -52,6 +52,21 @@ const BUILT_IN_TOOLS = {
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
 
+// Storage props (see D3_PROPS). ONE item type; which prop it is rides on the item's own
+// `propKind`, so a tenant gains the whole set at once and a design saved with a prop we later
+// rename still renders (d3PropSpec falls back).
+//
+// Merged after `...C.layoutItems` like BUILT_IN_TOOLS, so a tenant config cannot remove it —
+// and it MUST exist, because `ITEMS[item.type]` is the guard in both renderers: an item whose
+// type has no entry is silently dropped from the plan while staying in the saved row.
+//
+// `noPalette` because props are not placed by arming a tool and clicking a wall. They come
+// from the 3D Items popup, which drops one in the middle of the floor for the customer to
+// drag — there is nothing to aim at, and arming would have fallen through place3's dispatch
+// chain into WALL placement. width/height are overwritten per prop at placement from the
+// registry's footprint; these are only the fallback if an item ever arrives without them.
+const PROP_CFG = { label: "Stored item", icon: "📦", color: "#64748B", shortLabel: "Item", propType: true, noPalette: true, width: 2, height: 2 };
+
 // Legacy render safety-net. When a tenant HIDES a built-in option (deactivates it in
 // client_layout_items so it drops out of get_config's layoutItems), its already-placed items on
 // SAVED designs would otherwise lose their render config and vanish. This provides the standard
@@ -2324,7 +2339,7 @@ const D3_SWATCHES = [
 // Each build() returns a group centred on the origin in x/z and standing on y = 0.
 const D3_PROPS = {
   lawnmower: {
-    label: "Lawn mower", w: 2.0, d: 2.8,
+    label: "Lawn mower", w: 2.0, d: 2.8, h: 2.8,
     build(THREE, h) {
       const g = new THREE.Group();
       const deckM = h.mat("#3F7F4F"), darkM = h.mat("#2E3236"), tyreM = h.mat("#1F2124");
@@ -2344,7 +2359,7 @@ const D3_PROPS = {
     },
   },
   bike: {
-    label: "Bicycle", w: 0.7, d: 5.6,
+    label: "Bicycle", w: 0.7, d: 5.6, h: 3.1,
     build(THREE, h) {
       const g = new THREE.Group();
       const frameM = h.mat("#B03A3A"), tyreM = h.mat("#1F2124"), seatM = h.mat("#2E3236");
@@ -2362,7 +2377,7 @@ const D3_PROPS = {
     },
   },
   toolchest: {
-    label: "Tool chest", w: 2.6, d: 1.6,
+    label: "Tool chest", w: 2.6, d: 1.6, h: 3.0,
     build(THREE, h) {
       const g = new THREE.Group();
       const bodyM = h.mat("#B0403A"), pullM = h.mat("#C9CDD2"), castM = h.mat("#1F2124");
@@ -2378,7 +2393,7 @@ const D3_PROPS = {
     },
   },
   shelf: {
-    label: "Shelving", w: 3.2, d: 1.3,
+    label: "Shelving", w: 3.2, d: 1.3, h: 5.6,
     build(THREE, h) {
       const g = new THREE.Group();
       const m = h.mat("#8B7355");
@@ -2392,7 +2407,7 @@ const D3_PROPS = {
     },
   },
   trashcan: {
-    label: "Trash can", w: 1.3, d: 1.3,
+    label: "Trash can", w: 1.3, d: 1.3, h: 2.4,
     build(THREE, h) {
       const g = new THREE.Group();
       const body = h.cyl(h.mat("#4A6FA5"), 0.58, 2.2); body.position.y = 1.1; g.add(body);
@@ -2401,7 +2416,7 @@ const D3_PROPS = {
     },
   },
   atv: {
-    label: "ATV / mower rider", w: 3.6, d: 5.4,
+    label: "ATV / mower rider", w: 3.6, d: 5.4, h: 2.8,
     build(THREE, h) {
       const g = new THREE.Group();
       const bodyM = h.mat("#C2601F"), darkM = h.mat("#2E3236"), tyreM = h.mat("#1F2124");
@@ -3888,6 +3903,20 @@ function buildShed3DModel(THREE, p) {
         wf.O[1] + wf.U[1] * along + wf.N[1] * (T / 2)
       );
       interiorGroup.add(g);
+    } else if (c.propType) {
+      // A stored item the customer dropped in. The registry owns the shape; this owns only
+      // where it stands. Tagged like the loft and the workbench so pickItem3 finds it — that
+      // tag is set per branch, so without this the prop would be invisible AND unpickable.
+      const spec = d3PropSpec(it.propKind);
+      const g = new THREE.Group();
+      let built = null;
+      try { built = spec.build(THREE, { box, mat, cyl }); } catch (_e) { built = null; }
+      if (!built) return;   // a bad registry entry must not take the whole model down
+      g.add(built);
+      if (it.rotation) g.rotation.y = -(it.rotation * Math.PI) / 180;
+      g.position.set(ftX(it.x), 0, ftZ(it.y));
+      g.userData = { itemId: it.id, floorItem: true };
+      interiorGroup.add(g);
     }
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
@@ -4082,6 +4111,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const capturedRef = useRef(false);
   const [phase, setPhase] = useState("loading"); // loading | ready | error
   const [interior, setInterior] = useState(false);
+  const [itemsOpen, setItemsOpen] = useState(false);   // the stored-items chooser
   // SmartBuild-style view options: roof on/off, landscape (grass/sky/labels)
   // on/off, and the 3×3 camera-preset popover.
   const [roofOn, setRoofOn] = useState(true);
@@ -4130,6 +4160,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     if (onPaintChange) onPaintChange(next);
     capturedRef.current = false; // color change makes any earlier shot stale
     setShotTaken(false);
+  };
+
+  // Add a stored item, and show it. Flipping to Look-inside is not a nicety: the roof is on
+  // by default, so a prop dropped on the floor lands somewhere the customer cannot see, and
+  // the button would read as doing nothing.
+  const addProp = (kind) => {
+    const e = engineRef.current;
+    if (!e || !e.placeProp3) return;
+    if (!interior) setInterior(true);
+    e.placeProp3(kind);
   };
 
   // ── Door colour, on the door the shopper has selected (Carolyn, 2026-08-25) ──────────
@@ -4440,6 +4480,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           const elev = it.elevationFt || D3.LOFT_ELEV;
           highlight.scale.set(w + 0.3, D3.LOFT_T + 0.3, d0 + 0.3);
           highlight.position.set(cx, elev - D3.LOFT_T / 2, cz);
+        } else if (c.propType) {
+          // Props are the one floor class whose height is not a constant: a trash can is
+          // 2.4 ft and a shelving unit 5.6. The bench-height box below would swallow the can
+          // and cut the shelving off at the third shelf.
+          const ph = d3PropSpec(it.propKind).h || 3;
+          highlight.scale.set((rot ? d0 : w) + 0.3, ph + 0.3, (rot ? w : d0) + 0.3);
+          highlight.position.set(cx, ph / 2, cz);
         } else {
           highlight.scale.set((rot ? d0 : w) + 0.3, D3.BENCH_H + 0.3, (rot ? w : d0) + 0.3);
           highlight.position.set(cx, D3.BENCH_H / 2, cz);
@@ -4539,6 +4586,33 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         capturedRef.current = false;
         setShotTaken(false);
         queueRebuild();
+      };
+      // Drop a stored item in the middle of the floor.
+      //
+      // Deliberately NOT an armed tool. Every other placement asks the customer to aim at a
+      // wall, but a prop has nothing to aim at, and arming one would have fallen through
+      // place3's dispatch chain — which ends in wall placement — and stuck a lawnmower in the
+      // siding. Landing it in the middle and letting them drag it is also simply the shorter
+      // gesture: one click to have it, then move it if you care where it sits.
+      //
+      // Nudged off dead centre per prop so a second item does not hide inside the first.
+      const placeProp3 = (kind) => {
+        const spec = d3PropSpec(kind);
+        const n = liveItems.filter((i) => (itemTypes[i.type] || {}).propType).length;
+        const off = ((n % 4) - 1.5) * 1.25;
+        const halfW = spec.w / 2, halfH = spec.d / 2;
+        const cxFt = Math.max(halfW, Math.min(bldgW / 2 + off, bldgW - halfW));
+        const cyFt = Math.max(halfH, Math.min(bldgH / 2 + off, bldgH - halfH));
+        const ni = {
+          id: idCounter++, type: "prop", propKind: kind,
+          x: mgX + cxFt * scale, y: mgY + cyFt * scale,
+          rotation: 0, wall: null,
+          // Snapshotted from the registry, not read from it at draw time, so a design keeps
+          // the footprint it was drawn with if a prop is ever re-proportioned.
+          widthFt: spec.w, heightFt: spec.d,
+        };
+        commitPlaced3(ni);
+        return true;
       };
       // Recolour placed fixtures in place, without moving them.
       //
@@ -4919,6 +4993,25 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             }
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
             if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
+          } else if (c.propType) {
+            // The loft drag above, minus everything a loft needs and a stored item does not:
+            // no wall attachment, no loft-vs-loft snapping, no overlap refusal. Props are
+            // allowed to overlap each other — a bike leaning over a mower is a real shed, and
+            // refusing the drop would read as the app being broken rather than tidy.
+            //
+            // HALF-FOOT steps, not the loft's whole feet: a lawnmower is 2 ft wide and whole
+            // feet make it jump past the spot the customer is aiming at.
+            const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+            if (!p) return;
+            const spec = d3PropSpec(it.propKind);
+            const rotSwap = it.rotation === 90 || it.rotation === 270;
+            const halfW = (rotSwap ? (it.heightFt || spec.d) : (it.widthFt || spec.w)) / 2;
+            const halfH = (rotSwap ? (it.widthFt || spec.w) : (it.heightFt || spec.d)) / 2;
+            const q = (v) => Math.round(v * 2) / 2;
+            const cxFt = Math.max(halfW, Math.min(q(p.x + bldgW / 2), bldgW - halfW));
+            const cyFt = Math.max(halfH, Math.min(q(p.z + bldgH / 2), bldgH - halfH));
+            const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
+            if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
           }
           ev.preventDefault();
           return;
@@ -5040,7 +5133,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -5317,6 +5410,27 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           <button onClick={() => setEnvOn((v) => !v)} disabled={phase !== "ready"} title="Show/hide grass, sky and labels" style={{ background: envOn ? "#1E293B" : "#475569", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
             🌿 Landscape {envOn ? "" : "off"}
           </button>
+          {/* Stored items (Carolyn, 2026-08-25). Its own control rather than a palette tool:
+              there is nothing to aim at, so choosing one drops it on the floor and the
+              customer drags it. Placing also flips to Look-inside, because the whole point is
+              seeing your mower IN the building and a prop behind a closed roof is invisible. */}
+          <div style={{ position: "relative" }}>
+            {itemsOpen && (
+              <div style={{ position: "absolute", bottom: "115%", left: "50%", transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "repeat(3, 104px)", gap: 6, zIndex: 5 }}>
+                {D3_PROP_KEYS.map((k) => (
+                  <button key={k} onClick={() => { addProp(k); setItemsOpen(false); }}
+                    style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "8px 6px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", lineHeight: 1.25 }}>
+                    {D3_PROPS[k].label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setItemsOpen((v) => !v)} disabled={phase !== "ready"}
+              title="Put a mower, bike or shelving inside to see how it fits"
+              style={{ background: itemsOpen ? accent : "#1E293B", color: itemsOpen ? "#FFF" : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              📦 Items {itemsOpen ? "▾" : "▴"}
+            </button>
+          </div>
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
@@ -6203,7 +6317,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     return out;
   })();
-  const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
+  const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, prop: PROP_CFG, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
@@ -8135,7 +8249,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
 
       const iHeightFt = it.heightFt || cfg.height;
-      const halfW = iWidthFt / 2, halfH = iHeightFt / 2;
+      // ROTATION-AWARE, and it has to be: the hit test (see the `rot` swap in handleClick) and
+      // the removal overlay both swap the bounding box at 90/270, but this clamp did not, so a
+      // rotated non-square free-floating item was held inside the building by its UNROTATED
+      // footprint and could cross a wall the plan showed it clearing. Nothing hit it before
+      // because every free-floater today is either square-ish or never rotated — the loft
+      // rotates by swapping widthFt/heightFt and leaving the angle at 0, so it reads the same
+      // numbers either way and this change cannot move it.
+      const rotSwap = it.rotation === 90 || it.rotation === 270;
+      const halfW = (rotSwap ? iHeightFt : iWidthFt) / 2, halfH = (rotSwap ? iWidthFt : iHeightFt) / 2;
       const snapFt = 1; // snap threshold in feet
 
       // Convert desired position to feet
@@ -8451,6 +8573,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
       else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText(item.planLabel || "RAMP", -iw / 2 + 5, 4); }
       else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
+      // The SVG twin of this label lives in the item map — same text, same rule. CLAUDE.md's
+      // "two rendering paths must stay in sync" is exactly about these two branches.
+      else if (cfg.propType) { ctx.fillStyle = cfg.color; ctx.font = "bold 9px sans-serif"; ctx.fillText(d3PropSpec(item.propKind).label, 0, 3); }
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
         let label = cfg.shortLabel;
@@ -9377,7 +9502,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // sel verbatim), so a consumer never has to reverse-map display text.
           ...(sel.cladding && D3_CLADDING[sel.cladding] ? { cladding: D3_CLADDING[sel.cladding].label, claddingId: sel.cladding } : {}),
         },
-        floorPlanItems: items.map((item) => {
+        // Stored items are stripped here, and this is the ONLY place their free-ness needs
+        // defending. They are a visualisation aid — the customer's own mower and bikes, shown
+        // to answer "will my stuff fit" — not something anyone is buying, so an estimate line
+        // or even a bare row in this array would be wrong. This payload is a downstream
+        // contract read by n8n and GoHighLevel; a `type: "prop"` row would arrive at a
+        // consumer that has never heard of it. They still persist in the design's items for
+        // reload — dropped from the ESTIMATE, not from the design.
+        //
+        // Everywhere else props are free by omission: LAYOUT_PRICE_ORDER, the pricing
+        // measures map and itemSummary all enumerate types explicitly and none names `prop`.
+        floorPlanItems: items.filter((i) => !(ITEMS[i.type] || {}).propType).map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
           if (item.type === "line") {
             const dxFt = (item.x2 - item.x1) / scale;
@@ -11179,6 +11314,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
                         <text x={0} y={13} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>Workbench</text>
                       </>
+                    ) : cfg.propType ? (
+                      // Its NAME, not "Item" and not dimensions. A plan is read by the person
+                      // building the shed, and "Lawn mower" tells them what that rectangle is
+                      // for; a generic short label plus 2×2.8 tells them nothing. Kept in step
+                      // with the canvas path in renderExportCanvas — same text, same rule.
+                      <text x={0} y={3} textAnchor="middle" fill={cfg.color} fontSize={9} fontWeight="700">{d3PropSpec(item.propKind).label}</text>
                     ) : (
                       <>
                         <text x={0} y={2} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">{cfg.shortLabel}</text>
