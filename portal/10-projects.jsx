@@ -706,7 +706,10 @@ function ProjectsTab({ sub, onSub }) {
       </div>
 
       {openItem && data && (
-        <PMItemModal key={openItem.id + ":" + (openItem.updated_at || "")}
+        /* Keyed on id ONLY — deliberately NOT the schedule's id+updated_at remount idiom.
+           These fields are prop-driven (no seed-once state), and a remount on every cell
+           commit would wipe a half-typed update draft (found live, 2026-08-27). */
+        <PMItemModal key={openItem.id}
           item={openItem} columns={data.columns} ctx={ctx} canWrite={canWrite}
           onClose={() => setOpenItemId(null)}
           onCellCommit={onCellCommit} onRename={onRename} onArchive={onArchive}
