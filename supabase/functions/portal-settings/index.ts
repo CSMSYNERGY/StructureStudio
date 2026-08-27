@@ -3113,7 +3113,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .or(contact?.id ? `contact_id.eq.${contact.id}` : `short_code.in.(${codes.join(",") || "''"})`)
       .order("due_at", { ascending: true, nullsFirst: false }).limit(25);
 
-    return json({ ok: true, kind, contact, designs, feed, focus: focus ?? [] });
+    // ORDERS ON THE RECORD. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a
+    // contact, I feel like you should see the deal. You should see the orders."
+    //
+    // The deal half already existed (the designs/person reciprocal embed); this is the half
+    // that was missing, and it is the one that answers "have they actually bought anything".
+    // Joined on short_code because orders.short_code is a soft link with no FK for PostgREST
+    // to embed — the same reason OrdersView reads them separately.
+    //
+    // It rides THIS fetch rather than adding a second round-trip from the browser: the
+    // record page makes exactly one call on purpose, because designs/orders RLS is scoped to
+    // current_client_id() and a direct read returns nothing in operator view-as.
+    let orders: any[] = [];
+    if (codes.length) {
+      const { data: os } = await admin.from("orders")
+        .select("id, order_no, short_code, status, total_cents, ordered_at")
+        .eq("client_id", clientId).in("short_code", codes)
+        .order("ordered_at", { ascending: false }).limit(50);
+      orders = os ?? [];
+    }
+
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [] });
   }
 
   if (action === "crm_feed") {

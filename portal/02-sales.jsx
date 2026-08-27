@@ -960,6 +960,11 @@ const CRM_SECTIONS = [
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
   { key: "deals", title: "Deals", when: (c) => c.kind === "contact" },
+  // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
+  // you should see the deal. You should see the orders." Deals were already here; orders
+  // are what say whether any of them turned into a sale. Contact-side only — a design's
+  // order is the same one row and would just repeat the stage bar above it.
+  { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
   { key: "person", title: "Person", when: (c) => c.kind === "design" },
   { key: "overview", title: "Overview", when: () => true },
 ];
@@ -1002,8 +1007,16 @@ const CRM_TABS = [
       ? "This contact has no email address on file."
       : "You don't have permission to email contacts."),
   },
-  { key: "files", label: "Files", enabled: () => false, hint: "Needs a contact-scoped storage bucket." },
-  { key: "documents", label: "Documents", enabled: () => true },
+  // TWO NAMES THAT SAY WHOSE FILES THEY ARE. Carolyn spent the longest stretch of the
+  // 2026-08-26 call on this (20:08–26:45): "documents is what we create ... customer files
+  // is like customer files", and "I don't want it all mixed together."
+  //
+  // "Documents" and "Files" are the same word twice — neither tells you which pile you are
+  // looking at. Design Documents is what WE generated (quote PDFs, floor plans, invoices);
+  // Customer Uploads is what THEY sent us. The names now carry the distinction, so the two
+  // can never read as interchangeable tabs.
+  { key: "files", label: "Customer Uploads", enabled: () => false, hint: "Arrives with customer file storage — nothing they send is lost in the meantime, it is still on the email." },
+  { key: "documents", label: "Design Documents", enabled: () => true },
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
 ];
 
@@ -1020,7 +1033,11 @@ const CRM_CHIPS = [
   { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
-  { key: "changelog", label: "Changelog", types: ["design_version", "status_change", "lead_captured"] },
+  // Everything that happened, not three types two of which were never emitted — see the
+  // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
+  // screen. Keep the two lists identical.
+  { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
+    "change_order", "invoice_created", "invoice_sent", "lead_captured"] },
 ];
 
 // The stage bar. Carolyn's own stage names, from her Pipedrive screen.
@@ -1222,6 +1239,43 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             </button>
           ))}
           {(data.designs || []).length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No designs yet.</div>}
+        </div>
+      );
+    }
+    if (key === "orders") {
+      // ⚠️ ABSENT is not EMPTY. The frontend auto-deploys on push; the edge function that
+      // supplies `orders` is deployed separately, so between those two moments the field is
+      // undefined. Rendering "No orders yet" then would state, on a contact who has bought
+      // two buildings, that they have bought nothing — the same class of lie the Orders
+      // money-pending state exists to avoid. Undefined says the server is behind; [] says
+      // there are genuinely none.
+      if (!data.orders) {
+        return <div style={{ fontSize: 12, color: "#94A3B8" }}>Orders appear here once the server update lands.</div>;
+      }
+      const os = data.orders;
+      // No link out yet: Orders is its own tab with its own row-click detail, and there is
+      // no /portal/orders/<id> route to deep-link to. Showing the order number, what it was
+      // for and where it stands answers her question ("have they bought anything, and is it
+      // paid") without inventing a route that would then need its own back button.
+      return (
+        <div>
+          {os.map((o) => {
+            const d = (data.designs || []).find((x) => x.short_code === o.short_code);
+            const what = d ? [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") : "";
+            return (
+              <div key={o.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+                  #{o.order_no}{what ? ` · ${what}` : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "#64748B" }}>
+                  {fmtDate(o.ordered_at)}
+                  {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
+                  {o.status ? ` · ${o.status}` : ""}
+                </div>
+              </div>
+            );
+          })}
+          {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
         </div>
       );
     }
