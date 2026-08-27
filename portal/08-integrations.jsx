@@ -556,6 +556,28 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     });
   };
 
+  // ── Receiving replies ──────────────────────────────────────────────────────────────
+  // The address is DERIVED SERVER-SIDE from the verified sending domain (reply.<domain>) and
+  // deliberately not an input here. A free-text field is where a builder types their apex —
+  // the one value that would take over their real company inbox — and it would also let
+  // someone point a customer's replies at a host they do not own.
+  const [inboundNote, setInboundNote] = useState(null);
+
+  const inboundConnect = () => act({ action: "email_inbound_connect" }, () =>
+    setMsg({ ok: "Reply address set up — add the mail record below, then check it." }));
+
+  const inboundVerify = () => act({ action: "email_inbound_verify" }, (d) => {
+    if (d.verified) setMsg({ ok: "Replies are switched on — customer replies now land in the portal." });
+    else setInboundNote("Not working yet — mail records can take up to an hour. Check again shortly.");
+  });
+
+  const inboundDisconnect = () => {
+    if (!window.confirm(
+      "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your quotes and invoices are not affected.",
+    )) return;
+    act({ action: "email_inbound_disconnect" }, () => setMsg({ ok: "Replies switched off." }));
+  };
+
   const sendTest = async () => {
     if (!ssIsEmail(testTo)) { setTestResult({ err: "Enter a valid email address." }); return; }
     setBusy(true); setMsg(null); setTestResult(null);
@@ -620,7 +642,17 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       advisory: true,
     }]
     : [];
-  const dnsRows = dns.concat(dnsAdvisory);
+  // ── Receiving ────────────────────────────────────────────────────────────────────────
+  const inbound = status.inbound || {};
+  const inboundSt = inbound.status || "off";
+  const inboundRows = Array.isArray(inbound.dnsRecords) ? inbound.dnsRecords : [];
+  // ⚠️ THE INBOUND MX GOES INTO **THIS** ARRAY, not a table of its own, because
+  // webmasterMailto is built from dnsRows. A builder who forwards the records to their web
+  // guy and silently omits the MX gets sending working and receiving dead, with nothing on
+  // screen to explain why — and that hand-off is the step where this whole flow already dies
+  // (Carolyn: "so many people are going to be like, I don't know anything about this").
+  // Ordered before the advisory row so the required records stay together.
+  const dnsRows = dns.concat(inboundRows, dnsAdvisory);
 
   // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────
   // Her words: "so many people are going to be like, I don't know anything about this."
@@ -903,6 +935,132 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 <p style={{ fontSize: 12, color: "#64748B", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
                   Changing DNS host or rebuilding your website? Send these to whoever does it —
                   removing them stops your email verifying and sends it to spam.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* ── Replies in the portal ──────────────────────────────────────────────────
+              Ahsan, 2026-08-26: "if Junior Barns connects his domain, he should be able to
+              send AND receive emails in there."
+
+              Only rendered once SENDING is verified, because the reply address is a
+              subdomain of the sending domain — there is nothing to offer before that. */}
+          <div style={S.card}>
+            <div style={S.h2}>Replies in the portal</div>
+
+            {inboundSt === "off" && (
+              <div>
+                <p style={{ fontSize: 13, color: "#475569", marginTop: 0, marginBottom: 10, lineHeight: 1.6 }}>
+                  Right now when a customer replies to a quote, it goes to the personal inbox of
+                  whoever sent it. Switch this on and replies land here instead, on the customer's
+                  record, so anyone on your team can pick the conversation up.
+                </p>
+                {/* THE REASSURANCE IS THE FEATURE. A builder who thinks we are taking over
+                    @theirdomain.com will refuse, and they would be right to — it is their
+                    company inbox. Say the safe thing before asking for the click. */}
+                <p style={{ fontSize: 12.5, color: "#475569", marginTop: 0, marginBottom: 12, lineHeight: 1.6, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px" }}>
+                  This uses a separate address at <strong>reply.{status.domain}</strong> and adds
+                  one record there. <strong>Your normal email at @{status.domain} is not touched</strong> —
+                  it keeps working exactly as it does now.
+                </p>
+                <button type="button" onClick={inboundConnect} disabled={busy}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+                  {busy ? "Setting up…" : "Set up replies"}
+                </button>
+              </div>
+            )}
+
+            {inboundSt === "pending" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 5, background: "#F59E0B", flexShrink: 0 }} />
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>One record to add</div>
+                </div>
+                <p style={{ fontSize: 12.5, color: "#475569", marginTop: 0, marginBottom: 10, lineHeight: 1.6 }}>
+                  Add this at the same place you added the others. It only affects
+                  <strong> reply.{status.domain}</strong> — your normal email is unaffected.
+                </p>
+                {inboundRows.length > 0 && (
+                  <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                    <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                      <thead>
+                        <tr>
+                          <th style={S.th}>Type</th>
+                          <th style={S.th}>Host</th>
+                          <th style={S.th}>Value</th>
+                          <th style={{ ...S.th, width: 90 }} aria-label="Copy" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {inboundRows.map((r, i) => (
+                          <tr key={i}>
+                            <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>
+                              {r.type}
+                              {/* An MX without its priority is refused by every DNS panel. */}
+                              {r.priority != null && (
+                                <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#B45309" }}>
+                                  priority {r.priority}
+                                </span>
+                              )}
+                            </td>
+                            <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.host}</td>
+                            <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.value}</td>
+                            <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                              <button type="button" onClick={() => copy(r.value, "mx" + i)}
+                                style={{ ...S.btn(copied === "mx" + i ? "#15803D" : "#F1F5F9", copied === "mx" + i ? "#FFF" : "#334155"), border: "1px solid #E2E8F0", padding: "5px 10px", fontSize: 11.5 }}>
+                                {copied === "mx" + i ? "✓ Copied" : copied === "fail:mx" + i ? "Copy failed" : "Copy"}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+                  <button type="button" onClick={inboundVerify} disabled={busy}
+                    style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+                    {busy ? "Checking…" : "Check it"}
+                  </button>
+                  <button type="button" onClick={inboundDisconnect} disabled={busy}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "#64748B", textDecoration: "underline" }}>
+                    Cancel
+                  </button>
+                  {inboundNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{inboundNote}</span>}
+                </div>
+                {/* The webmaster button up in the sending card already carries this record —
+                    dnsRows includes it — so there is deliberately no second one here. */}
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 10, marginBottom: 0, lineHeight: 1.5 }}>
+                  Someone else manages your DNS? The “Email these records to my webmaster” button
+                  above includes this one too.
+                </p>
+                {inbound.lastError && (
+                  <p style={{ fontSize: 12, color: "#B45309", marginTop: 8, marginBottom: 0 }}>{inbound.lastError}</p>
+                )}
+              </div>
+            )}
+
+            {inboundSt === "active" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 5, background: "#16A34A", flexShrink: 0 }} />
+                  <div style={{ minWidth: 0, flex: "1 1 260px" }}>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>
+                      Replies come back here
+                    </div>
+                    <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                      {inbound.domain}{inbound.verifiedAt ? ` · since ${fmtDate(inbound.verifiedAt)}` : ""}
+                    </div>
+                  </div>
+                  <button type="button" onClick={inboundDisconnect} disabled={busy}
+                    style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", flexShrink: 0 }}>Turn off</button>
+                </div>
+                <p style={{ fontSize: 12.5, color: "#475569", marginTop: 10, marginBottom: 0, lineHeight: 1.6 }}>
+                  When a customer replies to a quote it appears on their record, and on the design
+                  they were asking about. Each email gets its own reply address so we know what it
+                  belongs to — they look like <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5 }}>{inbound.replyExample}</span>.
+                  Customers never type it; their email program fills it in when they press Reply.
                 </p>
               </div>
             )}

@@ -23,6 +23,8 @@ import {
   rsDeleteDomain,
   rsDomainVerified,
   rsGetDomain,
+  rsInboundRecords,
+  rsReceivingEnabled,
   rsSendEmail,
   rsVerifyDomain,
   type RsDomain,
@@ -420,7 +422,65 @@ Deno.test("rsDomainVerified is true ONLY on \"verified\"", () => {
     "a previously-passing domain that failed a re-check is NOT usable");
 });
 
+Deno.test("rsReceivingEnabled answers a DIFFERENT question from rsDomainVerified", () => {
+  const d = (status: string, receiving?: string): RsDomain => ({
+    id: DOMAIN_ID, status, records: [],
+    ...(receiving ? { capabilities: { sending: "enabled", receiving } } : {}),
+  });
+  assertEquals(rsReceivingEnabled(d("verified", "enabled")), true);
+  // THE PAIR THAT MATTERS. A domain can pass DNS verification and still not be switched on
+  // for mail — treating "verified" as "can receive" would advertise a reply address over a
+  // mailbox that does not exist, and the customer's reply would bounce back at the customer.
+  assertEquals(rsReceivingEnabled(d("verified", "disabled")), false);
+  assertEquals(rsDomainVerified(d("verified", "disabled")), true, "sending is a separate verdict");
+  // A response with no capabilities block at all must not read as enabled.
+  assertEquals(rsReceivingEnabled(d("verified")), false);
+});
+
+Deno.test("rsInboundRecords returns the MX rows, and never invents one", () => {
+  const rec = (type: string, host: string) =>
+    ({ purpose: "", host, fqdn: host, type, value: "x", verified: false });
+  const d: RsDomain = {
+    id: DOMAIN_ID, status: "verified",
+    records: [
+      rec("TXT", "resend._domainkey"),
+      rec("MX", "reply"),
+      rec("TXT", "send"),
+    ],
+  };
+  assertEquals(rsInboundRecords(d).length, 1);
+  assertEquals(rsInboundRecords(d)[0].host, "reply");
+  // Lowercase `mx` still counts — the filter must not depend on the provider's casing.
+  assertEquals(rsInboundRecords({ ...d, records: [rec("mx", "reply")] }).length, 1);
+  // ⚠️ EMPTY, NOT A GUESS. If Resend returns no MX the caller must fail loudly; hardcoding
+  // inbound-smtp.us-east-1.amazonaws.com would be a hostname that silently rots.
+  assertEquals(rsInboundRecords({ ...d, records: [] }).length, 0);
+  assertEquals(rsInboundRecords({ ...d, records: [rec("TXT", "send")] }).length, 0);
+});
+
 // ── Domain lifecycle calls ─────────────────────────────────────────────────────────────────
+
+Deno.test("rsCreateDomain asks for receiving ONLY when told to", async () => {
+  setup();
+  try {
+    // A sending domain must not quietly start accepting mail: with no opts the request body
+    // is byte-identical to what it was before receiving existed.
+    let calls = stub(() => jsonResponse(UNVERIFIED_DOMAIN));
+    await rsCreateDomain("mail.example.com");
+    assert(!("capabilities" in JSON.parse(calls[0].body ?? "{}")), "omitted, not disabled");
+
+    calls = stub(() => jsonResponse(UNVERIFIED_DOMAIN));
+    await rsCreateDomain("reply.example.com", { receiving: true });
+    // Stringified: this file's assertEquals is a `!==` check, so two structurally identical
+    // objects would always "fail" with an error message showing them as equal.
+    assertEquals(
+      JSON.stringify(JSON.parse(calls[0].body ?? "{}").capabilities),
+      JSON.stringify({ sending: "enabled", receiving: "enabled" }),
+    );
+  } finally {
+    teardown();
+  }
+});
 
 Deno.test("rsCreateDomain posts name + the pinned region in ONE request", async () => {
   setup();

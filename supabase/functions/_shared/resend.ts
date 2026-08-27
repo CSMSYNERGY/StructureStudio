@@ -193,6 +193,10 @@ export type RsDomain = {
   id: string;
   status: string;
   records: RsDnsRecord[];
+  /** Resend's per-capability switches, e.g. `{ sending: "enabled", receiving: "disabled" }`.
+   *  Receiving is OFF unless asked for at create time, and a domain object carries both —
+   *  which is why an inbound subdomain is a separate domain, not a flag on the sending one. */
+  capabilities?: { sending?: string; receiving?: string };
 };
 
 /** The ONE meaning of "usable": Resend has checked the records and says verified. Every
@@ -262,11 +266,41 @@ function toRsDomain(raw: unknown): RsDomain {
   const str = (v: unknown): string => (typeof v === "string" ? v : "");
   const domainName = str(d.name);
   const rawRecords = Array.isArray(d.records) ? d.records : [];
-  return {
+  const caps = (d.capabilities ?? null) as Record<string, unknown> | null;
+  const out: RsDomain = {
     id: str(d.id),
     status: str(d.status),
     records: rawRecords.map((r) => toRsRecord(r, domainName)),
   };
+  if (caps && typeof caps === "object") {
+    out.capabilities = { sending: str(caps.sending), receiving: str(caps.receiving) };
+  }
+  return out;
+}
+
+/**
+ * The MX record(s) a tenant must publish to RECEIVE mail on this domain.
+ *
+ * Filtered by record TYPE rather than by `purpose`, because the sending domain also carries
+ * an MX — the `send.<domain>` bounce return-path — and the two would otherwise be
+ * indistinguishable. On a receiving domain there is no return-path row, so every MX here is
+ * an inbound one; the filter is belt-and-braces against a future response that mixes them.
+ *
+ * ⚠️ RETURNS AN EMPTY ARRAY RATHER THAN INVENTING A HOSTNAME. Whether the API includes the
+ * inbound MX in `records[]` is documented nowhere — Resend's dashboard flow says "copy the
+ * MX record" from the UI. If it turns out not to, the caller must FAIL LOUDLY: hardcoding
+ * `inbound-smtp.us-east-1.amazonaws.com` would be a guess that silently rots the day Resend
+ * changes regions or hosts, and a wrong MX is a tenant's mail bouncing with no error anywhere.
+ */
+export function rsInboundRecords(d: RsDomain): RsDnsRecord[] {
+  return (d.records ?? []).filter((r) => String(r.type ?? "").toUpperCase() === "MX");
+}
+
+/** Whether Resend says this domain can actually receive. Separate from rsDomainVerified,
+ *  which answers the SENDING question — a domain can be verified for one and not the other,
+ *  and conflating them is how a UI shows "ready" over a mailbox that does not exist. */
+export function rsReceivingEnabled(d: RsDomain): boolean {
+  return d.capabilities?.receiving === "enabled";
 }
 
 /**
@@ -275,11 +309,21 @@ function toRsDomain(raw: unknown): RsDomain {
  * per-tenant choice would make otherwise-identical tenants hold different DNS for no
  * requirement anyone has stated.
  */
-export async function rsCreateDomain(name: string): Promise<RsDomain> {
+export async function rsCreateDomain(
+  name: string,
+  opts?: { receiving?: boolean },
+): Promise<RsDomain> {
   const key = requireKey();
   const raw = await rsFetch(key, "/domains", {
     method: "POST",
-    body: JSON.stringify({ name, region: "us-east-1" }),
+    body: JSON.stringify({
+      name,
+      region: "us-east-1",
+      // Receiving defaults to disabled, so this key is sent only when asked for — a domain
+      // created for SENDING must never quietly start accepting mail, and omitting the key
+      // keeps the request byte-identical to what it was before receiving existed.
+      ...(opts?.receiving ? { capabilities: { sending: "enabled", receiving: "enabled" } } : {}),
+    }),
   });
   return toRsDomain(raw);
 }
