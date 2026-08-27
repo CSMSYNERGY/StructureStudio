@@ -748,7 +748,7 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null }) {
+function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null }) {
   const [rows, setRows] = useState(null);   // null = loading; [{order, design, paid}]
   const [error, setError] = useState(null);
   const [schedLinks, setSchedLinks] = useState(null);   // { byDesign, saleDesigns, … }
@@ -791,9 +791,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         if (!data || data.length < page) return { data: out };
       }
     };
-    const [{ data: dsn }, paysRes, coRes] = await Promise.all([
+    const [dsnRes, paysRes, coRes] = await Promise.all([
       codes.length
-        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url").in("short_code", codes).limit(2000)
+        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
         : Promise.resolve({ data: [] }),
       fetchAllPayments(),
       // Pending change orders (migration 126): the row wears an amber chip, and the server
@@ -805,40 +805,50 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     // A failed payments read must not render every order as unpaid — that's the same
     // silent understatement the paging above exists to prevent.
     if (paysRes.error) { setError(paysRes.error.message); setRows([]); return; }
+    // A failed designs read must not read as "no designs": byCode would come up empty,
+    // the SS-only filter below would drop EVERY order, and the tab would show
+    // "No orders yet." + $0.00 tiles with nothing anywhere saying a read failed.
+    if (dsnRes.error) { setError(dsnRes.error.message); setRows([]); return; }
+    // Same for change orders: swallowing this read hides every "CO pending" chip while
+    // the server's invoice 409 still stands — the courtesy half of the rule goes dark.
+    if (coRes.error) { setError(coRes.error.message); setRows([]); return; }
     const pays = paysRes.data;
+    const dsn = dsnRes.data;
     const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
     const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
     const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
-    setRows(list.map((o) => {
-      const ps = payByOrder[o.id] || [];
-      return {
-        o, d: byCode[o.short_code] || null, pays: ps,
-        paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
-        coPending: pendingCo.has(o.short_code),
-      };
-    }));
+    setRows(list
+      // SS ORDERS ONLY (Carolyn 2026-08-24: "the Orders tab should NOT show any orders
+      // from GHL — only the SS invoices/orders"). The designs_ensure_order trigger mints
+      // a row for EVERY accepted/invoiced design, GHL-quoted ones included — those rows
+      // stay in the table (other code may care), but this tab is the ledger of paperwork
+      // StructureStudio issued: the design carries an ss_quote_number, or the order has no
+      // design at all (a future manual/walk-in order is SS-native by definition).
+      .filter((o) => !o.short_code || (byCode[o.short_code] && byCode[o.short_code].ss_quote_number))
+      .map((o) => {
+        const ps = payByOrder[o.id] || [];
+        return {
+          o, d: byCode[o.short_code] || null, pays: ps,
+          paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
+          coPending: pendingCo.has(o.short_code),
+        };
+      }));
   }, [clientId]);
 
-  // Pull fresh totals + externally-collected payments from GHL, then re-read.
-  // Kept separate from load(): recording a payment re-reads the tables (instant),
-  // while this hits the GHL API and only runs on mount and on Refresh.
+  // Refresh = re-read the tables. This used to also pull totals/statuses from GHL
+  // (sync-design-status over every order's code), but Orders is SS paperwork only now
+  // (Carolyn 2026-08-24): the GHL-quoted orders it refreshed are no longer shown, and SS
+  // designs are fenced out of that sync by design — so the GHL leg refreshed nothing this
+  // tab renders and cost a GHL API read per mount. Statuses on SS orders are written
+  // locally (customer-accept / send_invoice) and arrive with the plain read.
   const [syncing, setSyncing] = useState(false);
   const syncFromGhl = useCallback(async () => {
     setSyncing(true);
-    try {
-      const { data: ords } = await sb.from("orders").select("short_code").eq("client_id", clientId).limit(2000);
-      const codes = (ords || []).map((o) => o.short_code).filter(Boolean);
-      if (codes.length) await sb.functions.invoke("sync-design-status", { body: { shortCodes: codes } });
-    } catch (_e) { /* non-fatal: the tables still render what we already have */ }
-    setSyncing(false);
     await load();
-  }, [clientId, load]);
+    setSyncing(false);
+  }, [load]);
 
-  const didSync = useRef(false);
-  useEffect(() => {
-    load();
-    if (!didSync.current) { didSync.current = true; syncFromGhl(); }
-  }, [load, syncFromGhl]);
+  useEffect(() => { load(); }, [load]);
 
   // Which buildings are already on the board or on a load, and which orders are lot sales.
   // Only fetched when this person can actually act on it — a read of the schedule is still
@@ -918,12 +928,18 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     if (bal < 0) return { key: "over", label: "Overpaid", bg: "#FFEDD5", fg: "#9A3412" };
     if (bal === 0) return { key: "paid", label: "Paid in full", bg: "#DCFCE7", fg: "#166534" };
     if (r.paid > 0) return { key: "partial", label: "Partially paid", bg: "#DBEAFE", fg: "#1E40AF" };
-    // Nothing collected yet — and these are two different jobs. A quote the customer
-    // accepted but nobody has billed is the OWNER's move; an invoice that's out and
-    // unpaid is the CUSTOMER's. Lumping both under "Unpaid" hides the follow-up.
-    return ((r.d && r.d.status) === "accepted")
-      ? { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" }
-      : { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
+    // Nothing collected yet — and these are now THREE different jobs, each waiting on a
+    // different person. A quote the customer accepted but nobody has billed is the OWNER's
+    // move. An invoice that is out but unsigned is the CUSTOMER's (migration 136 — the
+    // signature moved to the invoice, and the design stays 'accepted' until they sign).
+    // An invoice that is signed and unpaid is the customer's too, but for money.
+    // Lumping them together hides which follow-up is actually owed.
+    if ((r.d && r.d.status) === "accepted") {
+      return (r.d && r.d.ss_invoice_sent_at)
+        ? { key: "invoiceout", label: "Awaiting signature", bg: "#FEF9C3", fg: "#854D0E" }
+        : { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" };
+    }
+    return { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
   };
 
   const all = rows || [];
@@ -951,13 +967,14 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   // Voided rows are fetched (they stay visible in the history) but must not be counted.
   const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
   const needsInvoice = all.filter((r) => stateOf(r).key === "needsinvoice").length;
+  const invoiceOut = all.filter((r) => stateOf(r).key === "invoiceout").length;
   const awaitingCount = all.filter((r) => stateOf(r).key === "awaiting").length;
   const needsTotal = all.filter((r) => r.o.total_cents == null).length;
 
   if (error) return <div style={S.err}>Couldn't load orders: {error}</div>;
   if (rows === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading orders…</div>;
 
-  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} />;
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} />;
 
   const tile = (label, value, note, accent) => (
     <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
@@ -979,14 +996,17 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
         {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
         {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
-        {tile("Awaiting payment", String(awaitingCount), "invoiced, nothing collected", "#9F1239")}
+        {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
+        {tile("Awaiting payment", String(awaitingCount), "signed, nothing collected", "#9F1239")}
         {needsTotal > 0 && tile("Needs a total", String(needsTotal), "set it on the order", null)}
       </div>
 
       <div style={S.card}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders {rows ? (query || filter !== "all" || hasFacets ? `(${shown.length} of ${all.length})` : `(${all.length})`) : ""}</div>
-          {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}{chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
+          {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}
+          {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
+          {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
           {needsTotal > 0 && chip("nototal", "Needs total")}
           {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
           <div style={{ marginLeft: "auto", minWidth: 240, flex: "0 1 300px" }}>
@@ -1009,7 +1029,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
 
         {all.length === 0 && (
           <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
-            No orders yet. An order appears here automatically as soon as a customer accepts their quote.
+            No orders yet. An order appears here automatically as soon as a customer signs a
+            StructureStudio quote. (Quotes and invoices issued through your CRM live in your
+            CRM — this page only tracks the paperwork StructureStudio issues.)
           </p>
         )}
         {all.length > 0 && shown.length === 0 && (
@@ -1155,12 +1177,25 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
     if (!vConfirm) { setMsg({ err: "Tick the confirmation box — it is your attestation." }); return; }
     if (!vRep.trim() || !vDate) { setMsg({ err: "Verbal confirmation needs your name and the date of the conversation." }); return; }
     setBusy(true); setMsg(null);
-    const { error } = await sb.from("change_orders")
+    // .select() makes the conditional update prove itself: without it, zero rows matched
+    // (the CO was signed or voided elsewhere while this form sat open) still comes back
+    // error:null, and we'd report "confirmed verbally" AND overwrite the order total
+    // from a CO that is no longer pending. The returned ids are the proof the
+    // status guard actually matched a row.
+    const { data: upd, error } = await sb.from("change_orders")
       .update({ status: "acknowledged", ack_method: "verbal", verbal_rep_name: vRep.trim(), verbal_conversation_date: vDate, verbal_note: vNote.trim() || null })
-      .eq("id", co.id).eq("status", "pending_ack");
+      .eq("id", co.id).eq("status", "pending_ack")
+      .select("id");
     setBusy(false);
     if (error) { setMsg({ err: error.message }); return; }
     setVerbalFor(null); setVRep(""); setVNote(""); setVConfirm(false);
+    if (!upd || upd.length === 0) {
+      // Nothing was pending to confirm — reload so the list shows the CO's real state,
+      // and leave the order total alone (it may already reflect a signed or voided CO).
+      setMsg({ err: `CO-${co.co_no} is no longer pending — it was signed or voided in the meantime. Nothing was changed.` });
+      load(); onChanged();
+      return;
+    }
     await applyAckedTotal(co);
     setMsg({ ok: `CO-${co.co_no} confirmed verbally.` });
     load(); onChanged();
@@ -1268,7 +1303,10 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
           {co.status === "acknowledged" && (
             <div style={{ fontSize: 12, color: "#15803D", fontWeight: 600, marginTop: 6 }}>
               {co.ack_method === "verbal"
-                ? `Verbal — ${co.verbal_rep_name}, conversation on ${fmtDate(co.verbal_conversation_date)}${co.verbal_note ? ` (${co.verbal_note})` : ""}`
+                /* verbal_conversation_date is DATE-ONLY: parsed bare it reads as UTC
+                   midnight and renders the previous local day. Midday anchor, the same
+                   trick recordPayment and the schedule use. */
+                ? `Verbal — ${co.verbal_rep_name}, conversation on ${fmtDate(co.verbal_conversation_date + "T12:00:00")}${co.verbal_note ? ` (${co.verbal_note})` : ""}`
                 : `Signed by the customer${co.acknowledged_at ? ` · ${fmtDate(co.acknowledged_at)}` : ""}`}
             </div>
           )}
@@ -1313,7 +1351,490 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
   );
 }
 
-function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf }) {
+/* ─── The invoice-style order document (migration 127) ─────────────────────────────────
+   SS-mode orders render the ORDER itself "between an invoice and a PDF" (Carolyn
+   2026-08-24): letterhead, the priced line items from designs.estimate_lines — the same
+   snapshot every PDF renders from, so screen and paper can't disagree — with roof,
+   cladding and paint as LIVE dropdowns. Changing one stages a change (dryRun price
+   preview from the server's catalog math), raises the change order the customer must
+   acknowledge, and can be discarded (void_change_order restores the as-signed design
+   from snapshot_before). Totals show the current numbers plus the amendment trail. */
+
+// De-render the snapshot's GHL-flavored HTML for display — MUST match
+// _shared/estimateLines.ts `deHtml` (the server is the authority; this is presentation).
+const ssDeHtml = (s) => String(s || "")
+  .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")
+  .replace(/<br\s*\/?>/gi, "\n")
+  .replace(/<[^>]*>/g, "")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+  .trim();
+const ssRound2 = (n) => Math.round(n * 100) / 100;
+// Totals over the snapshot — MUST match _shared/estimateLines.ts `totalFromSnapshot`.
+const ssSnapTotals = (snap) => {
+  const lines = (snap && Array.isArray(snap.lines)) ? snap.lines : [];
+  let subtotal = 0;
+  for (const li of lines) subtotal += ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
+  subtotal = ssRound2(subtotal);
+  const discount = Number(snap && snap.discount) || 0;
+  const total = Math.max(0, discount > 0 ? ssRound2(subtotal - discount) : subtotal);
+  return { subtotal, discount, total };
+};
+const ssUsd = (n) => {
+  if (n == null || !isFinite(Number(n))) return "—";
+  const v = ssRound2(Number(n));
+  const [int, frac] = Math.abs(v).toFixed(2).split(".");
+  return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+};
+// The offered cladding set — mirrors the designer's D3_CLADDING_CHOICES (batten is a
+// legacy render-only value; it shows as its label if a row carries it, but isn't offered).
+const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
+const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
+
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null }) {
+  const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
+  const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
+  const [previewErr, setPreviewErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const debounceRef = useRef(null);
+
+  // A sub-read failed: say so, in place of the WHOLE body. Rendering off partial data
+  // looks healthy while lying — with paperwork missing it would offer "Create & send
+  // invoice" on an order that may already be invoiced and awaiting signature. This
+  // must come before the loading gate: on a failed designs read design is null, and
+  // the null-design branch below reads as "Loading the order…" forever.
+  if (doc && doc.error) {
+    return (
+      <div style={S.card}>
+        <div style={S.err}>Couldn't load this order's paperwork: {doc.error}</div>
+        {onRetry && (
+          <button type="button" onClick={onRetry}
+            style={{ ...S.btn("#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5 }}>Retry</button>
+        )}
+      </div>
+    );
+  }
+  if (!doc || !doc.design) {
+    return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading the order…</p></div>;
+  }
+  const { design, acceptances, cos, paperwork } = doc;
+  const biz = (paperwork && paperwork.business) || {};
+  const colors = (paperwork && paperwork.colors) || [];
+  const invoice = (paperwork && paperwork.invoice) || null;
+  const snap = design.estimate_lines || { lines: [], discount: 0 };
+  const lines = Array.isArray(snap.lines) ? snap.lines : [];
+  const sel = design.selections || {};
+  const pc = design.paint_colors || {};
+  const locked = ["invoiced", "delivered"].includes(String(design.status || ""));
+  const acceptance = (acceptances || []).find((a) => a.subject === "quote") || null;
+  const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
+    .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
+  const pendingCo = (cos || []).find((c) => c.status === "pending_ack" && c.source === "design_edit") || null;
+  // A change approved AFTER the invoice was issued means the PDF in the customer's inbox
+  // shows the wrong amount. customer-accept refuses to let them sign a stale invoice, so
+  // the operator has to be told the remedy is "regenerate", not "wait" (migration 136).
+  const ackedAfterInvoice = !!invoice && !invoice.signed_at && ackedCos.some((c) =>
+    Date.parse(String(c.acknowledged_at || "")) > Date.parse(String(invoice.updated_at || "")));
+
+  const cur = {
+    roofType: String(sel.roofType || "").trim(),
+    roofColor: String(sel.roofColor || "").trim(),
+    cladding: String(sel.cladding || ""),
+    paintStatus: (sel.paint && String(sel.paint).toLowerCase() === "painted") ? "Paint" : "Unpaint",
+    paintBody: String(pc.body || "").trim(),
+    paintTrim: String(pc.trim || "").trim(),
+  };
+  const eff = draft || cur;
+
+  // Palette slices for the dropdowns. A stored value missing from today's palette still
+  // renders — a renamed color must not silently rewrite a signed order. An EMPTY stored
+  // value gets an explicit "(not chosen)" option: without one the browser displays the
+  // first option while the select's value stays "", and what the rep sees isn't what
+  // would be staged.
+  const colorOpts = (flag, current) => {
+    const opts = colors.filter((c) => c[flag] === true && !c.allow_custom).map((c) => c.label);
+    if (current && !opts.some((l) => l.toLowerCase() === current.toLowerCase())) opts.unshift(current);
+    if (!current) opts.unshift("");
+    return opts;
+  };
+  const optLabel = (l) => (l === "" ? "(not chosen)" : l);
+  const roofTypes = [["Shingle", colors.some((c) => c.shingle === true)], ["Metal", colors.some((c) => c.metal === true)]]
+    .filter(([, ok]) => ok).map(([t]) => t);
+
+  const queuePreview = (next) => {
+    setDraft(next); setPreview(null); setPreviewErr(null);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "stage_order_attribute_change", shortCode: o.short_code, attrs: next, dryRun: true },
+      });
+      if (error || (data && data.error)) { setPreviewErr((data && data.error) || error.message); return; }
+      setPreview(data);
+    }, 450);
+  };
+  const change = (k, v) => {
+    const next = { ...eff, [k]: v };
+    if (k === "roofType" && v !== eff.roofType) {
+      // The designer's rule: a type change resets the color to that type's first offering.
+      const flag = String(v).toLowerCase() === "metal" ? "metal" : "shingle";
+      const first = colors.find((c) => c[flag] === true && !c.allow_custom);
+      next.roofColor = first ? first.label : "";
+    }
+    queuePreview(next);
+  };
+  const discardDraft = () => { setDraft(null); setPreview(null); setPreviewErr(null); if (debounceRef.current) clearTimeout(debounceRef.current); };
+
+  const stage = async () => {
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "stage_order_attribute_change", shortCode: o.short_code, attrs: eff },
+    });
+    if (error || (data && data.error)) { setBusy(false); onMsg({ err: (data && data.error) || error.message }); return; }
+    let note;
+    if (data.changeOrderId) {
+      const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: data.changeOrderId } });
+      note = sent && sent.sent
+        ? { ok: `Change order CO-${data.coNo} staged and emailed to the customer for signature.` }
+        : { ok: `Change order CO-${data.coNo} staged. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — they can sign from their quote page link.` };
+    } else {
+      note = { ok: "Quote updated — the customer hasn't signed yet, so no change order was needed." };
+    }
+    setBusy(false); discardDraft(); onMsg(note); onChanged();
+  };
+
+  const discardStaged = async () => {
+    if (!pendingCo) return;
+    if (!window.confirm(`Discard the staged change (CO-${pendingCo.co_no}) and restore the order as the customer signed it?`)) return;
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "void_change_order", changeOrderId: pendingCo.id, reason: "Discarded from the order screen — restored to the signed configuration" },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+    onMsg({ ok: `CO-${pendingCo.co_no} discarded${data.reverted ? " — the order is back to what the customer signed" : ""}.` });
+    onChanged();
+  };
+
+  const selStyle = { fontFamily: "inherit", fontSize: 12, padding: "5px 8px", border: "1px solid #CBD5E1", borderRadius: 7, background: "#FFF", color: "#1E293B", maxWidth: 170 };
+  const th = { fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", textAlign: "left", padding: "10px 0 6px" };
+  const td = { fontSize: 13, color: "#1E293B", padding: "9px 0", borderTop: "1px solid #F1F5F9", verticalAlign: "top" };
+  const optionRows = (label, control) => (
+    <tr key={label}>
+      <td style={td}>
+        <div style={{ fontWeight: 700 }}>{label}</div>
+        <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>{control}</div>
+      </td>
+      <td style={{ ...td, textAlign: "center", color: "#94A3B8" }}>—</td>
+      <td style={{ ...td, textAlign: "right" }}></td>
+    </tr>
+  );
+
+  const totals = ssSnapTotals(snap);
+  const ssInvoicePdf = invoice && invoice.issued_by === "structurestudio" && invoice.invoice_pdf_url ? invoice.invoice_pdf_url : null;
+  const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(cur);
+  const anyBusy = busy || busyExt;
+
+  // The amendment trail: signed total + acknowledged CO snapshots — never re-summed line
+  // items, so double-counting is structurally impossible.
+  const trail = [];
+  if (acceptance && acceptance.total != null) {
+    let running = Number(acceptance.total);
+    trail.push({ label: `Signed ${fmtDate(acceptance.accepted_at)}`, amountText: ssUsd(running), tone: "base" });
+    for (const c of ackedCos) {
+      if (c.total_after_cents == null) {
+        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: "no price change", tone: "base" });
+      } else {
+        const after = c.total_after_cents / 100;
+        const delta = ssRound2(after - running);
+        running = after;
+        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: `${delta >= 0 ? "+" : "-"}${ssUsd(Math.abs(delta))} → ${ssUsd(after)}`, tone: "base" });
+      }
+    }
+    trail.push({ label: "Current total", amountText: o.total_cents == null ? "—" : money(o.total_cents), tone: "final" });
+    if (pendingCo && pendingCo.total_after_cents != null) {
+      trail.push({ label: `Pending CO-${pendingCo.co_no} (awaiting sign-off)`, amountText: `→ ${ssUsd(pendingCo.total_after_cents / 100)}`, tone: "pending" });
+    }
+  }
+
+  return (
+    <div style={{ ...S.card, padding: "20px 24px" }}>
+      {/* Letterhead */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, borderBottom: "2px solid #CBD5E1", paddingBottom: 13 }}>
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B" }}>{biz.name || "—"}</div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>
+            {[biz.phone, biz.website].filter(Boolean).join(" · ")}
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 14, fontWeight: 800, letterSpacing: 0.5, color: "#1E293B" }}>ORDER · {design.ss_quote_number}</div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>
+            Ordered {fmtDate(o.ordered_at)}
+            {invoice && invoice.invoice_number ? ` · Invoice ${invoice.invoice_number}` : " · not yet invoiced"}
+          </div>
+          <span style={{ display: "inline-block", marginTop: 6, background: st.bg, color: st.fg, borderRadius: 20, padding: "3px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+        </div>
+      </div>
+
+      {pendingCo && (
+        <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#B45309", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <b>CO-{pendingCo.co_no} is awaiting the customer's sign-off</b> — the values below include it; invoicing is blocked until they sign or you record their verbal OK.
+          <button type="button" onClick={discardStaged} disabled={anyBusy}
+            style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, cursor: "pointer", color: "#B45309", fontWeight: 700, fontSize: 12, textDecoration: "underline", fontFamily: "inherit" }}>
+            Discard staged change
+          </button>
+        </div>
+      )}
+
+      {/* Line items */}
+      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
+        <thead><tr><th style={th}>Item</th><th style={{ ...th, textAlign: "center", width: 46 }}>Qty</th><th style={{ ...th, textAlign: "right", width: 92 }}>Amount</th></tr></thead>
+        <tbody>
+          {lines.map((li, i) => {
+            const kind = String(li.kind || "");
+            const lineTotal = ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
+            let descCell = null;
+            if (!locked && kind === "paint") {
+              descCell = (
+                <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select style={selStyle} value={eff.paintStatus} onChange={(e) => change("paintStatus", e.target.value)}>
+                    <option value="Paint">Painted</option><option value="Unpaint">Unpainted</option>
+                  </select>
+                  {eff.paintStatus === "Paint" && (
+                    <>
+                      <span style={{ fontSize: 11.5, color: "#64748B" }}>Body</span>
+                      <select style={selStyle} value={eff.paintBody} onChange={(e) => change("paintBody", e.target.value)}>
+                        {colorOpts("siding", eff.paintBody).map((l) => <option key={l} value={l}>{optLabel(l)}</option>)}
+                      </select>
+                      <span style={{ fontSize: 11.5, color: "#64748B" }}>Trim</span>
+                      <select style={selStyle} value={eff.paintTrim} onChange={(e) => change("paintTrim", e.target.value)}>
+                        {colorOpts("trim", eff.paintTrim).map((l) => <option key={l} value={l}>{optLabel(l)}</option>)}
+                      </select>
+                    </>
+                  )}
+                </div>
+              );
+            } else if (!locked && kind === "roof") {
+              descCell = (
+                <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select style={selStyle} value={eff.roofType} onChange={(e) => change("roofType", e.target.value)}>
+                    {!eff.roofType && <option value="">Select…</option>}
+                    {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  {eff.roofType && (
+                    <select style={selStyle} value={eff.roofColor} onChange={(e) => change("roofColor", e.target.value)}>
+                      {colorOpts(String(eff.roofType).toLowerCase() === "metal" ? "metal" : "shingle", eff.roofColor).map((l) => <option key={l} value={l}>{optLabel(l)}</option>)}
+                    </select>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <React.Fragment key={i}>
+                <tr>
+                  <td style={td}>
+                    <div style={{ fontWeight: 700 }}>{li.name || "—"}</div>
+                    {descCell || (li.desc ? <div style={{ fontSize: 12, color: "#64748B", whiteSpace: "pre-wrap", marginTop: 2 }}>{ssDeHtml(li.desc)}</div> : null)}
+                  </td>
+                  <td style={{ ...td, textAlign: "center" }}>{Number(li.qty) === 1 && (kind === "paint" || kind === "roof") ? "—" : (li.qty ?? "—")}</td>
+                  <td style={{ ...td, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{ssUsd(lineTotal)}</td>
+                </tr>
+                {kind === "building" && optionRows("Cladding",
+                  locked
+                    ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding)}</span>
+                    : (
+                      <select style={selStyle} value={eff.cladding} onChange={(e) => change("cladding", e.target.value)}>
+                        {SS_CLADDING.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                      </select>
+                    ))}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {/* Staged-change banner (dryRun preview) */}
+      {dirty && (
+        <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 14px", marginTop: 10 }}>
+          {previewErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#B91C1C" }}>{previewErr}</div>}
+          {!previewErr && !preview && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#B45309" }}>Pricing the change…</div>}
+          {!previewErr && preview && (
+            <>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: "#B45309" }}>
+                This changes the order {ssUsd(preview.totalBefore)} → {ssUsd(preview.totalAfter)}
+                {preview.totalBefore != null && preview.totalAfter != null && (
+                  <> ({preview.totalAfter - preview.totalBefore >= 0 ? "+" : "-"}{ssUsd(Math.abs(ssRound2(preview.totalAfter - preview.totalBefore)))})</>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: "#92400E", whiteSpace: "pre-wrap", marginTop: 4 }}>{preview.description}</div>
+              <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>
+                {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the quote."}
+              </div>
+            </>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" onClick={stage} disabled={anyBusy || !preview}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5, opacity: anyBusy || !preview ? 0.6 : 1 }}>
+              {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the quote")}
+            </button>
+            <button type="button" onClick={discardDraft} disabled={anyBusy}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", fontSize: 12.5 }}>Discard</button>
+          </div>
+        </div>
+      )}
+
+      {/* Totals + the amendment trail */}
+      <div style={{ borderTop: "2px solid #CBD5E1", marginTop: 10, paddingTop: 9 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
+          <span>Subtotal</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.subtotal)}</span>
+        </div>
+        {totals.discount > 0 && (
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
+            <span>Discount</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>-{ssUsd(totals.discount)}</span>
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 16, fontWeight: 800, padding: "5px 0 2px", color: "#1E293B" }}>
+          <span>Total</span><span style={{ minWidth: 92, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.total)}</span>
+        </div>
+        {trail.length > 0 && (
+          <div style={{ background: "#F8FAFC", border: "1px solid #F1F5F9", borderRadius: 8, padding: "8px 12px", marginTop: 8 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 3 }}>Amendment trail</div>
+            {trail.map((t, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "2px 0",
+                color: t.tone === "pending" ? "#B45309" : t.tone === "final" ? "#1E293B" : "#64748B",
+                fontWeight: t.tone === "final" ? 800 : 500,
+                borderTop: t.tone === "final" ? "1px solid #E2E8F0" : "none",
+                marginTop: t.tone === "final" ? 3 : 0, paddingTop: t.tone === "final" ? 4 : 2 }}>
+                <span>{t.label}</span><span style={{ fontVariantNumeric: "tabular-nums" }}>{t.amountText}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* THE INVOICE STEP — the missing rung Carolyn hit (2026-08-25: "I see no way for
+          creating that into an invoice"). The ladder is: QUOTE (the signed offer, SST-…)
+          → this order → INVOICE (the bill, SSI-…). One clear affordance per state. */}
+      {!locked && (
+        !design.accepted_at
+          ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
+              <b>Quote sent — awaiting the customer's acceptance.</b> Invoicing unlocks when they accept it from their quote page (Copy customer link below, or hand them your phone).
+            </div>
+          : ssInvoicePdf
+          /* The invoice is OUT but the design is not locked, which since migration 136 can
+             only mean one thing: the customer has not signed it yet. Nothing here creates a
+             second invoice — both buttons re-send the same number. */
+          ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
+              <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
+              <div style={{ marginTop: 4, color: "#854D0E" }}>
+                They sign it from their quote page. The build schedule unlocks once they do.
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
+                {[["Resend invoice", false], ...(ackedAfterInvoice ? [["Regenerate & resend", true]] : [])].map(([label, regen]) => (
+                  <button key={label} type="button" disabled={anyBusy}
+                    onClick={async () => {
+                      if (!window.confirm(regen
+                        ? `Rebuild invoice ${invoice.invoice_number || ""} from the current totals and email it again?\n\nSame invoice number — the customer can't sign the outdated one.`
+                        : `Email invoice ${invoice.invoice_number || ""} to the customer again?`)) return;
+                      setBusy(true); onMsg(null);
+                      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code, ...(regen ? { regenerate: true } : {}) } });
+                      setBusy(false);
+                      if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                      onMsg(data && data.sent === false
+                        ? { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print it or copy the customer link.` }
+                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent again — still awaiting their signature.` });
+                      onChanged();
+                    }}
+                    style={{ ...S.btn(regen ? "#B45309" : "#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5, opacity: anyBusy ? 0.6 : 1 }}>
+                    {busy ? "Working…" : label}
+                  </button>
+                ))}
+              </div>
+              {ackedAfterInvoice && (
+                <div style={{ marginTop: 7, color: "#9A3412" }}>
+                  A change order was approved after this invoice went out, so the amount on it is out of date — the customer can't sign it until you regenerate.
+                </div>
+              )}
+            </div>
+          : pendingCo
+          ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
+              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{pendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+            </div>
+          : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+              <button type="button" disabled={anyBusy}
+                onClick={async () => {
+                  const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
+                  if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF. The customer signs the invoice — the order is marked Invoiced once they do.`)) return;
+                  setBusy(true); onMsg(null);
+                  const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
+                  setBusy(false);
+                  if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                  onMsg(data && data.sent === false
+                    ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.` }
+                    : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.` });
+                  onChanged();
+                }}
+                style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                {busy ? "Working…" : "Create & send invoice"}
+              </button>
+              <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Accepted {fmtDate(design.accepted_at)} — the invoice takes the next number in your sequence.</span>
+            </div>
+      )}
+
+      {/* Action row. The documents open IN A POPUP (Carolyn 2026-08-25), not a tab —
+          the viewer's own toolbar carries print/download. */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", borderTop: "1px solid #F1F5F9", marginTop: 12, paddingTop: 12 }}>
+        {(() => {
+          const docBtn = (label, url, title) => (
+            <button type="button" onClick={() => (onPreview ? onPreview(url, title) : window.open(url, "_blank"))}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>{label}</button>
+          );
+          return (
+            <>
+              {ssInvoicePdf
+                ? docBtn("Print invoice", ssInvoicePdf, `Invoice ${invoice.invoice_number || ""}`)
+                : (design.ss_quote_pdf_url && docBtn("Print quote", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`))}
+              {ssInvoicePdf && design.ss_quote_pdf_url && docBtn("Quote (PDF)", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`)}
+              {design.image_url && docBtn("Floor plan", design.image_url, "Floor plan")}
+            </>
+          );
+        })()}
+        {/* IN-PORTAL designer, never the public ?id= page — staff browsing there fires
+            capture-lead/draft saves and corrupts the tenant's Contacts activity. */}
+        {o.short_code && onOpenDesign && (
+          <button type="button" onClick={() => onOpenDesign(o.short_code)}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+        )}
+        <button type="button"
+          onClick={(e) => {
+            const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+            const btn = e.currentTarget;
+            const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+            else window.prompt("Copy the customer link:", link);
+          }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Copy customer link</button>
+        <button type="button" disabled={anyBusy}
+          onClick={async () => {
+            setBusy(true); onMsg(null);
+            const { data: res, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: o.short_code } });
+            setBusy(false);
+            if (err || (res && res.error)) { onMsg({ err: (res && res.error) || err.message }); return; }
+            onMsg(res && res.sent
+              ? { ok: `Quote ${design.ss_quote_number} emailed to the customer.` }
+              : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+          }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend quote email</button>
+      </div>
+      {locked && (
+        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
+          This order is invoiced — its options are frozen. Changes go through a manual change order below.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
   const [amount, setAmount] = useState("");
@@ -1325,6 +1846,68 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [totalDraft, setTotalDraft] = useState(o.total_cents == null ? "" : (o.total_cents / 100).toFixed(2));
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
+
+  // SS-mode orders (the design carries an SS quote) render the invoice-style order
+  // document (migration 127), which needs the FULL design row (the list query stays
+  // narrow), the signatures, the change orders, and the order_paperwork projection
+  // (letterhead + colors + the service-role-only invoice_sends fields).
+  const ssMode = !!(d && d.ss_quote_number);
+  const [ssDoc, setSsDoc] = useState(null);
+  const [ssReload, setSsReload] = useState(0);
+  useEffect(() => {
+    if (!ssMode || !o.short_code) return;
+    let alive = true;
+    (async () => {
+      const [dRes, aRes, cRes, pRes] = await Promise.all([
+        sb.from("designs")
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact")
+          .eq("client_id", clientId).eq("short_code", o.short_code).maybeSingle(),
+        sb.from("design_acceptances")
+          .select("subject, signer_name, accepted_at, total")
+          .eq("client_id", clientId).eq("short_code", o.short_code),
+        sb.from("change_orders")
+          .select("id, co_no, source, status, total_after_cents, acknowledged_at")
+          .eq("client_id", clientId).eq("short_code", o.short_code),
+        sb.functions.invoke("portal-settings", { body: { action: "order_paperwork", shortCode: o.short_code } }),
+      ]);
+      if (!alive) return;
+      // A failed sub-read must NOT be coerced to "no data" — each coercion told its own
+      // lie: designs failing left the card on "Loading the order…" forever (design:null
+      // IS the loading sentinel), order_paperwork failing rendered "not yet invoiced"
+      // plus a live "Create & send invoice" button on an order that may already be
+      // awaiting signature (duplicate-send bait), and change_orders failing hid the
+      // pending-CO invoice gate. Carry the first error on the payload instead; the
+      // document card renders it with a Retry in place of the normal body.
+      const loadError =
+        dRes.error ? dRes.error.message
+          : aRes.error ? aRes.error.message
+            : cRes.error ? cRes.error.message
+              : (pRes.data && pRes.data.error) ? pRes.data.error
+                : pRes.error ? await fnError(pRes.error)
+                  : null;
+      if (!alive) return; // fnError awaits the response body — the unmount race reopens
+      setSsDoc({
+        error: loadError,
+        design: dRes.data || null,
+        acceptances: aRes.data || [],
+        cos: cRes.data || [],
+        paperwork: (pRes.data && !pRes.data.error) ? pRes.data : null,
+      });
+    })();
+    return () => { alive = false; };
+  }, [ssMode, o.short_code, clientId, ssReload]);
+  const changedAll = () => { onChanged(); setSsReload((k) => k + 1); };
+  // In-portal document viewer (Carolyn 2026-08-25: PDFs open in a popup, not another
+  // tab). Browsers render PDFs (and images) natively in an iframe; the viewer's own
+  // toolbar carries print/download, and an escape hatch opens the real tab.
+  const [pdfView, setPdfView] = useState(null);   // { url, title } | null
+  const ssDesign = ssDoc && ssDoc.design;
+  const ssAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "quote");
+  // Migration 136: the invoice carries its own acceptance row, and it is the signature
+  // that closes the sale. The quote row above may be a click with no signature at all.
+  const ssInvoiceAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "invoice");
+  const ssInvoiceSigner = (ssInvoiceAcceptance && ssInvoiceAcceptance.signer_name) || "";
+  const ssInvoice = ssDoc && ssDoc.paperwork && ssDoc.paperwork.invoice;
 
   const saveTotal = async () => {
     const cents = centsFrom(totalDraft);
@@ -1391,58 +1974,45 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) minmax(0,1fr)", gap: 14, alignItems: "start" }} className="ss-order-grid">
         <div>
-          <div style={S.card}>
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
-              <div>
-                <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
-                <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
-                  Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
-                  {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : (d && d.ss_quote_number ? ` · ${d.ss_quote_number}` : "")}
+          {ssMode ? (
+            /* The invoice-style order document (migration 127) — letterhead, the priced
+               lines with live roof/cladding/paint dropdowns, the amendment trail, and the
+               action row. It replaces the old thin header card for SS orders. */
+            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
+              busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
+              onPreview={(url, title) => setPdfView({ url, title })}
+              onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />
+          ) : (
+            <div style={S.card}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+                <div>
+                  <div style={S.h2}>Order #{o.order_no} · {nameOf(row)}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
+                    Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
+                    {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
+                  </div>
                 </div>
+                <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
               </div>
-              <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {d && d.image_url && (
+                  <button type="button" onClick={() => setPdfView({ url: d.image_url, title: "Floor plan" })}
+                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>View floor plan (PDF)</button>
+                )}
+                {/* IN-PORTAL designer, never the public ?id= page (capture-lead/draft saves). */}
+                {o.short_code && onOpenDesign && (
+                  <button type="button" onClick={() => onOpenDesign(o.short_code)}
+                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+                )}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {d && d.image_url && <a href={d.image_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>View floor plan (PDF)</a>}
-              {o.short_code && <a href={`${window.location.origin}/?client=${encodeURIComponent(clientId)}&id=${encodeURIComponent(o.short_code)}`} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Open design</a>}
-              {/* SS-issued quote (migration 122): the printable document + the two
-                  hand-delivery tools, same trio as the Designs row and the designer
-                  success screen (Carolyn 2026-08-23). */}
-              {d && d.ss_quote_number && d.ss_quote_pdf_url && (
-                <a href={d.ss_quote_pdf_url} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none" }}>Quote (PDF)</a>
-              )}
-              {d && d.ss_quote_number && (
-                <button type="button"
-                  onClick={(e) => {
-                    const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
-                    const btn = e.currentTarget;
-                    const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
-                    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
-                    else window.prompt("Copy the customer link:", link);
-                  }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Copy customer link</button>
-              )}
-              {d && d.ss_quote_number && (
-                <button type="button" disabled={busy}
-                  onClick={async () => {
-                    setBusy(true); setMsg(null);
-                    const { data: res, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "resend_quote_email", shortCode: o.short_code } });
-                    setBusy(false);
-                    if (err || (res && res.error)) { setMsg({ err: (res && res.error) || err.message }); return; }
-                    setMsg(res && res.sent
-                      ? { ok: `Quote ${d.ss_quote_number} emailed to the customer.` }
-                      : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
-                  }}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>Resend quote email</button>
-              )}
-            </div>
-          </div>
+          )}
 
           {/* SS-mode orders (the design carries an SS quote) get change orders. CRM-mode
               orders don't — the decision was SS-only (Carolyn 2026-08-23). */}
-          {d && d.ss_quote_number && o.short_code && (
+          {ssMode && o.short_code && (
             <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
-              currentTotalCents={o.total_cents} onChanged={onChanged} />
+              currentTotalCents={o.total_cents} onChanged={changedAll} />
           )}
 
           <div style={S.card}>
@@ -1483,49 +2053,172 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
-              {o.total_cents == null ? "Set this order's total to track a balance" : `${money(row.paid)} of ${money(o.total_cents)} collected`}
+              {o.total_cents == null
+                ? (ssMode ? "The total arrives when the customer signs the quote" : "Set this order's total to track a balance")
+                : `${money(row.paid)} of ${money(o.total_cents)} collected`}
             </div>
+            {ssMode && o.total_cents != null && (
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.22)", marginTop: 10, paddingTop: 6 }}>
+                {[["Total", money(o.total_cents)], ["Paid", money(row.paid)], ["Balance", bal == null ? "—" : money(bal)]].map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0", color: "#D6E4F0" }}>
+                    <span>{k}</span><span style={{ fontWeight: 700, color: "#FFF", fontVariantNumeric: "tabular-nums" }}>{v}</span>
+                  </div>
+                ))}
+                <div style={{ fontSize: 10.5, color: "#B9CFE0", marginTop: 4, lineHeight: 1.45 }}>
+                  Set by the signed quote and acknowledged change orders — no hand editing.
+                </div>
+              </div>
+            )}
             {o.total_cents != null && (
               <button type="button" onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
                 style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13 }}>Record a payment</button>
             )}
           </div>
 
-          <div style={S.card}>
-            <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
-            {editTotal ? (
-              <>
-                <span style={S.lbl}>Total (from your estimate)</span>
-                <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
-                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                  <button onClick={saveTotal} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save total"}</button>
-                  {o.total_cents != null && <button onClick={() => { setEditTotal(false); setTotalDraft((o.total_cents / 100).toFixed(2)); }} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>}
+          {/* SS orders derive their total (accept → CO acks → invoice); the hand-typed
+              editor stays ONLY for design-less manual orders (Carolyn 2026-08-24). */}
+          {!ssMode && (
+            <div style={S.card}>
+              <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
+              {editTotal ? (
+                <>
+                  <span style={S.lbl}>Total (from your estimate)</span>
+                  <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button onClick={saveTotal} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save total"}</button>
+                    {o.total_cents != null && <button onClick={() => { setEditTotal(false); setTotalDraft((o.total_cents / 100).toFixed(2)); }} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
+                    Totals fill in automatically from the accepted estimate. Type one here if it hasn't come through yet — your number always wins.
+                  </div>
+                </>
+              ) : (
+                <>
+                  {kv("Total", money(o.total_cents))}
+                  {kv("Paid", money(row.paid))}
+                  {kv("Balance", bal == null ? "—" : money(bal))}
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                    {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
+                    {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Floor plan + 3D as IMAGES, side by side in one card (Carolyn 2026-08-25).
+              Thumbnails, not posters: capped height, natural aspect; the click opens the
+              full-size plan/picture. Saved by the designer on every submit; older designs
+              without one fall back to the plan PDF link. */}
+          {ssMode && ssDesign && (
+            <div style={{ ...S.card, padding: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 10 }}>
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 6px" }}>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>Floor plan</span>
+                    {ssDesign.image_url && (
+                      <button type="button" onClick={() => setPdfView({ url: ssDesign.image_url, title: "Floor plan" })}
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 10.5, color: ACCENT, fontWeight: 700, fontFamily: "inherit" }}>Full ↗</button>
+                    )}
+                  </div>
+                  {/* Both frames match at 280 tall (Carolyn 2026-08-25); clicks open the
+                      in-portal viewer popup, never another tab. */}
+                  {ssDesign.plan_image_url
+                    ? <button type="button" title="Open the full plan"
+                        onClick={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
+                        <img src={ssDesign.plan_image_url} alt="Floor plan"
+                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
+                      </button>
+                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
+                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
+                      </div>}
                 </div>
-                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
-                  Totals fill in automatically from the accepted estimate. Type one here if it hasn't come through yet — your number always wins.
+                <div>
+                  <div style={{ padding: "0 2px 6px" }}>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
+                  </div>
+                  {ssDesign.view3d_image_url
+                    ? <button type="button" title="Open the 3D picture"
+                        onClick={() => setPdfView({ url: ssDesign.view3d_image_url, title: "3D view" })}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
+                        <img src={ssDesign.view3d_image_url} alt="3D view"
+                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
+                      </button>
+                    : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
+                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Open the design, click 🧊 3D View, then resubmit to capture one.</p>
+                      </div>}
                 </div>
-              </>
-            ) : (
-              <>
-                {kv("Total", money(o.total_cents))}
-                {kv("Paid", money(row.paid))}
-                {kv("Balance", bal == null ? "—" : money(bal))}
-                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
-                  {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
-                  {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
-                </div>
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
 
           <div style={S.card}>
             <div style={{ ...S.h2, marginBottom: 8 }}>Customer</div>
             {kv("Name", nameOf(row))}
             {kv("Phone", (d && d.contact && d.contact.phone) || "—")}
             {kv("Email", (d && d.contact && d.contact.email) || "—")}
+            {ssMode && ssDesign && ssDesign.contact && (() => {
+              const c = ssDesign.contact || {};
+              const line2 = [c.city, c.state].filter(Boolean).join(", ") + (c.zip ? ` ${c.zip}` : "");
+              const addr = [c.street, line2].filter((s) => s && String(s).trim()).join(", ");
+              return (
+                <>
+                  {kv("Address", addr || "—")}
+                  {ssInvoiceAcceptance
+                    ? kv("Signed", `${fmtDate(ssInvoiceAcceptance.accepted_at)} · ${ssInvoiceAcceptance.signer_name || ""}`)
+                    : ssAcceptance && kv("Accepted", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`)}
+                  {addr && (
+                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`} target="_blank" rel="noopener"
+                      style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "block", textAlign: "center", marginTop: 8, fontSize: 12 }}>
+                      📍 View property
+                    </a>
+                  )}
+                </>
+              );
+            })()}
           </div>
+
+          {ssMode && ssDesign && (
+            <div style={S.card}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
+              {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
+              {kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {kv("Change orders", (() => {
+                const cs = (ssDoc && ssDoc.cos) || [];
+                const acked = cs.filter((c) => c.status === "acknowledged").length;
+                const pend = cs.filter((c) => c.status === "pending_ack").length;
+                if (!cs.length) return "none";
+                return `${acked} acknowledged${pend ? ` · ${pend} pending` : ""}`;
+              })())}
+              {kv("Invoice", ssInvoice && ssInvoice.invoice_number
+                ? `${ssInvoice.invoice_number} · ${fmtDate(ssInvoice.updated_at || ssInvoice.created_at)}`
+                : "not yet issued")}
+              {/* The signature that actually closes the sale now lives on the invoice. */}
+              {kv("Invoice signed", ssInvoice && ssInvoice.signed_at
+                ? `${fmtDate(ssInvoice.signed_at)}${ssInvoiceSigner ? ` · ${ssInvoiceSigner}` : ""}`
+                : (ssInvoice ? "awaiting the customer" : "not yet"))}
+            </div>
+          )}
         </div>
       </div>
+
+      {pdfView && (
+        <div onClick={(e) => { if (e.target === e.currentTarget) setPdfView(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+          <div style={{ background: "#FFF", borderRadius: 14, width: "min(900px, 96vw)", height: "min(88vh, 1100px)", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800 }}>{pdfView.title}</div>
+              <a href={pdfView.url} target="_blank" rel="noopener"
+                style={{ marginLeft: "auto", color: "#CFE0EC", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>Open in tab ↗</a>
+              <button type="button" onClick={() => setPdfView(null)}
+                style={{ background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+            </div>
+            {/* The browser's own viewer: its toolbar carries print + download. */}
+            <iframe src={pdfView.url} title={pdfView.title} style={{ flex: 1, width: "100%", border: "none", background: "#525659" }} />
+          </div>
+        </div>
+      )}
 
       {payOpen && (
         <div onClick={(e) => { if (e.target === e.currentTarget) setPayOpen(false); }}

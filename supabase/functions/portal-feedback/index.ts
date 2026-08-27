@@ -256,10 +256,14 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
 
   // 2. Resolve the caller's tenant — never from the body.
+  //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
+  //    exists, which would lock the user out entirely. portal.html already guards this
+  //    the same way (its "audit #F6" comment), as does _shared/resolveTenant.ts.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: mapping, error: mapErr } = await admin
-    .from("client_users").select("client_id, role").eq("user_id", user.id).maybeSingle();
+  const { data: mapRows, error: mapErr } = await admin
+    .from("client_users").select("client_id, role").eq("user_id", user.id).limit(1);
   if (mapErr) return json({ error: mapErr.message }, 500);
+  const mapping = mapRows && mapRows[0];
   if (!mapping) return json({ error: "No business is linked to this account." }, 403);
   const clientId: string = mapping.client_id;
 

@@ -737,6 +737,20 @@ function BillingView({ viewingLabel = null }) {
     // which independently re-checks confirmChargeCents.
     const amt = amountCents != null ? (amountCents / 100).toFixed(2) : null;
     const start = () => {
+      // Collect.js only ever settles us through `callback`, and it fires that ONLY on a
+      // tokenization attempt — closing the lightbox (the ✕, Esc, click-away) fires nothing
+      // in the config surface we use, which used to leave this promise pending forever:
+      // `subscribe` awaited it, `busy` never cleared, and the Billing tab was dead until a
+      // reload. There is no close/cancel hook to wire, so watch the DOM instead: the
+      // lightbox arrives as injected iframe(s); once one has been visible and none is any
+      // more — with no token — the customer closed it. Two consecutive misses (3s apart)
+      // before rejecting, so a re-layout blip can't fire a false abandon while the card
+      // form is still up; a 5-minute backstop covers a lightbox that hides rather than
+      // removes itself, or that never appeared at all.
+      let settled = false, poll = null, backstop = null;
+      const settle = (fn, v) => { if (settled) return; settled = true; if (poll) clearInterval(poll); if (backstop) clearTimeout(backstop); fn(v); };
+      // Snapshot BEFORE Collect.js runs, so whatever iframes it injects read as "added".
+      const before = new Set(Array.from(document.querySelectorAll("iframe")));
       try {
         window.CollectJS.configure({
           variant: "lightbox",
@@ -750,10 +764,19 @@ function BillingView({ viewingLabel = null }) {
             // note already lives on the page's due-today line and the pay button.
             instructionText: `You'll be charged ${fmt$(amountCents)} today.`,
           } : {}),
-          callback: (resp) => resp && resp.token ? resolve(resp.token) : reject(new Error("Card entry was cancelled.")),
+          callback: (resp) => resp && resp.token ? settle(resolve, resp.token) : settle(reject, new Error("Card entry was cancelled.")),
         });
         window.CollectJS.startPaymentRequest();
-      } catch (e) { reject(e); }
+      } catch (e) { return settle(reject, e); }
+      let seen = false, gone = 0;
+      poll = setInterval(() => {
+        const visible = Array.from(document.querySelectorAll("iframe")).some((el) =>
+          !before.has(el) && el.isConnected && (el.offsetWidth > 0 || el.offsetHeight > 0));
+        if (visible) { seen = true; gone = 0; return; }
+        // Soft wording on purpose: abandoning card entry is a normal choice, not a fault.
+        if (seen && ++gone >= 2) settle(reject, new Error("Card entry was closed — nothing was charged. Press the button again whenever you're ready."));
+      }, 3000);
+      backstop = setTimeout(() => settle(reject, new Error("Card entry timed out — nothing was charged. Press the button again whenever you're ready.")), 5 * 60 * 1000);
     };
     if (window.CollectJS) return start();
     const s = document.createElement("script");
@@ -767,10 +790,20 @@ function BillingView({ viewingLabel = null }) {
   const toggleFeature = (f) => {
     if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
-    if (f.required && !baseLive && !sel["full_suite"]) return; // Simple Layout stays unless the Suite covers it
+    // Only block REMOVING the required base (it's in `sel` and the click would delete it);
+    // re-adding must always work. Blocking both directions stranded the cart: selecting the
+    // Suite deletes Simple Layout from `sel`, deselecting the Suite then left NEITHER in the
+    // cart, and this guard refused the click that would put the base back — checkout dead
+    // until a reload re-ran the [data] preselect (the server 400s a cart without the base).
+    if (f.required && !baseLive && !sel["full_suite"] && sel[f.feature]) return; // Simple Layout stays unless the Suite covers it
     setSel((p) => {
       const n = { ...p };
-      if (n[f.feature]) delete n[f.feature];
+      if (n[f.feature]) {
+        delete n[f.feature];
+        // Deselecting the Suite re-seeds the required base — the [data] preselect effect
+        // only re-runs on a reload, so without this the cart strands with neither.
+        if (f.feature === "full_suite" && !baseLive && !liveFeatures["full_suite"] && byFeature["simple_layout"]) n.simple_layout = "annual";
+      }
       else {
         n[f.feature] = "annual";
         if (f.feature === "full_suite") SUITE_MEMBERS.forEach((m) => delete n[m]); // the Suite replaces the à-la-carte pieces
@@ -878,6 +911,85 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           </p>
         </div>
       )}
+
+      {/* WALLET — prepaid credit for metered usage. Carolyn, 2026-08-24: "like GHL has a
+          wallet on there ... put it in the billing, in the billing portion. A wallet for
+          usage cases."
+
+          Sits ABOVE "Your subscription" on purpose: once 3D is live this is what a builder
+          opens the tab to check weekly, while the subscription summary is a monthly glance.
+          It is also the shape she pointed at in Framed-UP — balance, what's left, what it
+          costs — translated from a monthly quota to prepaid money.
+
+          Renders even at a zero balance, and even before Deposyt is connected. That is the
+          whole point: a real balance really does drop when a generation runs, which is what
+          makes the September demo honest without a merchant account attached. */}
+      {data && data.wallet && (() => {
+        const w = data.wallet;
+        const avail = (w.balanceCents || 0) - (w.heldCents || 0);
+        const video = (w.meters || []).find((m) => m.kind === "video_3d_generation") || null;
+        const price = video && video.priceCents ? video.priceCents : 0;
+        const left = price > 0 ? Math.floor(Math.max(0, avail) / price) : null;
+        // Green at a generation or more in hand, amber below one, red at nothing. The same
+        // three-state read as SUB_BADGE, so the tab has one visual language.
+        const tone = w.exempt ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Non-billable" }
+          : left === null || left >= 1 ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Ready" }
+          : avail > 0 ? { bg: "#FFFBEB", bd: "#FDE68A", fg: "#92400E", t: "Low balance" }
+          : { bg: "#FEF2F2", bd: "#FECACA", fg: "#991B1B", t: "Empty" };
+        const stat = (label, value) => (
+          <div style={{ minWidth: 120 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#1E293B", marginTop: 3 }}>{value}</div>
+          </div>
+        );
+        return (
+          <div style={S.card}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+              <div style={{ ...S.h2, marginBottom: 0 }}>Wallet</div>
+              <span style={{ background: tone.bg, border: `1px solid ${tone.bd}`, color: tone.fg, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>{tone.t}</span>
+            </div>
+            <div style={{ display: "flex", gap: 26, flexWrap: "wrap", marginBottom: 14 }}>
+              {stat("Balance", fmt$(Math.max(0, avail)))}
+              {left !== null && stat("3D generations left", left)}
+              {(w.heldCents || 0) > 0 && stat("Reserved", fmt$(w.heldCents))}
+            </div>
+            {video && video.priceCents ? (
+              <p style={{ fontSize: 13, color: "#475569", marginTop: 0 }}>
+                <strong>{fmt$(video.priceCents)}</strong> per {video.unitLabel} — {video.label}.
+                Text messages and email will draw on the same wallet as they arrive.
+              </p>
+            ) : (
+              <p style={{ fontSize: 13, color: "#64748B", marginTop: 0 }}>
+                Nothing is metered on your account yet. When 3D generation and texting switch on, they draw from here.
+              </p>
+            )}
+            {/* ADD FUNDS is deliberately not a button yet. Carolyn, 2026-08-24: "I will
+                connect the wallet to Deposyt AFTER — just set the infrastructure up right
+                now." Stubbing a checkout that pretends to charge would be worse than
+                saying so; if someone clicks this at the expo, the honest sentence IS the
+                demo. Same voice as the "online checkout isn't switched on yet" notice. */}
+            <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600 }}>
+              Adding funds online isn't switched on yet — contact CSM Synergy to top up your wallet.
+            </div>
+            {(w.transactions || []).length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>Recent activity</div>
+                {w.transactions.map((t) => (
+                  <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
+                    <span style={{ color: "#475569" }}>
+                      {t.label}
+                      {t.pending && <span style={{ color: "#92400E", fontWeight: 700 }}> · pending</span>}
+                    </span>
+                    <span style={{ fontWeight: 700, color: t.amountCents < 0 ? "#991B1B" : "#065F46", whiteSpace: "nowrap" }}>
+                      {t.amountCents < 0 ? "−" : "+"}{fmt$(Math.abs(t.amountCents))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* At-a-glance subscription summary — total spend, status, and next renewal, above the
           per-feature detail. Derived from the same live subscriptions; no extra backend call. */}
@@ -1864,6 +1976,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     // null = comes in ALL window colors (the living default); an array = exactly those.
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
+    // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
+    // the floor), so an empty string has to survive the round trip rather than becoming 0.
+    // fmtFtIn renders 0 as "" (right for a width, wrong here — it would turn a deliberate
+    // floor-level window back into "use the default" on the next save), so 0 is spelled out.
+    sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
   });
   const load = async () => {
@@ -1894,6 +2011,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
+    ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
   });
 
@@ -1991,7 +2109,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
     ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
@@ -2005,7 +2123,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
   const exportRows = () => rows.map((r) => hasSwingOp
     ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -2068,6 +2186,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
         iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
+        iSill = col("height off floor"), iSillMode = col("placement"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -2121,6 +2240,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
             row.windowColorIds = winColors.filter((c) => names.includes(String(c.label).trim().toLowerCase())).map((c) => String(c.id));
           }
         }
+        // Height off floor / Placement (139), same absent-column-leaves-it-alone contract.
+        // A BLANK cell is meaningful here and is not the same as an absent column: blank
+        // means "the standard 3'6"", so it goes over as null rather than being skipped.
+        if (isWindowCat && iSill >= 0) row.sillIn = ftInToInches(String(cols[iSill] == null ? "" : cols[iSill]).replace(/\s/g, ""));
+        if (isWindowCat && iSillMode >= 0) {
+          row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
+        }
         return row;
       });
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "import_fixtures", category, rows: importRows }) });
@@ -2133,7 +2259,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -2313,6 +2439,37 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           {edit.draft.window_color_ids !== null && winColors.every((c) => !edit.draft.window_color_ids.includes(String(c.id))) && (
             <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No colors ticked — this window is placed with no color choice.</div>
           )}
+        </div>
+      )}
+      {/* Height off the floor (139). Carolyn, 2026-08-25: "how far off the floor, not off
+          the ground, off the floor, which is off the inside of the building, not the
+          exterior." Every window used to render at the same 3'6" in 3D no matter what the
+          builder sells, so a transom and a picture window sat at the same height.
+          Independent of the width/height fields above because it is not a size — it is
+          where the window is INSTALLED. */}
+      {isWindowCat && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div>
+              <div style={fldLbl}>Height off floor</div>
+              <input value={edit.draft.sill_in || ""} onChange={(e) => setDraft({ sill_in: e.target.value })}
+                placeholder={`standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
+            </div>
+            <div>
+              <div style={fldLbl}>Placement</div>
+              <select value={edit.draft.sill_mode === "variable" ? "variable" : "fixed"}
+                onChange={(e) => setDraft({ sill_mode: e.target.value })}
+                style={{ ...S.input, minWidth: 0 }}>
+                <option value="fixed">Fixed at this height</option>
+                <option value="variable">Customer can slide it up and down</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+            {edit.draft.sill_mode === "variable"
+              ? `Starts at ${(edit.draft.sill_in || "").trim() || `3'6"`} and the customer can move it up or down the wall in 3D — for transoms and high windows beside a garage door.`
+              : `Always sits this far above the floor inside the building. Leave blank for the standard 3'6".`}
+          </div>
         </div>
       )}
       <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
@@ -2640,9 +2797,17 @@ function WindowColorsEditor({ viewingLabel = null, clientId = null, onSaved = nu
     if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE window color list with these ${rows.length} color(s)?\n\nAnything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
+      // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
+      // rate into a silent $0 BEFORE the request, sneaking past the server's own invalid-rate
+      // guard, so the color then priced at $0 on every customer estimate — the same hole the
+      // 2026-08-20 audit closed in LayoutPricing.save. Refuse and name the rows instead. A
+      // blank rate still means 0 — that's how an untouched row round-trips.
+      const rateOf = (r) => { const s = String(r.rate ?? "").trim(); return s === "" ? 0 : Number(s); };
+      const bad = rows.filter((r) => { const n = rateOf(r); return !Number.isFinite(n) || n < 0; });
+      if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.map((r) => `${r.label || "unnamed color"} ("${r.rate}")`).join(", ")}.`);
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label, hex: r.hex || null,
-        rate: Number(r.rate) || 0, isDefault: r.is_default === true, active: r.active !== false, sortOrder: i,
+        rate: rateOf(r), isDefault: r.is_default === true, active: r.active !== false, sortOrder: i,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_window_colors", colors }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -2788,12 +2953,27 @@ function ColorsView({ viewingLabel = null }) {
 Anything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
+      // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
+      // rate into a silent $0 BEFORE the request, sneaking past the server's own invalid-rate
+      // guard, so the colour then priced at $0 on every customer estimate — the same hole the
+      // 2026-08-20 audit closed in LayoutPricing.save. Refuse and name the rows (and which of
+      // the two rates is broken) instead. A blank rate still means 0 — that's how an
+      // untouched row round-trips.
+      const numOf = (v) => { const s = String(v ?? "").trim(); return s === "" ? 0 : Number(s); };
+      const badRate = (v) => { const n = numOf(v); return !Number.isFinite(n) || n < 0; };
+      const bad = [];
+      rows.forEach((r) => {
+        const name = r.label || "unnamed colour";
+        if (badRate(r.rate)) bad.push(`${name} ("${r.rate}")`);
+        if (badRate(r.door_rate)) bad.push(`${name} door price ("${r.door_rate}")`);
+      });
+      if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.join(", ")}.`);
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label,
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
-        sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
-        doorRate: Number(r.door_rate) || 0,
+        sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
+        doorRate: numOf(r.door_rate),
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);

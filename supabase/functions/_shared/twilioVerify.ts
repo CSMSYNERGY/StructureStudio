@@ -201,13 +201,50 @@ async function twFetch(
 }
 
 /**
+ * Twilio's default Verify body is "Your <friendly name> verification code is 123456", and
+ * the friendly name is a property of the SERVICE — one service, one brand, every tenant.
+ * So a customer logging in to YoderBarn's portal got a code branded "StructureStudio"
+ * (Carolyn, 2026-08-25: "if it's YoderBarn, can we change it to where it says your YoderBarn
+ * verification?"). A white-label product naming its own vendor to the end customer is the
+ * one place the label slips.
+ *
+ * `CustomFriendlyName` overrides it PER REQUEST, which is why this is a parameter and not a
+ * service per tenant: a service each would mean provisioning on signup, a SID to store and
+ * migrate, and a second thing to go wrong at 2am — for a string substitution.
+ *
+ * ⚠️ Twilio REJECTS the whole send (HTTP 400) on a friendly name it does not like, so this
+ * sanitizes rather than trusts: letters, digits and spaces only, collapsed, capped at 32.
+ * A tenant's business name is free text they typed — "Yoder's Barns & Sheds, LLC" must not
+ * be able to stop their customers logging in. If nothing survives, the parameter is omitted
+ * and Twilio falls back to the service default, which is exactly today's behaviour.
+ */
+export function twSanitizeBrand(name: unknown): string {
+  if (typeof name !== "string") return "";
+  return name
+    .replace(/[^A-Za-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 32)
+    .trim();
+}
+
+/**
  * Start an SMS verification: Twilio texts a one-time code to `toE164`. Returns the
  * verification's `status` (normally "pending") and its `sid`. The sid is informational —
  * the CHECK path keys on the phone number, not the sid, so nothing breaks if it is lost.
+ *
+ * `brand` is the tenant's own name for the message body (see twSanitizeBrand). Omit it and
+ * the behaviour is byte-identical to before this parameter existed.
  */
-export async function twStartVerification(toE164: string): Promise<{ status: string; sid: string }> {
+export async function twStartVerification(
+  toE164: string,
+  brand?: string,
+): Promise<{ status: string; sid: string }> {
   const creds = requireCreds();
-  const raw = await twFetch(creds, "Verifications", { To: toE164, Channel: "sms" });
+  const params: Record<string, string> = { To: toE164, Channel: "sms" };
+  const friendly = twSanitizeBrand(brand);
+  if (friendly) params.CustomFriendlyName = friendly;
+  const raw = await twFetch(creds, "Verifications", params);
   return {
     status: typeof raw.status === "string" ? raw.status : "",
     sid: typeof raw.sid === "string" ? raw.sid : "",

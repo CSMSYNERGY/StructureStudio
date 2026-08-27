@@ -1,7 +1,16 @@
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null }) {
+  // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
+  // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
+  // pipelines ... this may become the pipeline view."
+  //
+  // It is a VIEW over rows this table already loads, not a second data path — which is
+  // exactly why it is cheap and why it lives here rather than in its own tab. The same
+  // search, the same facets and the same status chips narrow both renderings, so a filter a
+  // builder sets in the list is still set when they flip to the board.
+  const [view, setView] = useState("list");
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
   const [unitSerials, setUnitSerials] = useState({});
@@ -141,7 +150,11 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   const myQuotesLink = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
   const copyCustomerLink = (code) => {
     const done = () => { setCopiedKey(code); setTimeout(() => setCopiedKey((k) => (k === code ? null : k)), 2000); };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, done);
+    // A rejected writeText is NOT a copy: the API exists but can still refuse (permissions
+    // policy, unfocused tab), and `.then(done, done)` used to flash "Copied ✓" over a
+    // clipboard that still held something else — the rep then pastes the wrong thing to a
+    // customer. On rejection, fall back to the same manual prompt no-clipboard browsers get.
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, () => window.prompt("Copy the customer link:", myQuotesLink));
     else window.prompt("Copy the customer link:", myQuotesLink);
   };
   const resendQuoteEmail = async (r) => {
@@ -197,7 +210,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       <CardHead
         title="Designs"
         count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
-        right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
+        right={(
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
+              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => (
+                <button key={k} onClick={() => setView(k)}
+                  style={{
+                    background: view === k ? ACCENT : "#FFF", color: view === k ? "#FFF" : "#334155",
+                    border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                  }}>{label}</button>
+              ))}
+            </div>
+            <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+          </div>
+        )}
       />
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -229,7 +255,51 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
-      {rows && filtered.length > 0 && (
+      {/* ── PIPELINE BOARD ──────────────────────────────────────────────────────────
+          Columns are the stage KINDS, and a design's column is DERIVED from the status the
+          system can prove — accepted is won, invoiced is invoiced. There is no drag here on
+          purpose: dragging implies the rep sets the stage, and `designs.status` is a
+          read-only projection that sync-design-status overwrites on every list load, so a
+          dragged card would snap back and look broken. Moving a deal by hand needs the
+          local crm_stages table, which is the next increment, not this one. */}
+      {rows && filtered.length > 0 && view === "pipeline" && (
+        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
+            {CRM_STAGES.map((st) => {
+              const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
+              return (
+                <div key={st.kind} style={{ flex: "1 0 190px", minWidth: 190, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8" }}>{cards.length}</span>
+                  </div>
+                  {cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
+                  {cards.map((r) => {
+                    const c = r.contact || {}; const s = r.selections || {};
+                    return (
+                      <button key={r.short_code} type="button"
+                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code) : (onOpenDesign && onOpenDesign(r.short_code)))}
+                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 9px", marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.name || c.email || c.phone || "—"}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>
+                          {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3, display: "flex", justifyContent: "space-between", gap: 6 }}>
+                          <span>{fmtDate(r.created_at)}</span>
+                          {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {rows && filtered.length > 0 && view === "list" && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -455,7 +525,7 @@ function buildContactTimeline(act) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null }) {
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null, onOpenRecord = null }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
@@ -475,7 +545,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     } else {
     const { data, error: err } = await sb
       .from("designs")
-      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number")
+      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id")
       .eq("client_id", clientId)
       .order("created_at", { ascending: false });
     if (err) { setError(err.message); setRows([]); return; }
@@ -508,7 +578,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
       // wins the > comparison below — seeded at "sent", a draft-only contact could never
       // display as Draft (its -1 never beats 0).
-      if (!g) { g = { key, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
+      if (!g) { g = { key, contactId: null, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
+      // The real crm_contacts id, once migration 130 has stamped it. Absent until the
+      // backfill runs, which is why the record link below is conditional rather than assumed.
+      if (!g.contactId && r.contact_id) g.contactId = r.contact_id;
       g.count += 1;
       g.codes.push(r.short_code);                     // newest-first (list order)
       // Accumulate design-level searchable text (building + estimate #) so a lead is
@@ -691,7 +764,19 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                   <tr>
                     <td style={{ ...S.td, fontWeight: 700 }}>
                       {(() => { const a = activityInfo(g.lastActivity); return <span title={a.label} style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: a.color, marginRight: 8, verticalAlign: "middle" }} />; })()}
-                      {g.name || "—"}
+                      {/* THE NAME IS THE LINK. Carolyn, 2026-08-24, describing Pipedrive:
+                          "I want it to be very similar to where YOU CLICK THIS CUSTOMER NAME
+                          and you pop it up." It was briefly behind a small "Open record"
+                          button beside Details, which is not what she demonstrated and not
+                          where anyone would look. Falls back to plain text for a contact
+                          with no crm_contacts row yet — i.e. before the backfill has run. */}
+                      {g.contactId && onOpenRecord ? (
+                        <button type="button" onClick={() => onOpenRecord(g.contactId)}
+                          title="Open this contact's record"
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
+                          {g.name || "—"}
+                        </button>
+                      ) : (g.name || "—")}
                     </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
@@ -707,6 +792,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                       {/* In-portal open — same rule as DesignsTable: never the public page. */}
                       {!g.browsing && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open latest</button>}
+                      {/* The "Open record" button that stood here is gone: the customer NAME
+                          is the link now, which is what Carolyn demonstrated. "Details" stays
+                          as the quick inline peek that does not leave the list. */}
                       {!g.browsing && (
                         <button type="button" onClick={() => openDetails(g)}
                           style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
@@ -764,3 +852,559 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   );
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// THE MERGED CRM RECORD PAGE — Contacts + Designs, one shell, two contexts.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// Carolyn walked Pipedrive live on 2026-08-21 and again against our app on 08-24. The
+// load-bearing sentence: "the view of being in an opportunity and the view of being in a
+// person are different, but they're the same. You get the same look, the same work."
+// So: ONE shell, two contexts. Person = Contact, Deal = Design.
+//
+// Deal is a DESIGN, not an Order. Orders only exist after acceptance, so a pipeline made of
+// orders has no top of funnel — every deal would appear already won. A design already
+// carries a value, a status ladder, version history, an estimate number, a PDF, an
+// acceptance record, change orders and an invoice. An Order becomes a SECTION on the
+// design record, not a separate noun.
+//
+// WHY THIS LIVES IN 02-sales.jsx RATHER THAN A NEW portal/03-crm.jsx. The documented
+// convention is to insert a numbered part and renumber every later one, because the
+// numeric prefix IS the concatenation index. That is right, and it is also seven git mv's
+// across a tree that a second session is committing to every few minutes today — the same
+// tree where a sibling commit already swept up this session's uncommitted work once. The
+// components below compose DesignsTable and LeadsTable, which are directly above them, so
+// this is their topical home either way. If the portal is ever re-split, this block is a
+// contiguous slice at a top-level boundary and lifts out cleanly.
+
+// Three registries. A new sidebar section, action tab or history chip is a ROW here, not a
+// rewrite — which is the whole point of building the shell rather than two pages.
+const CRM_SECTIONS = [
+  { key: "summary", title: "Summary", when: () => true },
+  { key: "details", title: "Details", when: () => true },
+  // ── THE RECIPROCAL EMBED. This pair IS Carolyn's "here is the contact, and the deal is
+  // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
+  // its Person. Same shell, mirrored.
+  { key: "deals", title: "Deals", when: (c) => c.kind === "contact" },
+  { key: "person", title: "Person", when: (c) => c.kind === "design" },
+  { key: "overview", title: "Overview", when: () => true },
+];
+
+// The ACTION BAR — "up at the top here is things you can do. So this bar is basically
+// actions that you can take." Disabled tabs render GREYED WITH A TOOLTIP, never hidden: a
+// missing tab reads as "not built", a greyed one reads as "next", and she is showing this
+// at a trade show.
+const CRM_TABS = [
+  // "Not available yet" (the default hint) reads as NOT BUILT, which is the wrong story for
+  // a tab that is merely out of this person's reach — it is built, they just cannot write.
+  { key: "activity", label: "Activity", enabled: (c) => c.canEdit, hint: "You don't have permission to log activities." },
+  { key: "note", label: "Notes", enabled: (c) => c.canEdit, hint: "You don't have permission to add notes." },
+  { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
+  { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
+  // NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE. Ahsan, 2026-08-25:
+  // "we are not using Twilio for conversation or campaigns. We are only using Twilio to get
+  // the code to log in. That's it. For conversation, we are using emails."
+  //
+  // An earlier version of this registry carried a greyed WhatsApp tab hinted "arrives when
+  // the Twilio account is connected" — a promise that was never going to be kept, sitting on
+  // a screen Carolyn shows at a trade show. A greyed tab says "next"; removing it says "not
+  // part of this product", which is the truth. Twilio's only job here is the Verify code
+  // that logs a customer into my-quotes, and that needs no phone number, no messaging
+  // service and no A2P registration.
+  //
+  // Conversations ARE email. That is why the Email tab is the one that grows a composer.
+  // Email IS the conversation channel (Ahsan, 2026-08-25), so this is the tab that carries
+  // a composer. Needs an address to write to — a contact with neither an email nor a design
+  // is a browsing artefact, and offering a compose box that cannot send is worse than not
+  // offering one.
+  // The hint is a FUNCTION because two different things disable this tab, and a fixed
+  // string told the wrong story: a rep without contacts:edit was shown "this contact has no
+  // email address" while the address sat rendered directly above it. A tooltip that blames
+  // the data for a permissions problem sends someone off editing a contact that is fine.
+  {
+    key: "email", label: "Email",
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.email),
+    hint: (c) => (c.canEdit
+      ? "This contact has no email address on file."
+      : "You don't have permission to email contacts."),
+  },
+  { key: "files", label: "Files", enabled: () => false, hint: "Needs a contact-scoped storage bucket." },
+  { key: "documents", label: "Documents", enabled: () => true },
+  { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
+];
+
+// History chips. `types` is the SAME vocabulary the server emits (see _shared/crmFeed.ts's
+// CRM_FEED_TYPES), so a chip can never ask for a type that does not exist — the
+// RANK/STATUS_RANK class of bug, headed off rather than repeated.
+const CRM_CHIPS = [
+  { key: "all", label: "All", types: null },
+  { key: "activities", label: "Activities", types: ["activity"] },
+  { key: "notes", label: "Notes", types: ["note"] },
+  // Both directions under one chip. Carolyn: "I want to be able to see my emails and only
+  // emails in a quick and easy way" — a conversation split across two filters is not that.
+  { key: "emails", label: "Emails", types: ["email", "email_in"] },
+  { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
+  { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
+  { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
+  { key: "changelog", label: "Changelog", types: ["design_version", "status_change", "lead_captured"] },
+];
+
+// The stage bar. Carolyn's own stage names, from her Pipedrive screen.
+//
+// ⚠️ `kind` is the machine-readable half and the ONLY thing anything keys on. Names are
+// tenant-editable and DO get renamed — the Monday "Shipped" -> "Completed" rename stalled
+// every feature-request sync for a day, and 087 wrote the same lesson down for the build
+// schedule. Automation keys on kind, never on the name.
+const CRM_STAGES = [
+  { kind: "new", name: "Qualified" },
+  { kind: "working", name: "Demo Scheduled" },
+  { kind: "quoted", name: "Proposal Made" },
+  { kind: "won", name: "Contract Signed" },
+  { kind: "invoiced", name: "Invoiced" },
+  { kind: "delivered", name: "Delivered" },
+];
+// Derived from the status the system can PROVE. A rep may not drag a deal into "Won" —
+// accepting the quote is what does that. This is what stops a second source of truth for
+// revenue existing alongside the real one.
+const CRM_STAGE_FOR_STATUS = {
+  draft: "new", sent: "quoted", accepted: "won", invoiced: "invoiced", delivered: "delivered",
+};
+
+function CrmStageBar({ status }) {
+  const at = CRM_STAGE_FOR_STATUS[normStatus(status)] || "new";
+  const idx = Math.max(0, CRM_STAGES.findIndex((s) => s.kind === at));
+  return (
+    <div style={{ display: "flex", gap: 2, marginBottom: 12, flexWrap: "wrap" }}>
+      {CRM_STAGES.map((s, i) => (
+        <div key={s.kind} title={i <= idx ? "Reached" : "Not yet"}
+          style={{
+            flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
+            background: i < idx ? "#DDD6FE" : i === idx ? ACCENT : "#F1F5F9",
+            color: i === idx ? "#FFF" : i < idx ? ACCENT : "#94A3B8",
+            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
+          }}>
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The record page. One component, two contexts, driven entirely by the registries above.
+//
+// ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
+// scoped to current_client_id(), so in operator view-as a direct read returns NOTHING —
+// which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
+// operator-portal. Going through portal-settings means resolveTenant handles
+// targetClientId and app_operators for free, and there is no second code path to keep true.
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [tab, setTab] = useState("note");
+  const [chip, setChip] = useState("all");
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [mail, setMail] = useState({ subject: "", body: "" });
+  const [mailMsg, setMailMsg] = useState(null);
+  const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
+  // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
+  // renders only inside the Email tab — these controls need their own slot, keyed by control
+  // so a note error can't surface under Focus too. Every new attempt clears it first, so a
+  // stale failure never outlives the action that follows it.
+  const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus", msg }
+
+  const load = useCallback(async () => {
+    setErr(null);
+    const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "crm_record", kind, id: recordId } });
+    if (error || (d && d.error)) { setErr((error && error.message) || d.error); return; }
+    setData(d);
+  }, [kind, recordId]);
+  useEffect(() => { load(); }, [load]);
+
+  if (err) {
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>Not found</div>
+        <p style={{ fontSize: 13, color: "#64748B" }}>{err}</p>
+        <button style={S.btn()} onClick={onBack}>Back</button>
+      </div>
+    );
+  }
+  if (!data) return <div style={S.card}>Loading…</div>;
+
+  const record = kind === "design" ? (data.designs || [])[0] : data.contact;
+  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [] };
+  const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
+  const sel = (record && record.selections) || {};
+  const title = kind === "design"
+    ? ([sel.style, sel.size].filter(Boolean).join(" ") || (record && record.short_code) || "Design")
+    : cname;
+
+  const chips = CRM_CHIPS.filter((c) => !c.when || c.when(ctx));
+  const active = chips.find((c) => c.key === chip) || chips[0];
+  const feed = (data.feed || []).filter((e) => !active.types || active.types.indexOf(e.type) !== -1);
+
+  const saveNote = async () => {
+    const body = draft.trim();
+    if (!body) return;
+    setBusy(true); setOpErr(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_save_note", body,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    // A silent failure here looked exactly like a save — no message, and the note simply
+    // never appeared in History. Say so, and keep the draft: nothing was saved, so clearing
+    // the box would destroy the one copy of what they typed.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setOpErr({ where: "note", msg: `Note not saved — ${failMsg}` }); return; }
+    setDraft(""); load();
+  };
+
+  // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
+  // since 131, with `crm_complete_activity` to tick one off and a Focus block promising
+  // "scheduled activities appear here" — but nothing in the UI could ever CREATE one, so the
+  // tab was enabled and inert and Focus could only ever be empty. This is that missing half.
+  const saveActivity = async () => {
+    const subject = act.subject.trim();
+    if (!subject) return;
+    setBusy(true); setOpErr(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_save_activity", kind: act.kind, subject,
+        // A date-only input is midday-anchored, the same trick the payments and change-order
+        // screens use: UTC midnight renders as the PREVIOUS day for every US timezone.
+        dueAt: act.dueAt ? new Date(act.dueAt + "T12:00:00").toISOString() : null,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    // Same as saveNote: a silent failure looked like a save, and the activity never showed
+    // in Focus. Report it and keep the form filled — nothing was saved.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setOpErr({ where: "activity", msg: `Activity not saved — ${failMsg}` }); return; }
+    setAct({ kind: "call", subject: "", dueAt: "" }); load();
+  };
+
+  const sendEmail = async () => {
+    const subject = mail.subject.trim(), body = mail.body.trim();
+    if (!subject || !body) return;
+    setBusy(true); setMailMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_send_email",
+        to: data.contact && data.contact.email,
+        subject, body,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    // The server authors every sentence here — a domain that is not verified yet, a
+    // provider that is dark, a bounce. Restating them in the browser is how the two drift.
+    const err = (r && r.error) || (error && error.message);
+    if (err) { setMailMsg({ err }); return; }
+    setMail({ subject: "", body: "" });
+    setMailMsg({ ok: "Sent." });
+    load();
+  };
+
+  const renderSection = (key) => {
+    if (key === "summary") {
+      return kind === "contact" ? (
+        <div style={{ fontSize: 13, color: "#475569" }}>
+          <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
+          <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 13, color: "#475569" }}>
+          <div>Estimate {record.ss_quote_number || record.ghl_estimate_number || "—"}</div>
+        </div>
+      );
+    }
+    if (key === "details") {
+      return kind === "contact" ? (
+        <div style={{ fontSize: 13, color: "#475569" }}>First seen {fmtDate(data.contact.first_seen_at)}</div>
+      ) : (
+        <div style={{ fontSize: 13, color: "#475569" }}>{sel.style || "—"} · {sel.size || "—"}</div>
+      );
+    }
+    if (key === "deals") {
+      return (
+        <div>
+          <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({(data.designs || []).length})</div>
+          {(data.designs || []).map((d) => (
+            <button key={d.short_code} onClick={() => onNavigate("design", d.short_code)}
+              style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: "pointer" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+              </div>
+              <div style={{ fontSize: 11, color: "#64748B" }}>{fmtDate(d.created_at)}</div>
+            </button>
+          ))}
+          {(data.designs || []).length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No designs yet.</div>}
+        </div>
+      );
+    }
+    if (key === "person") {
+      return data.contact ? (
+        <button onClick={() => data.contact.id && onNavigate("contact", data.contact.id)}
+          style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", cursor: data.contact.id ? "pointer" : "default" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>{cname}</div>
+          <div style={{ fontSize: 11, color: "#64748B" }}>{data.contact.email || data.contact.phone || "—"}</div>
+        </button>
+      ) : <div style={{ fontSize: 12, color: "#94A3B8" }}>No contact linked.</div>;
+    }
+    if (key === "overview") {
+      const last = (data.feed || [])[0];
+      return (
+        <div style={{ fontSize: 13, color: "#475569" }}>
+          <div>Created {fmtDate(record && (record.created_at || record.first_seen_at))}</div>
+          <div>Last activity {last ? fmtDate(last.at) : "—"}</div>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0" }} onClick={onBack}>Back</button>
+        <div style={{ fontSize: 20, fontWeight: 800, color: "#1E293B" }}>{title}</div>
+        {kind === "design" && onOpenDesign && (
+          <div style={{ marginLeft: "auto" }}>
+            {/* IN-PORTAL ONLY. Linking to the public ?id= page fires capture-lead and draft
+                saves, corrupting the very activity this page reports on. */}
+            <button style={S.btn(ACCENT, "#FFF")} onClick={() => onOpenDesign(recordId)}>Open in designer</button>
+          </div>
+        )}
+      </div>
+      {kind === "design" && <CrmStageBar status={record.status} />}
+
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
+          {CRM_SECTIONS.filter((s) => s.when(ctx)).map((s) => (
+            <div key={s.key} style={{ ...S.card, marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 7 }}>{s.title}</div>
+              {renderSection(s.key)}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ flex: "3 1 420px", minWidth: 320 }}>
+          <div style={S.card}>
+            <div style={{ display: "flex", gap: 3, flexWrap: "wrap", borderBottom: "1px solid #E2E8F0", paddingBottom: 7, marginBottom: 9 }}>
+              {CRM_TABS.filter((t) => !t.when || t.when(ctx)).map((t) => {
+                const on = t.enabled(ctx);
+                return (
+                  <button key={t.key} disabled={!on}
+                    title={on ? "" : (typeof t.hint === "function" ? t.hint(ctx) : (t.hint || "Not available yet"))}
+                    onClick={() => { if (on) setTab(t.key); }}
+                    style={{
+                      background: tab === t.key && on ? "#EEF2FF" : "transparent",
+                      color: on ? (tab === t.key ? ACCENT : "#475569") : "#CBD5E1",
+                      border: "none", borderRadius: 6, padding: "5px 9px", fontSize: 12,
+                      fontWeight: 700, cursor: on ? "pointer" : "not-allowed",
+                    }}>{t.label}</button>
+                );
+              })}
+            </div>
+
+            {tab === "email" && canEdit && data.contact && data.contact.email && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
+                  To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
+                </div>
+                <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
+                  placeholder="Subject" style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
+                  placeholder="Write to this customer…"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
+                  <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
+                    {busy ? "Sending…" : "Send email"}
+                  </button>
+                  {mailMsg && mailMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{mailMsg.ok}</span>}
+                  {mailMsg && mailMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{mailMsg.err}</span>}
+                </div>
+              </div>
+            )}
+            {/* ACTIVITY. Kind first, because "call" and "deadline" read completely
+                differently in the feed, and the kind is what the icon and label key on. */}
+            {tab === "activity" && canEdit && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
+                  {["call", "meeting", "task", "deadline", "lunch"].map((k) => (
+                    <button key={k} type="button" onClick={() => setAct((p) => ({ ...p, kind: k }))}
+                      style={{
+                        background: act.kind === k ? ACCENT : "#F1F5F9", color: act.kind === k ? "#FFF" : "#475569",
+                        border: "none", borderRadius: 999, padding: "3px 11px", fontSize: 11.5, fontWeight: 700,
+                        cursor: "pointer", textTransform: "capitalize",
+                      }}>{k}</button>
+                  ))}
+                </div>
+                <input value={act.subject} onChange={(e) => setAct((p) => ({ ...p, subject: e.target.value }))}
+                  placeholder="What needs doing? e.g. Call back about the loft"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input type="date" value={act.dueAt} onChange={(e) => setAct((p) => ({ ...p, dueAt: e.target.value }))}
+                    style={{ ...S.sel, width: "auto" }} />
+                  <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Leave the date blank for an undated task.</span>
+                  <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !act.subject.trim()} onClick={saveActivity}>
+                    {busy ? "Saving…" : "Save activity"}
+                  </button>
+                  {opErr && opErr.where === "activity" && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{opErr.msg}</span>}
+                </div>
+              </div>
+            )}
+
+            {/* DOCUMENTS. Everything this record has actually produced, as links. The tab was
+                enabled and rendered nothing, which reads as a broken page rather than an
+                empty one — and on a record with a quote there is never nothing to show. */}
+            {tab === "documents" && (
+              <div style={{ marginBottom: 12 }}>
+                {(() => {
+                  const docs = [];
+                  (data.designs || []).forEach((d) => {
+                    const what = [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code;
+                    if (d.ss_quote_pdf_url) docs.push({ k: `q:${d.short_code}`, label: `Quote ${d.ss_quote_number || ""}`.trim() + ` — ${what}`, url: d.ss_quote_pdf_url });
+                    if (d.image_url) docs.push({ k: `p:${d.short_code}`, label: `Floor plan — ${what}`, url: d.image_url });
+                  });
+                  if (docs.length === 0) {
+                    return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No documents yet. A quote PDF appears here as soon as one is sent.</div>;
+                  }
+                  return docs.map((doc) => (
+                    <a key={doc.k} href={doc.url} target="_blank" rel="noopener"
+                      style={{
+                        display: "block", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
+                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, textDecoration: "none",
+                      }}>📄 {doc.label}</a>
+                  ));
+                })()}
+              </div>
+            )}
+
+            {/* INVOICE. Invoicing lives on the order, which is where payments, change orders
+                and the schedule already are — a second invoice button on a second screen is
+                how two sources of truth for money get built. So this routes rather than
+                duplicates, and says plainly what the customer still has to do. */}
+            {tab === "invoice" && kind === "design" && (
+              <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
+                <div style={{ fontSize: 12.5, color: "#475569" }}>
+                  This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
+                  payments, change orders and build schedule for the same building.
+                </div>
+                <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                  The customer signs the invoice; the order is marked Invoiced once they do.
+                </div>
+                {/* A LINK, not a navigate() call: `navigate` is a useCallback inside
+                    Dashboard (09-shell) and is not in scope in this part — calling it here
+                    would throw on click. The route is real, so an anchor is both correct
+                    and survives someone reorganising the shell. */}
+                <a href="/portal/orders"
+                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8, display: "inline-block", textDecoration: "none" }}>
+                  Open Orders
+                </a>
+              </div>
+            )}
+
+            {tab === "note" && canEdit && (
+              <div style={{ marginBottom: 12 }}>
+                <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
+                  placeholder="Click here to add a note…"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                <button style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 5 }} disabled={busy || !draft.trim()} onClick={saveNote}>
+                  {busy ? "Saving…" : "Save note"}
+                </button>
+                {opErr && opErr.where === "note" && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginLeft: 8 }}>{opErr.msg}</span>}
+              </div>
+            )}
+
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>Focus</div>
+            {opErr && opErr.where === "focus" && <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginBottom: 6 }}>{opErr.msg}</div>}
+            {(data.focus || []).length === 0 ? (
+              <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>
+                No focus items yet. Scheduled activities and pinned notes appear here.
+              </div>
+            ) : (
+              <div style={{ marginBottom: 12 }}>
+                {(data.focus || []).map((f) => (
+                  <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 0" }}>
+                    <input type="checkbox" onChange={async (e) => {
+                      // The box is uncontrolled, so a failed complete would leave it ticked
+                      // while the item stays in Focus — looking done when it isn't. Untick
+                      // it and say what happened instead of failing silently.
+                      const box = e.target;
+                      setOpErr(null);
+                      const { data: r, error } = await sb.functions.invoke("portal-settings", { body: { action: "crm_complete_activity", id: f.id, done: true } });
+                      const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+                      if (failMsg) { box.checked = false; setOpErr({ where: "focus", msg: `Could not complete "${f.subject}" — ${failMsg}` }); return; }
+                      load();
+                    }} />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{f.subject}</span>
+                    <span style={{ fontSize: 11, color: "#94A3B8" }}>{f.due_at ? fmtDate(f.due_at) : "no due date"}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* HISTORY. The filter chips are the thing she kept pointing at: "the best
+                thing about it is then down here we can sort it ... I want to be able to see
+                my emails and only emails in a quick and easy way like this." */}
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>History</div>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 9 }}>
+              {chips.map((c) => {
+                const n = c.types ? (data.feed || []).filter((e) => c.types.indexOf(e.type) !== -1).length : (data.feed || []).length;
+                return (
+                  <button key={c.key} onClick={() => setChip(c.key)}
+                    style={{
+                      background: chip === c.key ? ACCENT : "#F1F5F9", color: chip === c.key ? "#FFF" : "#475569",
+                      border: "none", borderRadius: 999, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    }}>{c.label} ({n})</button>
+                );
+              })}
+            </div>
+            {feed.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#94A3B8" }}>Nothing here yet.</div>
+            ) : feed.map((e) => (
+              <div key={e.id} style={{ display: "flex", gap: 9, padding: "7px 0", borderTop: "1px solid #F1F5F9" }}>
+                <div style={{ width: 8, height: 8, borderRadius: 99, background: "#CBD5E1", marginTop: 5, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  {/* A note renders as the highlighted card she liked; system events render
+                      as plain text. That contrast is what makes a human entry findable in a
+                      feed that is mostly machine output. */}
+                  {e.type === "email_in" ? (
+                    /* A REPLY LOOKS LIKE THE CUSTOMER SPEAKING. Tinted, indented and
+                       attributed, so a human message is findable in a feed that is otherwise
+                       machine output — the same reason a note is a yellow card. Getting this
+                       wrong would bury the one thing in the conversation somebody wrote. */
+                    <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 6, padding: "7px 9px" }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#1D4ED8", marginBottom: 2 }}>
+                        ↩ {e.actor || "Customer"} replied
+                      </div>
+                      {e.title && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{e.title}</div>}
+                      {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", marginTop: 2 }}>{e.body}</div>}
+                    </div>
+                  ) : e.type === "note" ? (
+                    <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{e.title}</div>
+                      {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{e.body}</div>}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{fmtDate(e.at)}{e.code ? " · " + e.code : ""}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -113,6 +113,24 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
     const subId = String(sub.subscription_id ?? sub.id ?? "");
     if (!subId) throw new Error("No subscription id in payload");
     const status = sub.status ? String(sub.status) : null;
+    // The gateway account is SHARED with other CSM Synergy products, so their subscription
+    // events arrive at this endpoint too (observed order_id prefixes "cs_" and "fu_" —
+    // Framed-UP; ours is "ss_", minted only by portal-billing). Those events can NEVER
+    // resolve to a StructureStudio tenant, and throwing made the gateway redeliver for
+    // hours while app_errors filled with "cannot resolve tenant" / "No billing_subscriptions
+    // row" rows (40+ per foreign subscription, observed 2026-08-24/25). A POSITIVELY
+    // foreign prefix is acked as processed-with-note instead; an absent or unparseable
+    // order_id keeps the throw-and-retry behaviour that out-of-order ss_ events rely on
+    // (see the reordering note on the delete case).
+    const orderIdRaw = String(sub.order_id ?? sub.orderid ?? "");
+    const foreignOrderPrefix = (() => {
+      const m = /^([a-z]+)_/.exec(orderIdRaw);
+      return m && m[1] !== "ss" ? `${m[1]}_` : null;
+    })();
+    const ackForeign = async () => {
+      await done(true, `ignored: foreign-product subscription (order_id=${orderIdRaw})`);
+      return json({ ok: true, ignored: "foreign-product subscription" });
+    };
     // NMI sends next_charge_date: "1970-01-01" as its placeholder for "no scheduled date"
     // — observed on EVERY live event 2026-07-28, adds and deletes alike. Stored at face
     // value that puts an epoch-zero renewal date in front of the tenant and makes any
@@ -167,11 +185,15 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         //      gateway, which we would have no row for.
         const { data: existingSub } = await admin.from("billing_subscriptions")
           .select("client_id, current_period_start, status").eq("id", subId).maybeSingle();
-        const orderId = String(sub.order_id ?? sub.orderid ?? "");
-        const fromOrderId = /^ss_([a-z0-9-]+)_/.exec(orderId)?.[1] ?? null;
+        // ss_first_<clientId>_<planId> is portal-billing's first-charge variant; without
+        // the optional "first_" hop the capture group returned the literal "first" as the
+        // tenant slug, and a gateway-created subscription would have been homed on a
+        // nonexistent client called "first".
+        const fromOrderId = /^ss_(?:first_)?([a-z0-9-]+)_/.exec(orderIdRaw)?.[1] ?? null;
         const tenant = existingSub?.client_id ?? clientId ?? fromOrderId;
         if (!tenant) {
-          throw new Error(`subscription.add: cannot resolve tenant (order_id=${orderId || "absent"})`);
+          if (foreignOrderPrefix) return await ackForeign();
+          throw new Error(`subscription.add: cannot resolve tenant (order_id=${orderIdRaw || "absent"})`);
         }
         // This event's real value is next_charge_date — portal-billing cannot know it.
         // Don't clobber what we already recorded: leave current_period_start alone on a
@@ -220,7 +242,10 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
                     { count: "exact" })
             .eq("id", subId);
           if (peErr) throw new Error(peErr.message);
-          if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+          if (!count) {
+            if (foreignOrderPrefix) return await ackForeign();
+            throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+          }
           break;
         }
         if (!next) {
@@ -253,7 +278,10 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
           ...pastDuePatch,
         }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
-        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+        if (!count) {
+          if (foreignOrderPrefix) return await ackForeign();
+          throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+        }
         break;
       }
       case "recurring.subscription.delete": {
@@ -272,7 +300,10 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
           status: "cancelled", canceled_at: new Date().toISOString(), updated_at: new Date().toISOString(),
         }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
-        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+        if (!count) {
+          if (foreignOrderPrefix) return await ackForeign();
+          throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+        }
         break;
       }
       case "recurring.subscription.pause": {
@@ -282,7 +313,10 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
           status: "paused", updated_at: new Date().toISOString(),
         }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
-        if (!count) throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+        if (!count) {
+          if (foreignOrderPrefix) return await ackForeign();
+          throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
+        }
         break;
       }
       default:

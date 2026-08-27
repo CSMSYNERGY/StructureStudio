@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 f723f8e309b2)
+// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 9747ac6803ca)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -31,7 +31,8 @@ function _objectWithoutPropertiesLoose(source, excluded) { if (source == null) r
 var _React = React,
   useState = _React.useState,
   useEffect = _React.useEffect,
-  useCallback = _React.useCallback;
+  useCallback = _React.useCallback,
+  useRef = _React.useRef;
 var createClient = window.supabase.createClient;
 
 // ─── StructureStudio Operator Admin ───
@@ -702,6 +703,7 @@ function AdminApp() {
     _useState74 = _slicedToArray(_useState73, 2),
     itemSel = _useState74[0],
     setItemSel = _useState74[1]; // staged layout-item picks (applied together on Save)
+  var itemsDirty = useRef(false); // true while itemSel holds unsaved ticks — see the re-sync effect below
   var _useState75 = useState(false),
     _useState76 = _slicedToArray(_useState75, 2),
     delOpen = _useState76[0],
@@ -739,10 +741,16 @@ function AdminApp() {
     _useState92 = _slicedToArray(_useState91, 2),
     emailTestBusy = _useState92[0],
     setEmailTestBusy = _useState92[1];
+
+  // Auto-dismiss clears only the message it announced: the timer captures its own m and
+  // the functional update checks identity, so a newer message flashed inside the 2.5s
+  // window (e.g. an error from the next action) is never wiped by the stale timer.
   var flash = function flash(m) {
     setMsg(m);
     if (m && m.ok) setTimeout(function () {
-      return setMsg(null);
+      return setMsg(function (cur) {
+        return cur === m ? null : cur;
+      });
     }, 2500);else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, {
       ui: "flash"
     });
@@ -1486,10 +1494,18 @@ function AdminApp() {
   }();
 
   // Layout-item editing is staged: the pills toggle a local selection and nothing is
-  // written until "Save". Re-sync the staged set whenever the loaded client/catalog
-  // changes (client switch or a post-save refresh). cat only changes on an explicit
-  // load/refresh, so an operator's in-progress ticks are never clobbered mid-edit.
+  // written until "Save". Re-sync the staged set when the loaded builder or catalog
+  // changes — but NOT while the operator has unsaved ticks: cat also refreshes after
+  // UNRELATED writes (act()'s best-effort refresh — e.g. a Building Styles active-pill
+  // toggle — createStyle, a CSV import), and re-syncing then would silently discard
+  // the staged picks. itemsDirty is set by the tick handlers, cleared on a builder
+  // switch (stale staging must not leak into the next tenant's view) and by saveItems
+  // once its writes land — its post-save refresh is a cat change that SHOULD re-sync.
   useEffect(function () {
+    itemsDirty.current = false;
+  }, [sel]); // declared first so a builder switch re-syncs below
+  useEffect(function () {
+    if (itemsDirty.current) return;
     setItemSel(new Set((cat && cat.clientLayoutItems || []).filter(function (i) {
       return i.active;
     }).map(function (i) {
@@ -1497,19 +1513,22 @@ function AdminApp() {
     })));
   }, [sel, cat]);
   var toggleItemSel = function toggleItemSel(key) {
-    return setItemSel(function (prev) {
+    itemsDirty.current = true;
+    setItemSel(function (prev) {
       var n = new Set(prev);
       n.has(key) ? n["delete"](key) : n.add(key);
       return n;
     });
   };
   var selectAllItems = function selectAllItems() {
-    return setItemSel(new Set((master && master.layoutItemTypes || []).map(function (i) {
+    itemsDirty.current = true;
+    setItemSel(new Set((master && master.layoutItemTypes || []).map(function (i) {
       return i.item_key;
     })));
   };
   var clearAllItems = function clearAllItems() {
-    return setItemSel(new Set());
+    itemsDirty.current = true;
+    setItemSel(new Set());
   };
   // Diff the staged set against what's actually assigned, then apply only the changes
   // (enable newly-ticked, disable newly-unticked) and refresh once at the end — so the
@@ -1540,120 +1559,125 @@ function AdminApp() {
             toDisable = keys.filter(function (k) {
               return !itemSel.has(k) && saved.has(k);
             });
-            total = toEnable.length + toDisable.length;
+            total = toEnable.length + toDisable.length; // Staged set matches what's saved (ticks toggled back, or none touched): nothing
+            // unsaved left to protect, so let the next catalog refresh re-sync again.
             if (!(total === 0)) {
-              _context12.next = 10;
+              _context12.next = 11;
               break;
             }
+            itemsDirty.current = false;
             flash({
               ok: "No changes to save."
             });
             return _context12.abrupt("return");
-          case 10:
+          case 11:
             setBusy(true);
             setMsg(null);
-            _context12.prev = 12;
+            _context12.prev = 13;
             _iterator = _createForOfIteratorHelper(toEnable);
-            _context12.prev = 14;
+            _context12.prev = 15;
             _iterator.s();
-          case 16:
+          case 17:
             if ((_step = _iterator.n()).done) {
-              _context12.next = 22;
+              _context12.next = 23;
               break;
             }
             k = _step.value;
-            _context12.next = 20;
+            _context12.next = 21;
             return api("toggle_item", pwd, {
               clientId: sel,
               itemKey: k,
               active: true
             });
-          case 20:
-            _context12.next = 16;
+          case 21:
+            _context12.next = 17;
             break;
-          case 22:
-            _context12.next = 27;
+          case 23:
+            _context12.next = 28;
             break;
-          case 24:
-            _context12.prev = 24;
-            _context12.t0 = _context12["catch"](14);
+          case 25:
+            _context12.prev = 25;
+            _context12.t0 = _context12["catch"](15);
             _iterator.e(_context12.t0);
-          case 27:
-            _context12.prev = 27;
+          case 28:
+            _context12.prev = 28;
             _iterator.f();
-            return _context12.finish(27);
-          case 30:
+            return _context12.finish(28);
+          case 31:
             _iterator2 = _createForOfIteratorHelper(toDisable);
-            _context12.prev = 31;
+            _context12.prev = 32;
             _iterator2.s();
-          case 33:
+          case 34:
             if ((_step2 = _iterator2.n()).done) {
-              _context12.next = 39;
+              _context12.next = 40;
               break;
             }
             _k = _step2.value;
-            _context12.next = 37;
+            _context12.next = 38;
             return api("toggle_item", pwd, {
               clientId: sel,
               itemKey: _k,
               active: false
             });
-          case 37:
-            _context12.next = 33;
+          case 38:
+            _context12.next = 34;
             break;
-          case 39:
-            _context12.next = 44;
+          case 40:
+            _context12.next = 45;
             break;
-          case 41:
-            _context12.prev = 41;
-            _context12.t1 = _context12["catch"](31);
+          case 42:
+            _context12.prev = 42;
+            _context12.t1 = _context12["catch"](32);
             _iterator2.e(_context12.t1);
-          case 44:
-            _context12.prev = 44;
+          case 45:
+            _context12.prev = 45;
             _iterator2.f();
-            return _context12.finish(44);
-          case 47:
-            _context12.next = 54;
+            return _context12.finish(45);
+          case 48:
+            _context12.next = 55;
             break;
-          case 49:
-            _context12.prev = 49;
-            _context12.t2 = _context12["catch"](12);
+          case 50:
+            _context12.prev = 50;
+            _context12.t2 = _context12["catch"](13);
             flash({
               err: _context12.t2.message
             });
             setBusy(false);
             return _context12.abrupt("return");
-          case 54:
+          case 55:
+            // Writes landed: the staging is no longer "unsaved", so clear the dirty flag BEFORE
+            // the refresh below — that refresh is the one cat change that must re-sync itemSel.
+            itemsDirty.current = false;
             flash({
               ok: "Saved ".concat(total, " change").concat(total === 1 ? "" : "s", ".")
             });
-            _context12.prev = 55;
+            _context12.prev = 57;
             _context12.t3 = setCat;
-            _context12.next = 59;
+            _context12.next = 61;
             return api("get_client_catalog", pwd, {
               clientId: sel
             });
-          case 59:
+          case 61:
             _context12.t4 = _context12.sent;
             (0, _context12.t3)(_context12.t4);
             _context12.t5 = setMaster;
-            _context12.next = 64;
+            _context12.next = 66;
             return api("get_master", pwd);
-          case 64:
+          case 66:
             _context12.t6 = _context12.sent;
             (0, _context12.t5)(_context12.t6);
-            _context12.next = 70;
+            _context12.next = 72;
             break;
-          case 68:
-            _context12.prev = 68;
-            _context12.t7 = _context12["catch"](55);
           case 70:
+            _context12.prev = 70;
+            _context12.t7 = _context12["catch"](57);
+          case 72:
             setBusy(false);
-          case 71:
+          case 73:
           case "end":
             return _context12.stop();
         }
-      }, _callee12, null, [[12, 49], [14, 24, 27, 30], [31, 41, 44, 47], [55, 68]]);
+      }, _callee12, null, [[13, 50], [15, 25, 28, 31], [32, 42, 45, 48], [57, 70]]);
     }));
     return function saveItems() {
       return _ref19.apply(this, arguments);

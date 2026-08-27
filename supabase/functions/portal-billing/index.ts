@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
+import { paidThroughOf } from "../_shared/billingPeriods.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
 // WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts.
@@ -241,42 +242,18 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // interval are both facts we hold; the roll STOPS at cancellation, because that is when the
   // gateway stopped charging — so this credits every period that was paid and not one more.
   //
-  // On the cadence, deliberately: the gateway has two, and checkout already encodes both — the
-  // discounted plan_amount path bills on a day-of-month capped at 28, while the plan_id path uses
-  // the gateway plan's own day_frequency (365 yearly, 30 monthly). This uses CALENDAR intervals
-  // for all of them rather than inferring the path per row, because 12 × 30 days = 360 < 365: a
-  // calendar boundary is never EARLIER than the gateway's, so the worst case is a tenant keeping
-  // a couple of days more than they strictly bought. That direction is the whole point — this
-  // value is a floor on access already paid for, not an instruction to charge anyone.
-  // Calendar arithmetic with END-OF-MONTH CLAMPING. A bare setUTCMonth(+1) overflows — Aug 31
-  // becomes Oct 1 and Jan 31 becomes Mar 3 — which would hand out a bonus period whose size
-  // depends on the anchor day. Clamping gives the conventional, predictable answer instead
-  // (Aug 31 → Sep 30, Jan 31 → Feb 28/29, Feb 29 → Feb 28 on a non-leap year).
-  const addInterval = (ms: number, interval: string): number => {
-    const d = new Date(ms);
-    const yearly = /^(year|annual)/.test(String(interval).toLowerCase());
-    const day = d.getUTCDate();
-    const target = new Date(Date.UTC(
-      d.getUTCFullYear() + (yearly ? 1 : 0),
-      d.getUTCMonth() + (yearly ? 0 : 1),
-      1, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds(),
-    ));
-    const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-    target.setUTCDate(Math.min(day, lastDay));
-    return target.getTime();
-  };
-  const paidThroughOf = (s: any): number => {
-    const stored = s?.current_period_end ? Date.parse(s.current_period_end) : NaN;
-    if (!Number.isFinite(stored)) return NaN;          // legacy bill-in-arrears row: nothing prepaid
-    const interval = planById.get(s.plan_id)?.billing_interval ?? "month";
-    // The gateway charged periods until cancellation (or until now, if somehow not cancelled).
-    const chargedUntil = s?.canceled_at ? Date.parse(s.canceled_at) : Date.now();
-    if (!Number.isFinite(chargedUntil)) return stored;
-    let end = stored;
-    // Bounded: 1 extra iteration per elapsed interval, capped so a bad date cannot spin.
-    for (let i = 0; i < 240 && end <= chargedUntil; i++) end = addInterval(end, interval);
-    return end;
-  };
+  // On the cadence, deliberately: since 2026-08-24 every NEW subscription bills on a
+  // day-of-month capped at 28 (custom-amount form — the only form now), while the two legacy
+  // plan_id subscriptions (simple_layout_annual, pre-collapse) still follow their gateway
+  // plan's day_frequency (365 yearly). This uses CALENDAR intervals for all of them rather
+  // than inferring the path per row, because 12 × 30 days = 360 < 365: a calendar boundary is
+  // never EARLIER than the gateway's, so the worst case is a tenant keeping a couple of days
+  // more than they strictly bought. That direction is the whole point — this value is a floor
+  // on access already paid for, not an instruction to charge anyone.
+  // The arithmetic itself (addInterval + the roll-forward) lives in _shared/billingPeriods.ts,
+  // shared with admin-catalog's operator billing overview so both compute the same dates.
+  const paidThrough = (s: any): number =>
+    paidThroughOf(s, planById.get(s?.plan_id)?.billing_interval ?? "month");
   const now = Date.now();
   // Best state per feature: active beats in-grace beats everything else.
   const featureState = new Map<string, { usable: boolean; state: string; graceEnds: number | null }>();
@@ -295,8 +272,8 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       // period". current_period_end is reliable on rows created since the same change; the
       // legacy rows without it (nothing was prepaid under the old bill-in-arrears flow)
       // fall through to the old lock-immediately behaviour, which for them is correct.
-      const paidThrough = paidThroughOf(s);
-      if (Number.isFinite(paidThrough) && paidThrough > now) {
+      const paidUntil = paidThrough(s);
+      if (Number.isFinite(paidUntil) && paidUntil > now) {
         st = { usable: true, state: "cancelled_paid", graceEnds: null };
       }
     }
@@ -470,11 +447,59 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // an owner gets the commercial detail: what this business pays, what discount it has,
     // whether a card is on file, or the checkout keys to put a new one there.
     const mine = canRead("settings_billing");
+
+    // WALLET. Behind the same field filter as the rest of the commercial detail: a
+    // balance is what this business has paid for, so it belongs with `discount` and
+    // `hasCard`, not with `entitlement`.
+    //
+    // Labels are authored HERE, server-side, so the browser never maps a `kind` enum to
+    // English and drifts from it. `cost_cents` and `usage` are never selected — that
+    // column is our gross margin on a $20 charge and is the single worst thing in this
+    // schema for a tenant to read.
+    let wallet: Record<string, unknown> | null = null;
+    if (mine) {
+      try {
+        const [acct, price, txs] = await Promise.all([
+          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt").eq("client_id", clientId).maybeSingle(),
+          admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible").eq("active", true).order("sort_order"),
+          admin.from("wallet_transactions").select("id, kind, amount_cents, meter_kind, state, memo, created_at")
+            .eq("client_id", clientId).in("state", ["posted", "held"]).order("created_at", { ascending: false }).limit(10),
+        ]);
+        const meters = (price.data ?? []).map((p: any) => ({
+          kind: p.kind, label: p.label, unitLabel: p.unit_label,
+          priceCents: p.visible === false ? null : Number(p.price_cents),
+        }));
+        const label = (t: any) => {
+          if (t.kind === "topup") return "Added funds";
+          if (t.kind === "grant") return "Credit from CSM Synergy";
+          if (t.kind === "adjustment") return t.memo ? `Adjustment — ${t.memo}` : "Adjustment";
+          if (t.kind === "refund") return "Refund";
+          if (t.meter_kind === "video_3d_generation") return "3D generation from a video";
+          return "Usage";
+        };
+        wallet = {
+          balanceCents: Number(acct.data?.balance_cents ?? 0),
+          heldCents: Number(acct.data?.held_cents ?? 0),
+          exempt: Boolean(acct.data?.metered_exempt),
+          meters,
+          transactions: (txs.data ?? []).map((t: any) => ({
+            id: t.id, label: label(t), amountCents: Number(t.amount_cents),
+            pending: t.state === "held", at: t.created_at,
+          })),
+        };
+      } catch (_) {
+        // A wallet read must never take the Billing tab down with it — `status` is the
+        // action that decides whether the whole portal is locked.
+        wallet = null;
+      }
+    }
+
     return json({
       configured,
       entitlement,
       ...(mine
         ? {
+          wallet,
           hasCard: Boolean(vaultId),
           discount: { percent: discountPct, features: discountFeatures },
           plans: publicPlans,
@@ -610,38 +635,36 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // Bill on today's day-of-month, capped at 28 so a subscription started on the 29th-31st
     // has the same anniversary in February as in every other month rather than drifting.
     const billingDay = Math.min(checkoutNow.getUTCDate(), 28);
-    // First renewal, custom-amount path: one interval from today on billingDay (≤28, so
-    // month arithmetic can never roll over). This exact date is TRANSMITTED as start_date.
+    // First renewal: one interval from today on billingDay (≤28, so month arithmetic can
+    // never roll over). This exact date is TRANSMITTED as start_date on every registration —
+    // since 2026-08-24 all subscriptions use the custom-amount form (see below), so the
+    // gateway's schedule and the DB mirror are the same arithmetic by construction.
     const renewalOf = (interval: string): Date =>
       new Date(Date.UTC(checkoutNow.getUTCFullYear(), checkoutNow.getUTCMonth() + (interval === "annual" ? 12 : 1), billingDay));
-    // First renewal, plan_id path: NOT transmitted — the gateway plan's own schedule rules,
-    // and those plans use day_frequency (proven 365 for yearly via the Query API; 30 assumed
-    // for monthly, same plan-creation batch). So the DB mirror uses the same arithmetic the
-    // gateway will, not the capped-day date it was never told about.
-    const planPathRenewal = (interval: string): Date =>
-      new Date(checkoutNow.getTime() + (interval === "annual" ? 365 : 30) * 86400000);
     const yyyymmdd = (d: Date) =>
       `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
 
     // One recurring subscription per feature, sequentially; report partial failures.
     //
-    // TWO gateway forms, chosen per plan:
+    // ONE gateway form since 2026-08-24: the custom-amount form (plan_amount). The charged
+    // amount is transmitted from billing_plans.price_cents (via chargeCentsFor) on every
+    // subscribe, and per NMI it is stored ON the subscription — every rebill uses it, no
+    // further API calls, immune to any later plan or price edit. That is the Founding-price
+    // guarantee: repricing billing_plans only affects NEW subscribers; existing ones keep
+    // the amount snapshotted at the gateway (mirrored in billing_subscriptions.price_cents).
+    // It also makes the DB the single source of truth — under the old plan_id form the
+    // amount lived in a Deposyt plan record, could silently disagree with price_cents, and
+    // every reprice needed a matching hand-edit in the Deposyt dashboard.
     //
-    //   plan_id       — full price. The amount lives in a plan record inside the gateway.
-    //                   This is the long-proven path (every subscription to date).
-    //   plan_amount   — discounted. NMI has no coupon/discount concept, so a discount can
-    //                   only be expressed as a lower amount, and the plan_id form cannot
-    //                   carry one: editing the gateway plan would re-price EVERY subscriber
-    //                   on it. Per NMI the custom amount is stored on the subscription and
-    //                   every rebill uses it — no further API calls, immune to plan edits.
-    //
-    // Why not use plan_amount for everyone (which would also make price_cents the single
-    // source of truth — today it is never transmitted and can silently disagree with what
-    // the card is charged): NMI's classic Subscription Management reference does not
-    // document customer_vault_id for the custom-amount form. Our code proves the vault
-    // works with plan_id; the combination is unverified. Until a real discounted
-    // subscription confirms it, an unproven call is kept out of the full-price path that
-    // every ordinary customer uses. Collapse to one path once proven.
+    // History: two forms coexisted until 2026-08-24 (plan_id for full price, plan_amount for
+    // discounts) because NMI's classic Subscription Management reference does not document
+    // customer_vault_id for the custom-amount form. A live 25%-off subscription registered
+    // off the vault on 2026-07-28 and its webhook returned correctly, proving the
+    // combination, so the paths were collapsed as the original comment here prescribed.
+    // The Deposyt plan records were then deleted — EXCEPT SS_SIMPLE_LAYOUT_MONTHLY/_YEARLY:
+    // the two pre-existing simple_layout_annual subscriptions still renew from the yearly
+    // record. Never delete those two records, and never re-register existing subscriptions.
+    // gateway_plan_id survives in billing_plans only as the plan_name label sent below.
     const created: any[] = [];
     const failed: { planId: string; error: string }[] = [];
     // Required base first: if Simple Layout cannot be started, charging for add-ons would
@@ -653,7 +676,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       const pct = discountForFeature(p!.feature);
       const discounted = chargeCents !== p!.price_cents;
       const firstCents = chargeCents + (p!.setup_fee_cents || 0);
-      const renewal = discounted ? renewalOf(p!.billing_interval) : planPathRenewal(p!.billing_interval);
+      const renewal = renewalOf(p!.billing_interval);
 
       if (baseFailed && !p!.required && !liveFeatures.has(requiredFeatures[0] ?? "")) {
         failed.push({ planId: p!.id, error: "Skipped - the required base plan could not be started, and this feature would be unusable without it." });
@@ -743,30 +766,24 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           continue;
         }
         // 2. Register the recurring so its first gateway charge is the RENEWAL.
-        //    plan_id path: proven to bill at period end (that is the very bug being fixed),
-        //    so with period 1 paid above, its built-in schedule is now correct as-is.
-        //    Custom-amount path: day_of_month alone is ambiguous about the first charge
-        //    (subscribe ON the billing day could mean today), so start_date pins it to the
-        //    renewal explicitly — a documented parameter on this form.
+        //    day_of_month alone is ambiguous about the first charge (subscribe ON the
+        //    billing day could mean today), so start_date pins it to the renewal
+        //    explicitly — a documented parameter on this form.
         const r = await nmiPost({
           recurring: "add_subscription",
-          ...(discounted
-            ? {
-              plan_amount: (chargeCents / 100).toFixed(2),
-              plan_payments: "0",                                          // 0 = until cancelled
-              month_frequency: p!.billing_interval === "annual" ? "12" : "1",
-              day_of_month: String(billingDay),
-              start_date: yyyymmdd(renewal),
-              // Undocumented for the classic custom-amount form (NMI documents plan_name
-              // for v5 only) but VERIFIED HONOURED: a live webhook payload came back with
-              // plan.name = "SS_SIMPLE_LAYOUT_MONTHLY_25OFF" (2026-07-28). Deposyt's
-              // Recurring Customer List still shows a bare number for these because that
-              // column renders plan.id, which is "" for a custom subscription — the name is
-              // stored, just not shown there. Don't remove this on the strength of that
-              // screen; check the payload.
-              plan_name: `${p!.gateway_plan_id}_${pct}OFF`,
-            }
-            : { plan_id: p!.gateway_plan_id }),
+          plan_amount: (chargeCents / 100).toFixed(2),
+          plan_payments: "0",                                          // 0 = until cancelled
+          month_frequency: p!.billing_interval === "annual" ? "12" : "1",
+          day_of_month: String(billingDay),
+          start_date: yyyymmdd(renewal),
+          // Undocumented for the classic custom-amount form (NMI documents plan_name
+          // for v5 only) but VERIFIED HONOURED: a live webhook payload came back with
+          // plan.name = "SS_SIMPLE_LAYOUT_MONTHLY_25OFF" (2026-07-28). Deposyt's
+          // Recurring Customer List still shows a bare number for these because that
+          // column renders plan.id, which is "" for a custom subscription — the name is
+          // stored, just not shown there. Don't remove this on the strength of that
+          // screen; check the payload.
+          plan_name: discounted ? `${p!.gateway_plan_id}_${pct}OFF` : p!.gateway_plan_id,
           customer_vault_id: vault,
           merchant_defined_field_1: clientId,
           orderid: `ss_${clientId}_${p!.id}`,

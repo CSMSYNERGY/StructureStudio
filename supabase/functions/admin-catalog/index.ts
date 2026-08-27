@@ -4,6 +4,7 @@ import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { paidThroughOf } from "../_shared/billingPeriods.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -226,6 +227,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   // break-glass console out of every write while telling it the account is read-only.
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
+    "get_billing_overview",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -234,7 +236,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Money is a separate grant from configuration — 056's own words: "Adding an operator
     // should never silently grant the ability to charge a client's card." set_billing sets
     // the discount and the exemption that every later charge is computed from.
-    if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants")
+    if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants"
+         || String(action ?? "") === "wallet_credit" || String(action ?? "") === "wallet_adjust"
+         || String(action ?? "") === "wallet_set_limits")
         && !identity.canBill) {
       return json({ error: "This operator account cannot change billing." }, 403);
     }
@@ -299,6 +303,82 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           };
         });
         return json({ ok: true, clients, features });
+      }
+      case "get_billing_overview": {
+        // Operator revenue dashboard (portal Admin → Billing tab). Returns RAW rows and the
+        // UI computes MRR/health metrics client-side in memos — FramedUp's
+        // get_admin_subscribers pattern, so the numbers on screen and the rows in the table
+        // can never disagree. The billing_* tables are service-role only; this action is
+        // their only cross-tenant reader.
+        // ⛔ NEVER return billing_customers.vault_id — an NMI vault id is a bearer
+        // capability for charging that card. This response carries no vault data at all.
+        const [subsRes, plansRes, cfgRes, csRes, grantsRes] = await Promise.all([
+          sb.from("billing_subscriptions")
+            .select("id, client_id, plan_id, status, price_cents, list_price_cents, current_period_start, current_period_end, past_due_since, canceled_at, created_at")
+            .order("created_at", { ascending: false }),
+          // Inactive plans included on purpose: a subscription's meaning is historical, and
+          // a retired plan must still render its name (FramedUp hit this exact blank).
+          sb.from("billing_plans").select("id, name, feature, billing_interval, required"),
+          sb.from("client_configs").select("client_id, company_name"),
+          sb.from("client_settings").select("client_id, billing_exempt, billing_exempt_until, discount_percent"),
+          sb.from("client_feature_grants").select("client_id, feature, expires_at"),
+        ]);
+        if (subsRes.error) throw subsRes.error;
+        if (plansRes.error) throw plansRes.error;
+        if (cfgRes.error) throw cfgRes.error;
+        const planById = new Map((plansRes.data ?? []).map((r: any) => [r.id, r]));
+        const nameById = new Map((cfgRes.data ?? []).map((r: any) => [r.client_id, r.company_name]));
+        const subscriptions = (subsRes.data ?? []).map((s: any) => {
+          const plan = planById.get(s.plan_id);
+          const interval = plan?.billing_interval ?? "month";
+          // current_period_end goes stale after the first gateway renewal (billing-webhook's
+          // periodEnd is dead data — NMI sends next_charge_date '1970-01-01'), so the display
+          // date is the calendar roll-forward, the same math portal-billing's entitlement uses.
+          const paid = paidThroughOf(s, interval);
+          return {
+            ...s,
+            company_name: nameById.get(s.client_id) ?? s.client_id,
+            plan_name: plan?.name ?? s.plan_id,
+            feature: plan?.feature ?? null,
+            billing_interval: plan?.billing_interval ?? null,
+            required: Boolean(plan?.required),
+            paid_through: Number.isFinite(paid) ? new Date(paid).toISOString() : null,
+          };
+        });
+        // Support alerts. closed_unknown = a checkout whose outcome could not be verified —
+        // the customer may have been charged with nothing recorded, and that plan's checkout
+        // is BLOCKED for them until reconciled, so operators must see these.
+        const { data: unknownRows } = await sb.from("billing_charge_attempts")
+          .select("client_id, plan_id, detail, sale_txn, created_at")
+          .eq("state", "closed_unknown").order("created_at", { ascending: false });
+        const since30 = new Date(Date.now() - 30 * 86400000).toISOString();
+        const { count: declined30 } = await sb.from("billing_charge_attempts")
+          .select("id", { count: "exact", head: true })
+          .eq("state", "closed_declined").gte("created_at", since30);
+        // Tenant billing posture: exempt/comped accounts have no subscription rows, which is
+        // what keeps them out of MRR — surfaced separately so they're visible, not invisible.
+        const csById = new Map((csRes.data ?? []).map((r: any) => [r.client_id, r]));
+        const grantCount = new Map<string, number>();
+        for (const g of (grantsRes.data ?? []) as any[]) {
+          grantCount.set(g.client_id, (grantCount.get(g.client_id) ?? 0) + 1);
+        }
+        const tenants = (cfgRes.data ?? []).map((c: any) => {
+          const s = csById.get(c.client_id);
+          return {
+            client_id: c.client_id,
+            company_name: c.company_name,
+            billing_exempt: Boolean(s?.billing_exempt),
+            exempt_until: s?.billing_exempt_until ?? null,
+            discount_percent: Number(s?.discount_percent) || 0,
+            grant_count: grantCount.get(c.client_id) ?? 0,
+          };
+        });
+        return json({
+          ok: true,
+          subscriptions,
+          tenants,
+          alerts: { unknown: unknownRows ?? [], declined30: declined30 ?? 0 },
+        });
       }
       case "get_master": {
         // Master LAYOUT-ITEM palette only. The global building-style catalog was retired
@@ -481,6 +561,18 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
           templateId = tmplId;
         }
+        // Discount inputs are validated BEFORE the config insert: a throw after the row
+        // lands would leave a half-created tenant that the exists-check above then blocks
+        // from ever retrying — validation must come before the first write.
+        const newDiscount = Math.round(Number(p.discountPercent) || 0);
+        if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
+          throw new Error("discountPercent must be a whole number from 0 to 100.");
+        }
+        // Empty/absent = the discount applies to EVERY feature. A list narrows it.
+        const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
+          ? p.discountFeatures.map((f: unknown) => String(f))
+          : null;
+
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
           client_id: clientId, company_name: companyName,
@@ -496,14 +588,6 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // owner to fill in via the portal. A normal new client gets no row here, so
         // billing_exempt reads false and the gate applies: they land on Billing and pay
         // before anything unlocks.
-        const newDiscount = Math.round(Number(p.discountPercent) || 0);
-        if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
-          throw new Error("discountPercent must be a whole number from 0 to 100.");
-        }
-        // Empty/absent = the discount applies to EVERY feature. A list narrows it.
-        const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
-          ? p.discountFeatures.map((f: unknown) => String(f))
-          : null;
         if (p.billingExempt === true || newDiscount > 0) {
           const bx = await sb.from("client_settings").upsert({
             client_id: clientId,
@@ -651,6 +735,83 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // needs SMTP), and either way we return a one-time set-password link the
       // operator can copy & send. role: "owner"/"admin" (full access incl. Pricing +
       // Settings) or "user" (Designs & Leads only).
+      // ── WALLET, OPERATOR SIDE ───────────────────────────────────────────────────────
+      // Every one of these is an APPEND. Deliberately NOT modelled on set_feature_grants'
+      // replace-the-whole-set shape: the 2026-08-19 audit found real bugs in that pattern
+      // (stale rows surviving, granted_by wiped), and an append is structurally immune to
+      // the entire class. It also means the ledger cannot be rewritten by a later call --
+      // an append-only ledger whose balance can be silently overwritten is not a ledger.
+      case "wallet_credit": {
+        // Comp credits: the demo lever, and the goodwill lever ("that one failed on us,
+        // here's $20 back"). MEMO IS REQUIRED -- a comp is a commercial act and should say
+        // why, the same argument 109_feature_grants makes for granted_by.
+        const clientId = reqStr(p.clientId, "clientId");
+        const amountCents = Math.round(Number(p.amountCents));
+        if (!Number.isFinite(amountCents) || amountCents <= 0) throw new Error("A positive amount is required.");
+        if (amountCents > 500000) throw new Error("That credit is over the $5,000 single-entry limit.");
+        const memo = reqStr(p.memo, "memo").slice(0, 300);
+        const { data: exists } = await sb.from("client_configs")
+          .select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+        const { data: bal, error } = await sb.rpc("wallet_credit", {
+          p_client_id: clientId, p_amount_cents: amountCents, p_kind: "grant",
+          p_ref_type: "operator", p_ref_id: null, p_memo: memo,
+          p_idem: String(p.idempotencyKey ?? "").slice(0, 120) || null, p_actor: null,
+        });
+        if (error) throw new Error(error.message);
+        return json({ ok: true, balanceCents: bal });
+      }
+
+      case "wallet_adjust": {
+        // Signed correction, INCLUDING zeroing out. Never a delete, never an UPDATE of the
+        // balance: zeroing is an `adjustment` row for -balance_cents with a memo, so the
+        // history still explains how the number got where it is.
+        const clientId = reqStr(p.clientId, "clientId");
+        const amountCents = Math.round(Number(p.amountCents));
+        if (!Number.isFinite(amountCents) || amountCents === 0) throw new Error("A non-zero amount is required.");
+        if (Math.abs(amountCents) > 500000) throw new Error("That adjustment is over the $5,000 single-entry limit.");
+        const memo = reqStr(p.memo, "memo").slice(0, 300);
+        const { data: bal, error } = await sb.rpc("wallet_credit", {
+          p_client_id: clientId, p_amount_cents: amountCents, p_kind: "adjustment",
+          p_ref_type: "operator", p_ref_id: null, p_memo: memo,
+          p_idem: String(p.idempotencyKey ?? "").slice(0, 120) || null, p_actor: null,
+        });
+        if (error) throw new Error(error.message);
+        return json({ ok: true, balanceCents: bal });
+      }
+
+      case "wallet_set_limits": {
+        // metered_exempt is the EXEMPTION -- not a new flag. An exempt tenant still gets a
+        // ledger row, at $0, so "how many generations did this tenant run and what did they
+        // cost us" stays answerable for internal accounts, which are exactly the ones most
+        // likely to run a lot of them.
+        const clientId = reqStr(p.clientId, "clientId");
+        const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
+        if (p.meteredExempt !== undefined) patch.metered_exempt = Boolean(p.meteredExempt);
+        if (p.monthlyAiCostCapCents !== undefined) {
+          const c = p.monthlyAiCostCapCents === null ? null : Math.round(Number(p.monthlyAiCostCapCents));
+          if (c !== null && (!Number.isFinite(c) || c < 0)) throw new Error("The cost cap must be a positive number of cents, or blank.");
+          patch.monthly_ai_cost_cap_cents = c;
+        }
+        const { error } = await sb.from("wallet_accounts").upsert(patch, { onConflict: "client_id" });
+        if (error) throw new Error(error.message);
+        return json({ ok: true });
+      }
+
+      case "wallet_status": {
+        // Operator read, and the ONLY place cost_cents is ever served. This is our gross
+        // margin on a $20 charge; a tenant must never see it (portal-billing's wallet
+        // projection deliberately omits the column entirely).
+        const clientId = reqStr(p.clientId, "clientId");
+        const [acct, txs, recon] = await Promise.all([
+          sb.from("wallet_accounts").select("*").eq("client_id", clientId).maybeSingle(),
+          sb.from("wallet_transactions").select("id, kind, amount_cents, balance_after_cents, meter_kind, state, cost_cents, memo, created_at")
+            .eq("client_id", clientId).order("created_at", { ascending: false }).limit(25),
+          sb.from("wallet_reconcile").select("*").eq("client_id", clientId).maybeSingle(),
+        ]);
+        return json({ ok: true, account: acct.data ?? null, transactions: txs.data ?? [], reconcile: recon.data ?? null });
+      }
+
       case "set_feature_grants": {
         // EARLY ACCESS: switch a feature on for ONE builder before it goes on sale.
         // Carolyn 2026-08-18 — "I would like to be able to see the 3D as I'm in beta, but not

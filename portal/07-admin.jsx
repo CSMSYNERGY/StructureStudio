@@ -472,9 +472,13 @@ function FeatureScope({ features, all, setAll, picked, setPicked, disabled }) {
           ))}
         </div>
       )}
+      {/* Server semantics (admin-catalog, create_client/set_billing): an EMPTY list is
+          stored as null = the discount applies to EVERY feature. An earlier version of this
+          warning claimed the exact opposite ("no discount applies anywhere"), which taught
+          operators that leaving it empty was the safe choice. */}
       {!all && picked.length === 0 && (
         <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 6 }}>
-          Pick at least one feature, or choose "Every feature" — an empty list means no discount applies anywhere.
+          Pick at least one feature, or choose "Every feature" — saved empty, the list means no restriction, and the discount would apply to every feature.
         </div>
       )}
     </div>
@@ -620,14 +624,243 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
   );
 }
 
+// ── Billing (global) ─────────────────────────────────────────────────────────
+// Operator revenue dashboard. ONE read (get_billing_overview) returns raw rows and every
+// metric is a memo over them, so the KPI cards and the table can never disagree (FramedUp's
+// SubscribersPage pattern). MRR counts active + past_due — a grace-period tenant is still
+// expected revenue — never cancelled; annual plans are normalized /12. Comped/exempt tenants
+// have no subscription rows at all, which keeps them out of MRR structurally; they get their
+// own card so they are visible rather than invisible.
+// Dates render as UTC calendar dates: gateway billing dates ARE calendar dates, and
+// local-zone rendering shifts them a day either side of midnight (FramedUp's billingDay bug).
+const admDay = (iso) => iso ? new Date(iso).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" }) : "—";
+
+function AdmBillingStat({ label, value, sub }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 800, color: "#1E293B", lineHeight: 1.2, marginTop: 2 }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function AdmBilling() {
+  const [data, setData] = useState(null);            // null = loading
+  const [err, setErr] = useState(null);
+  const [q, setQ] = useState("");
+  const [openId, setOpenId] = useState(null);        // expanded subscription row
+  const [showCancelled, setShowCancelled] = useState(true);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    try { setData(await adminApi("get_billing_overview")); }
+    catch (e) {
+      setErr(e.message || "Could not load billing.");
+      setData({ subscriptions: [], tenants: [], alerts: { unknown: [], declined30: 0 } });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const subs = (data && data.subscriptions) || [];
+  const tenants = (data && data.tenants) || [];
+  const alerts = (data && data.alerts) || { unknown: [], declined30: 0 };
+
+  const report = useMemo(() => {
+    const paying = subs.filter((s) => s.status === "active" || s.status === "past_due");
+    // Monthly and yearly plans are reported in their own units on their own cards
+    // (Carolyn 2026-08-24); the ARR card is the one place they combine (monthly ×12).
+    const breakdown = (rows) => {
+      const m = new Map();
+      for (const s of rows) {
+        const k = s.plan_name || s.plan_id;
+        m.set(k, (m.get(k) || 0) + (s.price_cents || 0));
+      }
+      return [...m.entries()].sort((a, b) => b[1] - a[1]);
+    };
+    const monthly = paying.filter((s) => s.billing_interval !== "annual");
+    const annual = paying.filter((s) => s.billing_interval === "annual");
+    const monthlyRevenue = monthly.reduce((t, s) => t + (s.price_cents || 0), 0);
+    const annualRevenue = annual.reduce((t, s) => t + (s.price_cents || 0), 0);
+    return {
+      monthly, annual, monthlyRevenue, annualRevenue,
+      byPlanMonthly: breakdown(monthly),
+      byPlanAnnual: breakdown(annual),
+      arr: monthlyRevenue * 12 + annualRevenue,
+      active: subs.filter((s) => s.status === "active").length,
+      pastDue: subs.filter((s) => s.status === "past_due"),
+      cancelled: subs.filter((s) => s.status === "cancelled").length,
+      payingBuilders: new Set(paying.map((s) => s.client_id)).size,
+      exempt: tenants.filter((t) => t.billing_exempt),
+      grantCount: tenants.reduce((t, r) => t + (r.grant_count || 0), 0),
+    };
+  }, [subs, tenants]);
+
+  const rows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return subs
+      .filter((s) => showCancelled || s.status !== "cancelled")
+      .filter((s) => !needle || [s.company_name, s.client_id, s.plan_name].some((v) => String(v || "").toLowerCase().indexOf(needle) !== -1));
+  }, [subs, q, showCancelled]);
+
+  const statusChip = (s) => {
+    if (s.status === "active") return <AdmChip tone="good">Active</AdmChip>;
+    if (s.status === "past_due") return <AdmChip tone="warn">Past due</AdmChip>;
+    if (s.status === "cancelled") return <AdmChip tone="neutral">Cancelled</AdmChip>;
+    return <AdmChip tone="neutral">{s.status || "—"}</AdmChip>;
+  };
+  const TH = { textAlign: "left", fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const TD = { fontSize: 13, color: "#1E293B", padding: "9px 10px", borderBottom: "1px solid #F1F5F9", whiteSpace: "nowrap" };
+
+  if (data === null) return <div style={S.card}><CardHead title="Billing" desc="Loading subscriptions…" /></div>;
+
+  return (
+    <div>
+      {err && <div style={S.err}>{err}</div>}
+
+      {/* closed_unknown FIRST and loud: it means a card may have been charged with nothing
+          recorded, and that plan's checkout is blocked for that tenant until reconciled. */}
+      {alerts.unknown.length > 0 && (
+        <div style={{ ...S.card, border: "1px solid #FCA5A5", background: "#FEF2F2" }}>
+          <CardHead title={`⚠️ ${alerts.unknown.length} unverified charge${alerts.unknown.length === 1 ? "" : "s"}`}
+            desc="A checkout whose outcome could not be confirmed — the card may have been charged with nothing recorded. Reconcile at the gateway; that tenant's checkout for the plan stays blocked until the row is resolved." />
+          {alerts.unknown.map((u, i) => (
+            <div key={i} style={{ ...ADM_ROW, fontSize: 12.5 }}>
+              <span style={{ fontWeight: 700 }}>{u.client_id}</span>
+              <span style={{ color: "#64748B" }}>{u.plan_id}</span>
+              <span style={{ color: "#991B1B", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{u.detail || "no detail"}</span>
+              <span style={{ color: "#94A3B8" }}>{u.sale_txn ? `txn ${u.sale_txn}` : ""} · {admDay(u.created_at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginBottom: 12 }}>
+        <div style={S.card}>
+          <AdmBillingStat label="Monthly plans" value={money(report.monthlyRevenue) + "/mo"}
+            sub={`${report.monthly.length} monthly subscription${report.monthly.length === 1 ? "" : "s"}`} />
+          {report.byPlanMonthly.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
+              {report.byPlanMonthly.map(([name, cents]) => (
+                <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#475569", padding: "2px 0" }}>
+                  <span>{name}</span><span style={{ fontWeight: 700 }}>{money(cents)}/mo</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Yearly plans" value={money(report.annualRevenue) + "/yr"}
+            sub={`${report.annual.length} yearly subscription${report.annual.length === 1 ? "" : "s"}`} />
+          {report.byPlanAnnual.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
+              {report.byPlanAnnual.map(([name, cents]) => (
+                <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#475569", padding: "2px 0" }}>
+                  <span>{name}</span><span style={{ fontWeight: 700 }}>{money(cents)}/yr</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Annual revenue" value={money(report.arr) + "/yr"}
+            sub={`all subscriptions · monthly ×12 + yearly · ${report.payingBuilders} paying builder${report.payingBuilders === 1 ? "" : "s"}`} />
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Subscriptions" value={report.active}
+            sub={`active · ${report.pastDue.length} past due · ${report.cancelled} cancelled`} />
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Billing health" value={report.pastDue.length === 0 && alerts.unknown.length === 0 ? "OK" : `${report.pastDue.length + alerts.unknown.length} ⚠`}
+            sub={`${report.pastDue.length} past due · ${alerts.unknown.length} unverified · ${alerts.declined30} declined in 30 days`} />
+          {report.pastDue.map((s) => (
+            <div key={s.id} style={{ fontSize: 12.5, color: "#92400E", marginTop: 4 }}>
+              {s.company_name} — {s.plan_name}, since {admDay(s.past_due_since)}
+            </div>
+          ))}
+        </div>
+        <div style={S.card}>
+          <AdmBillingStat label="Comped / exempt" value={report.exempt.length}
+            sub={`exempt builders (not in MRR) · ${report.grantCount} feature grant${report.grantCount === 1 ? "" : "s"}`} />
+          {report.exempt.slice(0, 6).map((t) => (
+            <div key={t.client_id} style={{ fontSize: 12.5, color: "#475569", marginTop: 4 }}>
+              {t.company_name || t.client_id}{t.exempt_until ? ` · until ${admDay(t.exempt_until)}` : ""}{t.discount_percent ? ` · ${t.discount_percent}% off` : ""}
+            </div>
+          ))}
+          {report.exempt.length > 6 && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 4 }}>+{report.exempt.length - 6} more</div>}
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <CardHead title="Subscribers" count={rows.length}
+          desc="Every subscription across the platform. Amounts are what the gateway actually bills — founding members keep their locked amount when list prices change."
+          right={<button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>Refresh</button>} />
+        <SearchInput value={q} onChange={setQ} placeholder="Search builder or plan…" />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#64748B", marginBottom: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} />
+          <span>Show cancelled</span>
+        </label>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={TH}>Builder</th><th style={TH}>Plan</th><th style={TH}>Interval</th>
+              <th style={{ ...TH, textAlign: "right" }}>Amount</th><th style={TH}>Status</th>
+              <th style={TH}>Started</th><th style={TH}>Renews</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((s) => (
+                <React.Fragment key={s.id}>
+                  <tr onClick={() => setOpenId(openId === s.id ? null : s.id)} style={{ cursor: "pointer", background: openId === s.id ? "#F8FAFC" : "transparent" }}>
+                    <td style={TD}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <AdmTile name={s.company_name} size={26} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 700 }}>{s.company_name}</div>
+                          <div style={{ fontSize: 11, color: "#94A3B8" }}>{s.client_id}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style={TD}>{s.plan_name}</td>
+                    <td style={TD}>{s.billing_interval === "annual" ? "Yearly" : s.billing_interval === "monthly" ? "Monthly" : "—"}</td>
+                    <td style={{ ...TD, textAlign: "right", fontWeight: 700 }}>
+                      {money(s.price_cents)}
+                      {s.list_price_cents != null && s.list_price_cents !== s.price_cents &&
+                        <span style={{ color: "#94A3B8", fontWeight: 400, textDecoration: "line-through", marginLeft: 6 }}>{money(s.list_price_cents)}</span>}
+                    </td>
+                    <td style={TD}>{statusChip(s)}</td>
+                    <td style={TD}>{admDay(s.created_at)}</td>
+                    <td style={TD}>{s.status === "cancelled" ? (s.paid_through ? `paid thru ${admDay(s.paid_through)}` : "—") : admDay(s.paid_through)}</td>
+                  </tr>
+                  {openId === s.id && (
+                    <tr><td colSpan={7} style={{ ...TD, background: "#F8FAFC", fontSize: 12.5, color: "#475569", whiteSpace: "normal" }}>
+                      Subscription <code>{s.id}</code> · period {admDay(s.current_period_start)} → {admDay(s.current_period_end)}
+                      {s.past_due_since ? <> · past due since {admDay(s.past_due_since)}</> : null}
+                      {s.canceled_at ? <> · cancelled {admDay(s.canceled_at)}</> : null}
+                      {s.list_price_cents != null && s.list_price_cents !== s.price_cents ? <> · list {money(s.list_price_cents)}, charged {money(s.price_cents)}</> : null}
+                    </td></tr>
+                  )}
+                </React.Fragment>
+              ))}
+              {rows.length === 0 && (
+                <tr><td colSpan={7} style={{ ...TD, color: "#94A3B8", textAlign: "center", padding: 24 }}>No subscriptions{q ? " match the search" : " yet"}.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── The shell ────────────────────────────────────────────────────────────────
-// Six sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
+// Seven sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
 // Items" wrote one tenant's row while "Master Items" read the platform-wide palette, and
 // they sat adjacent in one undifferentiated pill row with nothing saying so. The tab order
 // is also the onboarding order: create the client, give the owner a login, give them
 // styles, then items, then prices.
 const ADM_TABS = [
   ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
+  ["billing", "Billing",         "Subscribers, revenue and billing health across the platform",   "global"],
   ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
@@ -648,7 +881,11 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   const [bootErr, setBootErr] = useState(null);
   const promptedFor = useRef({});                 // so the picker nags at most once per tab
 
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 6000); };
+  // The ok auto-dismiss clears only ITS OWN message: an unconditional setMsg(null) fires 6s
+  // after whatever is current — including an error flashed 5s after the save it reports on,
+  // gone before anyone could read it. The functional updater checks identity (every flash
+  // makes a fresh object), so a superseded timer no-ops instead of clobbering.
+  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000); };
   const selRow = (clients || []).find((c) => c.client_id === sel) || null;
   const active = ADM_TABS.find((t) => t[0] === sub) || ADM_TABS[0];
   const needsClient = active[3] === "client";
@@ -777,6 +1014,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
         <AdmClients clients={clients} features={features} sel={sel}
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
       )}
+      {sub === "billing" && <AdmBilling />}
       {sub === "master" && <AdmMaster master={master} />}
 
       {needsClient && !sel && clients && (
@@ -880,6 +1118,14 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
 
   const create = async () => {
     if (!canCreate) return;
+    // Same guard as the Account tab's saveBilling: the server stores an EMPTY
+    // discountFeatures list as null = the discount applies to EVERY feature (admin-catalog,
+    // create_client/set_billing). So "only the ones I pick" with nothing picked would not
+    // create no discount — it would silently create an all-features one.
+    if (!exempt && (Number(discount) || 0) > 0 && !allFeat && picked.length === 0) {
+      onFlash({ err: "Choose which features the discount applies to, or select “Every feature”." });
+      return;
+    }
     setBusy(true);
     try {
       await adminApi("create_client", {
@@ -1104,12 +1350,19 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
 
   const [delOpen, setDelOpen] = useState(false);
 
-  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  const emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  const emailOk = emailRe.test(email.trim());
 
-  const link = async (reassign) => {
-    if (!emailOk || linkBusy) return;
+  // `addrOverride` exists for the reassign banner: `email` below is THIS render's closure,
+  // so a setEmail(...) in the same click handler is invisible to link() — the request would
+  // carry whatever the input held when this render happened. If the operator edited the
+  // field after the banner appeared, "Move them" reassigned the WRONG address (or, with the
+  // field now invalid, silently no-op'd on the emailOk guard). The banner passes the address
+  // it displays, so what the operator read is what gets moved.
+  const link = async (reassign, addrOverride) => {
+    const addr = (addrOverride != null ? addrOverride : email).trim();
+    if (!emailRe.test(addr) || linkBusy) return;
     setLinkBusy(true); setLinkResult(null);
-    const addr = email.trim();
     try {
       const r = await adminApi("link_owner", { clientId, email: addr, role, ...(reassign ? { reassign: true } : {}) });
       const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
@@ -1188,7 +1441,11 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div style={{ flex: "1 1 240px", minWidth: 200 }}>
             <label style={S.lbl}>Email</label>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@theirbusiness.com"
+            {/* Editing the address retires the reassign banner below: it names ONE specific
+                email, and a lingering banner would offer to move somebody the operator is no
+                longer typing about. (Programmatic setEmail — the banner's own button, the
+                post-link clear — does not fire onChange, so those keep the banner alive.) */}
+            <input value={email} onChange={(e) => { setEmail(e.target.value); setReassignFrom(null); }} placeholder="owner@theirbusiness.com"
               onKeyDown={(e) => { if (e.key === "Enter" && emailOk) link(false); }} style={S.input} />
           </div>
           <div style={{ width: 200 }}>
@@ -1209,7 +1466,9 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             <strong>{reassignFrom.email}</strong> already belongs to <strong>{reassignFrom.fromClient || "another builder"}</strong>.
             Moving them removes their access to that account.
             <div style={{ marginTop: 8 }}>
-              <button type="button" onClick={() => { setEmail(reassignFrom.email); link(true); }} disabled={linkBusy}
+              {/* The address goes as an argument — see link(): setEmail alone would not reach
+                  this call, which reads the pre-click render's `email`. */}
+              <button type="button" onClick={() => { setEmail(reassignFrom.email); link(true, reassignFrom.email); }} disabled={linkBusy}
                 style={{ ...S.btn("#92400E", "#FFF"), padding: "6px 12px", fontSize: 12 }}>Move them to {label}</button>
             </div>
           </div>

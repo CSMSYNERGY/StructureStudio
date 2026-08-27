@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>renderer tone-mapping parity check</title>
+<pre id="out">running…</pre>
+<script type="module">
+// Dev harness: does the renderer's tone-mapping setting actually change the colour a
+// building is drawn in?
+//
+// This is the measurement behind the snapshot bug. Two of the three renderers in the
+// designer tone-mapped with ACES; the off-screen one that produces the quote's 3D page did
+// not. If ACES were a subtle grade that would be a cosmetic inconsistency. It is not -- and
+// the point of this harness is to put a number on it rather than argue about it, because
+// the surface that disagreed is the one nobody ever watches being drawn.
+const THREE = await import("https://esm.sh/three@0.167.0");
+
+// One flat, saturated red lit exactly the same way in both renderers. Saturated colour is
+// where ACES differs most, and red is the colour Carolyn was looking at (2026-08-25) when
+// she said "the color isn't showing up in here correctly".
+const HEX = "#C62828";
+
+function draw(useAces) {
+  const cv = document.createElement("canvas");
+  cv.width = 64; cv.height = 64;
+  const r = new THREE.WebGLRenderer({ canvas: cv, antialias: false, preserveDrawingBuffer: true });
+  r.setPixelRatio(1);
+  if (THREE.SRGBColorSpace && "outputColorSpace" in r) r.outputColorSpace = THREE.SRGBColorSpace;
+  if (useAces) { r.toneMapping = THREE.ACESFilmicToneMapping; r.toneMappingExposure = 1.15; }
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+  cam.position.set(0, 0, 4);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.5));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.6); sun.position.set(3, 5, 4); scene.add(sun);
+  const m = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.2, 2.2),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color(HEX) }));
+  scene.add(m);
+  r.render(scene, cam);
+  const g = r.getContext();
+  const px = new Uint8Array(4);
+  g.readPixels(32, 32, 1, 1, g.RGBA, g.UNSIGNED_BYTE, px);
+  r.dispose();
+  return [px[0], px[1], px[2]];
+}
+
+const linear = draw(false);
+const aces = draw(true);
+const dist = Math.round(Math.hypot(linear[0] - aces[0], linear[1] - aces[1], linear[2] - aces[2]));
+const same = dist <= 2;
+
+document.getElementById("out").textContent =
+  `source colour           ${HEX}\n` +
+  `no tone mapping   (was the off-screen quote shot)  rgb(${linear.join(", ")})\n` +
+  `ACES @ 1.15       (both live viewers, and now all) rgb(${aces.join(", ")})\n` +
+  `\nchannel distance: ${dist}\n\n` +
+  (same
+    ? `=> settings make NO difference here; the mismatch is something else.\n`
+    : `=> the same hex renders ${dist} apart depending on this ONE setting.\n` +
+      `   That is the quote's building not matching the one the customer was shown.\n` +
+      `   All three renderers now go through d3ConfigureRenderer.\n`);
+</script>

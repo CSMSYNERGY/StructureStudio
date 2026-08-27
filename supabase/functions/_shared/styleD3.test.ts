@@ -73,6 +73,28 @@ Deno.test("a video reply parses to a clean spec and drops observed", () => {
   assert(!("observed" in (r.d3 as Record<string, unknown>)), "observed must not reach the stored spec");
 });
 
+Deno.test("wallHeightFt clamps a near-miss and drops a wrong-unit answer", () => {
+  const wh = (v: unknown) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, wallHeightFt: v });
+    assert(r.ok, "the roof is valid, so the spec is accepted whatever the height says");
+    return r.ok ? r.d3.wallHeightFt : undefined;
+  };
+  // In range: untouched.
+  assertEquals(wh(7), 7, "a plausible height passes through");
+  assertEquals(wh(5), 5, "the low bound is inclusive");
+  assertEquals(wh(14), 14, "the high bound is inclusive");
+  // Near-miss: pulled to the bound. Before 2026-08-25 these were DROPPED, which left the
+  // style default (often 8) standing -- further from the truth than the bound.
+  assertEquals(wh(4.5), 5, "a low near-miss clamps up rather than vanishing");
+  assertEquals(wh(16), 14, "a high near-miss clamps down rather than vanishing");
+  // Wrong unit or nonsense: dropped, so the builder's own value survives. Clamping 96 in
+  // would draw a two-storey wall on a garden shed and look like the model read it that way.
+  assertEquals(wh(96), undefined, "inches are not feet");
+  assertEquals(wh(0), undefined, "zero is not a wall");
+  assertEquals(wh(-8), undefined, "negative is not a wall");
+  assertEquals(wh("tall"), undefined, "non-numeric is dropped");
+});
+
 Deno.test("sanitizeD3Spec always emits siding, which is why the video merge cannot trust it", () => {
   // The regression applyDraftedShape guards: `siding` is present and null even though the
   // model never mentioned cladding, so a `!== undefined` check would wipe the builder's
@@ -82,6 +104,92 @@ Deno.test("sanitizeD3Spec always emits siding, which is why the video merge cann
   if (!r.ok) return;
   assert("siding" in r.d3, "siding is always present");
   assertEquals(r.d3.siding, null);
+});
+
+Deno.test("all four claddings round-trip; anything else collapses to null", () => {
+  // Until 2026-08-25 this test would have failed on "panel" and "agpanel": the sanitiser
+  // accepted only batten and lap and rewrote everything else to null WITHOUT erroring. A
+  // builder setting a style to Metal got a success toast and Panel on reload — the whole
+  // reason "change plain to panel siding, add metal" looked like a frontend bug.
+  for (const id of ["panel", "lap", "batten", "agpanel"]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, siding: id });
+    assert(r.ok, `${id} should be accepted`);
+    if (r.ok) assertEquals(r.d3.siding, id, `${id} must survive the round trip`);
+  }
+  for (const junk of ["plain", "vinyl", "", 7, null, undefined, { id: "lap" }]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, siding: junk });
+    assert(r.ok, "an unknown cladding is dropped, never an error");
+    // null is what the renderer already draws as panel, so this is the safe direction:
+    // an old row that says nothing looks exactly as it did before the list widened.
+    if (r.ok) assertEquals(r.d3.siding, null, `${JSON.stringify(junk)} must not persist`);
+  }
+});
+
+Deno.test("claddingChoices is rebuilt in canonical order, never echoed back", () => {
+  const r = sanitizeD3Spec({
+    roof: { type: "gable", pitch: 0.4 },
+    // Caller's order is arbitrary and carries junk; neither may reach the column.
+    claddingChoices: ["agpanel", "vinyl", "panel", "agpanel", "<script>"],
+  });
+  assert(r.ok, "spec should be accepted");
+  if (!r.ok) return;
+  assertEquals(r.d3.claddingChoices, ["panel", "agpanel"], "canonical order, junk dropped, deduped");
+});
+
+Deno.test("claddingChoices: absent and empty both mean all four", () => {
+  // Absent is every existing row. Empty is a builder who unticked every box — a slip,
+  // not an instruction, and honouring it literally would leave the customer no cladding
+  // to pick at all.
+  const absent = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(absent.ok && !("claddingChoices" in absent.d3), "absent stays absent");
+  const empty = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, claddingChoices: [] });
+  assert(empty.ok && !("claddingChoices" in empty.d3), "empty falls back to unset");
+  const allJunk = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, claddingChoices: ["nope"] });
+  assert(allJunk.ok && !("claddingChoices" in allJunk.d3), "all-unknown falls back to unset");
+});
+
+Deno.test("lean-to and dormer round-trip as additive roof keys, clamped", () => {
+  // They are extra keys on `roof` rather than new roof TYPES on purpose: one shared
+  // building_styles.d3 serves beta and production, and the production profile builder's
+  // `else` draws a GABLE for any type it does not know. A new type would therefore show
+  // production a plain gable the moment someone calibrated a lean-to on beta. Extra keys
+  // degrade to "appendage missing", which is honest; a wrong roof is not.
+  const r = sanitizeD3Spec({
+    roof: {
+      type: "gable", pitch: 0.4,
+      leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left",
+      dormerWidthFt: 4, dormerRiseFt: 2.5, dormerOffsetU: 0.45,
+    },
+  });
+  assert(r.ok, "spec should be accepted");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.leanToWidthFt, 8);
+  assertEquals(r.d3.roof.leanToSide, "left");
+  assertEquals(r.d3.roof.dormerWidthFt, 4);
+  assertEquals(r.d3.roof.dormerOffsetU, 0.45);
+
+  // Clamped, not rejected -- same posture as every other numeric here.
+  const c = sanitizeD3Spec({
+    roof: { type: "gable", pitch: 0.4, leanToWidthFt: 999, dormerOffsetU: -7, leanToDropFt: -3 },
+  });
+  assert(c.ok, "out-of-range values clamp rather than erroring");
+  if (!c.ok) return;
+  assertEquals(c.d3.roof.leanToWidthFt, 16, "capped at the widest real lean-to");
+  assertEquals(c.d3.roof.dormerOffsetU, -1, "held inside the span");
+  assertEquals(c.d3.roof.leanToDropFt, 0, "a negative drop is zero, not a rise");
+
+  // An unknown side is dropped rather than stored, so the renderer's default (right) wins.
+  const s = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, leanToSide: "north" } });
+  assert(s.ok && !("leanToSide" in s.d3.roof), "an unknown side never persists");
+});
+
+Deno.test("a style that mentions neither stays byte-identical", () => {
+  // The whole back-compat claim in one assertion: adding five clamps and a side enum must
+  // not put a single new key on a spec that did not ask for them.
+  const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(r.ok, "minimal spec accepted");
+  if (!r.ok) return;
+  assertEquals(Object.keys(r.d3.roof).sort(), ["pitch", "type"]);
 });
 
 Deno.test("parseObservedNotes lifts the block, collapses newlines and caps length", () => {
@@ -110,4 +218,138 @@ Deno.test("parseObservedNotes returns null when there is nothing to say", () => 
   assertEquals(parseObservedNotes(`{"roof":{"type":"gable"},"siding":null}`), null, "no observed block");
   assertEquals(parseObservedNotes("not json at all"), null);
   assertEquals(parseObservedNotes(`{"observed":{"doors":"   "}}`), null, "whitespace-only is nothing");
+});
+
+// ── Open eave / rafter tails / gable vent (2026-08-25) ────────────────────────────────
+// The whole safety property of these three fields is that ABSENCE is the old behaviour.
+// The test above at "a video reply parses to a clean spec" is an exact deep-equal on the
+// roof object, so defaulting either roof field would fail it — that is the guard working,
+// not a nuisance. Worse than a red test: openCalEditor seeds its draft from
+// d3ResolveStyleSpec and onSaveSpec writes that draft straight back, so a default here
+// gets PERSISTED into every tenant's column the first time a builder opens the 3D panel.
+
+Deno.test("eave, tailSpacingIn and gableVent are omitted when absent, so no stored spec moves", () => {
+  const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(r.ok, "minimal spec should be accepted");
+  if (!r.ok) return;
+  assert(!("eave" in r.d3.roof), "eave must not be defaulted into the roof object");
+  assert(!("tailSpacingIn" in r.d3.roof), "tailSpacingIn must not be defaulted");
+  assert(!("gableVent" in (r.d3 as Record<string, unknown>)), "gableVent must not be defaulted");
+});
+
+Deno.test("eave round-trips both values; junk is dropped without erroring", () => {
+  for (const v of ["open", "fascia"]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, eave: v } });
+    assert(r.ok, `${v} should be accepted`);
+    if (r.ok) assertEquals(r.d3.roof.eave, v);
+  }
+  for (const junk of ["exposed", "", 1, null, {}]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, eave: junk } });
+    assert(r.ok, "an unknown eave is dropped, never an error");
+    if (r.ok) assert(!("eave" in r.d3.roof), `${JSON.stringify(junk)} must not persist`);
+  }
+});
+
+Deno.test("tailSpacingIn clamps to real framing; gableVent widthFrac clamps to the triangle", () => {
+  const a = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, tailSpacingIn: 400 }, gableVent: { widthFrac: 9 } });
+  assert(a.ok, "out-of-range values clamp rather than reject");
+  if (!a.ok) return;
+  assertEquals(a.d3.roof.tailSpacingIn, 96, "96 in is looser than any real framing");
+  assertEquals(a.d3.gableVent, { widthFrac: 0.6 });
+  const b = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, tailSpacingIn: 1 }, gableVent: { widthFrac: 0 } });
+  assert(b.ok, "still accepted");
+  if (!b.ok) return;
+  assertEquals(b.d3.roof.tailSpacingIn, 8);
+  assert(!("gableVent" in (b.d3 as Record<string, unknown>)), "a zero-width vent is no vent");
+});
+
+Deno.test("the measured Urban spec survives the sanitiser intact", () => {
+  // The actual values written to junior-barns' Urban row, as read off the walk-around
+  // video. If a future clamp or key rename quietly drops one of these, this fails.
+  const r = sanitizeD3Spec({
+    roof: { type: "gable", pitch: 0.42, overhang: 1.0, eave: "open", tailSpacingIn: 24 },
+    gableVent: { widthFrac: 0.25 },
+    colors: { body: "#CDB794", trim: "#BBB29C", roof: "#46443F" },
+  });
+  assert(r.ok, "the measured spec must be accepted");
+  if (!r.ok) return;
+  // Key order matters here only because this file's assertEquals compares JSON strings:
+  // the sanitiser emits the numeric loop first, so tailSpacingIn precedes the eave enum.
+  assertEquals(r.d3.roof, { type: "gable", pitch: 0.42, overhang: 1, tailSpacingIn: 24, eave: "open" });
+  assertEquals(r.d3.gableVent, { widthFrac: 0.25 });
+});
+
+Deno.test("foundation round-trips skids/slab, is omitted when absent, drops junk", () => {
+  const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(bare.ok, "minimal spec accepted");
+  if (bare.ok) assert(!("foundation" in (bare.d3 as Record<string, unknown>)), "absent stays absent, so no existing row grows a slab it did not ask for");
+  for (const v of ["skids", "slab"]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: v });
+    assert(r.ok, `${v} accepted`);
+    if (r.ok) assertEquals(r.d3.foundation, v);
+  }
+  for (const junk of ["piers", "", 3, null, {}]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: junk });
+    assert(r.ok, "junk is dropped, never an error");
+    if (r.ok) assert(!("foundation" in (r.d3 as Record<string, unknown>)), `${JSON.stringify(junk)} must not persist`);
+  }
+});
+
+Deno.test("a full video reply carries the eave, vent and foundation through the sanitiser", () => {
+  // The end-to-end shape of what VIDEO_SHAPE_PROMPT now asks for. If a future prompt edit
+  // renames one of these keys, this fails here rather than silently producing drafts that
+  // look right and set nothing — which is exactly what the prompt did before 2026-08-25,
+  // when it predated all four fields.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.42, "overhang": 1.0, "eave": "open", "tailSpacingIn": 24 },
+    "gableVent": { "widthFrac": 0.25 },
+    "foundation": "skids",
+    "colors": { "body": "#CDB794", "trim": "#BBB29C", "roof": "#46443F" },
+    "wallHeightFt": 7,
+    "observed": { "confidence": "high" }
+  }`);
+  assert(r.ok, "the reply the prompt asks for must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.eave, "open");
+  assertEquals(r.d3.roof.tailSpacingIn, 24);
+  assertEquals(r.d3.gableVent, { widthFrac: 0.25 });
+  assertEquals(r.d3.foundation, "skids");
+});
+
+Deno.test("a video reply that saw none of it leaves every new field unset", () => {
+  // "I could not see under the eave" and "there is no vent" must both come back as
+  // ABSENCE, so the client merge keeps whatever the builder already had.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.42, "overhang": 1.0 },
+    "colors": {}, "wallHeightFt": 7,
+    "observed": { "eave": "unclear", "vents": "none", "confidence": "low" }
+  }`);
+  assert(r.ok, "a partial read is still a valid spec");
+  if (!r.ok) return;
+  assert(!("eave" in r.d3.roof), "an unreadable eave must not default to fascia in the spec");
+  assert(!("tailSpacingIn" in r.d3.roof), "spacing is meaningless without an open eave");
+  assert(!("gableVent" in (r.d3 as Record<string, unknown>)), "no vent seen must mean no vent set");
+  assert(!("foundation" in (r.d3 as Record<string, unknown>)), "an unseen base must not default to slab");
+});
+
+Deno.test("roofMaterial and the appendages survive a video reply", () => {
+  // roofMaterial is the THIRD top-level field the draft merge dropped before anyone
+  // noticed — the renderer textures the roof from it, so losing it shows shingles on a
+  // metal building and reads as the model getting it wrong. Lean-to and dormer ride on
+  // `roof`, so the spread merge already carried them; this pins that they survive the
+  // SANITISER, which is the other place they could vanish.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.4, "leanToWidthFt": 8, "leanToDropFt": 1.5,
+              "leanToSide": "left", "dormerWidthFt": 4, "dormerRiseFt": 2, "dormerOffsetU": 0.5 },
+    "roofMaterial": "metal", "colors": {}, "wallHeightFt": 8
+  }`);
+  assert(r.ok, "the reply the prompt asks for must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roofMaterial, "metal");
+  assertEquals(r.d3.roof.leanToWidthFt, 8);
+  assertEquals(r.d3.roof.leanToSide, "left");
+  assertEquals(r.d3.roof.dormerWidthFt, 4);
+  const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(bare.ok, "minimal spec accepted");
+  if (bare.ok) assert(!("roofMaterial" in (bare.d3 as Record<string, unknown>)), "absent stays absent");
 });

@@ -88,7 +88,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, planImageUrl, view3dImageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -109,7 +109,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl, email_template_copy")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -298,17 +298,23 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // 4. Fetch GHL products — pricing NEVER comes from GHL (every line item is priced from this
   //    tenant's StructureStudio catalog below). We still read the product list solely to borrow
   //    a userId for the estimate (products[0].createdBy). It's best-effort: a products-API hiccup
-  //    must not block an estimate, and userId falls back to the users API.
+  //    must not block an estimate, and userId falls back to the users API. GHL-ESTIMATE PATH
+  //    ONLY: the userId (and this lookup feeding it) is consumed solely by the estimate
+  //    create/send calls in steps 9/10, which SS-mode tenants (invoice_in_ghl = false, branch
+  //    9-ALT) never reach — so they skip the lookups AND the hard userId requirement below,
+  //    which used to 400 real SS-mode tenants whose location simply had no assignable user.
   let products: any[] = [];
-  try {
-    const r = await fetch(
-      `https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`,
-      { headers: ghlHeaders }
-    );
-    if (r.ok) { const d = await r.json(); products = d?.products || []; }
-    else console.warn("Products fetch (userId only) failed:", r.status, (await r.text()).slice(0, 300));
-  } catch (e) {
-    console.warn("Products fetch (userId only) error:", (e as Error).message);
+  if (invoiceInGhl) {
+    try {
+      const r = await fetch(
+        `https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`,
+        { headers: ghlHeaders }
+      );
+      if (r.ok) { const d = await r.json(); products = d?.products || []; }
+      else console.warn("Products fetch (userId only) failed:", r.status, (await r.text()).slice(0, 300));
+    } catch (e) {
+      console.warn("Products fetch (userId only) error:", (e as Error).message);
+    }
   }
 
   const dynamicLocationId = (products[0]?.locationId) || locationId;
@@ -318,9 +324,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //   1. products[0].createdBy   — borrow from an existing product (how prod/Junior Barns works)
   //   2. GET /users/?locationId= — first user in the location
   // If both come up empty (e.g. a brand-new GHL location with no products and no assigned
-  // users), we fail early with an actionable message instead of GHL's cryptic 422.
+  // users), we fail early with an actionable message instead of GHL's cryptic 422. In SS mode
+  // no GHL estimate is ever created, so the id stays "" and nothing requires it (the contact
+  // upsert and the opportunity never take a userId).
   let dynamicUserId = (products[0]?.createdBy) || "";
-  if (!dynamicUserId) {
+  if (invoiceInGhl && !dynamicUserId) {
     try {
       const r = await fetch(
         `https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`,
@@ -337,7 +345,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       console.warn("userId fallback (users fetch) error:", (e as Error).message);
     }
   }
-  if (!dynamicUserId) {
+  if (invoiceInGhl && !dynamicUserId) {
     // This endpoint is reachable with the public anon key, so the caller-facing message must not
     // carry the tenant's ghl_location_id — it lives in the service-role-only client_settings and
     // every other surface deliberately masks it (portal-settings' maskId, admin-save-settings'
@@ -648,6 +656,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Price a single color (paint or roof) by its catalog rate + pricing_method — same math as
   // layout add-ons. pct_estimate_total isn't supported on a combined color line (colors realistically
   // use each / pct_building_price / flat), so it falls back to 0.
+  //
+  // ⚠️ EXTRACTED COPY EXISTS: _shared/attributeLines.ts carries this function and the
+  // paint/roof line builders below verbatim — the order screen's attribute change orders
+  // (migration 127) price with it. Any change to this math MUST land in both files.
   const colorAmount = (row: any): number => {
     const rate = Number(row?.rate) || 0;
     if (rate <= 0) return 0;
@@ -1465,6 +1477,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
     // URL, since this one is fetched server-side.
     const planUrl = imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null;
+    // The plain-image twins for the order screen's sidebar cards (migration 127) — same
+    // prefix guard, persisted below. SS branch only, so the CRM path never writes them.
+    const planImg = planImageUrl && String(planImageUrl).startsWith(expectedPdfPrefix) ? String(planImageUrl) : null;
+    const view3dImg = view3dImageUrl && String(view3dImageUrl).startsWith(expectedPdfPrefix) ? String(view3dImageUrl) : null;
     const skippedSheets: string[] = [];
 
     let quotePdfUrl: string | null = null;
@@ -1587,6 +1603,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           quoteTerms: quoteTerms || null,
         })
         : estimateEmail({
+          templateCopy: settings.email_template_copy,
           businessName,
           logoUrl: businessLogoUrl || null,
           phone: businessPhone || null,
@@ -1627,6 +1644,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         estimate_lines: estimateLines,
         ss_quote_number: ssQuoteNumber,
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
+        ...(planImg ? { plan_image_url: planImg } : {}),
+        ...(view3dImg ? { view3d_image_url: view3dImg } : {}),
         // ss_quote_sent_at means the QUOTE email landed; a change-order email is a
         // different document and must not masquerade as the quote having been sent.
         ...(emailed && !changeOrder ? { ss_quote_sent_at: new Date().toISOString() } : {}),
@@ -1635,11 +1654,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       .eq("short_code", designId);
     // A failed persist is worth surfacing: the number has been consumed and the customer may
     // already hold the document, so silence here would leave nothing to reconcile against.
-    if (persistErr) console.warn("SS quote persist failed:", persistErr.message);
+    // Durable log + a warning in the response, not just the console — the runtime console
+    // stream is unreliable on this project (see CLAUDE.md), and a silent ok:true leaves the
+    // allocated quote number diverged from what the row stores.
+    if (persistErr) {
+      console.warn("SS quote persist failed:", persistErr.message);
+      logEdgeError({
+        fn: "submit-estimate",
+        req,
+        clientId,
+        code: "ss_quote_persist_failed",
+        message: `SS quote persist failed after issue/email: ${persistErr.message}`,
+        context: { designId: String(designId), ssQuoteNumber, emailed },
+      }).catch(() => {});
+    }
 
     return json({
       ok: true,
       issuedBy: "structurestudio",
+      ...(persistErr
+        ? { warning: "The quote was issued, but saving it to the design failed — the stored record may be out of date. The error was logged for support." }
+        : {}),
       contactId,
       opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
       // No GHL estimate exists in this mode. Reported as null rather than omitted so a caller
@@ -1821,6 +1856,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // (recording the pre-redirect recipient as intended_email), the dark guards,
           // and the email_sends ledger — and it never throws.
           const content = estimateEmail({
+          templateCopy: settings.email_template_copy,
             businessName,
             logoUrl: businessLogoUrl || null,
             phone: businessPhone || null,
@@ -1903,7 +1939,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // 11. Persist GHL IDs + the line provenance snapshot (estimateLines — built just above
   //     step 10, same object; see its comment for the serialization-timing invariants).
 
-  await supabase
+  const { error: persistErr } = await supabase
     .from("designs")
     .update({
       ghl_contact_id: contactId,
@@ -1914,9 +1950,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       updated_at: new Date().toISOString(),
     })
     .eq("short_code", designId);
+  // A failed persist here is the duplicate-estimate seed: the GHL estimate exists and the
+  // email may already be out, but the row never learned its id — so the NEXT resubmit
+  // POSTs a brand-new estimate instead of PUTting this one. Durable log + a warning in
+  // the response, never a silent ok:true (same treatment as the 9-ALT persist above).
+  if (persistErr) {
+    console.warn("GHL estimate persist failed:", persistErr.message);
+    logEdgeError({
+      fn: "submit-estimate",
+      req,
+      clientId,
+      code: "ghl_estimate_persist_failed",
+      message: `designs update after GHL estimate create/send failed: ${persistErr.message}`,
+      context: { designId: String(designId), estimateId, estimateNumber, recreatedFromStale },
+    }).catch(() => {});
+  }
 
   return json({
     ok: true,
+    ...(persistErr
+      ? { warning: "The estimate was created and sent, but saving its reference to the design failed — resubmitting may create a duplicate estimate. The error was logged for support." }
+      : {}),
     contactId,
     estimateId,
     estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || null,

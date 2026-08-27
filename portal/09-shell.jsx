@@ -1,3 +1,17 @@
+// The `leads` tab no longer renders anything — it rewrites itself into the merged
+// Contacts & Designs section. Kept rather than deleted because /portal/leads is a link
+// people already have: it is in release notes, in bookmarks, and in any ?view= URL an
+// operator has shared. Deleting the tab would 404 all of them; redirecting self-corrects
+// the URL and lands them where the content actually lives.
+//
+// `replace` so the alias does not sit in history and trap the back button on it.
+function LeadsRedirect({ sub, navigate }) {
+  useEffect(() => {
+    navigate("designs", sub && /^[cd]-/.test(sub) ? sub : "people", true);
+  }, [sub]);
+  return null;
+}
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -130,9 +144,18 @@ function Dashboard({ session }) {
     const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
+    // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
+    // go with it: a team member landing on /portal/admin/billing bounces to designs, where
+    // "billing" matches none of that tab's sub branches (c-/d-/deals/people) — the body
+    // rendered EMPTY and the rewrite below then published /portal/designs/billing, a URL
+    // that reproduces the blank on every reload. Null it and let the re-run write the clean
+    // path. Safe to do only HERE, after the wanted/gatesResolved wait above — at clamp time
+    // proper (first render) isOperator is still false, and stripping then would cost an
+    // operator's /portal/admin/<sub> deep link its sub before the answer arrives.
+    if (resolvedTab !== tab && sub !== null) { setSub(null); return; }
     if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
     try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
-  }, [resolvedTab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
+  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -627,8 +650,9 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
-          {navItem("designs", "Designs")}
-          {navItem("leads", "Contacts")}
+          {/* ONE item. Carolyn, 2026-08-24: "these two needs to be consolidated." The views
+              live inside it (Contacts / Designs / Pipeline) rather than as sibling tabs. */}
+          {navItem("designs", "Contacts & Designs")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
           {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
@@ -637,24 +661,23 @@ function Dashboard({ session }) {
           {navItem("delivery-schedule", "Delivery Schedule")}
           {navItem("repairs", "Repairs")}
           {navItem("commissions", "Commissions")}
-          {/* Config surface like Settings, so gated the same way: admins, plus anyone
-              holding settings_quickbooks (migration 100) — navHidden reads that area via
-              TAB_AREA, the same map the clamp and the content render use, so all three
-              surfaces agree (audit 2026-08-20). Kept OUT of NONADMIN_TABS: a plain
-              "user" role with no area grant still never sees or reaches it. */}
-          {navItem("quickbooks", "QuickBooks")}
+          {/* QuickBooks has no nav entry any more (Carolyn 2026-08-24): it is a config
+              surface, not workspace work, and it is already mounted a second time at
+              Settings → QuickBooks — which is where the links people actually hold point
+              (/portal/settings/quickbooks). The /portal/quickbooks route, its render
+              block and ICONS.quickbooks all stay, so old deep links still land on the
+              real page: same treatment 3D Design got below. Its gating is unchanged —
+              admins plus settings_quickbooks holders (migration 100), enforced by
+              TAB_AREA and the clamp, neither of which reads the nav. */}
         </nav>
 
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
-          {/* 3D is gated the same way every paid add-on is: featureOn reads
-              entitlement.features, which portal-billing now computes from a THREE-branch
-              map. view_3d is `grantable`, so it is deliberately NOT covered by the
-              exempt/transition blankets - an operator grant (or a real subscription) is
-              the only way in, which is what "not all clients need to see it" requires.
-              Operators are never gated by featureOn, so CSM Synergy always sees it. */}
-          {view3dUnlocked ? navItem("view-3d", "3D Design", "New") : soonItem("view-3d", "3D Design", "3rd Qtr")}
+          {/* 3D Design has no nav entry any more (Carolyn 2026-08-25): it is live inside
+              the Designer (view3d prop) and calibration lives in Settings → Designer, so
+              the standalone tab came off the rail. The /portal/view-3d route and its
+              render block stay so old deep links still land somewhere sensible. */}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
@@ -835,16 +858,81 @@ function Dashboard({ session }) {
               </div>
             )}
             {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
-            {!gateLocked && activeTab === "designs" && (
+            {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "these two need to be
+                consolidated ... the view of being in an opportunity and the view of being
+                in a person are different, but they're the same."
+
+                Routed on the EXISTING `sub` segment rather than a new merged tab:
+                /portal/leads/c-<uuid> and /portal/designs/d-<code>. ssParsePath, ssPagePath
+                and the popstate handler already carry `sub`, so this needs no router
+                change, no TAB_META entry, no TAB_AREA/ssFallbackTab/NONADMIN_TABS edit, and
+                no PORTAL_PARTS renumber — all of which are edits to files a second session
+                is committing to today. The prefix (c-/d-) is what tells the two record
+                kinds apart, so one shell serves both from either tab.
+
+                Consolidating the two LISTS into one tab is the remaining half and is
+                deliberately not done here: it touches six hardcoded "designs" literals in
+                this file plus the landing clamp, and it is not what makes the demo. */}
+            {/* ⚠️ canEdit WAS `ssCanRead(myAccess, "contacts") === "edit"`, which was ALWAYS
+                FALSE: ssCanRead returns a BOOLEAN (01-core), so it compared `true` to the
+                string "edit". The whole conversation half of the record page — Activity,
+                Notes and the Email composer — was therefore disabled for EVERY user in the
+                product, owners and operators included, while the server happily accepted
+                those same writes. Worse, the Email tab's hint then blamed the contact ("no
+                email address on file") in front of a contact whose address is rendered
+                directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
+                admin or owner always holds it, otherwise read the area out of the map. */}
+            {/* `leads` is a REDIRECT ALIAS now, kept so old bookmarks, release-note links and
+                any ?view= URL still land somewhere real. It rewrites itself to the merged tab
+                and preserves a record sub, so /portal/leads/c-<id> still opens that contact. */}
+            {activeTab === "leads" ? <LeadsRedirect sub={sub} navigate={navigate} /> : null}
+            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
+              <CrmRecord
+                key={sub}
+                kind={sub.charAt(0) === "c" ? "contact" : "design"}
+                recordId={sub.slice(2)}
+                isAdmin={canAdmin}
+                canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
+                onBack={() => navigate("designs", sub.charAt(0) === "c" ? "people" : "deals")}
+                onNavigate={(k, id) => navigate("designs", (k === "contact" ? "c-" : "d-") + id)}
+                onOpenDesign={(code) => openInDesigner(code)}
+              />
+            ) : null}
+            {/* CONTACTS | DESIGNS, as views of one section. The switch rides on `sub`, so each
+                view is linkable, the back button works, and a rep can send someone straight to
+                /portal/designs/people. Contacts is the DEFAULT because that is the view Carolyn
+                demonstrated — a person first, their buildings alongside. */}
+            {!gateLocked && activeTab === "designs" && !(sub && /^[cd]-/.test(sub)) && (
+              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                {[["people", "Contacts"], ["deals", "Designs"]].map(([k, label]) => {
+                  const on = (sub || "people") === k;
+                  return (
+                    <button key={k} type="button" onClick={() => navigate("designs", k)}
+                      style={{
+                        background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155",
+                        border: "1px solid " + (on ? ACCENT : "#E2E8F0"), borderRadius: 8,
+                        padding: "7px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                      }}>{label}</button>
+                  );
+                })}
+              </div>
+            )}
+            {!gateLocked && activeTab === "designs" && sub === "deals" && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
                 isAdmin={canAdmin}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                onOpenRecord={(code) => navigate("designs", "d-" + code)}
                 onOpenDesign={openInDesigner} />
             )}
-            {!gateLocked && activeTab === "leads" && (
+            {/* Anything that isn't "deals" or a record sub renders the DEFAULT view — the
+                same treatment SettingsShell gives an unknown slug. A sub this branch does
+                not recognise (a foreign segment surviving a tab clamp, or a hand-typed
+                URL) must never leave the section bodiless. */}
+            {!gateLocked && activeTab === "designs" && sub !== "deals" && !(sub && /^[cd]-/.test(sub)) && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                onOpenRecord={(contactId) => navigate("designs", "c-" + contactId)}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (
@@ -866,7 +954,11 @@ function Dashboard({ session }) {
                        "to be loaded" pool (the pool is a query over sold units without a
                        sale stop), so this just takes the dispatcher there — no focus/
                        hand-off state to keep in sync. */
-                    onScheduleDelivery={() => navigate("delivery-schedule")} />
+                    onScheduleDelivery={() => navigate("delivery-schedule")}
+                    /* IN-PORTAL designer, same as every other Open in this app — the public
+                       ?id= page silently captures leads/drafts, so staff must never browse
+                       a customer's design there. */
+                    onOpenDesign={openInDesigner} />
                 : <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).

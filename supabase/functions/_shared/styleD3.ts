@@ -14,16 +14,59 @@
 
 export const D3_ROOF_TYPES = ["shed", "gable", "gambrel"] as const;
 
+// The four claddings the renderer can draw, in the order Carolyn names them
+// (2026-08-24): "panel siding, lap siding, board and batten, and metal".
+//
+// These are the ids in the renderer's D3_CLADDING table, so a style spec can now
+// name any of them. Until 2026-08-25 this list was effectively ["batten","lap"]
+// inline below, which meant a style could never persist `panel` or `agpanel` —
+// the sanitiser rewrote them to null WITHOUT erroring, and null renders as panel.
+// That is why "set this style to Metal" appeared to save and read back as Panel.
+//
+// `null` is still legal and still means "unset". It normalises to `panel` in the
+// renderer (d3NormalizeCladding), which is what every existing row already does —
+// so widening this list changes nothing for a style nobody re-saves.
+export const D3_SIDING_VALUES = ["panel", "lap", "batten", "agpanel"] as const;
+
 // Room for a genuinely steep roof and a deep overhang, but not for the values that
 // make the renderer produce nonsense (a "pitch" of 40 draws a spike through the sky).
 const CLAMPS: Record<string, [number, number]> = {
   pitch: [0, 2],
-  ridgeOffset: [-0.35, 0.35],   // saltbox shift, as a fraction of the half-span
+  ridgeOffset: [-0.35, 0.35],   // saltbox shift, as a fraction of the FULL span (d3RoofProfile: ru = S * ridgeOffset)
   overhang: [0, 3],             // feet past the wall
   kneeU: [0, 1],                // gambrel knee, fraction of half-span
+  // BOTH rises are measured from the WALL PLATE, not from each other: d3RoofProfile does
+  // kY = H + s2*kneeRise and rY = H + s2*ridgeRise off the same H. Describing ridgeRise as
+  // "above the knee" anywhere makes every drafted gambrel come out inside-out, because the
+  // model then reports the leftover and the renderer reads it as the whole height.
   kneeRise: [0, 1],
   ridgeRise: [0, 1.5],
+  // Rafter-tail spacing in INCHES, because that is the unit a builder measures
+  // on-centre in. 8 is tighter than any real framing, 96 looser than any.
+  tailSpacingIn: [8, 96],
+
+  // LEAN-TO and DORMER (2026-08-25). Both are ADDITIVE keys on `roof` rather than new
+  // `roof.type` values, and that choice is load-bearing rather than stylistic.
+  //
+  // A new roof TYPE would be a live production hazard: one Supabase project serves beta
+  // and production, `building_styles.d3` is one shared table, and the production
+  // renderer's profile builder has an `else` branch that catches every unknown type and
+  // draws a GABLE. So a builder calibrating "leanto" on beta would immediately show
+  // production customers a plain gable on that style. As extra keys, an older renderer
+  // simply does not read them and draws the base building correctly -- the appendage is
+  // missing, which is honest, rather than the roof being wrong, which is not.
+  //
+  // A lean-to exists iff leanToWidthFt > 0; a dormer iff dormerWidthFt > 0. Zero is the
+  // off switch, which is why every lower bound here is 0 rather than a real minimum.
+  leanToWidthFt: [0, 16],     // feet the appendage projects past the eave wall
+  leanToDropFt: [0, 6],       // how far its outer edge falls below the main eave
+  dormerWidthFt: [0, 12],     // along the ridge
+  dormerRiseFt: [0, 6],       // above the slope it sits on
+  dormerOffsetU: [-1, 1],     // where along the span, as a fraction of the half-span
 };
+
+// Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
+const D3_LEANTO_SIDES = ["left", "right"] as const;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -46,6 +89,9 @@ export type D3Spec = {
   colors: Record<string, string>;
   wallHeightFt?: number;
   roofMaterial?: string;
+  gableVent?: { widthFrac: number };
+  foundation?: string;
+  claddingChoices?: string[];
 };
 
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
@@ -59,14 +105,38 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     return { ok: false, error: `Unknown roof type "${type}" — expected shed, gable or gambrel.` };
   }
   const roof: Record<string, unknown> = { type };
-  for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise"]) {
+  // ⚠️ A CLAMPS entry is not enough — a key missing from THIS list is dropped silently,
+  // which looks to a builder exactly like "the save didn't work". Add to both.
+  for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn",
+                   "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
+  // Which eave the lean-to hangs off. Only meaningful when leanToWidthFt > 0; stored
+  // regardless so toggling the width back up remembers the side.
+  if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
+    roof.leanToSide = String(rawRoof.leanToSide);
+  }
+  // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
+  // Urban style, read off a walk-around video; "fascia" = the painted trim board the
+  // renderer has always drawn.
+  //
+  // ABSENT is deliberate and means fascia. The renderer tests `=== "open"`, so every
+  // row that predates this field keeps its exact render, and the deep-equal on `roof`
+  // in styleD3.test.ts keeps passing. Emitting a default here would fail that test AND
+  // silently write the default into every tenant's column the first time a builder
+  // opens and saves the calibration panel.
+  //
+  // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would
+  // throw on a key with no entry.
+  if (rawRoof.eave === "open" || rawRoof.eave === "fascia") roof.eave = rawRoof.eave;
 
-  // Anything that is not one of the two renderable sidings means "plain", which is
-  // what the renderer already does with null. Matches the AI validator's posture.
-  const siding = (src.siding === "batten" || src.siding === "lap") ? src.siding : null;
+  // Anything that is not a renderable cladding means "unset", which the renderer
+  // draws as panel siding. Matches the AI validator's posture: drop what we cannot
+  // draw rather than argue with it.
+  const siding = (D3_SIDING_VALUES as readonly string[]).includes(String(src.siding))
+    ? String(src.siding)
+    : null;
 
   const colors: Record<string, string> = {};
   const rawColors = (src.colors && typeof src.colors === "object") ? src.colors : {};
@@ -76,12 +146,54 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   }
 
   const d3: D3Spec = { roof, siding, colors };
+  // Wall height is CLAMPED into range rather than dropped, but only from a plausible band.
+  // Dropping a 4.5 threw away a good near-miss and left the style default (often 8) standing,
+  // which is further from the truth than the bound would have been. Clamping everything is
+  // the opposite mistake: a model that answers in INCHES returns 96, and clamping that to 14
+  // draws a two-storey wall on a garden shed. So anything a human could plausibly have meant
+  // in feet gets pulled to the nearest bound, and anything outside that is a different unit
+  // or a hallucination and is dropped, leaving the builder's own value alone.
   const wh = num(src.wallHeightFt);
-  if (wh !== null && wh >= 5 && wh <= 14) d3.wallHeightFt = wh;
+  if (wh !== null && wh >= 3 && wh <= 20) d3.wallHeightFt = Math.min(14, Math.max(5, wh));
   // The style's default roof MATERIAL (2026-08-15): the renderer textures the
   // roof with it before any customer roof-type pick. Same posture as siding —
   // anything unknown means "unset".
   if (src.roofMaterial === "shingle" || src.roofMaterial === "metal") d3.roofMaterial = src.roofMaterial;
+
+  // A louvered gable vent at both ends, sized as a fraction of the span. Absent means
+  // no vent, which is what every row that predates this field says by omission.
+  //
+  // Height is NOT a field: real gable vents run about 2:1 wide-to-tall and the renderer
+  // derives it, so there is one number to get wrong instead of two.
+  const gvRaw = src.gableVent;
+  if (gvRaw && typeof gvRaw === "object") {
+    const w = num((gvRaw as Record<string, unknown>).widthFrac);
+    if (w !== null && w > 0) d3.gableVent = { widthFrac: Math.min(0.6, Math.max(0.05, w)) };
+  }
+
+  // What the building sits on. "skids" draws runners under a thin deck — the shadow gap
+  // that says a building is portable rather than poured. Absent means the slab the
+  // renderer has always drawn, so no existing row moves.
+  if (src.foundation === "skids" || src.foundation === "slab") d3.foundation = src.foundation;
+
+  // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
+  // which is what every existing row says by omission.
+  //
+  // Per-style rather than per-tenant on purpose: a Horse Shelter can be metal while a
+  // Lofted Cabin is not, and `building_styles.d3` already round-trips through this
+  // sanitiser, is already emitted per style by get_config, and already has both save
+  // paths. A tenant-level flag would need a migration, a get_config regenerated from
+  // pg_get_functiondef, and a new save action — days of work for a worse answer.
+  //
+  // Rebuilt from D3_SIDING_VALUES rather than filtered from the caller's array, so the
+  // stored order is always canonical and unknown ids cannot ride along.
+  if (Array.isArray(src.claddingChoices)) {
+    const offered = src.claddingChoices as unknown[];
+    const picked = (D3_SIDING_VALUES as readonly string[]).filter((id) => offered.includes(id));
+    // Every box unticked would leave the customer no cladding at all. That is a slip,
+    // not an instruction, so it reads as "unset" and falls back to all four.
+    if (picked.length) d3.claddingChoices = picked;
+  }
 
   // A spec is a handful of numbers. Anything approaching this size is either a mistake
   // or someone using a customer-visible jsonb column as free storage.
@@ -115,18 +227,27 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
   "roof": {
     "type": "shed" | "gable" | "gambrel",
     "pitch": <rise over run, e.g. 0.33 for 4:12>,
-    "ridgeOffset": <-0.35..0.35, gable only: shifts the ridge toward one eave for a saltbox look; 0 if centred>,
+    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
     "overhang": <feet the roof projects past the wall, typically 0.3-1.0>,
     "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
-    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>
+    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>
   },
-  "siding": "batten" | "lap" | null,
+  "siding": "panel" | "lap" | "batten" | "agpanel" | null,
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
   "wallHeightFt": <estimated wall height, typically 6-10; doors are about 6.5 ft tall, use them for scale>
 }
 
-Judge the roof type from the silhouette: one slope = shed, two = gable, four (a break partway down each side) = gambrel. "batten" means vertical boards with raised strips over the seams; "lap" means horizontal overlapping boards. Colors are the dominant UNPAINTED material colors. Estimate conservatively and use typical values when a photo does not show something.`;
+Judge the roof type from the silhouette: one slope = shed, two = gable, four (a break partway down each side) = gambrel.
+
+SIDING is what the wall surface is made of:
+- "panel" — flat vertical sheets with narrow grooves cut INTO them every 8 inches or so, all flush with each other. Sold as SmartSide, DuraTemp or T1-11. This is the most common; use it when the wall reads as plain vertical sheeting.
+- "lap" — horizontal boards, each overlapping the one below, casting a shadow line every few inches.
+- "batten" — vertical boards about 12-18 inches apart with a narrow strip of trim laid ON TOP of each seam, standing proud of the wall. If you can see raised strips with gaps between them, it is batten, not panel.
+- "agpanel" — ribbed metal sheeting, with regular raised ribs running vertically and a metallic sheen.
+Use null only if the frames genuinely do not show the wall surface.
+
+Colors are the dominant UNPAINTED material colors. Estimate conservatively and use typical values when a photo does not show something.`;
 
 // The walk-around-video variant of the prompt above. Same output shape, because it feeds
 // the same sanitiser and the same renderer — but three things differ enough to be worth a
@@ -144,6 +265,13 @@ Judge the roof type from the silhouette: one slope = shed, two = gable, four (a 
 //      customer changes afterwards, so a colour the model is unsure of costs nothing and a
 //      roof type it gets wrong costs everything.
 //
+// `siding` is deliberately ABSENT from this prompt (2026-08-25). It used to be here, and
+// because the model answers every key it was asked for, EVERY walk-around draft overwrote
+// the builder's cladding choice with a guess read off ground-level frames. Dropping the key
+// is why applyDraftedShape no longer carries a siding line: a prompt that never mentions it
+// cannot return it, which is a stronger guarantee than a caller remembering not to apply it.
+// The builder picks cladding from a four-way list one field below the video button.
+//
 // `observed` is deliberately OUTSIDE the spec. sanitizeD3Spec rebuilds from known keys and
 // drops it, which is what we want — it is a note for the builder about what the video
 // actually showed (doors, windows, vents), not geometry. The renderer has no field for any
@@ -157,13 +285,23 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
   "roof": {
     "type": "shed" | "gable" | "gambrel",
     "pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,
-    "ridgeOffset": <-0.35..0.35, gable only: shifts the ridge toward one eave for a saltbox look; 0 if centred>,
+    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
     "overhang": <feet the roof projects past the wall, typically 0.3-1.5>,
     "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
     "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
-    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the knee>
+    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>,
+    "eave": "open" | "fascia",
+    "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>,
+    "leanToWidthFt": <only if an open lean-to runs along one long side: how far it projects, in feet>,
+    "leanToDropFt": <how far the lean-to's outer edge sits below the main eave, in feet, typically 1-2>,
+    "leanToSide": "left" | "right",
+    "dormerWidthFt": <only if a dormer sits on a roof slope: its width in feet>,
+    "dormerRiseFt": <how far the dormer stands above the slope, in feet>,
+    "dormerOffsetU": <-0.85..0.85: how far the dormer sits from the ridge line toward one eave, as a fraction of the half-span. This is a SIDEWAYS position across the roof, not a distance up the slope: 0 puts it on the ridge, 0.5 halfway out to the eave, and the sign picks the side (negative = left, positive = right, seen from outside facing the doors)>
   },
-  "siding": "batten" | "lap" | null,
+  "gableVent": { "widthFrac": <vent width as a fraction of the wall width, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
+  "foundation": "skids" | "slab",
+  "roofMaterial": "shingle" | "metal",
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
   "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6.5 ft, use it for scale>,
   "observed": {
@@ -185,6 +323,18 @@ PITCH: find a frame looking straight at a gable end and read the slope of the ro
 OVERHANG: how far the roof edge stands out past the wall below it, in feet, judged against a door for scale. Some styles are sold on a deliberately wide eave, so this number carries the look — do not default it to a middle value if the frames show a wide one.
 
 WALL HEIGHT: the wall at the eave, not at the peak.
+
+EAVE FINISH, from a frame looking along a long side at the underside of the roof edge. There are two possibilities and they look nothing alike once you know to look: a continuous painted board running the whole length, level and unbroken, is "fascia"; a repeating row of raw unpainted wood blocks projecting below the roof with gaps of open air between them is "open" — exposed rafter tails, which give the bottom of the roof a sawtooth outline rather than a straight line. If it is "open", count the blocks along a run you can measure against the wall and give the spacing in inches — 24 is the common one, 16 the next. If you cannot see under the eave in any frame, omit both keys rather than guessing; omitting them means the fascia we already draw.
+
+GABLE VENT: a louvered opening set in the gable triangle, above the top of the wall. Give its width as a fraction of the WALL's width, not of the triangle. Omit the whole gableVent object if the gable ends carry no vent — that is common and is not a failure to see one.
+
+ROOF MATERIAL: asphalt shingles are laid in overlapping courses, so the slope carries a horizontal line every few inches and the surface looks granular. Metal is long continuous panels running UP the slope with raised ribs a foot or so apart, and it catches light in hard streaks rather than evenly. Judge it from the frame where the roof fills most of the picture; on an overcast day the giveaway is the direction of the lines — across the slope means shingle, up it means metal.
+
+LEAN-TO: an open roofed section running along one LONG side, its outer edge carried on posts rather than a wall — a porch or an equipment bay. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen by someone standing outside facing the doors.
+
+DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and how far ACROSS the roof it sits -- measured sideways from the ridge line toward one eave, as a fraction of the half-span, negative for the left side and positive for the right as seen from outside facing the doors. Omit all three keys if the roof is unbroken, which is the common case.
+
+FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
 
 Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
 

@@ -20,6 +20,7 @@ import {
   twilioConfigured,
   TwilioApiError,
   TwilioNotConfigured,
+  twSanitizeBrand,
   twStartVerification,
 } from "./twilioVerify.ts";
 
@@ -446,4 +447,38 @@ Deno.test("toE164US: everything else is null — the caller strips formatting, t
   assertEquals(toE164US("+15005550006"), null, "already-E.164 input is not digits");
   assertEquals(toE164US("500555000a"), null, "a stray letter");
   assertEquals(toE164US(""), null, "empty");
+});
+
+// ── twSanitizeBrand ────────────────────────────────────────────────────────────────────
+// This runs on a string the BUILDER typed into a settings box, and its output goes to
+// Twilio as CustomFriendlyName. Twilio 400s the whole send on a name it dislikes, and a
+// rejected send means the builder's CUSTOMER cannot log in to see their quote. So the
+// interesting cases here are all "ugly input must not become a failed login".
+
+Deno.test("twSanitizeBrand: an ordinary business name passes through", () => {
+  assertEquals(twSanitizeBrand("YoderBarn"), "YoderBarn");
+  assertEquals(twSanitizeBrand("Junior Barns"), "Junior Barns");
+});
+
+Deno.test("twSanitizeBrand: punctuation real businesses actually use is stripped, not rejected", () => {
+  // The whole point: "Yoder's Barns & Sheds, LLC" is a name someone will type.
+  assertEquals(twSanitizeBrand("Yoder's Barns & Sheds, LLC"), "Yoder s Barns Sheds LLC");
+  assertEquals(twSanitizeBrand("A+B  Structures"), "A B Structures");
+});
+
+Deno.test("twSanitizeBrand: capped at 32 chars with no trailing space", () => {
+  const out = twSanitizeBrand("Abcdefghij Klmnopqrst Uvwxyz Abcdefghij");
+  assert(out.length <= 32, `expected <=32, got ${out.length}`);
+  assertEquals(out, out.trim(), "a cap must never leave a trailing space");
+});
+
+Deno.test("twSanitizeBrand: nothing usable returns empty, so the caller omits the override", () => {
+  // Empty is the SAFE answer, not a failure: the send goes out on Twilio's service default,
+  // which is exactly the behaviour before this parameter existed.
+  assertEquals(twSanitizeBrand(""), "");
+  assertEquals(twSanitizeBrand("   "), "");
+  assertEquals(twSanitizeBrand("!!!"), "");
+  assertEquals(twSanitizeBrand(null), "");
+  assertEquals(twSanitizeBrand(undefined), "");
+  assertEquals(twSanitizeBrand(12345), "");
 });

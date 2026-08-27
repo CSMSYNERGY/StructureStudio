@@ -52,6 +52,21 @@ const BUILT_IN_TOOLS = {
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
 };
 
+// Storage props (see D3_PROPS). ONE item type; which prop it is rides on the item's own
+// `propKind`, so a tenant gains the whole set at once and a design saved with a prop we later
+// rename still renders (d3PropSpec falls back).
+//
+// Merged after `...C.layoutItems` like BUILT_IN_TOOLS, so a tenant config cannot remove it —
+// and it MUST exist, because `ITEMS[item.type]` is the guard in both renderers: an item whose
+// type has no entry is silently dropped from the plan while staying in the saved row.
+//
+// `noPalette` because props are not placed by arming a tool and clicking a wall. They come
+// from the 3D Items popup, which drops one in the middle of the floor for the customer to
+// drag — there is nothing to aim at, and arming would have fallen through place3's dispatch
+// chain into WALL placement. width/height are overwritten per prop at placement from the
+// registry's footprint; these are only the fallback if an item ever arrives without them.
+const PROP_CFG = { label: "Stored item", icon: "📦", color: "#64748B", shortLabel: "Item", propType: true, noPalette: true, width: 2, height: 2 };
+
 // Legacy render safety-net. When a tenant HIDES a built-in option (deactivates it in
 // client_layout_items so it drops out of get_config's layoutItems), its already-placed items on
 // SAVED designs would otherwise lose their render config and vanish. This provides the standard
@@ -517,8 +532,8 @@ function windowColorsFor(fx, windowColors) {
 }
 // The color fields a PLACED fixture snapshots (ids for server-side price re-resolution,
 // labels for descriptions, hexes for 2D/3D rendering). Every door stamp site — place,
-// swap, included-chip, 3D placement — writes all six so a swap can never leak the old
-// door's colors; windows stamp the three main fields only.
+// swap, included-chip, 3D placement, and the 3D footer's re-colour — writes all six so a
+// swap can never leak the old door's colors; windows stamp the three main fields only.
 function doorColorStamps(dc, tc) {
   return {
     colorId: dc ? dc.id : null, colorLabel: dc ? (dc.label || null) : null, colorHex: dc ? (dc.hex || null) : null,
@@ -527,6 +542,25 @@ function doorColorStamps(dc, tc) {
 }
 function windowColorStamps(c) {
   return { colorId: c ? c.id : null, colorLabel: c ? (c.label || null) : null, colorHex: c ? (c.hex || null) : null };
+}
+// How far off the interior FLOOR a catalog window sits, and whether the customer may slide
+// it (139). Stamped at placement like every other fixture field, so a design keeps the
+// height it was drawn with even if the builder later re-specs the window.
+//
+// ⚠️ Catalog windows never carried a sill at all before this: placePickedWindow and
+// placeFixture3 stamped none, and the swap branch wrote `sillFt: undefined` outright, so
+// EVERY catalog window fell through to the hardcoded 3'6" no matter what it was. That is
+// the bug Carolyn was describing when she said the windows "all go all the way to the top".
+//
+// undefined (not null) when the builder left it blank, because openingSpan's fallback is
+// `it.sillFt != null ? it.sillFt : D3.WINDOW_SILL` — undefined and null both fall through,
+// and undefined is what the existing stamp sites already write for "no opinion".
+function windowSillStamps(fx) {
+  const s = Number(fx && fx.sillIn);
+  return {
+    sillFt: (fx && fx.sillIn != null && Number.isFinite(s) && s >= 0) ? s / 12 : undefined,
+    sillMode: (fx && fx.sillMode === "variable") ? "variable" : "fixed",
+  };
 }
 function buildFixtureTools(fixtures) {
   const out = {};
@@ -923,6 +957,11 @@ function computeSelectionRows(sel, paintColors, C, items) {
   }
   return rows;
 }
+// The one Supabase storage host a design's image_url may legitimately point at, derived
+// from SUPABASE_URL so the two can never drift. A ".supabase.co" SUFFIX test admitted ANY
+// Supabase project — attacker-controlled storage on someone else's free project shares
+// that suffix, which defeats the anti-phishing gate below. Only THIS project's host is safe.
+const SS_SUPABASE_HOST = new URL(SUPABASE_URL).hostname;
 // Only allow a design's image_url to be used as a clickable href when it is an
 // https Supabase-storage (or same-origin) URL. image_url is stored verbatim by the
 // anon-granted save_design RPC, so a hostile caller could stash a javascript: or
@@ -932,7 +971,7 @@ function ssSafeUrl(u) {
     const url = new URL(u, window.location.origin);
     if (url.protocol !== "https:") return null;
     const h = url.hostname;
-    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+    return (h === window.location.hostname || h === SS_SUPABASE_HOST) ? u : null;
   } catch { return null; }
 }
 
@@ -1311,12 +1350,64 @@ function textOnAccent(hex) {
 // Progressive US phone formatter: "8163003600" -> "(816) 300-3600".
 // Caps at 10 digits; partial inputs format as "(816", "(816) 30", etc.
 // Display only — strip back to digits before sending to GHL.
+// Display formatter for the customer's phone field. Also the onChange transform, so
+// whatever this returns is what gets STORED in designs.contact and read by every
+// downstream matcher.
+//
+// 🚨 IT USED TO DESTROY DATA. The old body opened with:
+//
+//     const d = (v || "").replace(/\D/g, "").slice(0, 10);
+//
+// On an eleven-digit number typed with its country code, `slice(0, 10)` keeps the
+// leading 1 as the start of the area code and THROWS THE LAST DIGIT AWAY:
+//
+//     "+1 707 362 5667"  ->  digits 17073625667  ->  sliced 1707362566  ->  "(170) 736-2566"
+//
+// The number is not merely formatted oddly, it is unrecoverable — the final digit exists
+// nowhere in the row afterwards. Two live contacts were found in this state on 2026-08-25
+// when migration 130's backfill grouped designs by phone and the same person appeared
+// twice, once under each spelling. Any note or activity written against a contact would
+// have landed on whichever of their two rows they happened to create that day.
+//
+// The rules below are ported from `formatPhone` in the portal, which has always been
+// correct. They are duplicated rather than shared because the portal and the designer are
+// separate bundles with no common scope; if a third caller ever appears, that is the point
+// to lift this into a shared module rather than copy it again.
+//
+// The load-bearing change is that there is NO TRUNCATION anywhere. Anything this cannot
+// confidently format is returned untouched, because passing a number through unstyled is
+// recoverable and silently shortening one is not.
 function formatPhoneDisplay(v) {
-  const d = (v || "").replace(/\D/g, "").slice(0, 10);
-  if (d.length === 0) return "";
-  if (d.length <= 3) return `(${d}`;
-  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
-  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  const raw = String(v == null ? "" : v);
+  const t = raw.trim();
+  // An explicit non-US country code: leave it completely alone. A US mask applied to a UK
+  // or Mexican number produces something that looks valid and is not.
+  if (/^\+/.test(t) && !/^\+\s*1\b/.test(t) && !/^\+\s*1\d/.test(t)) return raw;
+  const plus1Typed = /^\+\s*1/.test(t);
+  let d = raw.replace(/\D/g, "");
+  let cc = false;
+  if (plus1Typed && d[0] === "1") { d = d.slice(1); cc = true; }
+  else if (d.length === 11 && d[0] === "1") { d = d.slice(1); cc = true; }
+  // Still too long after removing a country code — an extension, a typo, or a format we do
+  // not know. Hand it back verbatim. This is the line the old version did not have.
+  if (d.length > 10) return raw;
+  const p = cc ? "+1 " : "";
+  if (!d) return cc ? "+1 " : "";
+  if (d.length <= 3) return p + d;
+  if (d.length <= 6) return `${p}(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `${p}(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+// Digits-for-validation view of a phone. formatPhoneDisplay above deliberately preserves a
+// typed or browser-tel-autofilled "+1", so a perfectly valid US number can reach the
+// validators as 11 digits with a leading 1 — counting those as "not 10" rejected genuine
+// autofilled numbers. Every "exactly 10 digits" check AND the submitted payload use this
+// same view, so downstream (the GHL upsert, customer-auth phone matching) always sees one
+// consistent 10-digit value. Only the 11-digit leading-1 case is normalized; anything else
+// passes through unchanged for the validators to reject exactly as before.
+function ssPhone10(v) {
+  const d = String(v == null ? "" : v).replace(/\D/g, "");
+  return d.length === 11 && d[0] === "1" ? d.slice(1) : d;
 }
 
 // Lazy-load Google Maps JS API via the official inline bootstrap loader. Resolves
@@ -1942,11 +2033,36 @@ const D3_CLADDING = {
   lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
   agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
-  batten:  { id: "batten",  label: "Board & Batten", tex: "groove",  relief: "batten", stepFt: 1.5,  tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
+  // reliefTrim: the proud strip takes TRIM colour, not body. Carolyn, 2026-08-24: board and
+  // batten is "boards further apart and it has like a piece of TRIM over the top of it".
+  // It is a flag rather than a string compare on id so a future cladding can opt in.
+  // `rib` deliberately does NOT: a metal rib is the same sheet of steel, not a second board.
+  batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40, reliefTrim: true },
 };
-// The customer-selectable set, in the order Carolyn listed them. `batten` is deliberately
-// absent -- it is a legacy value we still RENDER, not one we offer.
-const D3_CLADDING_CHOICES = ["lap", "panel", "agpanel"];
+// The customer-selectable set, in the order Carolyn named them on 2026-08-24: "panel
+// siding, lap siding, board and batten, and metal". `batten` joined the list that day --
+// it was rendered but never offered, which is why board & batten could only ever appear
+// on a style whose stored spec already said so.
+//
+// A style may NARROW this via `d3.claddingChoices` (see d3CladdingChoicesFor below) --
+// not every builder sells every cladding, and metal in particular is far from universal.
+const D3_CLADDING_CHOICES = ["panel", "lap", "batten", "agpanel"];
+
+// Which claddings a given style offers the customer. A style may narrow the list via
+// `d3.claddingChoices` -- plenty of builders sell no metal siding at all -- but a style
+// that says nothing offers all four, which is what every existing row says by omission.
+//
+// Rebuilt by filtering OUR list rather than trusting theirs, so the dropdown order is
+// always canonical and a stale id in the column cannot reach D3_CLADDING[id].label and
+// throw. An empty result means the builder unticked everything, which is a slip rather
+// than an instruction -- honouring it literally would leave the customer no cladding to
+// pick at all -- so it falls back to the full list.
+function d3CladdingChoicesFor(styleCfg) {
+  const narrowed = styleCfg && styleCfg.d3 && Array.isArray(styleCfg.d3.claddingChoices)
+    ? D3_CLADDING_CHOICES.filter((id) => styleCfg.d3.claddingChoices.indexOf(id) !== -1)
+    : [];
+  return narrowed.length ? narrowed : D3_CLADDING_CHOICES;
+}
 
 // Every value `building_styles.d3.siding` can already hold, mapped onto the table above.
 // This is the whole backward-compatibility story and it needs NO migration: today `null`
@@ -1958,6 +2074,179 @@ function d3NormalizeCladding(v) {
   if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
   if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
+}
+
+// The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
+// plus the slope segments that get roof slabs.
+//
+// Extracted out of buildShed3DModel on 2026-08-25 so the calibration panel can DRAW the
+// same profile the renderer builds. Two implementations of a gambrel knee would drift on
+// the first change, and a drawing that disagrees with the 3D is worse than no drawing --
+// the whole point of it is that a builder can trust it.
+//
+// Pure: no THREE, no DOM. `tallNeg` picks which end of a shed roof is the high one.
+function d3RoofProfile(roofCfg, S, H, tallNeg) {
+  const cfg = roofCfg || {};
+  const prof = [], slopes = [];
+  if (cfg.type === "shed") {
+    const rise = S * (cfg.pitch || 0.25);
+    const A = tallNeg ? [-S / 2, H + rise] : [-S / 2, H];
+    const B = tallNeg ? [S / 2, H] : [S / 2, H + rise];
+    prof.push([-S / 2, H], A, B, [S / 2, H]);
+    slopes.push([A, B]);
+  } else if (cfg.type === "gambrel") {
+    const s2 = S / 2;
+    const kU = s2 * (cfg.kneeU || 0.55);
+    const kY = H + s2 * (cfg.kneeRise || 0.55);
+    const rY = H + s2 * (cfg.ridgeRise || 0.8);
+    prof.push([-s2, H], [-kU, kY], [0, rY], [kU, kY], [s2, H]);
+    slopes.push([[-s2, H], [-kU, kY]], [[-kU, kY], [0, rY]], [[0, rY], [kU, kY]], [[kU, kY], [s2, H]]);
+  } else {
+    const rise = (S / 2) * (cfg.pitch || 0.4);
+    // ridgeOffset shifts the ridge toward one eave (saltbox-style asymmetry).
+    const ru = S * Math.max(-0.35, Math.min(0.35, cfg.ridgeOffset || 0));
+    prof.push([-S / 2, H], [ru, H + rise], [S / 2, H]);
+    slopes.push([[-S / 2, H], [ru, H + rise]], [[ru, H + rise], [S / 2, H]]);
+  }
+  // Drop consecutive duplicate points (the shed profile produces one); the open edge
+  // auto-closes along the wall-plate line.
+  const dedup = prof.filter((pt, i) => i === 0 || Math.abs(pt[0] - prof[i - 1][0]) > 1e-6 || Math.abs(pt[1] - prof[i - 1][1]) > 1e-6);
+  return { prof, slopes, dedup };
+}
+
+// Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
+// point of the elevation drawing -- Carolyn spent two and a half minutes on 2026-08-24
+// failing to match a real gambrel because every control was a dimensionless ratio against
+// a referent nothing on screen named ("half in span. Nine. Okay, well that's kind of
+// crazy"). Rounded to the nearest inch; 12" rolls up.
+function d3FtIn(ft) {
+  if (!isFinite(ft)) return "";
+  const neg = ft < 0;
+  let whole = Math.floor(Math.abs(ft));
+  let inch = Math.round((Math.abs(ft) - whole) * 12);
+  if (inch === 12) { whole += 1; inch = 0; }
+  return (neg ? "-" : "") + whole + "' " + inch + '"';
+}
+
+// A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
+// the SAME profile builder the 3D renderer uses, so the drawing cannot disagree with the
+// building beside it.
+//
+// This exists because of one specific failure. On 2026-08-24 Carolyn spent two and a half
+// minutes trying to match a real gambrel and could not work out which number to change:
+// "I couldn't figure out which numbers to change here ... Half in span. Nine. Okay, well
+// that's kind of crazy ... I want them to be able to put in EXACTLY like what this is so
+// that they can get this angle to be exactly the way theirs is." The controls are
+// dimensionless ratios against a referent nothing on screen named -- `s2 = S / 2` is her
+// "half in span", and it appears nowhere in the UI. Every dimension here is therefore
+// annotated in FEET AND INCHES, with the ratio in small text underneath, and focusing an
+// input highlights the dimension it drives.
+//
+// Deliberately SVG and not a second 3D view: the preview beside it is a perspective
+// three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL
+// context that should not grow overlay complexity.
+function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
+  const roof = (spec && spec.roof) || {};
+  const m = /^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
+  // Mirrors buildShed3DModel's default front wall for a building with no doors placed --
+  // fw = bldgH >= bldgW ? "north" : "west" -- which is what the calibration preview shows.
+  // tallNeg is true for both of those, so the shed's high end is always on the left here.
+  const frontNS = d >= w;
+  const uAxisIsX = roof.type === "shed" ? !frontNS : frontNS;
+  const S = uAxisIsX ? w : d;
+  const H = (spec && spec.wallHeightFt) || 8;
+  const OV = roof.overhang != null ? roof.overhang : 0.6;
+  const dedup = d3RoofProfile(roof, S, H, true).dedup;
+  let peak = H;
+  dedup.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+
+  const VW = 360, VH = 210, PL = 54, PR = 54, PT = 14, PB = 34;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const sc = Math.min(innerW / Math.max(S + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = (u) => PL + innerW / 2 + u * sc;
+  const Y = (y) => PT + innerH - y * sc;
+
+  // Overhang: extend the outermost slope segment past the wall by OV measured HORIZONTALLY,
+  // which is how the renderer measures it (OV is feet past the wall, not along the rafter).
+  const ext = (far, near) => {
+    const dx = near[0] - far[0], dy = near[1] - far[1];
+    if (Math.abs(dx) < 1e-6) return near;
+    const k = OV / Math.abs(dx);
+    return [near[0] + dx * k, near[1] + dy * k];
+  };
+  const eaveL = dedup.length > 1 ? ext(dedup[1], dedup[0]) : dedup[0];
+  const eaveR = dedup.length > 1 ? ext(dedup[dedup.length - 2], dedup[dedup.length - 1]) : dedup[dedup.length - 1];
+  const roofPts = [eaveL].concat(dedup, [eaveR]).map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const on = (k) => focusKey === k;
+  const dimStroke = (k) => ({ stroke: on(k) ? HL : DIM, strokeWidth: on(k) ? 2 : 1 });
+  const tick = (x, y1, y2, k) => <line x1={x} y1={y1} x2={x} y2={y2} {...dimStroke(k)} />;
+  const label = (x, y, main, sub, k, anchor) => (
+    <g>
+      <text x={x} y={y} textAnchor={anchor || "middle"} style={{ fontSize: 10, fontWeight: 800, fill: on(k) ? HL : INK }}>{main}</text>
+      {sub ? <text x={x} y={y + 9} textAnchor={anchor || "middle"} style={{ fontSize: 8, fill: DIM }}>{sub}</text> : null}
+    </g>
+  );
+
+  const isGam = roof.type === "gambrel";
+  const s2 = S / 2;
+  const kU = s2 * (roof.kneeU || 0.55), kY = H + s2 * (roof.kneeRise || 0.55);
+  const rY = H + s2 * (roof.ridgeRise || 0.8);
+  const ru = S * Math.max(-0.35, Math.min(0.35, roof.ridgeOffset || 0));
+  const pitch = roof.pitch != null ? roof.pitch : (roof.type === "shed" ? 0.25 : 0.4);
+
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
+      {/* ground + wall box */}
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      <rect x={X(-s2)} y={Y(H)} width={s2 * 2 * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      <polyline points={roofPts} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
+
+      {/* WALL HEIGHT, left */}
+      {tick(PL - 22, Y(0), Y(H), "wallHeightFt")}
+      <line x1={PL - 26} y1={Y(H)} x2={PL - 18} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      <line x1={PL - 26} y1={Y(0)} x2={PL - 18} y2={Y(0)} {...dimStroke("wallHeightFt")} />
+      {label(PL - 30, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+
+      {/* PEAK, right -- read-only, the number a builder actually measures against */}
+      {tick(VW - PR + 22, Y(0), Y(peak), null)}
+      {label(VW - PR + 26, (Y(0) + Y(peak)) / 2, d3FtIn(peak), "peak", null, "start")}
+
+      {/* SPAN, bottom */}
+      <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
+      {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
+
+      {/* OVERHANG, at the left eave */}
+      <line x1={X(eaveL[0])} y1={Y(eaveL[1]) - 9} x2={X(-s2)} y2={Y(eaveL[1]) - 9} {...dimStroke("overhang")} />
+      {label((X(eaveL[0]) + X(-s2)) / 2, Y(eaveL[1]) - 12, d3FtIn(OV), "eave", "overhang")}
+
+      {/* PITCH -- as x:12, which is the only way a builder states a roof slope */}
+      {!isGam && label(X(ru) + (X(s2) - X(ru)) / 2, Y((H + peak) / 2) - 4,
+        `${Math.round(pitch * 12)}:12`, `pitch ${(+pitch).toFixed(2)}`, "pitch")}
+
+      {/* RIDGE OFFSET -- only when it is actually doing something */}
+      {!isGam && Math.abs(ru) > 0.01 && (
+        <g>
+          <line x1={X(0)} y1={Y(peak) - 8} x2={X(ru)} y2={Y(peak) - 8} {...dimStroke("ridgeOffset")} />
+          {label((X(0) + X(ru)) / 2, Y(peak) - 11, d3FtIn(Math.abs(ru)), "ridge shift", "ridgeOffset")}
+        </g>
+      )}
+
+      {/* GAMBREL -- the three controls she could not decode */}
+      {isGam && (
+        <g>
+          <line x1={X(0)} y1={Y(kY) + 10} x2={X(kU)} y2={Y(kY) + 10} {...dimStroke("kneeU")} />
+          {label((X(0) + X(kU)) / 2, Y(kY) + 22, d3FtIn(kU), "knee out", "kneeU")}
+          {tick(X(kU) + 16, Y(H), Y(kY), "kneeRise")}
+          {label(X(kU) + 20, (Y(H) + Y(kY)) / 2, d3FtIn(kY - H), "knee up", "kneeRise", "start")}
+          {tick(X(0) - 16, Y(H), Y(rY), "ridgeRise")}
+          {label(X(0) - 20, (Y(H) + Y(rY)) / 2, d3FtIn(rY - H), "ridge up", "ridgeRise", "end")}
+        </g>
+      )}
+    </svg>
+  );
 }
 
 // Resolve a style's 3D appearance: tenant config override (the style entry's
@@ -1977,6 +2266,22 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // The style's default roof MATERIAL (shingle|metal) — texture + surface
     // response even before the customer picks a roof type; their pick wins.
     roofMaterial: o.roofMaterial === "metal" || o.roofMaterial === "shingle" ? o.roofMaterial : (base.roofMaterial || null),
+    // A louvered gable vent, tenant override over the built-in default. This MUST be
+    // named here: the literal drops what it does not list, and because openCalEditor
+    // seeds from this resolver and onSaveSpec writes the draft back, a dropped key is
+    // erased from the column the first time a builder opens and saves the panel.
+    gableVent: (o.gableVent && o.gableVent.widthFrac > 0) ? o.gableVent : (base.gableVent || null),
+    // Named for the same reason gableVent is: the literal drops what it does not list,
+    // and the calibration panel round-trips through this resolver.
+    foundation: (o.foundation === "skids" || o.foundation === "slab") ? o.foundation : (base.foundation || null),
+    // Third field named for the same reason as the two above, and the one that was actually
+    // missing until 2026-08-25. It is worse than the others because the cladding checkboxes
+    // READ this spec too (`d3CladdingChoicesFor({ d3: adminCal.spec })`): a style that offers
+    // two claddings opened with all four ticked, and saving that screen -- without touching a
+    // checkbox -- wrote the widened list back. The narrowing was lost twice over, on display
+    // and on save. `undefined` rather than `null` matches what the checkbox handler stores,
+    // so an unnarrowed style keeps the key ABSENT from the column instead of growing a null.
+    claddingChoices: Array.isArray(o.claddingChoices) ? o.claddingChoices : (base.claddingChoices || undefined),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
 }
@@ -2031,7 +2336,152 @@ const D3_SWATCHES = [
   { label: "Green", css: "#4F6F52" },
   { label: "Brown", css: "#6B4F3A" },
 ];
-function d3SwatchCss(label, fallback) {
+// ── Storage props: what the customer keeps IN the building ────────────────────────────
+//
+// Carolyn, 2026-08-25: "a lawnmower, they wanna store a lawnmower in here... I think it's a
+// huge selling point." That is the whole point of these — they are not inventory and they
+// are not priced. A shopper who can see their own mower, bikes and shelving inside a 10x12
+// believes the 10x12 is big enough, which is the question that actually stalls a shed sale.
+//
+// PARAMETRIC, not downloaded models. A GLB per prop would put a loader on the shopper's
+// critical path, pin a three.js addon version, and need an asset pipeline and a disposal
+// story none of this code has — to render shapes that only ever have to read as "lawnmower"
+// from across a room. Boxes and cylinders do that, cost nothing to fetch, and free
+// themselves through the same disposeSubtree as everything else.
+//
+// ⚠️ w/d are the PLAN FOOTPRINT in feet and must match the geometry's real extent: the 2D
+// rectangle, the placement clamp and the drag bounds all read them, so a shape that outgrows
+// its w/d will visibly cross a wall the plan says it clears.
+//
+// Each build() returns a group centred on the origin in x/z and standing on y = 0.
+const D3_PROPS = {
+  lawnmower: {
+    label: "Lawn mower", w: 2.0, d: 2.8, h: 2.8,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const deckM = h.mat("#3F7F4F"), darkM = h.mat("#2E3236"), tyreM = h.mat("#1F2124");
+      const deck = h.box(deckM, 1.75, 0.38, 2.0); deck.position.y = 0.62; g.add(deck);
+      const eng = h.box(darkM, 0.75, 0.5, 0.8); eng.position.set(0, 1.05, -0.2); g.add(eng);
+      [[-0.88, 0.9, 0.32], [0.88, 0.9, 0.32], [-0.88, -0.85, 0.26], [0.88, -0.85, 0.26]].forEach(([x, z, r]) => {
+        const wheel = h.cyl(tyreM, r, 0.2); wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(x, r, z); g.add(wheel);
+      });
+      // Push handle: two rails raked back over the rear wheels, joined by a grip bar.
+      [-0.7, 0.7].forEach((x) => {
+        const rail = h.box(darkM, 0.1, 2.35, 0.1);
+        rail.position.set(x, 1.5, -1.05); rail.rotation.x = -0.42; g.add(rail);
+      });
+      const grip = h.box(darkM, 1.5, 0.11, 0.11); grip.position.set(0, 2.55, -1.55); g.add(grip);
+      return g;
+    },
+  },
+  bike: {
+    label: "Bicycle", w: 0.7, d: 5.6, h: 3.1,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const frameM = h.mat("#B03A3A"), tyreM = h.mat("#1F2124"), seatM = h.mat("#2E3236");
+      [-1.75, 1.75].forEach((z) => {
+        const wheel = h.cyl(tyreM, 1.12, 0.12); wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(0, 1.12, z); g.add(wheel);
+      });
+      const bar = (len, x, y, z, rx) => { const b = h.box(frameM, 0.1, len, 0.1); b.position.set(x, y, z); b.rotation.x = rx; g.add(b); };
+      bar(2.5, 0, 1.7, 0.55, 1.15);    // down tube
+      bar(2.2, 0, 2.0, -0.55, -1.25);  // top tube
+      bar(1.9, 0, 1.55, 1.6, 0.22);    // seat stay
+      const seat = h.box(seatM, 0.22, 0.14, 0.75); seat.position.set(0, 2.75, 1.2); g.add(seat);
+      const hbar = h.box(seatM, 1.5, 0.1, 0.1); hbar.position.set(0, 2.95, -1.5); g.add(hbar);
+      return g;
+    },
+  },
+  toolchest: {
+    label: "Tool chest", w: 2.6, d: 1.6, h: 3.0,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const bodyM = h.mat("#B0403A"), pullM = h.mat("#C9CDD2"), castM = h.mat("#1F2124");
+      const body = h.box(bodyM, 2.5, 2.6, 1.5); body.position.y = 1.6; g.add(body);
+      // Drawer pulls, proud of the front face so the box reads as a chest and not a crate.
+      [0.65, 1.35, 2.05, 2.7].forEach((y) => {
+        const pull = h.box(pullM, 1.7, 0.09, 0.06); pull.position.set(0, y, 0.78); g.add(pull);
+      });
+      [[-0.95, -0.5], [0.95, -0.5], [-0.95, 0.5], [0.95, 0.5]].forEach(([x, z]) => {
+        const c = h.cyl(castM, 0.15, 0.12); c.rotation.z = Math.PI / 2; c.position.set(x, 0.15, z); g.add(c);
+      });
+      return g;
+    },
+  },
+  shelf: {
+    label: "Shelving", w: 3.2, d: 1.3, h: 5.6,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const m = h.mat("#8B7355");
+      [[-1.5, -0.55], [1.5, -0.55], [-1.5, 0.55], [1.5, 0.55]].forEach(([x, z]) => {
+        const post = h.box(m, 0.12, 5.6, 0.12); post.position.set(x, 2.8, z); g.add(post);
+      });
+      [0.5, 2.0, 3.5, 5.0].forEach((y) => {
+        const s = h.box(m, 3.1, 0.1, 1.2); s.position.y = y; g.add(s);
+      });
+      return g;
+    },
+  },
+  trashcan: {
+    label: "Trash can", w: 1.3, d: 1.3, h: 2.4,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const body = h.cyl(h.mat("#4A6FA5"), 0.58, 2.2); body.position.y = 1.1; g.add(body);
+      const lid = h.cyl(h.mat("#3B5A85"), 0.63, 0.14); lid.position.y = 2.27; g.add(lid);
+      return g;
+    },
+  },
+  atv: {
+    label: "ATV / mower rider", w: 3.6, d: 5.4, h: 2.8,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const bodyM = h.mat("#C2601F"), darkM = h.mat("#2E3236"), tyreM = h.mat("#1F2124");
+      const body = h.box(bodyM, 2.3, 0.95, 3.5); body.position.y = 1.35; g.add(body);
+      const hood = h.box(bodyM, 1.9, 0.55, 1.1); hood.position.set(0, 1.95, -1.15); g.add(hood);
+      const seat = h.box(darkM, 1.5, 0.45, 1.2); seat.position.set(0, 2.05, 0.75); g.add(seat);
+      [[-1.35, -1.55], [1.35, -1.55], [-1.35, 1.6], [1.35, 1.6]].forEach(([x, z]) => {
+        const wheel = h.cyl(tyreM, 0.78, 0.55); wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(x, 0.78, z); g.add(wheel);
+      });
+      const hbar = h.box(darkM, 1.7, 0.1, 0.1); hbar.position.set(0, 2.6, -0.9); g.add(hbar);
+      return g;
+    },
+  },
+};
+// Placement order for the Items popup, and the only list that decides what a shopper is
+// offered. Object key order is not a contract; this is.
+const D3_PROP_KEYS = ["lawnmower", "bike", "atv", "toolchest", "shelf", "trashcan"];
+const d3PropSpec = (kind) => D3_PROPS[kind] || D3_PROPS.lawnmower;
+
+// The tenant's own catalog rows for a paint slot, in the {label, css} shape both the 3D
+// swatch row and d3SwatchCss speak. `allowCustom` rows are excluded: that row is a
+// "type your own" affordance rather than a colour, and it carries no hex, so it would
+// render as a dead grey chip.
+function d3PaintPool(colors, kind) {
+  return (Array.isArray(colors) ? colors : [])
+    .filter((c) => c && c.hex && !c.allowCustom && (kind === "trim" ? c.trim : c.siding))
+    .map((c) => ({ label: c.label, css: c.hex }));
+}
+
+// `pool` is the tenant's catalog (see d3PaintPool) and wins when it has the label.
+// Optional and last-resort-free by design: omit it and this behaves exactly as it always
+// has, so every existing call site is unchanged.
+//
+// Why it exists: the 2D picker has always read C.colors, while 3D read a hardcoded nine.
+// A customer picking "Mountain Red" in 2D got d3CssColor()'s CSS-NAME GUESS in 3D --
+// new Option().style parsing a colour name that is not a CSS colour -- so the two views
+// of the same building disagreed. The D3_SWATCHES fallback stays underneath for labels
+// the catalog does not carry, which is what keeps an already-saved design rendering after
+// its tenant deletes a colour (save_colors is a full-list replace, so that happens).
+function d3SwatchCss(label, fallback, pool) {
+  if (Array.isArray(pool)) {
+    const hit = pool.find((x) => x.label === label);
+    if (hit && hit.css) return hit.css;
+  }
+  return d3SwatchCssBuiltIn(label, fallback);
+}
+function d3SwatchCssBuiltIn(label, fallback) {
   const s = D3_SWATCHES.find((x) => x.label === label);
   return s ? s.css : d3CssColor(label, fallback);
 }
@@ -2077,7 +2527,7 @@ function d3CssColor(v, fallback) {
 // stays white-based) and a BUMP canvas (grayscale relief) at 512px, with a
 // seeded PRNG so the variegation is identical every session — a quote PDF
 // captured today must match one captured tomorrow.
-const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel"]);
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "bnb"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -2190,6 +2640,33 @@ function _d3RasterKind(kind) {
       const bg = b.createLinearGradient(0, y, 0, y + board);                  // board tilt
       bg.addColorStop(0, "#9a9a9a"); bg.addColorStop(0.9, "#6f6f6f"); bg.addColorStop(1, "#2f2f2f");
       b.fillStyle = bg; b.fillRect(0, y, N, board);
+    }
+  } else if (kind === "bnb") {
+    // Board & batten: wide plain boards with a butt seam every half-tile, and NO grooves.
+    //
+    // batten used to reuse the T1-11 "groove" raster, which cuts a groove every ~8 inches
+    // while the proud battens step every 18 -- two patterns at incommensurable spacings on
+    // the same wall. That mismatch is why it never read as board & batten no matter how the
+    // relief was tuned: 4.0 and 1.5 share no common multiple, so a drawn groove landed under
+    // a batten roughly once every twelve feet and looked like a mistake everywhere else.
+    //
+    // Two seams per 512px tile at tileFtU 3.0 puts one every 1.5 ft -- exactly where the
+    // relief loop places a batten -- so the drawn seam and the physical strip coincide BY
+    // CONSTRUCTION rather than by tuning.
+    const seam = N / 2;
+    for (let x = 0; x < N; x += seam) {                // per-board tone
+      const v = 0.94 + rng() * 0.10;
+      const gray = Math.round(246 * Math.min(1.02, v));
+      g.fillStyle = `rgb(${gray},${gray},${gray})`;
+      g.fillRect(x, 0, seam, N);
+    }
+    for (let i = 0; i < 26; i++) {                     // faint vertical grain
+      g.fillStyle = `rgba(0,0,0,${0.012 + rng() * 0.022})`;
+      g.fillRect(rng() * N, 0, 1 + rng() * 2, N);
+    }
+    for (let x = 0; x < N; x += seam) {                // the butt seam the batten covers
+      g.fillStyle = "rgba(0,0,0,0.28)"; g.fillRect(x, 0, 2, N);
+      b.fillStyle = "#5c5c5c"; b.fillRect(x, 0, 2, N);
     }
   } else {
     // "groove" — vertical T1-11 style panel: grooves with soft shoulders + grain.
@@ -2461,6 +2938,12 @@ function buildShed3DModel(THREE, p) {
   const mat = (color, extra) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.0, ...(extra || {}) });
   const wallMat = mat(bodyColor);
   const trimMat = mat(trimColor);
+  // Battens are trim-coloured but need their OWN material, not trimMat. trimMat's other
+  // users -- corner posts, fascia, rake boards -- all live in roofGroup, which "look
+  // inside" hides wholesale, so trimMat has never needed a ghost path. Battens live in
+  // wallsGroup and must ghost WITH the walls; teaching trimMat to ghost instead would also
+  // ghost every opening casing, which is a visible change nobody asked for.
+  const battenMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
   // Catalog fixture photos. Resolved LIVE from the catalog by fixtureItemId
   // rather than stamped on the item at placement (unlike price/name, which must
@@ -2496,6 +2979,10 @@ function buildShed3DModel(THREE, p) {
     if (clad.metal) { wallMat.roughness = 0.45; wallMat.metalness = 0.35; }
   }
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+  // The building itself is all boxes; wheels and bins are the one place that reads as wrong
+  // without a round profile. 12 segments is plenty at the size a prop is ever seen, and
+  // disposeSubtree frees a CylinderGeometry exactly like a BoxGeometry — nothing special.
+  const cyl = (m, r, hgt) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, hgt, 12), m);
 
   // Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
   const ftX = (px) => (px - mgX) / scale - bldgW / 2;
@@ -2536,9 +3023,45 @@ function buildShed3DModel(THREE, p) {
   const nLbl = d3MakeGroundLabel(THREE, "N", Math.max(1.6, lblH * 1.2));
   if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -D3.FLOOR_T + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
   root.add(envGroup);
-  const floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
-  floor.position.y = -D3.FLOOR_T / 2;
-  root.add(floor);
+  // Base. A slab by default; runners when the style says so. Everything below is drawn
+  // INSIDE the slab's own 0.35 ft band, on purpose: the ground plane, every ramp's rise
+  // (which reads D3.FLOOR_T for its drop) and the compass labels are all pinned to that
+  // depth, so raising the building to make room for skids would silently leave every ramp
+  // short. Same envelope, different reading.
+  // `floor` stays in the OUTER scope because the shadow pass below still needs the base
+  // mesh by name, whichever branch made it.
+  let floor;
+  if ((p.styleSpec && p.styleSpec.foundation) !== "skids") {
+    floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
+    floor.position.y = -D3.FLOOR_T / 2;
+    root.add(floor);
+  } else {
+    // A portable building sits on runners. The shadow gap under the deck is what says
+    // "this gets delivered" instead of "this was poured here".
+    const DECK_T = 0.12;
+    const SKID_T = D3.FLOOR_T - DECK_T;      // reads as a 4x4 under a thin deck
+    const SKID_W = 3.5 / 12;
+    const deck = box(mat(D3_COLORS.floor), bldgW + 0.2, DECK_T, bldgH + 0.2);
+    deck.position.y = -DECK_T / 2;
+    root.add(deck);
+    floor = deck;
+    // Runners follow the LONG axis, the way they are framed and the way a trailer pulls
+    // them, and the COUNT is a rule — no unsupported run wider than about 4 ft — so it
+    // scales with the building instead of being a number that is right for one size.
+    const alongX = bldgW >= bldgH;
+    const across = alongX ? bldgH : bldgW;
+    const nSkid = Math.max(2, Math.round(across / 4));
+    const inset = Math.min(1.0, across * 0.14);
+    for (let i = 0; i < nSkid; i++) {
+      const t = nSkid === 1 ? 0.5 : i / (nSkid - 1);
+      const at = -across / 2 + inset + t * (across - 2 * inset);
+      const sk = alongX
+        ? box(mat(D3_COLORS.bench), bldgW + 0.2, SKID_T, SKID_W)
+        : box(mat(D3_COLORS.bench), SKID_W, SKID_T, bldgH + 0.2);
+      sk.position.set(alongX ? 0 : at, -DECK_T - SKID_T / 2, alongX ? at : 0);
+      root.add(sk);
+    }
+  }
 
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
   // wall, N = exterior normal. `along` runs west→east on N/S walls and
@@ -2579,6 +3102,48 @@ function buildShed3DModel(THREE, p) {
     );
     if (wf.U[0] === 0) b.rotation.y = Math.PI / 2;
     return b;
+  };
+
+  // WORLD-FEET UVs for a roof slab -- and the fix for a defect that shipped with the very
+  // first textured roof, because this was the ONE textured surface with no UV rewrite.
+  //
+  // A slab is box(w = along the SLOPE, h = thickness, d = along the RIDGE), and stock
+  // BoxGeometry maps its top face u -> local x and v -> local z. So u ran DOWN THE SLOPE
+  // and v ran ALONG THE RIDGE, while both rasters are drawn on exactly the opposite
+  // assumption:
+  //   * metal draws its standing seams at constant canvas-x, i.e. constant u -- so the
+  //     seams came out running ALONG THE EAVE. Real standing seam runs eave-to-ridge.
+  //   * shingle draws its course shadows at constant canvas-y, i.e. constant v -- so the
+  //     courses came out running UP THE SLOPE. Real courses run along the eave.
+  // Each is wrong in the opposite direction, so ONE axis swap fixes both. Carolyn's note
+  // about the walls -- "metal runs up and down, not this way" (2026-08-24) -- was the same
+  // defect on a smaller surface; the walls were already right, the roof never was.
+  //
+  // u = feet along the ridge, v = feet down the slope, the same unit wallBox uses, so the
+  // repeat numbers beside it read as real dimensions instead of tile counts. Phase is
+  // arbitrary here (nothing on a roof has to line up with a wall origin), so the box's own
+  // centred coordinates go straight in.
+  const d3RoofSlabUVs = (slab) => {
+    const uvA = slab.geometry.attributes.uv, posA = slab.geometry.attributes.position;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getZ(i), posA.getX(i));
+    uvA.needsUpdate = true;
+  };
+
+  // Same idea, for a slab whose box axes are TRANSPOSED relative to the main slopes: local
+  // x along the ridge, local z down the slope. The dormer cap is built that way because it
+  // is rotated about X to tilt it, so its rafter length has to lie on z -- which means the
+  // rewrite above lands u and v the wrong way round and leaves the dormer 90 degrees off
+  // from the roof it sits on. Two helpers rather than one clever one: the axis convention
+  // is a property of how each box was constructed, and a caller that has to pass a flag is
+  // a caller that will eventually pass the wrong flag.
+  //
+  // Do NOT "simplify" this by skipping the rewrite on transposed slabs. Stock BoxGeometry
+  // UVs run 0..1 per face, and the repeat beside it is in 1/feet -- a 0..1 face would draw
+  // a fraction of a single tile, stretched over the whole cap.
+  const d3RoofSlabUVsT = (slab) => {
+    const uvA = slab.geometry.attributes.uv, posA = slab.geometry.attributes.position;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i), posA.getZ(i));
+    uvA.needsUpdate = true;
   };
 
   // Opening vertical extent: item-stamped fields first (Phase 5 — placed items
@@ -2663,8 +3228,9 @@ function buildShed3DModel(THREE, p) {
           const bs = clad.stepFt;
           const halfW = clad.relief === "rib" ? 0.05 : 0.07;
           const depth = clad.relief === "rib" ? 0.05 : 0.1;
+          const reliefMat = clad.reliefTrim ? battenMat : wallMat;
           for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
-            wg.add(wallBox(wallMat, wf, a - halfW, a + halfW, 0, H, T / 2 + 0.03, depth));
+            wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, 0, H, T / 2 + 0.03, depth));
           }
         } else {
           for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
@@ -2804,6 +3370,14 @@ function buildShed3DModel(THREE, p) {
   const roofGroup = new THREE.Group();
   const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const OV = roofCfg.overhang != null ? roofCfg.overhang : D3.OVERHANG;
+  // Eave finish. An AFFIRMATIVE test on purpose: absent, null, "fascia" and any junk
+  // all fall through to the fascia branch, so no tenant who has not opted in moves.
+  const EAVE_OPEN = roofCfg.eave === "open";
+  // Raw, unpainted 2x stock for the tails. Created lazily so a model with no open eave
+  // never mints it — a material built and never attached to a mesh is never reached by
+  // the disposal walk, and is the one thing here that could actually leak.
+  let _tailMat = null;
+  const tailMat = () => (_tailMat || (_tailMat = mat(D3_COLORS.bench, { roughness: 0.95 })));
   const fw = frontWall || (bldgH >= bldgW ? "north" : "west");
   const frontNS = fw === "north" || fw === "south";
   // Profile u-axis: the axis the roof profile spans across. For gable/gambrel
@@ -2812,32 +3386,11 @@ function buildShed3DModel(THREE, p) {
   const uAxisIsX = roofCfg.type === "shed" ? !frontNS : frontNS;
   const S = uAxisIsX ? bldgW : bldgH;   // profile span
   const L = uAxisIsX ? bldgH : bldgW;   // extrusion length
-  const prof = [];    // profile polygon points [u, y], eave→ridge→eave
-  const slopes = [];  // top edges [[A,B], …] that get roof slabs
-  if (roofCfg.type === "shed") {
-    const rise = S * (roofCfg.pitch || 0.25);
-    const tallNeg = fw === "north" || fw === "west";
-    const A = tallNeg ? [-S / 2, H + rise] : [-S / 2, H];
-    const B = tallNeg ? [S / 2, H] : [S / 2, H + rise];
-    prof.push([-S / 2, H], A, B, [S / 2, H]);
-    slopes.push([A, B]);
-  } else if (roofCfg.type === "gambrel") {
-    const s2 = S / 2;
-    const kU = s2 * (roofCfg.kneeU || 0.55);
-    const kY = H + s2 * (roofCfg.kneeRise || 0.55);
-    const rY = H + s2 * (roofCfg.ridgeRise || 0.8);
-    prof.push([-s2, H], [-kU, kY], [0, rY], [kU, kY], [s2, H]);
-    slopes.push([[-s2, H], [-kU, kY]], [[-kU, kY], [0, rY]], [[0, rY], [kU, kY]], [[kU, kY], [s2, H]]);
-  } else {
-    const rise = (S / 2) * (roofCfg.pitch || 0.4);
-    // ridgeOffset shifts the ridge toward one eave (saltbox-style asymmetry).
-    const ru = S * Math.max(-0.35, Math.min(0.35, roofCfg.ridgeOffset || 0));
-    prof.push([-S / 2, H], [ru, H + rise], [S / 2, H]);
-    slopes.push([[-S / 2, H], [ru, H + rise]], [[ru, H + rise], [S / 2, H]]);
-  }
-  // Drop consecutive duplicate points (the shed profile produces one) before
-  // building the shape; the open edge auto-closes along the wall-plate line.
-  const dedup = prof.filter((pt, i) => i === 0 || Math.abs(pt[0] - prof[i - 1][0]) > 1e-6 || Math.abs(pt[1] - prof[i - 1][1]) > 1e-6);
+  // One profile builder, shared with the calibration panel's elevation drawing.
+  const _rp = d3RoofProfile(roofCfg, S, H, fw === "north" || fw === "west");
+  const prof = _rp.prof;      // profile polygon points [u, y], eave→ridge→eave
+  const slopes = _rp.slopes;  // top edges [[A,B], …] that get roof slabs
+  const dedup = _rp.dedup;
   const shape = new THREE.Shape();
   dedup.forEach((pt, i) => (i === 0 ? shape.moveTo(pt[0], pt[1]) : shape.lineTo(pt[0], pt[1])));
   const rg = new THREE.Group(); // local space: x = profile u, y = up, z = 0..L along the ridge
@@ -2861,8 +3414,167 @@ function buildShed3DModel(THREE, p) {
   // fixes, with a false green light.
   const gableMat = mat(bodyColor);
   const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false });
+  // U-PHASE. ExtrudeGeometry's WorldUVGenerator gives the caps UVs in profile-space feet,
+  // which is the same unit wallBox uses -- but a DIFFERENT ORIGIN. The wall's u runs 0..S
+  // from the wall origin; the cap's runs -S/2..+S/2 from the building centre. So the two
+  // are out of phase by exactly S/2 unless the half-span happens to be a whole number of
+  // tiles. On a 14 ft wall at tileFtU 3.0 that is a third of a tile: every groove, rib and
+  // seam visibly jogs sideways as it crosses the plate line. Shifting u by S/2 lines them
+  // up. v needs no shift -- both conventions already measure height from y = 0, which is
+  // why the horizontal lap courses were the one pattern that always matched.
+  {
+    const guv = gableGeom.attributes.uv;
+    if (guv) {
+      for (let i = 0; i < guv.count; i++) guv.setX(i, guv.getX(i) + S / 2);
+      guv.needsUpdate = true;
+    }
+  }
   rg.add(new THREE.Mesh(gableGeom,
     (gableGeom.groups && gableGeom.groups.length === 2) ? [wallMat, gableMat] : gableMat));
+
+  // Height of the roof profile at a given profile-u. The profile is just the dedup'd top
+  // polyline, so one piecewise-linear walk serves gable, gambrel and shed alike.
+  const profYAt = (u) => {
+    for (let i = 0; i + 1 < dedup.length; i++) {
+      const A = dedup[i], B = dedup[i + 1];
+      const lo = Math.min(A[0], B[0]), hi = Math.max(A[0], B[0]);
+      if (u < lo - 1e-6 || u > hi + 1e-6) continue;
+      if (Math.abs(B[0] - A[0]) < 1e-6) return Math.max(A[1], B[1]);
+      return A[1] + ((u - A[0]) / (B[0] - A[0])) * (B[1] - A[1]);
+    }
+    return H;
+  };
+
+  // ── LEAN-TO (2026-08-25) ──────────────────────────────────────────────────────────
+  // A shed-roofed appendage off ONE eave wall: the second of the two things "lean-to"
+  // means in this trade. The first -- a standalone single-slope building -- has always
+  // shipped as roof.type "shed", which is why that option now reads "Single slant".
+  //
+  // ADDITIVE, not a new roof type, and that is load-bearing rather than stylistic. One
+  // Supabase project serves beta and production off one `building_styles.d3` table, and
+  // the production profile builder's `else` catches every unknown type and draws a GABLE.
+  // A new type would therefore show production customers a plain gable the moment someone
+  // calibrated a lean-to on beta. As extra keys, an older renderer ignores them and draws
+  // the base building -- the appendage is missing, which is honest, rather than the roof
+  // being wrong, which is not.
+  //
+  // Lives in rg, so "look inside" hides it with the roof. That is the right reading: you
+  // are looking inside the MAIN building, and an open lean-to has no inside.
+  const leanW = roofCfg.leanToWidthFt || 0;
+  if (leanW > 0.5) {
+    const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
+    const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
+    const u0 = dir * (S / 2), u1 = u0 + dir * leanW;
+    const y0 = H, y1 = H - drop;
+    const du = u1 - u0, dy = y1 - y0;
+    const slen = Math.sqrt(du * du + dy * dy) || 1;
+    const ux = du / slen, uy = dy / slen;
+    // One slab, running from the main wall out past the free edge by the eave overhang.
+    const lslab = box(roofMat, slen + OV, D3.ROOF_T, L + OV * 2);
+    d3RoofSlabUVs(lslab);
+    lslab.rotation.z = Math.atan2(dy, du);
+    lslab.position.set((u0 + u1) / 2 + ux * OV / 2,
+                       (y0 + y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2,
+                       L / 2);
+    rg.add(lslab);
+    // Posts at the free edge. Two is what a shed lot actually builds under 12 ft; longer
+    // runs get a third rather than an unsupported header.
+    const nPost = L > 12 ? 3 : 2;
+    const inset = Math.min(0.8, L * 0.08);
+    for (let i = 0; i < nPost; i++) {
+      const t = nPost === 1 ? 0.5 : i / (nPost - 1);
+      const post = box(trimMat, 0.3, y1, 0.3);
+      post.position.set(u1, y1 / 2, inset + t * (L - 2 * inset));
+      rg.add(post);
+    }
+    const hdr = box(trimMat, 0.35, 0.5, L);     // header tying the posts together
+    hdr.position.set(u1, y1 - 0.25, L / 2);
+    rg.add(hdr);
+  }
+
+  // ── DORMER (2026-08-25) ──────────────────────────────────────────────────────────
+  // COSMETIC BY CONSTRUCTION, and that is a deliberate limit rather than a shortcut.
+  // There is no CSG in this renderer, so the dormer sits ON the slope and intersects the
+  // roof slab instead of cutting a hole through it. From outside that reads correctly --
+  // the dormer face is opaque either way -- and "look inside" hides the whole roofGroup,
+  // so the missing opening is never visible from within either. A real roof cut-out needs
+  // a boolean op this engine has no business growing three weeks before a trade show.
+  //
+  // Skipped on a shed roof: a dormer on a single slope is a shed dormer, which is a
+  // different massing, and drawing a gable dormer there would be wrong rather than simple.
+  const dormW = roofCfg.dormerWidthFt || 0;
+  if (dormW > 0.5 && roofCfg.type !== "shed") {
+    const dRise = roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5;
+    // offsetU is a fraction of the HALF-SPAN, so it reads the way kneeU does. Held off
+    // the ridge and the eave so the dormer cannot overhang either edge.
+    const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
+    const dU = (S / 2) * fr;
+    const baseY = profYAt(dU);
+    const dDepth = 2.0;
+    const dormMat = mat(bodyColor);
+    const body = box(dormMat, dDepth, dRise, dormW);
+    body.position.set(dU, baseY + dRise / 2, L / 2);
+    rg.add(body);
+    // A little gable cap, so it does not read as a packing crate glued to the roof.
+    const capRise = Math.max(0.5, dormW * 0.22);
+    const half = dormW / 2;
+    const clen = Math.sqrt(half * half + capRise * capRise);
+    [-1, 1].forEach((sgn) => {
+      const cap = box(roofMat, dDepth + 0.6, D3.ROOF_T, clen);
+      d3RoofSlabUVsT(cap);   // x = ridge, z = slope -- transposed vs the main slabs
+      cap.rotation.x = sgn * Math.atan2(capRise, half);
+      cap.position.set(dU, baseY + dRise + capRise / 2, L / 2 + sgn * half / 2);
+      rg.add(cap);
+    });
+  }
+
+  // PROUD RELIEF DOES NOT STOP AT THE PLATE LINE.
+  //
+  // The clad.relief loop lives inside buildOneWall and runs nowhere else, so on a batten or
+  // metal style the PHYSICAL vertical strips stopped dead at the wall plate while the flat
+  // texture on the cap carried on above them. From any three-quarter view that reads exactly
+  // as "the siding doesn't go straight up" -- which is what Carolyn has now said three times
+  // (2026-08-18, and again 2026-08-24: "this going up, it has to go straight up"). Giving
+  // the cap the wall texture, which is what the 08-18 fix did, was necessary and not
+  // sufficient: the texture matched and the geometry still stopped.
+  //
+  // Strips are placed at u = k*stepFt - S/2 so they stay IN PHASE with the wall strips
+  // below, which step from the wall origin -- the same S/2 that just fixed the texture.
+  // Each is clipped to the profile above it, so it stops on the roof line instead of poking
+  // through the slab. They live in rg, so "look inside" hides them with the roof, exactly
+  // like the cap they sit on.
+  if (clad.relief === "batten" || clad.relief === "rib") {
+    const bs = clad.stepFt;
+    const halfW = clad.relief === "rib" ? 0.05 : 0.07;
+    const depth = clad.relief === "rib" ? 0.05 : 0.1;
+    const reliefMat = clad.reliefTrim ? battenMat : wallMat;
+    // ⚠️ CLIP TO THE LOWEST PROFILE ACROSS THE STRIP'S WIDTH, NEVER ITS CENTRE.
+    // A batten is a BOX: its top is flat. The roof above it is not. Taking profYAt(u) at the
+    // strip's centre puts that flat top at the centre height, so on any slope the upper
+    // corner stands proud of the roof plane by halfW x slope — about an inch and a half on a
+    // gambrel's lower pitch, which is exactly the row of red slivers poking through the
+    // shingles along the rake and at the knee (reported 2026-08-26 with a screenshot:
+    // "I need uniformity in this, it should not break").
+    //
+    // Sampling both edges is not enough on a gambrel: the KNEE is a peak that can sit inside
+    // a strip, where both edges read lower than the middle. So every profile vertex falling
+    // within the strip is sampled too, and the minimum wins. The strip then always stops ON
+    // or just under the roof line — never through it — at every u, on every roof type.
+    for (let k = 1; k * bs < S; k++) {
+      const u = k * bs - S / 2;
+      let yTop = Math.min(profYAt(u - halfW), profYAt(u), profYAt(u + halfW));
+      for (let i = 0; i < dedup.length; i++) {
+        const vx = dedup[i][0];
+        if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
+      }
+      if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
+      [-(depth / 2) - 0.02, L + (depth / 2) + 0.02].forEach((z) => {
+        const st = box(reliefMat, halfW * 2, yTop - H, depth);
+        st.position.set(u, (H + yTop) / 2, z);
+        rg.add(st);
+      });
+    }
+  }
   // Roof texture: metal standing-seam vs shingle courses. The customer's
   // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
   // fills in before any pick — a bare flat-color slab was the single biggest
@@ -2871,9 +3583,25 @@ function buildShed3DModel(THREE, p) {
   const roofKind = p.roofType === "Metal" ? "metal"
     : p.roofType === "Shingle" ? "shingle"
     : (p.styleSpec && (p.styleSpec.roofMaterial === "metal" || p.styleSpec.roofMaterial === "shingle") ? p.styleSpec.roofMaterial : "shingle");
+  // Roof tile size in FEET, as (along the ridge, down the slope), paired with the
+  // world-feet UV rewrite on each slab. A `repeat` without that rewrite anchors nothing --
+  // the same lesson the walls learned in the 2026-08-19 audit, where a repeat whose comment
+  // claimed world anchoring was in fact dividing each face's own 0..1 span.
+  //
+  // metal: the raster lays 4 standing-seam pans across one 512px tile, so 6 ft along the
+  //   ridge puts a seam every 18 inches -- a real pan width. It is uniform down the pan,
+  //   so the second number only bounds anisotropy.
+  // shingle: 6 tabs across and 8 courses down per tile, so 6 x 4 ft gives 12-inch tabs and
+  //   a 6-inch course exposure.
+  //
+  // The old expression was Math.round(S / 1.5) into the u slot -- a tile COUNT derived from
+  // the profile span, fed to an axis that was itself the wrong one. On a 12 ft half-span
+  // that packed about 9 tiles x 4 pans into the slope: a line every 2.4 inches. Corduroy.
+  const roofTileU = 6.0;                               // along the ridge
+  const roofTileV = roofKind === "metal" ? 8.0 : 4.0;  // down the slope
   const roofTex = d3MakeTexture(THREE, roofKind);
   if (roofTex) {
-    roofTex.repeat.set(Math.max(2, Math.round(S / (roofKind === "metal" ? 1.5 : 2.5))), Math.max(2, Math.round(L / 2.5)));
+    roofTex.repeat.set(1 / roofTileU, 1 / roofTileV);
     roofMat.map = roofTex; roofMat.needsUpdate = true;
     const roofBump = d3MakeBumpTexture(THREE, roofKind);
     if (roofBump) { roofBump.repeat.copy(roofTex.repeat); roofMat.bumpMap = roofBump; roofMat.bumpScale = roofKind === "metal" ? 0.5 : 0.35; }
@@ -2923,6 +3651,7 @@ function buildShed3DModel(THREE, p) {
     const extA = jointExt(A, -ux, -uy);      // the slab extends beyond A along -u
     const extB = jointExt(B, ux, uy);
     const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, L + OV * 2);
+    d3RoofSlabUVs(slab);
     slab.rotation.z = Math.atan2(dy, du);
     const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
     slab.position.set(
@@ -2939,11 +3668,53 @@ function buildShed3DModel(THREE, p) {
     const lowEnd = A[1] <= B[1] ? A : B;
     if (lowEnd[1] <= H + 0.01) {
       const towardLow = lowEnd === A ? -1 : 1;
-      const edgeU = lowEnd[0] + towardLow * ux * OV + nx * (D3.ROOF_T / 2 + 0.02);
-      const edgeY = lowEnd[1] + towardLow * uy * OV + ny * (D3.ROOF_T / 2 + 0.02);
-      const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
-      fascia.position.set(edgeU, edgeY - 0.14, L / 2);
-      rg.add(fascia);
+      // The eave end ON the slope line. Every eave detail registers against this point:
+      // at a free edge jointExt returns OV, so the slab's end face is the plane through
+      // here. Factored out of the fascia's own expression WITHOUT reordering its float
+      // ops, so the fascia below is bit-for-bit where it has always been.
+      const eaveU = lowEnd[0] + towardLow * ux * OV;
+      const eaveY = lowEnd[1] + towardLow * uy * OV;
+      if (!EAVE_OPEN) {
+        const edgeU = eaveU + nx * (D3.ROOF_T / 2 + 0.02);
+        const edgeY = eaveY + ny * (D3.ROOF_T / 2 + 0.02);
+        const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
+        fascia.position.set(edgeU, edgeY - 0.14, L / 2);
+        rg.add(fascia);
+      } else {
+        // OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
+        // the roof deck at 24 in on centre. On the building this was measured from it is
+        // the highest-contrast element there is, and a painted fascia is precisely what
+        // it is NOT: the two are alternatives, never both.
+        const TAIL_W = 0.125;                 // 1.5 in stock, measured ALONG the ridge (z)
+        const TAIL_H = 0.34;                  // tall enough that the top buries in the slab
+        const TAIL_DROP = 3.5 / 12;           // visible projection below the deck underside
+        // The slab underside sits at n = +0.02. Dropping the tail's bottom face
+        // TAIL_DROP below that puts its top at n = +0.068 — inside the slab's
+        // [0.02, 0.22] band, so nothing pokes through the roof and no daylight shows
+        // between tail and deck.
+        const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
+        const tailLen = OV + 0.5;             // outboard face flush with the slab end,
+                                              // inboard end buried behind the wall
+        const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
+        const tailY = eaveY - towardLow * uy * (tailLen / 2) + ny * tailN;
+        const tailRot = Math.atan2(dy, du);   // same rotation as the slab it hangs under
+        const addTail = (z) => {
+          const tl = box(tailMat(), tailLen, TAIL_H, TAIL_W);
+          tl.rotation.z = tailRot;
+          tl.position.set(tailU, tailY, z);
+          rg.add(tl);
+        };
+        // COUNT IS A RULE, not a number. Bays are laid across the wall span z in [0, L]
+        // and rounded to whole bays, so both gable walls always carry an end rafter and
+        // no stub bay is left over. An 8x8 at 24 o.c. gives 4 bays and 5 tails, which is
+        // exactly what the walk-around video shows.
+        const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
+        for (let z = 0; z <= L + 1e-6; z += tailStep) addTail(Math.min(z, L));
+        // Fly-rafter tails, one under each rake about 10 in outboard of the gable wall.
+        // Skipped when the overhang is too shallow to hold one.
+        const flyOut = Math.min(OV - 0.1, 10 / 12);
+        if (flyOut > 0.15) { addTail(-flyOut); addTail(L + flyOut); }
+      }
     }
     // Ridge cap: one angled board LYING ON each slope that reaches the peak
     // (both halves of a gable, the upper legs of a gambrel) — a flat box can
@@ -2952,7 +3723,11 @@ function buildShed3DModel(THREE, p) {
     if (roofCfg.type !== "shed" && highEnd[1] >= profPeak - 0.01) {
       const towardHigh = highEnd === A ? -1 : 1;
       const CAPW = 0.55;
+      // Same rewrite as the slabs: a standing-seam ridge cap really does carry its seams
+      // across it, and without this the cap keeps stock 0..1 UVs and reads as flat colour
+      // beside a correctly tiled roof.
       const capBoard = box(roofMat, CAPW, 0.06, L + OV * 2);
+      d3RoofSlabUVs(capBoard);
       capBoard.rotation.z = Math.atan2(dy, du);
       capBoard.position.set(
         highEnd[0] - towardHigh * ux * (CAPW / 2 - 0.06) + nx * (D3.ROOF_T + 0.05),
@@ -2979,6 +3754,77 @@ function buildShed3DModel(THREE, p) {
       rg.add(rake);
     });
   });
+  // ── Louvered gable vent, both ends ──────────────────────────────────────────────────
+  // Applied boxes proud of the extrusion's end CAPS (local z = 0 and z = L), NOT a hole
+  // in the profile: one hole extrudes the whole length L and punches out through the far
+  // gable as a tunnel, which reveals nothing (the prism is solid) and whose inner faces
+  // belong to the soffit material that "look inside" ghosts. Applied is also how casing,
+  // muntins, relief strips, fascia, rake and ridge cap are every one of them built.
+  const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
+  if (gv && gv.widthFrac > 0 && profPeak > H + 0.9) {
+    // Horizontal extent of the gable polygon at height y. Generic on purpose: ridgeOffset
+    // skews a gable and a gambrel end is a five-point pentagon, so a hard-coded
+    // (S/2)*(1 - (y-H)/rise) would be right for exactly one of the three roof types.
+    const profSpanAt = (y) => {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i + 1 < dedup.length; i++) {
+        const P = dedup[i], Q = dedup[i + 1];
+        if ((P[1] - y) * (Q[1] - y) > 1e-12) continue;   // both ends the same side of y
+        const dY = Q[1] - P[1];
+        if (Math.abs(dY) < 1e-9) {
+          lo = Math.min(lo, P[0], Q[0]); hi = Math.max(hi, P[0], Q[0]);
+        } else {
+          const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / dY);
+          lo = Math.min(lo, u); hi = Math.max(hi, u);
+        }
+      }
+      return hi > lo ? [lo, hi] : null;
+    };
+    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
+    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
+    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
+    // shrink by a third to clear the rakes while the same vent on a sill fits at full
+    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
+    const VENT_SILL = 2 / 12;
+    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
+    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
+    let vCy = H + VENT_SILL + vH / 2;
+    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
+    // a narrower vent is also shorter and therefore has more room above it.
+    for (let k = 0; k < 3; k++) {
+      const sp = profSpanAt(vCy + vH / 2);
+      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
+      if (vW <= avail) break;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
+    }
+    const spC = profSpanAt(vCy);
+    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
+    if (vW >= 0.8 && vH >= 0.35) {
+      const ventMat = mat("#2A2E33", { roughness: 0.9 });
+      const ltex = d3MakeTexture(THREE, "lap");          // blade lines, same trick the
+      if (ltex) {                                        // roll-up door already uses
+        ltex.repeat.set(1, Math.max(3, Math.round(vH / 0.25)));
+        ventMat.map = ltex; ventMat.needsUpdate = true;
+      }
+      const F = 0.12;                                    // trim board width
+      // The cap plane is the wall MID-plane, so 0.15 only reaches the siding face:
+      // 0.20 for the trim and 0.16 for the louvers leaves the blades recessed inside
+      // their own frame, which is what reads as louvered rather than as a grey rectangle.
+      [[0, -1], [L, 1]].forEach(function (end) {
+        const z0 = end[0], s = end[1];
+        const put = (m, w, h, d, du_, dy_, off) => {
+          const b = box(m, w, h, d);
+          b.position.set(vCu + du_, vCy + dy_, z0 + s * off);
+          rg.add(b);
+        };
+        put(ventMat, vW, vH, 0.06, 0, 0, 0.16);                        // louver face
+        put(trimMat, vW + F * 2, F, 0.10, 0, (vH + F) / 2, 0.20);      // head
+        put(trimMat, vW + F * 2, F, 0.10, 0, -(vH + F) / 2, 0.20);     // sill
+        put(trimMat, F, vH + F * 2, 0.10, -(vW + F) / 2, 0, 0.20);     // left jamb
+        put(trimMat, F, vH + F * 2, 0.10, (vW + F) / 2, 0, 0.20);      // right jamb
+      });
+    }
+  }
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
   roofGroup.add(rg);
@@ -3034,9 +3880,41 @@ function buildShed3DModel(THREE, p) {
       plat.position.set(cx, elev - D3.LOFT_T / 2, cz);
       lg.add(plat);
       const ph = elev - D3.LOFT_T;
-      [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach((sgn) => {
-        const post = box(mat(D3_COLORS.bench), 0.28, ph, 0.28);
-        post.position.set(cx + sgn[0] * (w / 2 - 0.25), ph / 2, cz + sgn[1] * (d / 2 - 0.25));
+      // A loft is CARRIED BY THE WALLS IT TOUCHES. Carolyn, 2026-08-25, looking inside:
+      // "The loft is built sitting on this wall. So it does not have this here."
+      //
+      // It used to grow four posts unconditionally, inset a quarter foot from the platform
+      // edge. A click-placed loft is seeded widthFt = bldgW, so it spans wall to wall and
+      // those posts stood INSIDE the wall — a post buried in the siding, holding up a
+      // platform the wall was already holding up. Nobody frames it that way.
+      //
+      // So: a ledger board along every edge that meets a wall, and a post only at a corner
+      // where NEITHER adjacent edge does. A wall-to-wall loft ends up with two ledgers and no
+      // posts at all, which is the shape she was describing.
+      //
+      // Same 0.3 ft tolerance as checkLoftAttached, deliberately — that function decides
+      // whether the plan ALLOWS the loft, this decides how it is drawn, and the two
+      // disagreeing would mean a loft the plan calls supported drawn floating on posts.
+      // Edges here are in feet from the building's near corner, matching its convention.
+      const tol = 0.3;
+      const lF = (it.x - mgX) / scale - w / 2, rF = (it.x - mgX) / scale + w / 2;
+      const tF = (it.y - mgY) / scale - d / 2, bF = (it.y - mgY) / scale + d / 2;
+      const onW = Math.abs(lF - 0) < tol, onE = Math.abs(rF - bldgW) < tol;
+      const onN = Math.abs(tF - 0) < tol, onS = Math.abs(bF - bldgH) < tol;
+      const ledgerMat = mat(D3_COLORS.bench);
+      // Tucked under the platform and against the wall face, so it reads as the board the
+      // joists land on rather than a second slab.
+      const LD = 0.3, LT = 0.45;
+      if (onW) { const b1 = box(ledgerMat, LD, LT, d); b1.position.set(cx - w / 2 + LD / 2, elev - D3.LOFT_T - LT / 2, cz); lg.add(b1); }
+      if (onE) { const b2 = box(ledgerMat, LD, LT, d); b2.position.set(cx + w / 2 - LD / 2, elev - D3.LOFT_T - LT / 2, cz); lg.add(b2); }
+      if (onN) { const b3 = box(ledgerMat, w, LT, LD); b3.position.set(cx, elev - D3.LOFT_T - LT / 2, cz - d / 2 + LD / 2); lg.add(b3); }
+      if (onS) { const b4 = box(ledgerMat, w, LT, LD); b4.position.set(cx, elev - D3.LOFT_T - LT / 2, cz + d / 2 - LD / 2); lg.add(b4); }
+      // [x sign, z sign, this corner's two edges]. A corner with either edge on a wall is
+      // already carried; only a genuinely free corner needs a leg to the floor.
+      [[-1, -1, onW || onN], [1, -1, onE || onN], [-1, 1, onW || onS], [1, 1, onE || onS]].forEach(([sx, sz, carried]) => {
+        if (carried) return;
+        const post = box(ledgerMat, 0.28, ph, 0.28);
+        post.position.set(cx + sx * (w / 2 - 0.25), ph / 2, cz + sz * (d / 2 - 0.25));
         lg.add(post);
       });
       interiorGroup.add(lg);
@@ -3074,6 +3952,20 @@ function buildShed3DModel(THREE, p) {
         wf.O[1] + wf.U[1] * along + wf.N[1] * (T / 2)
       );
       interiorGroup.add(g);
+    } else if (c.propType) {
+      // A stored item the customer dropped in. The registry owns the shape; this owns only
+      // where it stands. Tagged like the loft and the workbench so pickItem3 finds it — that
+      // tag is set per branch, so without this the prop would be invisible AND unpickable.
+      const spec = d3PropSpec(it.propKind);
+      const g = new THREE.Group();
+      let built = null;
+      try { built = spec.build(THREE, { box, mat, cyl }); } catch (_e) { built = null; }
+      if (!built) return;   // a bad registry entry must not take the whole model down
+      g.add(built);
+      if (it.rotation) g.rotation.y = -(it.rotation * Math.PI) / 180;
+      g.position.set(ftX(it.x), 0, ftZ(it.y));
+      g.userData = { itemId: it.id, floorItem: true };
+      interiorGroup.add(g);
     }
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
@@ -3095,8 +3987,8 @@ function buildShed3DModel(THREE, p) {
   // trim materials that per-wall disposal must keep (their maps ride along, so
   // the siding texture survives too). builtFrontWall lets the flush detect a
   // FRONT flip, which needs the full path (roof + ground labels re-home).
-  const sharedMats = new Set([wallMat, trimMat]);
-  const model = { root, envGroup, wallMat, trimMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
+  const sharedMats = new Set([wallMat, trimMat, battenMat]);
+  const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -3152,6 +4044,103 @@ function disposeSubtree(obj, sharedMats) {
   d3UnbindFixtureMats(mats);
 }
 
+// The colour pipeline, in ONE place, for every renderer that draws this building.
+//
+// There are three of them -- the full-screen modal, the docked panel, and the off-screen
+// fallback below -- and their configuration had drifted: both live viewers tone-mapped,
+// the fallback did not. ACES is not a subtle grade. It rolls off saturated colour hard, so
+// the SAME hex rendered visibly different depending on which renderer drew it, and the one
+// that disagreed was the one nobody watches being made -- the shot that goes in the
+// customer's quote. Carolyn, 2026-08-25, looking at a red building: "the color isn't
+// showing up in here correctly."
+//
+// Anything that changes how a colour is turned into a pixel belongs here. What stays at the
+// call sites is what genuinely differs per surface -- pixel ratio, shadow maps,
+// preserveDrawingBuffer, clear colour -- each of which is a documented deliberate choice.
+function d3ConfigureRenderer(THREE, renderer) {
+  if (THREE.SRGBColorSpace && "outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+}
+
+// A default 3/4 view of the building, rendered OFF-SCREEN, with no 3D modal involved.
+//
+// WHY THIS EXISTS. The quote's 3D page and the customer's quote-card thumbnail only ever
+// appeared when someone had opened the 3D view and pressed "Use this view in my quote".
+// Most reps never do, so most customers received paperwork showing a floor plan and nothing
+// that looks like a building — the single most persuasive thing we can put in front of them.
+// This is the fallback, taken at submit time when no shot was armed.
+//
+// It deliberately reuses the D3Viewer's OWN framing (34° lens, dist = R*3.66, the front
+// three-quarter OUT map keyed on frontWall) rather than inventing a camera: the fallback and
+// the hand-picked shot should look like the same product, and a second set of magic numbers
+// would drift from the first the next time either is tuned.
+//
+// Never throws — every caller treats a null as "no 3D page", which is exactly the behaviour
+// that shipped before this existed.
+async function renderDefault3DShot(p) {
+  let renderer = null;
+  let model = null;
+  try {
+    const { THREE } = await loadThree();
+    const W = 1200, H = 900;
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(1);
+    renderer.setClearColor("#E7EEF5", 1);
+    d3ConfigureRenderer(THREE, renderer);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#E7EEF5");
+    const spec = p.style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
+    const bodyCss = p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body, p.bodyColors) : (spec.colors.body || D3_COLORS.body);
+    const trimCss = p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim, p.trimColors) : (spec.colors.trim || D3_COLORS.trim);
+    const roofCss = p.roofColorHex || spec.colors.roof || D3_COLORS.roof;
+    model = buildShed3DModel(THREE, {
+      bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec,
+      roofColor: roofCss, roofType: p.roofType, items: p.items, itemTypes: p.itemTypes,
+      bodyColor: bodyCss, trimColor: trimCss, frontWall: p.frontWall,
+      scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures,
+    });
+    scene.add(model.root);
+    scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
+
+    const fw = p.frontWall || "south";
+    const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
+    const R = Math.max(p.bldgW, p.bldgH) * 0.5 + D3.WALL_H;
+    const dist = R * 3.66;
+    const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
+    const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+    const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
+    sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
+    scene.add(sun);
+    const camera = new THREE.PerspectiveCamera(34, W / H, 0.1, dist * 10);
+    camera.position.set(camX, dist * 0.5, camZ);
+    camera.lookAt(0, D3.WALL_H * 0.45, 0);
+
+    renderer.render(scene, camera);
+    // Catalog fixture photos (a door's real photo on its slab) load asynchronously. Reading
+    // the canvas before they land ships a building with blank doors, so wait the same
+    // bounded 1.5s the shutter waits and re-render if any arrived.
+    if (d3FixtureTexturesPending() > 0) {
+      await d3WaitFixtureTextures(1500);
+      renderer.render(scene, camera);
+    }
+    const url = cv.toDataURL("image/jpeg", 0.9);
+    // A lost context yields "data:," — treat that as no snapshot rather than a broken page.
+    if (!url || url.length < 512) return null;
+    return { url, w: W, h: H };
+  } catch (_e) {
+    return null;
+  } finally {
+    if (model) { try { disposeShed3DModel(model); } catch (_e) { /* nothing left to free */ } }
+    if (renderer) {
+      try { renderer.dispose(); if (renderer.forceContextLoss) renderer.forceContextLoss(); } catch (_e) { /* context already gone */ }
+    }
+  }
+}
+
 // Free every geometry/material a buildShed3DModel() group holds — Three.js
 // doesn't GC WebGL resources, and drag-to-move rebuilds the model live.
 function disposeShed3DModel(model) {
@@ -3164,13 +4153,14 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
   const capturedRef = useRef(false);
   const [phase, setPhase] = useState("loading"); // loading | ready | error
   const [interior, setInterior] = useState(false);
+  const [itemsOpen, setItemsOpen] = useState(false);   // the stored-items chooser
   // SmartBuild-style view options: roof on/off, landscape (grass/sky/labels)
   // on/off, and the 3×3 camera-preset popover.
   const [roofOn, setRoofOn] = useState(true);
@@ -3221,6 +4211,68 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     setShotTaken(false);
   };
 
+  // Add a stored item, and show it. Flipping to Look-inside is not a nicety: the roof is on
+  // by default, so a prop dropped on the floor lands somewhere the customer cannot see, and
+  // the button would read as doing nothing.
+  const addProp = (kind) => {
+    const e = engineRef.current;
+    if (!e || !e.placeProp3) return;
+    if (!interior) setInterior(true);
+    e.placeProp3(kind);
+  };
+
+  // ── Door colour, on the door the shopper has selected (Carolyn, 2026-08-25) ──────────
+  // "Siding color, trim color, roof color... but they're not having different door colors,
+  // which blows my mind." The data has been there since migration 116 — colourable doors,
+  // an optional second colour for two-tone barn doors, a flat per-door charge — and
+  // DoorPicker offers it at PLACEMENT. What was missing is changing your mind afterwards
+  // without deleting the door, which in 3D is where anyone would try.
+  //
+  // Reads from the `items` prop, not the engine's liveItems: the engine reports every
+  // commit up through onItemMove, so the prop is the version React can re-render from, and
+  // the chips light from the same place the model draws.
+  const doorPool = Array.isArray(doorColors) ? doorColors : [];
+  const fixtureOf = (it) => (it && it.fixtureItemId != null
+    ? (fixtures || []).find((f) => String(f.id) === String(it.fixtureItemId)) || null
+    : null);
+  // Fixed-colour doors are the owner's decision, not the shopper's — same rule DoorPicker
+  // applies by showing no Colour block for them.
+  const doorColorable = (fx) => !!(fx && (fx.colorMode === "paint" || fx.colorMode === "match"));
+  const sel3dItem = sel3d ? (items || []).find((i) => i.id === sel3d.id) || null : null;
+  const sel3dFx = sel3dItem && sel3dItem.type === "fixtureDoor" ? fixtureOf(sel3dItem) : null;
+  // A one-colour palette assigns itself silently, exactly as it does in DoorPicker: chips
+  // you cannot choose between are decoration.
+  const doorRowsOn = doorColorable(sel3dFx) && doorPool.length > 1;
+  const poolById = (id) => (id == null ? null : doorPool.find((c) => String(c.id) === String(id)) || null);
+  // The item's own stamps are the fallback, so a colour later removed from the catalog
+  // still round-trips instead of silently clearing the door.
+  const curDoorColor = sel3dItem ? (poolById(sel3dItem.colorId) || (sel3dItem.colorId ? { id: sel3dItem.colorId, label: sel3dItem.colorLabel, hex: sel3dItem.colorHex } : null)) : null;
+  const curDoorTrim = sel3dItem ? (poolById(sel3dItem.trimColorId) || (sel3dItem.trimColorId ? { id: sel3dItem.trimColorId, label: sel3dItem.trimColorLabel, hex: sel3dItem.trimColorHex } : null)) : null;
+  const commitDoorColors = (entries) => {
+    if (!entries.length) return;
+    const e = engineRef.current;
+    if (e && e.recolorItems3) e.recolorItems3(entries);
+    capturedRef.current = false;   // the armed shot now shows the old colour
+    setShotTaken(false);
+  };
+  const pickDoorColor = (slot, c) => {
+    if (!sel3dItem || !sel3dFx) return;
+    const dc = slot === "trim" ? curDoorColor : c;
+    const tc = slot === "trim" ? c : curDoorTrim;
+    commitDoorColors([{ id: sel3dItem.id, patch: doorColorStamps(dc, sel3dFx.hasTrimColor ? tc : null) }]);
+  };
+  // Every OTHER colourable door takes the selected door's scheme. Fixed-colour doors are
+  // skipped, and a single-tone door gets no trim fields even when the source door is
+  // two-tone — which is why the engine takes a list of per-door patches rather than one.
+  const otherColorableDoors = (items || []).filter((i) => i.type === "fixtureDoor" && (!sel3dItem || i.id !== sel3dItem.id) && doorColorable(fixtureOf(i)));
+  const applyDoorColorsToAll = () => {
+    if (!sel3dItem) return;
+    commitDoorColors(otherColorableDoors.map((i) => ({
+      id: i.id,
+      patch: doorColorStamps(curDoorColor, fixtureOf(i).hasTrimColor ? curDoorTrim : null),
+    })));
+  };
+
   useEffect(() => {
     let disposed = false;
     loadThree().then((bundle) => {
@@ -3248,8 +4300,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       // Filmic tone mapping is what lets the PBR materials read as real
       // surfaces — flat Linear output was a big part of the "toy render" look.
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.15;
+      // Shared with the panel and the off-screen shot: see d3ConfigureRenderer.
+      d3ConfigureRenderer(THREE, renderer);
       // The sun is a fixed directional light with a fixed ortho shadow camera,
       // so the shadow map is VIEW-INDEPENDENT: orbiting re-renders the same
       // depth map for nothing (a full 2048² PCFSoft pass per pointermove).
@@ -3267,8 +4319,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // Live paint colors — swatch picks update these and recolor materials in
       // place; drag rebuilds read the same vars so colors survive rebuilds.
       // Unpainted falls back to the STYLE's natural material colors.
-      let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
-      let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
+      let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body, bodyColors) : (spec.colors.body || D3_COLORS.body);
+      let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim, trimColors) : (spec.colors.trim || D3_COLORS.trim);
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
       const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures }));
       scene.add(model.root);
@@ -3383,6 +4435,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           e.model.gableMat.depthWrite = !e.interior;
           e.model.gableMat.needsUpdate = true;
         }
+        if (e.model.battenMat) {
+          // Board & batten's proud strips sit ON the walls in wallsGroup, so without this
+          // "look inside" leaves a cage of opaque battens floating over a ghosted building.
+          e.model.battenMat.transparent = !!e.interior;
+          e.model.battenMat.opacity = e.interior ? 0.14 : 1;
+          e.model.battenMat.depthWrite = !e.interior;
+          e.model.battenMat.needsUpdate = true;
+        }
         // Every caller changed what casts or shows shadow (rebuild flush, roof
         // toggle, look-inside) - re-render the cached shadow map next frame.
         e.renderer.shadowMap.needsUpdate = true;
@@ -3469,6 +4529,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           const elev = it.elevationFt || D3.LOFT_ELEV;
           highlight.scale.set(w + 0.3, D3.LOFT_T + 0.3, d0 + 0.3);
           highlight.position.set(cx, elev - D3.LOFT_T / 2, cz);
+        } else if (c.propType) {
+          // Props are the one floor class whose height is not a constant: a trash can is
+          // 2.4 ft and a shelving unit 5.6. The bench-height box below would swallow the can
+          // and cut the shelving off at the third shelf.
+          const ph = d3PropSpec(it.propKind).h || 3;
+          highlight.scale.set((rot ? d0 : w) + 0.3, ph + 0.3, (rot ? w : d0) + 0.3);
+          highlight.position.set(cx, ph / 2, cz);
         } else {
           highlight.scale.set((rot ? d0 : w) + 0.3, D3.BENCH_H + 0.3, (rot ? w : d0) + 0.3);
           highlight.position.set(cx, D3.BENCH_H / 2, cz);
@@ -3524,13 +4591,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // Swatch picks recolor the live materials in place — no rebuild needed.
       // Clearing paint returns to the style's natural material colors.
       const setLiveColors = (bodyLabel, trimLabel) => {
-        liveBodyCss = bodyLabel ? d3SwatchCss(bodyLabel, D3_COLORS.body) : (spec.colors.body || D3_COLORS.body);
-        liveTrimCss = trimLabel ? d3SwatchCss(trimLabel, D3_COLORS.trim) : (spec.colors.trim || D3_COLORS.trim);
+        liveBodyCss = bodyLabel ? d3SwatchCss(bodyLabel, D3_COLORS.body, bodyColors) : (spec.colors.body || D3_COLORS.body);
+        liveTrimCss = trimLabel ? d3SwatchCss(trimLabel, D3_COLORS.trim, trimColors) : (spec.colors.trim || D3_COLORS.trim);
         const e = engineRef.current;
         if (!e) return;
         e.model.wallMat.color.set(liveBodyCss);
         if (e.model.gableMat) e.model.gableMat.color.set(liveBodyCss);
         e.model.trimMat.color.set(liveTrimCss);
+        // Battens are trim-coloured, and they are a separate material, so they need the
+        // write too -- otherwise picking a trim swatch recolours everything except the one
+        // detail that makes board & batten legible.
+        if (e.model.battenMat) e.model.battenMat.color.set(liveTrimCss);
         render();
       };
       // ── 3D placement pipeline (every item class, §10.4) ──
@@ -3565,6 +4636,63 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         queueRebuild();
       };
+      // Drop a stored item in the middle of the floor.
+      //
+      // Deliberately NOT an armed tool. Every other placement asks the customer to aim at a
+      // wall, but a prop has nothing to aim at, and arming one would have fallen through
+      // place3's dispatch chain — which ends in wall placement — and stuck a lawnmower in the
+      // siding. Landing it in the middle and letting them drag it is also simply the shorter
+      // gesture: one click to have it, then move it if you care where it sits.
+      //
+      // Nudged off dead centre per prop so a second item does not hide inside the first.
+      const placeProp3 = (kind) => {
+        const spec = d3PropSpec(kind);
+        const n = liveItems.filter((i) => (itemTypes[i.type] || {}).propType).length;
+        const off = ((n % 4) - 1.5) * 1.25;
+        const halfW = spec.w / 2, halfH = spec.d / 2;
+        const cxFt = Math.max(halfW, Math.min(bldgW / 2 + off, bldgW - halfW));
+        const cyFt = Math.max(halfH, Math.min(bldgH / 2 + off, bldgH - halfH));
+        const ni = {
+          id: idCounter++, type: "prop", propKind: kind,
+          x: mgX + cxFt * scale, y: mgY + cyFt * scale,
+          rotation: 0, wall: null,
+          // Snapshotted from the registry, not read from it at draw time, so a design keeps
+          // the footprint it was drawn with if a prop is ever re-proportioned.
+          widthFt: spec.w, heightFt: spec.d,
+        };
+        commitPlaced3(ni);
+        return true;
+      };
+      // Recolour placed fixtures in place, without moving them.
+      //
+      // Same commit path as a drag — liveItems, then the parent's onItemMove — so 3D never
+      // becomes a second source of truth for item state. The patch carries all six colour
+      // fields (see doorColorStamps), which is what stops a later swap leaking the previous
+      // door's colours and what lets the estimate re-resolve the per-door colour charge.
+      //
+      // A LIST rather than one id, because "apply to all doors" must patch each door with
+      // its OWN stamps: a fixed-colour door is skipped entirely and a single-tone door must
+      // not be handed trim fields, so the patches genuinely differ per door.
+      //
+      // Rebuild rather than a material write: a door's slab and its casing are built
+      // per-item inside buildOneWall and there is no per-item material registry to reach
+      // into. rebuildWalls re-reads the items it is handed, so scoping to the touched walls
+      // costs about a tenth of a full rebuild. Anything without a wall falls back to full.
+      const recolorItems3 = (list) => {
+        const entries = (Array.isArray(list) ? list : []).filter((e) => e && e.id != null && e.patch);
+        if (!entries.length) return;
+        const byId = new Map(entries.map((e) => [e.id, e.patch]));
+        const walls = [];
+        let wallless = false;
+        liveItems = liveItems.map((i) => {
+          const patch = byId.get(i.id);
+          if (!patch) return i;
+          if (i.wall) walls.push(i.wall); else wallless = true;
+          return { ...i, ...patch };
+        });
+        if (onItemMove) byId.forEach((patch, id) => onItemMove(id, patch));
+        queueRebuild(wallless || !walls.length ? undefined : { walls });
+      };
       // Catalog door/window from the in-viewer chooser (also the included-chip
       // path): the FIXTURE stamps are what the estimate prices from — placing
       // these as their raw tool key was the bug that made 3D-placed included
@@ -3572,13 +4700,20 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const placeFixture3 = (fx, type, ptx, pty) => {
         const w = getWallFromClick(ptx, pty, pWpx, pHpx, mgX, mgY) || getNearestWall(ptx, pty, pWpx, pHpx, mgX, mgY);
         const widthFt = (Number(fx.widthIn) || (type === "window" ? 24 : 36)) / 12;
+        // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
+        // overhangs the building corner; refuse up front — same computation the 2D
+        // included-chip branch gained in the 2026-08-20 audit.
+        if (widthFt > (w === "north" || w === "south" ? pWpx : pHpx) / scale + 1e-6) {
+          flash3(`That ${type === "window" ? "window" : "door"} is wider than this wall — pick a longer wall.`);
+          return false;
+        }
         const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY);
         let ni;
         if (type === "window") {
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))) };
+            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))), ...windowSillStamps(fx) };
         } else {
           const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
           const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -3586,11 +4721,19 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation,
             // The in-viewer picker has no color step (matching its no-swing/op contract):
-            // stamp the door's defaults; the shopper refines via the 2D swap flow.
+            // stamp the door's defaults. Refining them no longer means going back to 2D —
+            // select the door and the footer's Door / Door trim rows recolour it in place.
             ...fixtureDoorColorDefaults(fx, doorColors, paintBody, paintTrim) };
         }
         if (checkDoorCollision(ni, { width: widthFt }, liveItems, itemTypes, scale)) {
           flash3("Something's already there — pick a different spot on the wall.");
+          return false;
+        }
+        // Workbench check too — checkDoorCollision deliberately skips workbenches, so the
+        // in-viewer picker / included chip could drop its door or window straight onto one.
+        // Same refusal the 2D placement paths gained in the 2026-08-20 audit.
+        if (checkWorkbenchOverlap(sn, widthFt * scale, liveItems, itemTypes, scale)) {
+          flash3("A workbench is on that wall — place this somewhere else on the wall.");
           return false;
         }
         commitPlaced3(ni);
@@ -3784,23 +4927,65 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // opening's mid-height so the item lands on whichever wall the
             // cursor is nearest — same feel as the 2D drag following the mouse.
             const sp = openSpanOf(it);
-            dragPlane.set(new THREE.Vector3(0, 1, 0), -((sp[0] + sp[1]) / 2));
-            let p = raycaster.ray.intersectPlane(dragPlane, dragHit);
-            const lim = Math.max(bldgW, bldgH) * 4;
-            if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) {
-              // Grazing angle — track against the item's current wall plane instead.
+            // A VARIABLE window (139) also moves UP AND DOWN, so it tracks its own wall
+            // PLANE instead: one raycast on that plane yields both axes at once — along the
+            // wall from x/z, height from y. The horizontal plane cannot do this, and worse,
+            // with it a purely vertical mouse movement slides the intersection point away
+            // along the wall, so trying to raise a transom would also shove it sideways.
+            //
+            // Cross-wall dragging still works: a point on the south wall's plane, dragged
+            // far past a corner, is nearest the west wall, so getNearestWall re-homes it
+            // exactly as before. Nothing here bypasses the shared 2D functions.
+            const vertical = it.type === "window" && it.sillMode === "variable";
+            const wallPlane = () => {
               if (it.wall === "north") dragPlane.set(new THREE.Vector3(0, 0, 1), bldgH / 2);
               else if (it.wall === "south") dragPlane.set(new THREE.Vector3(0, 0, 1), -bldgH / 2);
               else if (it.wall === "west") dragPlane.set(new THREE.Vector3(1, 0, 0), bldgW / 2);
               else dragPlane.set(new THREE.Vector3(1, 0, 0), -bldgW / 2);
+            };
+            let p;
+            if (vertical) {
+              wallPlane();
               p = raycaster.ray.intersectPlane(dragPlane, dragHit);
               if (!p) return;
+            } else {
+              dragPlane.set(new THREE.Vector3(0, 1, 0), -((sp[0] + sp[1]) / 2));
+              p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+              const lim = Math.max(bldgW, bldgH) * 4;
+              if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) {
+                // Grazing angle — track against the item's current wall plane instead.
+                wallPlane();
+                p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+                if (!p) return;
+              }
             }
             const pageX = mgX + (p.x + bldgW / 2) * scale;
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
             const sn = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+            // Refuse the move rather than commit an overlap — same posture as the 2D wallOnly
+            // drag (audit 2026-08-20) and the workbench branch below, which simply return.
+            // Until now the 3D drag was the one path that could still land a door/window/RO
+            // on another opening or on a workbench; the argument shapes mirror the 2D
+            // refusal exactly so semantics match. Guarding here, above the vertical branch,
+            // covers both commit sites below with one check.
+            const dOthers3 = liveItems.filter((i) => i.id !== it.id);
+            if (checkDoorCollision({ ...it, ...sn, widthFt: wFt }, { ...c, width: wFt }, dOthers3, itemTypes, scale)) return;
+            if (checkWorkbenchOverlap(sn, wFt * scale, dOthers3, itemTypes, scale)) return;
+            if (vertical) {
+              // Quarter-foot steps, and the SAME bounds openSpanOf enforces at build time:
+              // y = 0 is the interior floor (which is what Carolyn specified — "off the
+              // floor, not off the ground"), and the header keeps its 0.2 ft.
+              const wh = sp[1] - sp[0];
+              const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+              const want = Math.max(0, Math.min(Math.round((p.y - wh / 2) * 4) / 4, Math.max(0, maxTop - wh)));
+              const moved = sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall;
+              if (moved || want !== it.sillFt) {
+                commitLive(it, { ...sn, sillFt: want }, { walls: [it.wall, sn.wall] });
+              }
+              return;
+            }
             if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) {
               // The door's ramp follows live — same derived placement as 2D.
               const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === it.id);
@@ -3880,6 +5065,25 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             }
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
             if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
+          } else if (c.propType) {
+            // The loft drag above, minus everything a loft needs and a stored item does not:
+            // no wall attachment, no loft-vs-loft snapping, no overlap refusal. Props are
+            // allowed to overlap each other — a bike leaning over a mower is a real shed, and
+            // refusing the drop would read as the app being broken rather than tidy.
+            //
+            // HALF-FOOT steps, not the loft's whole feet: a lawnmower is 2 ft wide and whole
+            // feet make it jump past the spot the customer is aiming at.
+            const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+            if (!p) return;
+            const spec = d3PropSpec(it.propKind);
+            const rotSwap = it.rotation === 90 || it.rotation === 270;
+            const halfW = (rotSwap ? (it.heightFt || spec.d) : (it.widthFt || spec.w)) / 2;
+            const halfH = (rotSwap ? (it.widthFt || spec.w) : (it.heightFt || spec.d)) / 2;
+            const q = (v) => Math.round(v * 2) / 2;
+            const cxFt = Math.max(halfW, Math.min(q(p.x + bldgW / 2), bldgW - halfW));
+            const cyFt = Math.max(halfH, Math.min(q(p.z + bldgH / 2), bldgH - halfH));
+            const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
+            if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
           }
           ev.preventDefault();
           return;
@@ -3913,7 +5117,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         render();
         if (d.moved) {
           const moved = liveItems.find((i) => i.id === d.id);
-          if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall });
+          // sillFt rides along for a window (139), or a height the customer just dragged
+          // would render live and then silently revert the moment the design is saved or
+          // reloaded — this commit, not commitLive, is what reaches the parent's state.
+          // Sent only when the item actually carries one, so nothing else gains the key.
+          if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall,
+            ...(moved.type === "window" && moved.sillFt != null ? { sillFt: moved.sillFt } : {}) });
           // A moved door commits its ramp's new derived position too.
           const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === d.id);
           if (ramp && onItemMove) onItemMove(ramp.id, { x: ramp.x, y: ramp.y, rotation: ramp.rotation, wall: ramp.wall });
@@ -3996,7 +5205,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -4200,16 +5409,52 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         {/* Paint colors: labels land in paintColors (and the estimate); swatch hex drives the 3D */}
         {paintEnabled && (
           <div style={{ display: "flex", gap: 14, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-            {["body", "trim"].map((kind) => (
+            {["body", "trim"].map((kind) => {
+              // The tenant's catalog if they have one for this slot, otherwise the built-in
+              // nine. NOT hidden-when-empty: junior-barns -- the demo tenant -- has no named
+              // colours at all (migration 009 says so), so hiding would strip a working
+              // control off the expo demo to make a point about consistency. Falling back
+              // leaves every existing tenant exactly as they are and upgrades the ones who
+              // have actually built a palette.
+              const sw = (kind === "trim" ? trimColors : bodyColors);
+              const pool = (sw && sw.length) ? sw : D3_SWATCHES;
+              return (
               <div key={kind} style={{ display: "flex", gap: 5, alignItems: "center" }}>
                 <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>{kind}</span>
-                {D3_SWATCHES.map((s) => (
+                {pool.map((s) => (
                   <button key={s.label} title={s.label} onClick={() => pickColor(kind, s.label)} disabled={phase !== "ready"}
                     style={{ width: 20, height: 20, borderRadius: 99, background: s.css, cursor: "pointer", padding: 0, border: paintSel[kind] === s.label ? "2px solid #FBBF24" : "1px solid #334155" }} />
                 ))}
               </div>
-            ))}
+            );})}
             <button onClick={() => pickColor("none")} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#94A3B8", border: "1px solid #334155", borderRadius: 7, padding: "4px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✕ No paint</button>
+          </div>
+        )}
+        {/* Door colour — only while a colourable door is selected. Deliberately OUTSIDE the
+            paintEnabled block above: a door's colours come from the fixture catalog, not
+            from the building-paint option, so a tenant who sells unpainted buildings with
+            colourable doors still gets this. Its own row rather than two more swatches
+            beside body/trim, because those two are the whole building and these two are one
+            door — reading them as one set is how you end up painting the barn to match a
+            door handle. */}
+        {doorRowsOn && (
+          <div style={{ display: "flex", gap: 14, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+            {[{ slot: "door", label: "Door", cur: curDoorColor }].concat(sel3dFx.hasTrimColor ? [{ slot: "trim", label: "Door trim", cur: curDoorTrim }] : []).map((row) => (
+              <div key={row.slot} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>{row.label}</span>
+                {doorPool.map((c) => (
+                  <button key={c.id} title={c.label} onClick={() => pickDoorColor(row.slot, c)} disabled={phase !== "ready"}
+                    style={{ width: 20, height: 20, borderRadius: 99, background: c.hex || "#CCC", cursor: "pointer", padding: 0, border: (row.cur && String(row.cur.id) === String(c.id)) ? "2px solid #FBBF24" : "1px solid #334155" }} />
+                ))}
+              </div>
+            ))}
+            {otherColorableDoors.length > 0 && (
+              <button onClick={applyDoorColorsToAll} disabled={phase !== "ready"}
+                title={`Give the other ${otherColorableDoors.length} door${otherColorableDoors.length === 1 ? "" : "s"} these colours`}
+                style={{ background: "#1E293B", color: "#94A3B8", border: "1px solid #334155", borderRadius: 7, padding: "4px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                Apply to all doors
+              </button>
+            )}
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -4237,6 +5482,27 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           <button onClick={() => setEnvOn((v) => !v)} disabled={phase !== "ready"} title="Show/hide grass, sky and labels" style={{ background: envOn ? "#1E293B" : "#475569", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
             🌿 Landscape {envOn ? "" : "off"}
           </button>
+          {/* Stored items (Carolyn, 2026-08-25). Its own control rather than a palette tool:
+              there is nothing to aim at, so choosing one drops it on the floor and the
+              customer drags it. Placing also flips to Look-inside, because the whole point is
+              seeing your mower IN the building and a prop behind a closed roof is invisible. */}
+          <div style={{ position: "relative" }}>
+            {itemsOpen && (
+              <div style={{ position: "absolute", bottom: "115%", left: "50%", transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "repeat(3, 104px)", gap: 6, zIndex: 5 }}>
+                {D3_PROP_KEYS.map((k) => (
+                  <button key={k} onClick={() => { addProp(k); setItemsOpen(false); }}
+                    style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "8px 6px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", lineHeight: 1.25 }}>
+                    {D3_PROPS[k].label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setItemsOpen((v) => !v)} disabled={phase !== "ready"}
+              title="Put a mower, bike or shelving inside to see how it fits"
+              style={{ background: itemsOpen ? accent : "#1E293B", color: itemsOpen ? "#FFF" : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              📦 Items {itemsOpen ? "▾" : "▴"}
+            </button>
+          </div>
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
@@ -4308,7 +5574,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -4318,7 +5584,12 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // during render (not in an effect) so a flush scheduled this frame already
   // sees this frame's values — this is what avoids the frozen-props trap.
   const pRef = useRef(null);
-  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, fitHeightFt };
+  // bodyColors/trimColors are IN here deliberately. They were destructured above and then
+  // left out of this object, so bodyOf/trimOf below resolved a tenant's paint label with an
+  // undefined pool -- past the catalog lookup, past the built-in nine, down to
+  // d3CssColor's CSS-name guess. "Mountain Red" is not a CSS colour name, so the panel drew
+  // a fallback while the modal beside it drew the real hex off the same design.
+  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, fitHeightFt };
 
   // Every geometry input that is NOT `items`, flattened to a scalar string.
   // d3ResolveStyleSpec returns a fresh object (with fresh nested roof/colors)
@@ -4330,7 +5601,12 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // The hand-picked version silently missed roofMaterial, roof.overhang and the gambrel
   // knee numbers, so two styles differing only in those left a stale roof standing beside
   // a corrected plan until some unrelated edit happened to force a full rebuild.
-  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0]);
+  // The colour POOLS are part of the signature too, for the same reason the whole style
+  // spec is: a label resolves through them, so editing a swatch's hex in the catalog
+  // changes what this model should draw without changing any label. Leaving them out meant
+  // the corrected colour appeared everywhere except the panel, until some unrelated edit
+  // forced a rebuild.
+  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0, bodyColors, trimColors]);
 
   useEffect(() => {
     let disposed = false;
@@ -4342,8 +5618,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.15;
+      d3ConfigureRenderer(THREE, renderer);
       // Same view-independent sun as the modal: orbiting must not re-render the
       // depth map. Every geometry mutation below re-arms needsUpdate by hand.
       renderer.shadowMap.autoUpdate = false;
@@ -4353,8 +5628,8 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       scene.background = new THREE.Color("#E7EEF5");
 
       const specOf = (p) => p.style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
-      const bodyOf = (p) => (p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body) : (specOf(p).colors.body || D3_COLORS.body));
-      const trimOf = (p) => (p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim) : (specOf(p).colors.trim || D3_COLORS.trim));
+      const bodyOf = (p) => (p.painted ? d3SwatchCss(p.paintBody, D3_COLORS.body, p.bodyColors) : (specOf(p).colors.body || D3_COLORS.body));
+      const trimOf = (p) => (p.painted ? d3SwatchCss(p.paintTrim, D3_COLORS.trim, p.trimColors) : (specOf(p).colors.trim || D3_COLORS.trim));
       const roofOf = (p) => p.roofColorHex || specOf(p).colors.roof || D3_COLORS.roof;
       const buildArgs = (p, fw) => {
         const spec = specOf(p);
@@ -4668,7 +5943,7 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
-  const digits = phone.replace(/\D/g, "");
+  const digits = ssPhone10(phone); // a "+1" preserved by formatPhoneDisplay still counts as 10
   const valid = name.trim().length > 0 && digits.length === 10;
   const brand = (config && config.branding) || {};
   const acc = accent || "#3D3672";
@@ -5068,6 +6343,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the default stamps on included-chip / 3D placements.
   const doorPaintColors = useMemo(() => (Array.isArray(C.colors) ? C.colors : []).filter((c) => c && c.door), [C.colors]);
   const windowColorList = useMemo(() => (Array.isArray(C.windowColors) ? C.windowColors : []), [C.windowColors]);
+  // Memoized, not inline at the mount: the docked 3D panel keeps props alive across
+  // rebuilds, and handing it a fresh array identity on every keystroke is how a cheap
+  // prop turns into a churning one.
+  const bodyPaintPool = useMemo(() => d3PaintPool(C.colors, "body"), [C.colors]);
+  const trimPaintPool = useMemo(() => d3PaintPool(C.colors, "trim"), [C.colors]);
   // Ramp is self-contained now (SIMPLE_RAMP_CFG), driven by the Ramp settings — NOT the built-in
   // `ramp` layout item. Custom mode → the ramp picker (catalog styles); simple mode + offered → the
   // simple ramp tool; otherwise render-only (old ramps still draw, but no new placement).
@@ -5109,7 +6389,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     return out;
   })();
-  const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, fixtureDoor: FIXTURE_DOOR_CFG,
+  const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, prop: PROP_CFG, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
@@ -5172,10 +6452,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
-  // Cladding is a FIXED triple (we ship a texture for each; a tenant cannot invent a
-  // fourth), so it is a constant list like roofTypes rather than a catalog read. Empty
-  // string = "builder's standard", i.e. fall through to the style's own d3.siding, which
-  // is what every existing design does today.
+  // Cladding is a fixed FOUR (we ship a texture for each; a tenant cannot invent a fifth),
+  // narrowable per style. Empty string = "builder's standard", i.e. fall through to the
+  // style's own d3.siding, which is what every existing design does today.
+  //
+  // Keyed off the CURRENTLY SELECTED style, so switching style re-reads the list. A
+  // customer mid-design on a metal-capable style who switches to one that is not keeps
+  // sel.cladding pointing at "agpanel" -- harmless, because the estimate resolves it
+  // through D3_CLADDING and the 3D renderer draws whatever the id says; the dropdown
+  // simply no longer offers it. Clearing it instead would silently undo a deliberate pick
+  // the moment someone browsed a neighbouring style.
   //
   // Offered ONLY where 3D is on for this viewer. Cladding is visual-only in v1 -- the pick
   // manifests nowhere but the 3D view (plus a line of text on the estimate) -- so on a
@@ -5183,7 +6469,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // every public designer without opt-in (audit 2026-08-19). Gating it on view3dOn keeps
   // an ungranted tenant's page byte-identical to before cladding existed, and the control
   // appears together with 3D as each builder is switched on.
-  const claddingChoices = view3dOn ? D3_CLADDING_CHOICES : [];
+  const claddingChoices = view3dOn
+    ? d3CladdingChoicesFor(C.buildingStyles.find((s) => s.value === sel.style))
+    : [];
   // The paint option renders inline beside the Roof Options (same row), not in
   // the option list below — see the Size/Roof/Paint row and renderPaintFields.
   const paintOpt = visibleOptions.find((o) => o.type === "counter" && o.id === "paint") || null;
@@ -5249,6 +6537,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     } catch (_e) {}
     return false;
   });
+  // Whether the interaction-triggered lead gate must pop, and whether it is currently
+  // open. Declared HERE — above the 2D pointer handlers — and not down by the gate's
+  // render (whose comment describes the modal), because gateRequired sits in handleClick's
+  // and onPtrDown's useCallback dependency arrays, which are evaluated during render: as a
+  // `const`, reading it before this line runs is a temporal-dead-zone crash in the
+  // ES-module build (the compiled twin only survived because preset-env rewrites
+  // const→var). The useState is still unconditional top-level, so hook order is stable.
+  const gateRequired = !gatePassed && !isAdmin && !embedded;
+  const [gateOpen, setGateOpen] = useState(false);
   // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
   // design overrides this from design.paint_colors on load.
   const [paintColors, setPaintColors] = useState(() => {
@@ -5327,7 +6624,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const contactComplete = useMemo(() => {
     const req = ["name", "email", "phone", "street", "city", "state", "zip"].filter((f) => C.contactFields.includes(f));
     if (req.some((f) => !String(contact[f] || "").trim())) return false;
-    if (C.contactFields.includes("phone") && String(contact.phone || "").replace(/\D/g, "").length !== 10) return false;
+    if (C.contactFields.includes("phone") && ssPhone10(contact.phone).length !== 10) return false;
     return true;
   }, [contact, C.contactFields]);
   // The public Details section is locked until the contact form is complete. Content is
@@ -5707,6 +7004,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // four-side reference photos, preview live, save to the config row.
   const [adminCal, setAdminCal] = useState(null);        // { styleValue, spec, photos: [url×4] } | null
   const [adminCalMsg, setAdminCalMsg] = useState(null);  // {ok, msg} | null
+  // Which calibration input has focus, so the elevation can highlight the dimension that
+  // input drives. This IS the answer to "I couldn't figure out which numbers to change".
+  const [calFocus, setCalFocus] = useState(null);
   const [adminCalBusy, setAdminCalBusy] = useState(false);
   const [adminCalPreview, setAdminCalPreview] = useState(false);
   // Walk-around video → shape. `urls` caches the uploaded frames so a re-draft re-spends
@@ -6324,7 +7624,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))) };
+          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))), ...windowSillStamps(fx) };
       } else {
         const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
         const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -6558,7 +7858,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Drop the height a BUILT-IN placement stamped: openingHeightFt wins over heightIn
           // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
           // matter what the builder's door actually measures.
-          openingHeightFt: undefined, sillFt: undefined,
+          // sillMode goes too: a door has no height off the floor, and a leftover
+          // "variable" from the window this replaced is exactly the stale field the color
+          // note below is about. Nothing reads it on a door today, which is what would make
+          // it survive unnoticed until something does.
+          openingHeightFt: undefined, sillFt: undefined, sillMode: undefined,
           // All six color fields set EXPLICITLY (nulls when absent) — same stale-field
           // discipline as openingHeightFt: the old door's colors must never survive a swap.
           ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
@@ -6653,10 +7957,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setItems((p) => p.map((it) => it.id === swapId ? { ...it, ...sn, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
         planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
         price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-        // As on the door swap: a built-in window stamped openingHeightFt/sillFt, and those
-        // beat the catalog window's own heightIn in openingSpan. Color fields likewise set
-        // explicitly so the old window's color never survives the swap.
-        openingHeightFt: undefined, sillFt: undefined, ...windowColorStamps(windowColor), widthFt: wFt } : it));
+        // As on the door swap: a built-in window stamped openingHeightFt, and that beats the
+        // catalog window's own heightIn in openingSpan. Color fields likewise set explicitly
+        // so the old window's color never survives the swap.
+        //
+        // sillFt is no longer blanked here — windowSillStamps supplies the NEW window's own
+        // height off the floor (and undefined when it has none), which is what stops the
+        // window being swapped INTO inheriting the height of the one it replaced.
+        openingHeightFt: undefined, ...windowColorStamps(windowColor), ...windowSillStamps(fx), widthFt: wFt } : it));
       setSwapId(null); setWindowPick(null); setToast(null); return;
     }
     if (!windowPick || !fx) return;
@@ -6677,7 +7985,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
       price: (fx.price != null ? fx.price : null),
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-      ...windowColorStamps(windowColor),
+      ...windowColorStamps(windowColor), ...windowSillStamps(fx),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("Something's already there — pick a different spot on the wall.");
@@ -7022,7 +8330,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
 
       const iHeightFt = it.heightFt || cfg.height;
-      const halfW = iWidthFt / 2, halfH = iHeightFt / 2;
+      // ROTATION-AWARE, and it has to be: the hit test (see the `rot` swap in handleClick) and
+      // the removal overlay both swap the bounding box at 90/270, but this clamp did not, so a
+      // rotated non-square free-floating item was held inside the building by its UNROTATED
+      // footprint and could cross a wall the plan showed it clearing. Nothing hit it before
+      // because every free-floater today is either square-ish or never rotated — the loft
+      // rotates by swapping widthFt/heightFt and leaving the angle at 0, so it reads the same
+      // numbers either way and this change cannot move it.
+      const rotSwap = it.rotation === 90 || it.rotation === 270;
+      const halfW = (rotSwap ? iHeightFt : iWidthFt) / 2, halfH = (rotSwap ? iWidthFt : iHeightFt) / 2;
       const snapFt = 1; // snap threshold in feet
 
       // Convert desired position to feet
@@ -7338,6 +8654,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
       else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText(item.planLabel || "RAMP", -iw / 2 + 5, 4); }
       else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
+      // The SVG twin of this label lives in the item map — same text, same rule. CLAUDE.md's
+      // "two rendering paths must stay in sync" is exactly about these two branches.
+      else if (cfg.propType) { ctx.fillStyle = cfg.color; ctx.font = "bold 9px sans-serif"; ctx.fillText(d3PropSpec(item.propKind).label, 0, 3); }
       else {
         const lblY = cfg.wallOnly ? ((item.wall === "north" || item.wall === "east") ? 14 : -10) : 4;
         let label = cfg.shortLabel;
@@ -7601,6 +8920,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const applyDraftedSpec = (d3) => setAdminCal((p) => ({
     ...p,
     spec: {
+      // ...p.spec FIRST, for the same reason d3ResolveStyleSpec names every key: an object
+      // literal keeps only what it lists. Without this line a photo draft silently blanked
+      // roofMaterial, gableVent, foundation and claddingChoices -- fields the model is never
+      // even ASKED about by SPEC_PROMPT, so they could only ever be erased, never replaced.
+      ...p.spec,
       roof: { ...p.spec.roof, ...(d3.roof || {}) },
       siding: d3.siding !== undefined ? d3.siding : p.spec.siding,
       colors: { ...p.spec.colors, ...(d3.colors || {}) },
@@ -7619,13 +8943,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Colours are left alone for the same reason plus a better one: the customer repaints the
   // building in the configurator anyway, so a colour averaged off one overcast clip is not
   // worth overwriting a deliberate choice with.
+  // 2026-08-25: this no longer carries a siding line at all. VIDEO_SHAPE_PROMPT stopped
+  // ASKING for siding, which is a stronger guarantee than a caller remembering not to
+  // apply it: a prompt that never mentions cladding cannot return a guess about it. The
+  // old two-value allow-list here would also have quietly become WRONG the moment the
+  // vocabulary widened to four, because it would have kept waving batten and lap through
+  // while silently dropping panel and metal.
   const applyDraftedShape = (d3) => setAdminCal((p) => ({
     ...p,
     spec: {
       ...p.spec,
       roof: { ...p.spec.roof, ...((d3 && d3.roof) || {}) },
-      siding: (d3 && (d3.siding === "batten" || d3.siding === "lap")) ? d3.siding : p.spec.siding,
       wallHeightFt: (d3 && d3.wallHeightFt) || p.spec.wallHeightFt,
+      // gableVent and foundation are TOP-LEVEL, so a `roof`-only merge silently drops
+      // them and the video draft looks like it read nothing about vents or skids. Each
+      // keeps its existing value when the model omits the key, so "the frames never
+      // showed the bottom of the building" leaves the builder's setting alone rather
+      // than resetting it to a slab.
+      gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : p.spec.gableVent,
+      foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : p.spec.foundation,
+      // Third top-level field, same trap: the renderer textures the roof from this before
+      // any customer roof-type pick, so a video that read "metal" and had it dropped here
+      // would show shingles on a metal building and look like the model got it wrong.
+      roofMaterial: (d3 && (d3.roofMaterial === "shingle" || d3.roofMaterial === "metal")) ? d3.roofMaterial : p.spec.roofMaterial,
     },
   }));
   const copyCalJson = () => {
@@ -8016,7 +9356,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSubmitError(`Please fill in: ${missing.join(", ")}.`);
       return;
     }
-    if (C.contactFields.includes("phone") && contact.phone.replace(/\D/g, "").length !== 10) {
+    if (C.contactFields.includes("phone") && ssPhone10(contact.phone).length !== 10) {
       setSubmitError("Phone number must be 10 digits.");
       return;
     }
@@ -8066,8 +9406,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       //    enumerate every design short_code. A plain insert needs no SELECT
       //    policy, so the listable policy can be dropped (see 042_floor_plans_no_list).
       //    Uses the same hand-built JPEG-in-PDF wrapper that downloadPDF uses.
-      const pdfPages = [{ bytes: dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.92)), w: canvas.width, h: canvas.height }];
-      const shot3d = render3DSnapshotRef.current;
+      const fullSheetDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+      // The PLAN-ONLY image (Carolyn 2026-08-25): everywhere the PNG is used — the order
+      // screen's floor-plan card — the sheet's bottom customer-info band is noise, so the
+      // image crops to the drawing: the full visible band above TEXT_AREA_H vertically,
+      // and the plan plus a label margin horizontally (wall labels + rotated dimensions
+      // sit ~70px outside the walls). The PDF keeps the FULL sheet — it IS the document.
+      const dpr2 = canvas.width / cW;
+      const cropX = Math.max(0, Math.round((mgX - 70) * dpr2));
+      const cropW = Math.min(canvas.width - cropX, Math.round((pW + 140) * dpr2));
+      const cropH = Math.round((cH - TEXT_AREA_H) * dpr2);
+      const planCanvas = document.createElement("canvas");
+      planCanvas.width = cropW; planCanvas.height = cropH;
+      const pctx = planCanvas.getContext("2d");
+      pctx.fillStyle = "#FFF"; pctx.fillRect(0, 0, cropW, cropH);
+      pctx.drawImage(canvas, cropX, 0, cropW, cropH, 0, 0, cropW, cropH);
+      const planJpegDataUrl = planCanvas.toDataURL("image/jpeg", 0.92);
+      const pdfPages = [{ bytes: dataUrlToBytes(fullSheetDataUrl), w: canvas.width, h: canvas.height }];
+      // An armed shot always wins — if the rep framed the building deliberately, that is
+      // the view the customer should see. Only when nobody opened 3D at all do we render a
+      // default one, so a quote is never sent without a picture of the building.
+      let shot3d = render3DSnapshotRef.current;
+      if (!shot3d) {
+        shot3d = await renderDefault3DShot({
+          bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
+          painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
+          scale, mgX, mgY,
+          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight),
+          roofType: sel.roofType,
+          roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
+          fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
+        });
+      }
       if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
       const blob = buildPdfFromJpegPages(pdfPages);
       const { error: upErr } = await supabase.storage
@@ -8077,6 +9447,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       const { data: urlData } = supabase.storage.from("floor-plans").getPublicUrl(filePath);
       const imageUrl = urlData.publicUrl;
+
+      // 3b. The same images as plain JPEGs (migration 127): the portal's order screen shows
+      // the floor plan (and the 3D shot when one was captured) as <img> cards — an image
+      // beats an embedded PDF viewer in a small card. BEST-EFFORT: these are presentation,
+      // and a failed upload must never block the quote. Timestamped names match the widened
+      // storage policy shape ({client}/SS-<code>-plan-<ts>.jpg / -3d-<ts>.jpg) and keep the
+      // anon-no-update invariant — every submit ADDS a fresh pair.
+      let planImageUrl = null;
+      let view3dImageUrl = null;
+      try {
+        const ts = Date.now();
+        const planPath = `${C.clientId}/${shortCode}-plan-${ts}.jpg`;
+        const planUp = await supabase.storage.from("floor-plans")
+          .upload(planPath, dataUrlToBytes(planJpegDataUrl), { upsert: false, contentType: "image/jpeg", cacheControl: "0" });
+        if (!planUp.error) planImageUrl = supabase.storage.from("floor-plans").getPublicUrl(planPath).data.publicUrl;
+        if (shot3d) {
+          const shotPath = `${C.clientId}/${shortCode}-3d-${ts}.jpg`;
+          const shotUp = await supabase.storage.from("floor-plans")
+            .upload(shotPath, dataUrlToBytes(shot3d.url), { upsert: false, contentType: "image/jpeg", cacheControl: "0" });
+          if (!shotUp.error) view3dImageUrl = supabase.storage.from("floor-plans").getPublicUrl(shotPath).data.publicUrl;
+        }
+      } catch (_e) { /* image cards degrade to the PDF link; the quote is unaffected */ }
 
       // 4. Save the design row via the capability RPC (insert on first save,
       //    update on subsequent saves; keyed by the unguessable short code).
@@ -8144,6 +9536,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // New fields — n8n can use these for GHL linking + image embed
         designId: shortCode,
         imageUrl,
+        // Plain-image twins of the plan PDF (migration 127) — the order screen's sidebar
+        // cards. Persisted by submit-estimate's SS branch only; null when an upload failed.
+        planImageUrl,
+        view3dImageUrl,
         viewUrl,
         source: "StructureStudio",
         clientId: C.clientId,
@@ -8155,8 +9551,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         contact: {
           name: contact.name,
           email: contact.email,
-          // Strip display formatting; n8n/GHL store raw digits.
-          phone: contact.phone.replace(/\D/g, ""),
+          // Strip display formatting (n8n/GHL store raw digits) — via ssPhone10, not a bare
+          // digit strip: submit the same normalized 10 digits the validator counted (an
+          // autofilled "+1" otherwise submits 11 digits and splits the customer into two
+          // GHL contacts / breaks customer-auth phone matching).
+          phone: ssPhone10(contact.phone),
           street: contact.street,
           city: contact.city,
           state: contact.state,
@@ -8187,7 +9586,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // sel verbatim), so a consumer never has to reverse-map display text.
           ...(sel.cladding && D3_CLADDING[sel.cladding] ? { cladding: D3_CLADDING[sel.cladding].label, claddingId: sel.cladding } : {}),
         },
-        floorPlanItems: items.map((item) => {
+        // Stored items are stripped here, and this is the ONLY place their free-ness needs
+        // defending. They are a visualisation aid — the customer's own mower and bikes, shown
+        // to answer "will my stuff fit" — not something anyone is buying, so an estimate line
+        // or even a bare row in this array would be wrong. This payload is a downstream
+        // contract read by n8n and GoHighLevel; a `type: "prop"` row would arrive at a
+        // consumer that has never heard of it. They still persist in the design's items for
+        // reload — dropped from the ESTIMATE, not from the design.
+        //
+        // Everywhere else props are free by omission: LAYOUT_PRICE_ORDER, the pricing
+        // measures map and itemSummary all enumerate types explicitly and none names `prop`.
+        floorPlanItems: items.filter((i) => !(ITEMS[i.type] || {}).propType).map((item) => {
           const displayLabel = getDisplayLabel(item.wall, frontWall);
           if (item.type === "line") {
             const dxFt = (item.x2 - item.x1) / scale;
@@ -8624,8 +10033,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // tries to work the 2D canvas (arm a tool, place, or drag an item). gatePassed
   // (remembered browsers, ?id= reopens), the operator preview (isAdmin), and
   // embedded portal mounts never see it.
-  const gateRequired = !gatePassed && !isAdmin && !embedded;
-  const [gateOpen, setGateOpen] = useState(false);
+  // gateRequired + gateOpen are declared up beside gatePassed (search "temporal-dead-zone"):
+  // they are read by handleClick/onPtrDown's useCallback dependency arrays far above here.
   const showGate = gateRequired && gateOpen;
   // Gate identity chip (public page only): who this browser is remembered as, plus a
   // reset. contact.name is live right after passing the gate; the localStorage copy
@@ -8681,7 +10090,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A plain const, deliberately: everything from here down is JSX held in a variable, and
   // a hook below the calibrationOnly early return would change hook order between the two
   // returns (React #310 — this file has form for it).
-  const photoLabels = adminCalVideo.count ? ["View 1", "View 2", "View 3", "View 4"] : ["Front", "Back", "Left", "Right"];
+  // The four Front/Back/Left/Right slots are GONE. Ahsan on the 2026-08-24 call, when
+  // Carolyn asked "are you still thinking of leaving that in there?": "No, I'll remove it
+  // because now we have added the video option now."
+  //
+  // What survives is the same four slots used READ-ONLY as thumbnails of the frames the
+  // walk-around video produced -- the video path spreads four of its eight frames across
+  // them, and seeing what the model actually looked at is the whole reason a builder trusts
+  // the drafted shape. `d3_photos` and upload_style_photo stay exactly as they are; only the
+  // manual entry path and the photo-draft button are removed.
+  const photoLabels = ["View 1", "View 2", "View 3", "View 4"];
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
@@ -8865,75 +10283,189 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   )}
                 </div>
               )}
+              {/* The drawing sits directly ABOVE the numbers it explains, and directly
+                  beside the reference-photo thumbnails, so "film it, then nudge the
+                  drawing" becomes the obvious workflow. The fitting engine already exists
+                  (walk-around video / draft from photos) -- it was just undiscoverable
+                  behind a wall of raw ratios. */}
+              <div style={{ marginBottom: 8 }}>
+                <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} />
+                <div style={{ fontSize: 10, color: "#A16207", marginTop: 3 }}>
+                  End elevation at {sel.size || "this size"}. Click a number below and its dimension lights up.
+                </div>
+              </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
                   <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                    <option value="gable">gable</option>
-                    <option value="shed">shed</option>
-                    <option value="gambrel">gambrel</option>
+                    {/* "Single slant" is what ShedPro and Carolyn both call a shed roof.
+                        The value stays "shed" -- this is a label, not a new roof type. */}
+                    <option value="gable">Gable (two slopes)</option>
+                    <option value="shed">Single slant (shed roof)</option>
+                    <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("overhang")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("ridgeOffset")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
-                  <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("wallHeightFt")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (standard look)
-                  <select value={adminCal.spec.siding || ""} onChange={(e) => calSet({ siding: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                    <option value="">plain</option>
-                    <option value="batten">batten (vertical)</option>
-                    <option value="lap">lap (horizontal)</option>
+                {/* The empty "plain" option is gone (2026-08-25). It was the LABEL FOR null,
+                    which the renderer draws as panel siding -- so it named a thing the
+                    customer never sees and meant nothing to the builder reading it.
+                    Normalising the value through d3NormalizeCladding maps a stored null to
+                    "panel", so an untouched style shows exactly what it already renders and
+                    the pixels do not move; the first save just writes it down explicitly. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Siding (this style&rsquo;s standard)
+                  <select value={d3NormalizeCladding(adminCal.spec.siding)} onChange={(e) => calSet({ siding: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="panel">Panel siding (SmartSide, DuraTemp, T1-11)</option>
+                    <option value="lap">Lap siding</option>
+                    <option value="batten">Board &amp; batten</option>
+                    <option value="agpanel">Metal</option>
                   </select>
                 </label>
+              </div>
+              {/* Which of the four this style OFFERS the customer. Carolyn, 2026-08-24:
+                  "they don't offer metal here, but there's some other clients that do."
+
+                  All four ticked is the SAME as saying nothing, so that case stores
+                  nothing at all -- an untouched style keeps a spec byte-identical to the
+                  one it has today, and a builder who never opens this row is unaffected. */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: "#92400E", fontWeight: 700, marginBottom: 4 }}>Cladding this style offers the customer</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+                  {D3_CLADDING_CHOICES.map((id) => {
+                    const offered = d3CladdingChoicesFor({ d3: adminCal.spec });
+                    const on = offered.indexOf(id) !== -1;
+                    return (
+                      <label key={id} style={{ fontSize: 11, color: "#92400E", display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => {
+                            const next = D3_CLADDING_CHOICES.filter((c) => (c === id ? !on : offered.indexOf(c) !== -1));
+                            // Nothing ticked is a slip, not an instruction -- it would leave
+                            // the customer no cladding at all -- and everything ticked is the
+                            // default. Both store `undefined`, which JSON.stringify drops, so
+                            // the column stays absent rather than growing a list saying nothing.
+                            const store = (next.length === 0 || next.length === D3_CLADDING_CHOICES.length) ? undefined : next;
+                            calSet({ claddingChoices: store });
+                          }}
+                        />
+                        {D3_CLADDING[id].label}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* LEAN-TO and DORMER. Both are off at zero width, which is why they sit in
+                  their own row rather than the main grid -- a builder who wants neither
+                  should not have to read four controls to establish that. */}
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to width (ft, 0 = none)
+                  <input type="number" step="0.5" min="0" value={adminCal.spec.roof.leanToWidthFt != null ? adminCal.spec.roof.leanToWidthFt : 0} onChange={(e) => calSetRoof({ leanToWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                {(adminCal.spec.roof.leanToWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to drop (ft)
+                    <input type="number" step="0.25" min="0" value={adminCal.spec.roof.leanToDropFt != null ? adminCal.spec.roof.leanToDropFt : 1} onChange={(e) => calSetRoof({ leanToDropFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {(adminCal.spec.roof.leanToWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to side
+                    <select value={adminCal.spec.roof.leanToSide || "right"} onChange={(e) => calSetRoof({ leanToSide: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="right">Right eave</option>
+                      <option value="left">Left eave</option>
+                    </select>
+                  </label>
+                )}
+                {adminCal.spec.roof.type !== "shed" && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
+                    <input type="number" step="0.5" min="0" value={adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0} onChange={(e) => calSetRoof({ dormerWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
+                    <input type="number" step="0.25" min="0" value={adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5} onChange={(e) => calSetRoof({ dormerRiseFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer position (&minus;1 &hellip; 1)
+                    <input type="number" step="0.05" value={adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45} onChange={(e) => calSetRoof({ dormerOffsetU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
               </div>
               {adminCal.spec.roof.type === "gambrel" && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("kneeU")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Knee rise (× half-span)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("kneeRise")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge rise (× half-span)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("ridgeRise")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 </div>
               )}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
-                {["body", "trim", "roof"].map((k) => (
+                {/* Carolyn, 2026-08-24: "this body color and trim color and roof color needs to
+                    go with the colors that are in THEIR database ... it's going to be so much
+                    easier for them."
+
+                    The hex box STAYS. These three are the UNPAINTED natural-material colours
+                    -- bare wood, galvalume -- which are deliberately not paint-catalog rows,
+                    and styleD3.ts enforces hex-only on the column. The picker is sugar over
+                    the same input: choosing a catalog colour writes its hex into the field, so
+                    there is no server change, no migration and no new save action. A builder
+                    who wants a colour that is not in their catalog can still type one.
+
+                    Roof pulls from shingle OR metal rows because the unpainted roof colour is
+                    a roofing product, not a paint. */}
+                {["body", "trim", "roof"].map((k) => {
+                  const pool = (Array.isArray(C.colors) ? C.colors : []).filter((c) =>
+                    (k === "body" ? c.siding : k === "trim" ? c.trim : (c.shingle || c.metal)) && c.hex && !c.allowCustom);
+                  return (
                   <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
                     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                       <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                       <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
                     </div>
+                    {/* Hidden rather than shown-empty when the tenant has no colours of this
+                        kind on file: an empty picker beside a working text box reads as broken. */}
+                    {pool.length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => { if (e.target.value) calSetColor(k, e.target.value); }}
+                        title="Pick from your colour catalog"
+                        style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginTop: 4, fontWeight: 400 }}
+                      >
+                        <option value="">Pick from your colours…</option>
+                        {pool.map((c) => <option key={c.label} value={c.hex}>{c.label}</option>)}
+                      </select>
+                    )}
                   </label>
-                ))}
+                );})}
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
-                {photoLabels.map((side, i) => (
-                  <label key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{side} photo{setup3d ? "" : " URL"}
-                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                      <input type="text" placeholder="https://…" value={adminCal.photos[i] || ""} onChange={(e) => calSetPhoto(i, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                      {/* In the portal a builder picks a file; the host uploads it and hands
-                          back a URL. The public page has no session, so it stays URL-only. */}
-                      {setup3d && setup3d.onUploadPhoto && (
-                        <label title="Upload a photo" style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "6px 8px", cursor: adminCalBusy ? "wait" : "pointer", flexShrink: 0, marginBottom: 0 }}>
-                          ⬆
-                          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={adminCalBusy}
-                            onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; calUploadPhoto(i, f); }}
-                            style={{ display: "none" }} />
-                        </label>
-                      )}
-                      {adminCal.photos[i] ? <img src={adminCal.photos[i]} alt={side} style={{ width: 44, height: 32, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", flexShrink: 0 }} /> : null}
+                {/* READ-ONLY. These are the frames the walk-around video produced, shown so a
+                    builder can see what the model actually looked at -- not slots to fill in.
+                    Nothing renders at all before a video has been read, rather than four
+                    empty boxes implying there is something to do here. */}
+                {adminCalVideo.count > 0 && photoLabels.map((side, i) => (
+                  adminCal.photos[i] ? (
+                    <div key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>
+                      {side}
+                      <div style={{ marginTop: 3 }}>
+                        <img src={adminCal.photos[i]} alt={side} style={{ width: "100%", maxWidth: 120, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D" }} />
+                      </div>
                     </div>
-                  </label>
+                  ) : null
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -8974,11 +10506,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {/* Disabled with a reason when the Anthropic key is not set on the server: the
                     browser cannot see an edge secret, so `aiReady` from the catalog action is the
                     only way to avoid offering a button that always fails. */}
-                <button onClick={calibrateFromPhotos} disabled={adminCalBusy || scan.aiReady === false}
-                  title={scan.aiReady === false ? "AI drafting isn't switched on for this site yet — tune the numbers by hand, or ask CSM Synergy to enable it." : "Read the roof, siding and colours off the photos"}
-                  style={{ ...S.btn(adminCalBusy || scan.aiReady === false ? "#9CA3AF" : "#0E7490", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer" }}>
-                  {adminCalBusy ? "Working…" : "✨ Draft from photos (AI)"}
-                </button>
+                {/* "Draft from photos (AI)" removed 2026-08-25 with the four manual slots it
+                    fed. One way in -- the walk-around video -- rather than two paths to the
+                    same spec, one of which asked a builder to stage four photographs.
+                    calibrateFromPhotos and onDraftFromPhotos remain wired for the operator
+                    scan path; only this entry point is gone. */}
                 <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
                   {adminCalBusy ? "Saving…" : (setup3d ? "Save 3D look" : "Save to config")}
                 </button>
@@ -9001,7 +10533,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           painted={false} paintBody="" paintTrim=""
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
-          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
@@ -9065,7 +10597,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     painted={false} paintBody="" paintTrim=""
                     roofType="" roofColorHex=""
                     frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-                    fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+                    fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
                     /* Nothing drags on this surface, and no canEdit: there is no plan to edit
                        here, so the panel's "⛶ Edit in 3D" footer never renders. */
                     suspended={false}
@@ -9866,6 +11398,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
                         <text x={0} y={13} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>Workbench</text>
                       </>
+                    ) : cfg.propType ? (
+                      // Its NAME, not "Item" and not dimensions. A plan is read by the person
+                      // building the shed, and "Lawn mower" tells them what that rectangle is
+                      // for; a generic short label plus 2×2.8 tells them nothing. Kept in step
+                      // with the canvas path in renderExportCanvas — same text, same rule.
+                      <text x={0} y={3} textAnchor="middle" fill={cfg.color} fontSize={9} fontWeight="700">{d3PropSpec(item.propKind).label}</text>
                     ) : (
                       <>
                         <text x={0} y={2} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">{cfg.shortLabel}</text>
@@ -9964,7 +11502,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
-              fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+              fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
               suspended={Boolean(dragging || resizing)}
               canEdit={!planLocked}
               onEdit={() => { setDock3D(false); setShow3D(true); }}
@@ -10333,7 +11871,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <div onClick={(e) => e.stopPropagation()}
             style={{ background: "#FFF", borderRadius: 14, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
             {invDialog.done ? (
-              <React.Fragment>
+              <>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", marginBottom: 6 }}>
                   {invDialog.done.updated
                     ? "Inventory building updated"
@@ -10350,9 +11888,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <button type="button" onClick={() => setInvDialog(null)}
                     style={{ background: "#1E293B", color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
                 </div>
-              </React.Fragment>
+              </>
             ) : (
-              <React.Fragment>
+              <>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>
                   {inventoryMaster && inventoryMaster.unitId ? "Update inventory building" : "Request this build"}
                 </div>
@@ -10386,7 +11924,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Send request")}
                   </button>
                 </div>
-              </React.Fragment>
+              </>
             )}
           </div>
         </div>
@@ -10681,7 +12219,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
-          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList}
+          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
@@ -10810,7 +12348,10 @@ export default function StructureStudio({ config: configProp = null, clientId: c
     if (!clientId) {
       const host = window.location.hostname.toLowerCase();
       const TENANT_APEXES = ["structurestudio.app", "structurestudiosuite.com"];
-      const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
+      // "beta-2-0" is a DEPLOY label (beta-2-0.structurestudiosuite.com), not a tenant —
+      // a single-label hyphenated deploy name has no "." and so defeats the multi-label
+      // deploy-host heuristic above; it must be reserved by name.
+      const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app", "beta-2-0"];
       for (const base of TENANT_APEXES) {
         if (!host.endsWith("." + base)) continue;
         const sub = host.slice(0, host.length - base.length - 1);

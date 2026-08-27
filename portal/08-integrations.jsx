@@ -51,6 +51,46 @@ function qboReasonText(reason, company) {
   return QBO_REASONS[reason];
 }
 
+// Grouped <select> of QuickBooks items; keeps a saved-but-vanished id selectable so a
+// transient QuickBooks outage can't blank a stored mapping on save (the stage-dropdown
+// idiom used across Settings).
+// HOISTED to module scope on purpose, like FeatureScope in 07-admin.jsx: declared inside
+// QuickBooksView it was a new component type on every render, so React remounted every
+// dropdown whenever the view re-rendered — an open list snapped shut when a background
+// fetch landed, and focus was lost after every pick. Everything it reads arrives as props
+// (mappedId/setMapped/qboItems/mappings); it closes over nothing from the view. Qbo-prefixed
+// because the portal parts concatenate into one shared scope, like QBO_KINDS above.
+function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMapped, qboItems, mappings }) {
+  const val = mappedId(kind, itemKey, styleId);
+  const items = qboItems || [];
+  // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
+  // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
+  // grouping they can navigate. Items with no category (and any response from a
+  // not-yet-updated function, where fullName is absent) fall back to the old grouping by
+  // Type, so this degrades to previous behaviour instead of collapsing into one blob.
+  const groupOf = (i) => {
+    const fn = i.fullName || "";
+    const cut = fn.lastIndexOf(":");
+    return cut > 0 ? fn.slice(0, cut) : (i.type || "Other");
+  };
+  const byGroup = {};
+  items.forEach((i) => { const g = groupOf(i); (byGroup[g] = byGroup[g] || []).push(i); });
+  const stale = val && !items.some((i) => i.id === val);
+  const savedRow = stale ? (mappings || []).find((m) => m.qbo_item_id === val) : null;
+  return (
+    <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
+      style={{ ...S.input, maxWidth: 340 }}>
+      <option value="">{placeholder || "— not mapped —"}</option>
+      {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
+      {Object.keys(byGroup).sort().map((g) => (
+        <optgroup key={g} label={g}>
+          {byGroup[g].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
 function QuickBooksView({ clientId, viewingLabel = null }) {
   const [status, setStatus] = useState(null);   // qbo_status response; null = loading
   const [error, setError] = useState(null);
@@ -228,39 +268,10 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     if (!g.error && g.data && !g.data.error) setGrid(g.data);
   };
 
-  // Grouped <select> of QuickBooks items; keeps a saved-but-vanished id selectable so a
-  // transient QuickBooks outage can't blank a stored mapping on save (the stage-dropdown
-  // idiom used across Settings).
-  const ItemSelect = ({ kind, itemKey, styleId, placeholder }) => {
-    const val = mappedId(kind, itemKey, styleId);
-    const items = qboItems || [];
-    // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
-    // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
-    // grouping they can navigate. Items with no category (and any response from a
-    // not-yet-updated function, where fullName is absent) fall back to the old grouping by
-    // Type, so this degrades to previous behaviour instead of collapsing into one blob.
-    const groupOf = (i) => {
-      const fn = i.fullName || "";
-      const cut = fn.lastIndexOf(":");
-      return cut > 0 ? fn.slice(0, cut) : (i.type || "Other");
-    };
-    const byGroup = {};
-    items.forEach((i) => { const g = groupOf(i); (byGroup[g] = byGroup[g] || []).push(i); });
-    const stale = val && !items.some((i) => i.id === val);
-    const savedRow = stale ? (grid && grid.mappings || []).find((m) => m.qbo_item_id === val) : null;
-    return (
-      <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
-        style={{ ...S.input, maxWidth: 340 }}>
-        <option value="">{placeholder || "— not mapped —"}</option>
-        {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
-        {Object.keys(byGroup).sort().map((g) => (
-          <optgroup key={g} label={g}>
-            {byGroup[g].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
-          </optgroup>
-        ))}
-      </select>
-    );
-  };
+  // Wiring for the module-scope QboItemSelect (hoisted — see its comment). The functions
+  // are re-created each render, which is fine as PROPS: the component TYPE stays stable, so
+  // nothing remounts.
+  const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings };
 
   if (status === null) return <div style={{ padding: 24, color: "#64748B", fontSize: 13 }}>Loading QuickBooks…</div>;
 
@@ -410,7 +421,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
                     ? (grid.layoutItems || []).map((li) => (
                         <div key={li.item_key} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 12.5, fontWeight: 600, color: "#475569", minWidth: 140 }}>{li.label || li.item_key}</span>
-                          <ItemSelect kind="layout_item" itemKey={li.item_key} styleId={null} />
+                          <QboItemSelect kind="layout_item" itemKey={li.item_key} styleId={null} {...selProps} />
                         </div>
                       ))
                     : <p style={{ fontSize: 12, color: "#94A3B8" }}>No active layout items.</p>
@@ -418,17 +429,17 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
                   <div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 12.5, fontWeight: 600, color: "#475569", minWidth: 140 }}>Default (all styles)</span>
-                      <ItemSelect kind="building" itemKey="" styleId={null} />
+                      <QboItemSelect kind="building" itemKey="" styleId={null} {...selProps} />
                     </div>
                     {(grid.styles || []).map((s) => (
                       <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 12.5, fontWeight: 600, color: "#94A3B8", minWidth: 140 }}>{s.label}</span>
-                        <ItemSelect kind="building" itemKey="" styleId={s.id} placeholder="— use default —" />
+                        <QboItemSelect kind="building" itemKey="" styleId={s.id} placeholder="— use default —" {...selProps} />
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <ItemSelect kind={kind} itemKey="" styleId={null} />
+                  <QboItemSelect kind={kind} itemKey="" styleId={null} {...selProps} />
                 )}
               </div>
             ))}
@@ -466,6 +477,21 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   const [fromName, setFromName] = useState("");
   const [fromLocal, setFromLocal] = useState("info");
   // Verification feedback + per-row copy state (pending state)
+  // Tenant wording for the document emails (migration 138). Seeded from email_status.
+  const [tplKind, setTplKind] = useState("estimate");
+  const [tpl, setTpl] = useState({});           // { estimate:{subject,intro}, ... }
+  const [tplMsg, setTplMsg] = useState(null);
+  // Seed the wording boxes ONCE from the server. A ref rather than a "is it empty?" test,
+  // and an effect rather than a render-time set: the empty check would have been true
+  // forever for a tenant with no saved copy, so setting state on it during render was an
+  // infinite loop waiting for a background refresh to trigger it. The ref also means a
+  // later refresh never clobbers what someone is halfway through typing.
+  const tplSeeded = useRef(false);
+  useEffect(() => {
+    if (tplSeeded.current || !status || !status.templateCopy) return;
+    tplSeeded.current = true;
+    setTpl(status.templateCopy);
+  }, [status]);
   const [checkNote, setCheckNote] = useState(null);
   const [copied, setCopied] = useState(null);   // "v<i>" | "fail:v<i>" | null
   // Test send (verified state)
@@ -566,17 +592,113 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // So the table shows a fourth, advisory row. `advisory` keeps it out of the verified
   // tally: Resend does not check DMARC, so it can never report this one as verified, and a
   // permanent grey dot next to a correct record would read as broken.
-  const dnsAdvisory = dns.length > 0 && status.domain
+  // ⚠️ BUILD THIS FROM THE PROVIDER'S DOMAIN, NOT OUR STORED STRING. Resend normalizes what
+  // it is handed — give it "www.example.com" and it registers DKIM, MX and SPF against
+  // "example.com" — so the two can silently disagree. When they did (2026-08-26) this row
+  // told a tenant to publish _dmarc.www.csmsynergy.com, which protects nothing, with reports
+  // going to carolyn@www.csmsynergy.com, an address that cannot receive mail. Meanwhile the
+  // apex already had a correct _dmarc record.
+  //
+  // The record hostnames Resend RETURNED are the fact; our stored domain is only a claim.
+  // Derive the apex from them and fall back to our copy only when there are none.
+  const dnsApex = (() => {
+    const dkim = dns.find((r) => String(r.host || "").startsWith("resend._domainkey."));
+    if (dkim) return String(dkim.host).replace(/^resend\._domainkey\./, "");
+    const send = dns.find((r) => String(r.host || "").startsWith("send."));
+    if (send) return String(send.host).replace(/^send\./, "");
+    return String(status.domain || "").replace(/^www\./, "");
+  })();
+  const dnsAdvisory = dns.length > 0 && dnsApex
     ? [{
       type: "TXT",
-      host: "_dmarc." + status.domain,
-      value: "v=DMARC1; p=none; rua=mailto:" + (status.fromAddress || "you@" + status.domain),
+      host: "_dmarc." + dnsApex,
+      // The reports address has to be one that RECEIVES mail. A fromAddress on some other
+      // host would send every DMARC report into a black hole, so it is used only when it
+      // sits on this apex.
+      value: "v=DMARC1; p=none; rua=mailto:" + (status.fromAddress && status.fromAddress.endsWith("@" + dnsApex) ? status.fromAddress : "you@" + dnsApex),
       verified: false,
       advisory: true,
     }]
     : [];
   const dnsRows = dns.concat(dnsAdvisory);
+
+  // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────
+  // Her words: "so many people are going to be like, I don't know anything about this."
+  // The tenant is a shed builder; the person who can actually add a TXT record is their web
+  // guy, and the gap between those two people is where domain verification dies. She
+  // explicitly ruled out the auto-detect-their-DNS-host idea for now — "let's not right
+  // now... instead let's put in here, email this to my webmaster."
+  //
+  // mailto: and nothing else. No send from our servers: the builder's own client puts it in
+  // their Sent folder, uses whatever address their webmaster already answers, and keeps the
+  // reply on a thread they own. It also means this works with zero backend, which matters
+  // because the tenants who need it most are the ones whose sending is NOT yet verified.
+  //
+  // ⚠️ The DMARC row goes in the email. It is the one Resend never returns, and pasting
+  // exactly what the portal shows without it is what put a live A/B test in Gmail's spam
+  // folder (2026-08-21). A webmaster who adds three records and stops has done the work and
+  // still gets spam-foldered, and nobody would know why.
+  const webmasterMailto = (() => {
+    if (dnsRows.length === 0) return "";
+    const dom = dnsApex || status.domain || "our domain";
+    const lines = dnsRows.map((r, i) => {
+      const bits = [
+        `${i + 1}. ${r.type} record${r.advisory ? "  (recommended — see note below)" : ""}`,
+        `   Name/Host: ${r.host}`,
+        `   Value:     ${r.value}`,
+      ];
+      // An MX without its priority cannot be created — same reason it is on screen.
+      if (r.priority != null) bits.push(`   Priority:  ${r.priority}`);
+      return bits.join("\n");
+    }).join("\n\n");
+    const body = [
+      `Hi,`,
+      ``,
+      `Please add the following DNS records for ${dom}. They let our quoting software send`,
+      `email from our own address instead of a shared one, and they prove to Gmail and`,
+      `Outlook that the mail really is from us.`,
+      ``,
+      lines,
+      ``,
+      dnsAdvisory.length > 0
+        ? `Note on the DMARC record: it is marked recommended rather than required. Our provider\ndoes not check it, so nothing will report it missing — but without it mail from a new\ndomain frequently lands in spam. "p=none" only asks for reports; it never blocks mail.`
+        : ``,
+      ``,
+      `Nothing else needs changing — this does not affect the website or existing email.`,
+      `Please let me know once they are in and I will run the verification check.`,
+      ``,
+      `Thanks!`,
+    ].filter((l) => l !== undefined).join("\n");
+    const build = (b) => `mailto:?subject=${encodeURIComponent(`DNS records to add for ${dom}`)}&body=${encodeURIComponent(b)}`;
+    const full = build(body);
+    // ⚠️ Windows/Outlook stop reading a mailto: at ~2,083 characters, and they TRUNCATE
+    // rather than refuse -- the webmaster would get an email ending mid-record, with the
+    // DMARC row (always last, always the one nobody else supplies) the first thing lost.
+    // Measured 1,869 chars for csmsynergy.com and 2,079 for a 44-char domain, because a
+    // 1024-bit DKIM value alone is ~218 chars and percent-encoding inflates every newline
+    // to 3. So the prose is what gets dropped, never a record: the records ARE the email.
+    if (full.length <= 1900) return full;
+    const terse = [
+      `Hi,`,
+      ``,
+      `Please add these DNS records for ${dom}:`,
+      ``,
+      lines,
+      ``,
+      dnsAdvisory.length > 0 ? `The DMARC record is recommended, not required — without it mail from a new domain\noften lands in spam. "p=none" only asks for reports; it never blocks mail.` : ``,
+      ``,
+      `This does not affect the website or existing email. Thanks!`,
+    ].filter((l) => l !== undefined).join("\n");
+    const short = build(terse);
+    // Even terse can overflow (many records, or a long domain). Better a short email the
+    // webmaster can reply to than a long one that arrives cut in half -- the on-screen
+    // table with its per-row Copy buttons is still the complete source.
+    return short.length <= 1900
+      ? short
+      : build(`Hi,\n\nPlease add the DNS records for ${dom} that I am sending separately —\nthere are ${dnsRows.length} of them and they are too long for one email.\n\nThanks!`);
+  })();
   const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
+
   const fromAddress = status.fromAddress || (status.fromLocal && status.domain ? `${status.fromLocal}@${status.domain}` : "");
 
   return (
@@ -710,8 +832,21 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               style={{ ...S.btn("#92400E", "#FFF"), opacity: busy ? 0.6 : 1 }}>
               {busy ? "Checking…" : "Check verification"}
             </button>
+            {webmasterMailto && (
+              <a href={webmasterMailto}
+                title="Opens your email program with the records already written out"
+                style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", textDecoration: "none", display: "inline-block" }}>
+                ✉️ Email this to my webmaster
+              </a>
+            )}
             {checkNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{checkNote}</span>}
           </div>
+          {webmasterMailto && (
+            <p style={{ fontSize: 12, color: "#92400E", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
+              Not the person who manages your website? The button above opens your email program with
+              every record written out, ready to send to whoever does.
+            </p>
+          )}
           <p style={{ fontSize: 12, color: "#92400E", marginTop: 12, marginBottom: 0 }}>
             DNS changes can take up to an hour to appear — keep this tab open and check again.
           </p>
@@ -754,6 +889,23 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 Deactivating instantly reverts to sending through your CRM — nothing else changes.
               </p>
             </div>
+            {/* Verified is not forever: a DNS host migration, a zone rebuild or a webmaster
+                tidying up "unused" TXT records drops these silently, and the first symptom is
+                mail going to spam. The records have to stay reachable AFTER verification, not
+                only while chasing it -- so the same button lives here too. */}
+            {webmasterMailto && (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
+                <a href={webmasterMailto}
+                  title="Opens your email program with the records already written out"
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "inline-block" }}>
+                  ✉️ Email these records to my webmaster
+                </a>
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
+                  Changing DNS host or rebuilding your website? Send these to whoever does it —
+                  removing them stops your email verifying and sends it to spam.
+                </p>
+              </div>
+            )}
           </div>
 
           <div style={S.card}>
@@ -776,6 +928,51 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 {testResult.err || testResult.ok}
               </div>
             )}
+            {/* ── YOUR WORDING ────────────────────────────────────────────────────────
+                Carolyn, 2026-08-21: "I don't know what it's going to take to create like a
+                template that they can edit."
+
+                What is editable is the SUBJECT and the OPENING LINE — the two things that
+                are genuinely the builder's voice. The branded header, the quote/total rows,
+                the buttons and the PDF links stay ours, because those are the parts that DO
+                something and a wording edit has no business near them. Logo and colours are
+                already theirs under Branding, which is the "images" half of the ask.
+                Plain text only: markup is refused with a message, not silently stripped. */}
+            <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+              <div style={S.lbl}>Your wording</div>
+              <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"} and they fill in automatically.
+              </div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                {[["estimate", "Estimate"], ["quote", "Quote"], ["invoice", "Invoice"]].map(([k, label]) => (
+                  <button key={k} type="button" onClick={() => setTplKind(k)}
+                    style={{ background: tplKind === k ? ACCENT : "#FFF", color: tplKind === k ? "#FFF" : "#334155", border: "1px solid " + (tplKind === k ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                ))}
+              </div>
+              <input
+                value={(tpl[tplKind] && tpl[tplKind].subject) || ""}
+                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), subject: e.target.value } }))}
+                placeholder={"Subject — e.g. Your " + tplKind + " {number} from {business}"}
+                style={{ ...S.input, marginBottom: 6 }} />
+              <textarea
+                value={(tpl[tplKind] && tpl[tplKind].intro) || ""}
+                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), intro: e.target.value } }))}
+                rows={3}
+                placeholder="Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."
+                style={{ ...S.input, resize: "vertical" }} />
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
+                  onClick={async () => {
+                    setBusy(true); setTplMsg(null);
+                    const { data: r, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "email_save_template", copy: tpl } });
+                    setBusy(false);
+                    const e2 = (r && r.error) || (err && err.message);
+                    setTplMsg(e2 ? { err: e2 } : { ok: "Saved." });
+                  }}>Save wording</button>
+                {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
+                {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
+              </div>
+            </div>
             {sends.length > 0 && (
               <div style={{ marginTop: 14 }}>
                 <div style={S.lbl}>Recent sends</div>
