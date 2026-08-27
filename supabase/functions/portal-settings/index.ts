@@ -3199,6 +3199,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       text: body,
       ...(replyTo ? { replyTo } : {}),
       ...(shortCode ? { shortCode } : {}),
+      // Carried so sendTenantEmail can build the threading Message-ID. Without it a
+      // conversation email about no particular design gets no threading id, and a reply
+      // could only be placed by the sender's address — which cannot tell two people at the
+      // same company apart.
+      ...(contactId ? { contactId } : {}),
     } as any);
 
     if (out.sent) {

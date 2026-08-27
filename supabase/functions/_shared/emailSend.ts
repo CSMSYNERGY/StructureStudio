@@ -46,6 +46,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
 import { logEdgeError } from "./logError.ts";
+import { buildThreadMessageId } from "./emailInbound.ts";
 
 /** The platform-owned fallback sender for tenants whose own domain is not yet verified.
  *  Usable only while PLATFORM_EMAIL_DOMAIN_READY === 'true' (read at request time, so
@@ -69,6 +70,10 @@ export type TenantMail = {
   replyTo?: string;
   /** Design short code; null/absent for kind 'test'. */
   shortCode?: string | null;
+  /** Who this is about, when there is no design — the CRM composer's case. Used only to
+   *  build the threading Message-ID, so a reply to a plain conversation email lands on the
+   *  right person. A send with neither this nor shortCode simply gets no threading id. */
+  contactId?: string | null;
   to: string;
   subject: string;
   html: string;
@@ -190,6 +195,24 @@ export async function sendTenantEmail(
     }
     const rowId = row.id;
 
+    // ── Threading id ────────────────────────────────────────────────────────────────
+    // An RFC 5322 Message-ID we generate ourselves, encoding the tenant and what the mail
+    // is about, so a reply's In-Reply-To routes straight back to this design or contact.
+    //
+    // It exists because the obvious alternative CANNOT work: `provider_message_id` below
+    // stores Resend's API id, a bare uuid with no `@`, while In-Reply-To always carries an
+    // id ending `@domain`. The webhook's join against that column has therefore matched
+    // nothing on every send since it was written (migration 135's table comment still
+    // claims otherwise). Generating the id makes it comparable AND self-describing.
+    //
+    // Built on the SENDING domain so it aligns with From, and omitted entirely when the
+    // pieces are missing — a send with no threading id behaves exactly as it did before.
+    const threadId = buildThreadMessageId(
+      clientId,
+      fromEmail.split("@")[1] ?? "",
+      { shortCode: mail.shortCode, contactId: mail.contactId },
+    );
+
     // ── Send, then record the outcome on the claimed row ────────────────────────────
     let messageId: string;
     try {
@@ -200,6 +223,7 @@ export async function sendTenantEmail(
         html: mail.html,
         ...(mail.text ? { text: mail.text } : {}),
         ...(mail.replyTo ? { replyTo: mail.replyTo } : {}),
+        ...(threadId ? { headers: { "Message-ID": threadId } } : {}),
         // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
         // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
         // failing the whole send.

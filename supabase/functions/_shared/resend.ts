@@ -323,6 +323,11 @@ export type RsSendInput = {
   text?: string;
   replyTo?: string;
   tags?: { name: string; value: string }[];
+  /** Custom RFC 5322 headers. Used for `Message-ID`, so a reply's In-Reply-To is matchable —
+   *  the provider's own send id never is (see _shared/emailInbound.ts buildThreadMessageId).
+   *  Omitted from the wire entirely when absent, so a caller that passes nothing sends
+   *  exactly the bytes it sent before this field existed. */
+  headers?: Record<string, string>;
 };
 
 /** Resend rejects the WHOLE send with a 422 when a tag name or value carries anything
@@ -351,6 +356,8 @@ export async function rsSendEmail(input: RsSendInput): Promise<{ id: string }> {
       html: input.html,
       text: input.text,
       reply_to: input.replyTo,
+      // Undefined when the caller passed none, and JSON.stringify then drops the key.
+      headers: input.headers && Object.keys(input.headers).length ? input.headers : undefined,
       tags: input.tags?.map((t) => ({ name: sanitizeTag(t.name), value: sanitizeTag(t.value) })),
     }),
   });
