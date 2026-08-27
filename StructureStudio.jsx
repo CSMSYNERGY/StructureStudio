@@ -2304,6 +2304,124 @@ const D3_SWATCHES = [
   { label: "Green", css: "#4F6F52" },
   { label: "Brown", css: "#6B4F3A" },
 ];
+// ── Storage props: what the customer keeps IN the building ────────────────────────────
+//
+// Carolyn, 2026-08-25: "a lawnmower, they wanna store a lawnmower in here... I think it's a
+// huge selling point." That is the whole point of these — they are not inventory and they
+// are not priced. A shopper who can see their own mower, bikes and shelving inside a 10x12
+// believes the 10x12 is big enough, which is the question that actually stalls a shed sale.
+//
+// PARAMETRIC, not downloaded models. A GLB per prop would put a loader on the shopper's
+// critical path, pin a three.js addon version, and need an asset pipeline and a disposal
+// story none of this code has — to render shapes that only ever have to read as "lawnmower"
+// from across a room. Boxes and cylinders do that, cost nothing to fetch, and free
+// themselves through the same disposeSubtree as everything else.
+//
+// ⚠️ w/d are the PLAN FOOTPRINT in feet and must match the geometry's real extent: the 2D
+// rectangle, the placement clamp and the drag bounds all read them, so a shape that outgrows
+// its w/d will visibly cross a wall the plan says it clears.
+//
+// Each build() returns a group centred on the origin in x/z and standing on y = 0.
+const D3_PROPS = {
+  lawnmower: {
+    label: "Lawn mower", w: 2.0, d: 2.8,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const deckM = h.mat("#3F7F4F"), darkM = h.mat("#2E3236"), tyreM = h.mat("#1F2124");
+      const deck = h.box(deckM, 1.75, 0.38, 2.0); deck.position.y = 0.62; g.add(deck);
+      const eng = h.box(darkM, 0.75, 0.5, 0.8); eng.position.set(0, 1.05, -0.2); g.add(eng);
+      [[-0.88, 0.9, 0.32], [0.88, 0.9, 0.32], [-0.88, -0.85, 0.26], [0.88, -0.85, 0.26]].forEach(([x, z, r]) => {
+        const wheel = h.cyl(tyreM, r, 0.2); wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(x, r, z); g.add(wheel);
+      });
+      // Push handle: two rails raked back over the rear wheels, joined by a grip bar.
+      [-0.7, 0.7].forEach((x) => {
+        const rail = h.box(darkM, 0.1, 2.35, 0.1);
+        rail.position.set(x, 1.5, -1.05); rail.rotation.x = -0.42; g.add(rail);
+      });
+      const grip = h.box(darkM, 1.5, 0.11, 0.11); grip.position.set(0, 2.55, -1.55); g.add(grip);
+      return g;
+    },
+  },
+  bike: {
+    label: "Bicycle", w: 0.7, d: 5.6,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const frameM = h.mat("#B03A3A"), tyreM = h.mat("#1F2124"), seatM = h.mat("#2E3236");
+      [-1.75, 1.75].forEach((z) => {
+        const wheel = h.cyl(tyreM, 1.12, 0.12); wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(0, 1.12, z); g.add(wheel);
+      });
+      const bar = (len, x, y, z, rx) => { const b = h.box(frameM, 0.1, len, 0.1); b.position.set(x, y, z); b.rotation.x = rx; g.add(b); };
+      bar(2.5, 0, 1.7, 0.55, 1.15);    // down tube
+      bar(2.2, 0, 2.0, -0.55, -1.25);  // top tube
+      bar(1.9, 0, 1.55, 1.6, 0.22);    // seat stay
+      const seat = h.box(seatM, 0.22, 0.14, 0.75); seat.position.set(0, 2.75, 1.2); g.add(seat);
+      const hbar = h.box(seatM, 1.5, 0.1, 0.1); hbar.position.set(0, 2.95, -1.5); g.add(hbar);
+      return g;
+    },
+  },
+  toolchest: {
+    label: "Tool chest", w: 2.6, d: 1.6,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const bodyM = h.mat("#B0403A"), pullM = h.mat("#C9CDD2"), castM = h.mat("#1F2124");
+      const body = h.box(bodyM, 2.5, 2.6, 1.5); body.position.y = 1.6; g.add(body);
+      // Drawer pulls, proud of the front face so the box reads as a chest and not a crate.
+      [0.65, 1.35, 2.05, 2.7].forEach((y) => {
+        const pull = h.box(pullM, 1.7, 0.09, 0.06); pull.position.set(0, y, 0.78); g.add(pull);
+      });
+      [[-0.95, -0.5], [0.95, -0.5], [-0.95, 0.5], [0.95, 0.5]].forEach(([x, z]) => {
+        const c = h.cyl(castM, 0.15, 0.12); c.rotation.z = Math.PI / 2; c.position.set(x, 0.15, z); g.add(c);
+      });
+      return g;
+    },
+  },
+  shelf: {
+    label: "Shelving", w: 3.2, d: 1.3,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const m = h.mat("#8B7355");
+      [[-1.5, -0.55], [1.5, -0.55], [-1.5, 0.55], [1.5, 0.55]].forEach(([x, z]) => {
+        const post = h.box(m, 0.12, 5.6, 0.12); post.position.set(x, 2.8, z); g.add(post);
+      });
+      [0.5, 2.0, 3.5, 5.0].forEach((y) => {
+        const s = h.box(m, 3.1, 0.1, 1.2); s.position.y = y; g.add(s);
+      });
+      return g;
+    },
+  },
+  trashcan: {
+    label: "Trash can", w: 1.3, d: 1.3,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const body = h.cyl(h.mat("#4A6FA5"), 0.58, 2.2); body.position.y = 1.1; g.add(body);
+      const lid = h.cyl(h.mat("#3B5A85"), 0.63, 0.14); lid.position.y = 2.27; g.add(lid);
+      return g;
+    },
+  },
+  atv: {
+    label: "ATV / mower rider", w: 3.6, d: 5.4,
+    build(THREE, h) {
+      const g = new THREE.Group();
+      const bodyM = h.mat("#C2601F"), darkM = h.mat("#2E3236"), tyreM = h.mat("#1F2124");
+      const body = h.box(bodyM, 2.3, 0.95, 3.5); body.position.y = 1.35; g.add(body);
+      const hood = h.box(bodyM, 1.9, 0.55, 1.1); hood.position.set(0, 1.95, -1.15); g.add(hood);
+      const seat = h.box(darkM, 1.5, 0.45, 1.2); seat.position.set(0, 2.05, 0.75); g.add(seat);
+      [[-1.35, -1.55], [1.35, -1.55], [-1.35, 1.6], [1.35, 1.6]].forEach(([x, z]) => {
+        const wheel = h.cyl(tyreM, 0.78, 0.55); wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(x, 0.78, z); g.add(wheel);
+      });
+      const hbar = h.box(darkM, 1.7, 0.1, 0.1); hbar.position.set(0, 2.6, -0.9); g.add(hbar);
+      return g;
+    },
+  },
+};
+// Placement order for the Items popup, and the only list that decides what a shopper is
+// offered. Object key order is not a contract; this is.
+const D3_PROP_KEYS = ["lawnmower", "bike", "atv", "toolchest", "shelf", "trashcan"];
+const d3PropSpec = (kind) => D3_PROPS[kind] || D3_PROPS.lawnmower;
+
 // The tenant's own catalog rows for a paint slot, in the {label, css} shape both the 3D
 // swatch row and d3SwatchCss speak. `allowCustom` rows are excluded: that row is a
 // "type your own" affordance rather than a colour, and it carries no hex, so it would
@@ -2829,6 +2947,10 @@ function buildShed3DModel(THREE, p) {
     if (clad.metal) { wallMat.roughness = 0.45; wallMat.metalness = 0.35; }
   }
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+  // The building itself is all boxes; wheels and bins are the one place that reads as wrong
+  // without a round profile. 12 segments is plenty at the size a prop is ever seen, and
+  // disposeSubtree frees a CylinderGeometry exactly like a BoxGeometry — nothing special.
+  const cyl = (m, r, hgt) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, hgt, 12), m);
 
   // Page px → world ft (plan §3): same scale/mg the 2D plan renders with.
   const ftX = (px) => (px - mgX) / scale - bldgW / 2;
