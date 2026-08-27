@@ -517,8 +517,8 @@ function windowColorsFor(fx, windowColors) {
 }
 // The color fields a PLACED fixture snapshots (ids for server-side price re-resolution,
 // labels for descriptions, hexes for 2D/3D rendering). Every door stamp site — place,
-// swap, included-chip, 3D placement — writes all six so a swap can never leak the old
-// door's colors; windows stamp the three main fields only.
+// swap, included-chip, 3D placement, and the 3D footer's re-colour — writes all six so a
+// swap can never leak the old door's colors; windows stamp the three main fields only.
 function doorColorStamps(dc, tc) {
   return {
     colorId: dc ? dc.id : null, colorLabel: dc ? (dc.label || null) : null, colorHex: dc ? (dc.hex || null) : null,
@@ -3991,6 +3991,58 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     setShotTaken(false);
   };
 
+  // ── Door colour, on the door the shopper has selected (Carolyn, 2026-08-25) ──────────
+  // "Siding color, trim color, roof color... but they're not having different door colors,
+  // which blows my mind." The data has been there since migration 116 — colourable doors,
+  // an optional second colour for two-tone barn doors, a flat per-door charge — and
+  // DoorPicker offers it at PLACEMENT. What was missing is changing your mind afterwards
+  // without deleting the door, which in 3D is where anyone would try.
+  //
+  // Reads from the `items` prop, not the engine's liveItems: the engine reports every
+  // commit up through onItemMove, so the prop is the version React can re-render from, and
+  // the chips light from the same place the model draws.
+  const doorPool = Array.isArray(doorColors) ? doorColors : [];
+  const fixtureOf = (it) => (it && it.fixtureItemId != null
+    ? (fixtures || []).find((f) => String(f.id) === String(it.fixtureItemId)) || null
+    : null);
+  // Fixed-colour doors are the owner's decision, not the shopper's — same rule DoorPicker
+  // applies by showing no Colour block for them.
+  const doorColorable = (fx) => !!(fx && (fx.colorMode === "paint" || fx.colorMode === "match"));
+  const sel3dItem = sel3d ? (items || []).find((i) => i.id === sel3d.id) || null : null;
+  const sel3dFx = sel3dItem && sel3dItem.type === "fixtureDoor" ? fixtureOf(sel3dItem) : null;
+  // A one-colour palette assigns itself silently, exactly as it does in DoorPicker: chips
+  // you cannot choose between are decoration.
+  const doorRowsOn = doorColorable(sel3dFx) && doorPool.length > 1;
+  const poolById = (id) => (id == null ? null : doorPool.find((c) => String(c.id) === String(id)) || null);
+  // The item's own stamps are the fallback, so a colour later removed from the catalog
+  // still round-trips instead of silently clearing the door.
+  const curDoorColor = sel3dItem ? (poolById(sel3dItem.colorId) || (sel3dItem.colorId ? { id: sel3dItem.colorId, label: sel3dItem.colorLabel, hex: sel3dItem.colorHex } : null)) : null;
+  const curDoorTrim = sel3dItem ? (poolById(sel3dItem.trimColorId) || (sel3dItem.trimColorId ? { id: sel3dItem.trimColorId, label: sel3dItem.trimColorLabel, hex: sel3dItem.trimColorHex } : null)) : null;
+  const commitDoorColors = (entries) => {
+    if (!entries.length) return;
+    const e = engineRef.current;
+    if (e && e.recolorItems3) e.recolorItems3(entries);
+    capturedRef.current = false;   // the armed shot now shows the old colour
+    setShotTaken(false);
+  };
+  const pickDoorColor = (slot, c) => {
+    if (!sel3dItem || !sel3dFx) return;
+    const dc = slot === "trim" ? curDoorColor : c;
+    const tc = slot === "trim" ? c : curDoorTrim;
+    commitDoorColors([{ id: sel3dItem.id, patch: doorColorStamps(dc, sel3dFx.hasTrimColor ? tc : null) }]);
+  };
+  // Every OTHER colourable door takes the selected door's scheme. Fixed-colour doors are
+  // skipped, and a single-tone door gets no trim fields even when the source door is
+  // two-tone — which is why the engine takes a list of per-door patches rather than one.
+  const otherColorableDoors = (items || []).filter((i) => i.type === "fixtureDoor" && (!sel3dItem || i.id !== sel3dItem.id) && doorColorable(fixtureOf(i)));
+  const applyDoorColorsToAll = () => {
+    if (!sel3dItem) return;
+    commitDoorColors(otherColorableDoors.map((i) => ({
+      id: i.id,
+      patch: doorColorStamps(curDoorColor, fixtureOf(i).hasTrimColor ? curDoorTrim : null),
+    })));
+  };
+
   useEffect(() => {
     let disposed = false;
     loadThree().then((bundle) => {
@@ -4347,6 +4399,36 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         queueRebuild();
       };
+      // Recolour placed fixtures in place, without moving them.
+      //
+      // Same commit path as a drag — liveItems, then the parent's onItemMove — so 3D never
+      // becomes a second source of truth for item state. The patch carries all six colour
+      // fields (see doorColorStamps), which is what stops a later swap leaking the previous
+      // door's colours and what lets the estimate re-resolve the per-door colour charge.
+      //
+      // A LIST rather than one id, because "apply to all doors" must patch each door with
+      // its OWN stamps: a fixed-colour door is skipped entirely and a single-tone door must
+      // not be handed trim fields, so the patches genuinely differ per door.
+      //
+      // Rebuild rather than a material write: a door's slab and its casing are built
+      // per-item inside buildOneWall and there is no per-item material registry to reach
+      // into. rebuildWalls re-reads the items it is handed, so scoping to the touched walls
+      // costs about a tenth of a full rebuild. Anything without a wall falls back to full.
+      const recolorItems3 = (list) => {
+        const entries = (Array.isArray(list) ? list : []).filter((e) => e && e.id != null && e.patch);
+        if (!entries.length) return;
+        const byId = new Map(entries.map((e) => [e.id, e.patch]));
+        const walls = [];
+        let wallless = false;
+        liveItems = liveItems.map((i) => {
+          const patch = byId.get(i.id);
+          if (!patch) return i;
+          if (i.wall) walls.push(i.wall); else wallless = true;
+          return { ...i, ...patch };
+        });
+        if (onItemMove) byId.forEach((patch, id) => onItemMove(id, patch));
+        queueRebuild(wallless || !walls.length ? undefined : { walls });
+      };
       // Catalog door/window from the in-viewer chooser (also the included-chip
       // path): the FIXTURE stamps are what the estimate prices from — placing
       // these as their raw tool key was the bug that made 3D-placed included
@@ -4368,7 +4450,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "DOOR").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation,
             // The in-viewer picker has no color step (matching its no-swing/op contract):
-            // stamp the door's defaults; the shopper refines via the 2D swap flow.
+            // stamp the door's defaults. Refining them no longer means going back to 2D —
+            // select the door and the footer's Door / Door trim rows recolour it in place.
             ...fixtureDoorColorDefaults(fx, doorColors, paintBody, paintTrim) };
         }
         if (checkDoorCollision(ni, { width: widthFt }, liveItems, itemTypes, scale)) {
@@ -4778,7 +4861,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -5001,6 +5084,33 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               </div>
             );})}
             <button onClick={() => pickColor("none")} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#94A3B8", border: "1px solid #334155", borderRadius: 7, padding: "4px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✕ No paint</button>
+          </div>
+        )}
+        {/* Door colour — only while a colourable door is selected. Deliberately OUTSIDE the
+            paintEnabled block above: a door's colours come from the fixture catalog, not
+            from the building-paint option, so a tenant who sells unpainted buildings with
+            colourable doors still gets this. Its own row rather than two more swatches
+            beside body/trim, because those two are the whole building and these two are one
+            door — reading them as one set is how you end up painting the barn to match a
+            door handle. */}
+        {doorRowsOn && (
+          <div style={{ display: "flex", gap: 14, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+            {[{ slot: "door", label: "Door", cur: curDoorColor }].concat(sel3dFx.hasTrimColor ? [{ slot: "trim", label: "Door trim", cur: curDoorTrim }] : []).map((row) => (
+              <div key={row.slot} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>{row.label}</span>
+                {doorPool.map((c) => (
+                  <button key={c.id} title={c.label} onClick={() => pickDoorColor(row.slot, c)} disabled={phase !== "ready"}
+                    style={{ width: 20, height: 20, borderRadius: 99, background: c.hex || "#CCC", cursor: "pointer", padding: 0, border: (row.cur && String(row.cur.id) === String(c.id)) ? "2px solid #FBBF24" : "1px solid #334155" }} />
+                ))}
+              </div>
+            ))}
+            {otherColorableDoors.length > 0 && (
+              <button onClick={applyDoorColorsToAll} disabled={phase !== "ready"}
+                title={`Give the other ${otherColorableDoors.length} door${otherColorableDoors.length === 1 ? "" : "s"} these colours`}
+                style={{ background: "#1E293B", color: "#94A3B8", border: "1px solid #334155", borderRadius: 7, padding: "4px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                Apply to all doors
+              </button>
+            )}
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
