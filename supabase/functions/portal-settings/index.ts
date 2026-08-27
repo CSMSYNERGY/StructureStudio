@@ -1038,7 +1038,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -2248,6 +2248,23 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
       }
     }
+    // Height off the FLOOR (139): windows only, presence-guarded, same shape as above.
+    // NULL sill_in means "use the designer's 3'6" default" and is deliberately NOT the same
+    // as 0 — 0 is a real answer, a window that starts at the floor. sill_mode 'variable'
+    // lets the customer slide it up and down the wall (Carolyn's transom); 'fixed' pins it.
+    // The 12 ft ceiling is a sanity bound, not a product rule: the designer clamps a window
+    // against the actual wall height at build time, which is the only place that knows it.
+    if (category !== "window") {
+      rec.sill_in = null; rec.sill_mode = "fixed";
+    } else {
+      if (has("sillIn")) {
+        const s = numOrNull(row?.sillIn);
+        if (Number.isNaN(s)) return { err: `${name}: invalid height off floor` };
+        if (s !== null && ((s as number) < 0 || (s as number) > 144)) return { err: `${name}: height off floor must be between 0 and 12 ft` };
+        rec.sill_in = s;
+      }
+      if (has("sillMode")) rec.sill_mode = row?.sillMode === "variable" ? "variable" : "fixed";
+    }
     return { rec };
   };
   // Inserts still need concrete values for whatever the presence contract left out — the
@@ -2264,6 +2281,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
+    if (!("sill_in" in rec)) rec.sill_in = null;
+    if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
     return rec;
   };
 

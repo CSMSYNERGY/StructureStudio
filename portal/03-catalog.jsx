@@ -1943,6 +1943,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     // null = comes in ALL window colors (the living default); an array = exactly those.
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
+    // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
+    // the floor), so an empty string has to survive the round trip rather than becoming 0.
+    // fmtFtIn renders 0 as "" (right for a width, wrong here — it would turn a deliberate
+    // floor-level window back into "use the default" on the next save), so 0 is spelled out.
+    sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
   });
   const load = async () => {
@@ -1973,6 +1978,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
+    ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
   });
 
@@ -2070,7 +2076,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
     ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
@@ -2084,7 +2090,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
   const exportRows = () => rows.map((r) => hasSwingOp
     ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -2147,6 +2153,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
         iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
+        iSill = col("height off floor"), iSillMode = col("placement"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -2200,6 +2207,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
             row.windowColorIds = winColors.filter((c) => names.includes(String(c.label).trim().toLowerCase())).map((c) => String(c.id));
           }
         }
+        // Height off floor / Placement (139), same absent-column-leaves-it-alone contract.
+        // A BLANK cell is meaningful here and is not the same as an absent column: blank
+        // means "the standard 3'6"", so it goes over as null rather than being skipped.
+        if (isWindowCat && iSill >= 0) row.sillIn = ftInToInches(String(cols[iSill] == null ? "" : cols[iSill]).replace(/\s/g, ""));
+        if (isWindowCat && iSillMode >= 0) {
+          row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
+        }
         return row;
       });
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "import_fixtures", category, rows: importRows }) });
@@ -2212,7 +2226,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -2392,6 +2406,37 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           {edit.draft.window_color_ids !== null && winColors.every((c) => !edit.draft.window_color_ids.includes(String(c.id))) && (
             <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No colors ticked — this window is placed with no color choice.</div>
           )}
+        </div>
+      )}
+      {/* Height off the floor (139). Carolyn, 2026-08-25: "how far off the floor, not off
+          the ground, off the floor, which is off the inside of the building, not the
+          exterior." Every window used to render at the same 3'6" in 3D no matter what the
+          builder sells, so a transom and a picture window sat at the same height.
+          Independent of the width/height fields above because it is not a size — it is
+          where the window is INSTALLED. */}
+      {isWindowCat && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div>
+              <div style={fldLbl}>Height off floor</div>
+              <input value={edit.draft.sill_in || ""} onChange={(e) => setDraft({ sill_in: e.target.value })}
+                placeholder={`standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
+            </div>
+            <div>
+              <div style={fldLbl}>Placement</div>
+              <select value={edit.draft.sill_mode === "variable" ? "variable" : "fixed"}
+                onChange={(e) => setDraft({ sill_mode: e.target.value })}
+                style={{ ...S.input, minWidth: 0 }}>
+                <option value="fixed">Fixed at this height</option>
+                <option value="variable">Customer can slide it up and down</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+            {edit.draft.sill_mode === "variable"
+              ? `Starts at ${(edit.draft.sill_in || "").trim() || `3'6"`} and the customer can move it up or down the wall in 3D — for transoms and high windows beside a garage door.`
+              : `Always sits this far above the floor inside the building. Leave blank for the standard 3'6".`}
+          </div>
         </div>
       )}
       <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>

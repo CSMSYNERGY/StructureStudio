@@ -531,6 +531,25 @@ function doorColorStamps(dc, tc) {
 function windowColorStamps(c) {
   return { colorId: c ? c.id : null, colorLabel: c ? (c.label || null) : null, colorHex: c ? (c.hex || null) : null };
 }
+// How far off the interior FLOOR a catalog window sits, and whether the customer may slide
+// it (139). Stamped at placement like every other fixture field, so a design keeps the
+// height it was drawn with even if the builder later re-specs the window.
+//
+// ⚠️ Catalog windows never carried a sill at all before this: placePickedWindow and
+// placeFixture3 stamped none, and the swap branch wrote `sillFt: undefined` outright, so
+// EVERY catalog window fell through to the hardcoded 3'6" no matter what it was. That is
+// the bug Carolyn was describing when she said the windows "all go all the way to the top".
+//
+// undefined (not null) when the builder left it blank, because openingSpan's fallback is
+// `it.sillFt != null ? it.sillFt : D3.WINDOW_SILL` — undefined and null both fall through,
+// and undefined is what the existing stamp sites already write for "no opinion".
+function windowSillStamps(fx) {
+  const s = Number(fx && fx.sillIn);
+  return {
+    sillFt: (fx && fx.sillIn != null && Number.isFinite(s) && s >= 0) ? s / 12 : undefined,
+    sillMode: (fx && fx.sillMode === "variable") ? "variable" : "fixed",
+  };
+}
 function buildFixtureTools(fixtures) {
   const out = {};
   (Array.isArray(fixtures) ? fixtures : []).forEach((fx) => {
@@ -4445,7 +4464,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))) };
+            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))), ...windowSillStamps(fx) };
         } else {
           const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
           const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -4652,23 +4671,56 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // opening's mid-height so the item lands on whichever wall the
             // cursor is nearest — same feel as the 2D drag following the mouse.
             const sp = openSpanOf(it);
-            dragPlane.set(new THREE.Vector3(0, 1, 0), -((sp[0] + sp[1]) / 2));
-            let p = raycaster.ray.intersectPlane(dragPlane, dragHit);
-            const lim = Math.max(bldgW, bldgH) * 4;
-            if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) {
-              // Grazing angle — track against the item's current wall plane instead.
+            // A VARIABLE window (139) also moves UP AND DOWN, so it tracks its own wall
+            // PLANE instead: one raycast on that plane yields both axes at once — along the
+            // wall from x/z, height from y. The horizontal plane cannot do this, and worse,
+            // with it a purely vertical mouse movement slides the intersection point away
+            // along the wall, so trying to raise a transom would also shove it sideways.
+            //
+            // Cross-wall dragging still works: a point on the south wall's plane, dragged
+            // far past a corner, is nearest the west wall, so getNearestWall re-homes it
+            // exactly as before. Nothing here bypasses the shared 2D functions.
+            const vertical = it.type === "window" && it.sillMode === "variable";
+            const wallPlane = () => {
               if (it.wall === "north") dragPlane.set(new THREE.Vector3(0, 0, 1), bldgH / 2);
               else if (it.wall === "south") dragPlane.set(new THREE.Vector3(0, 0, 1), -bldgH / 2);
               else if (it.wall === "west") dragPlane.set(new THREE.Vector3(1, 0, 0), bldgW / 2);
               else dragPlane.set(new THREE.Vector3(1, 0, 0), -bldgW / 2);
+            };
+            let p;
+            if (vertical) {
+              wallPlane();
               p = raycaster.ray.intersectPlane(dragPlane, dragHit);
               if (!p) return;
+            } else {
+              dragPlane.set(new THREE.Vector3(0, 1, 0), -((sp[0] + sp[1]) / 2));
+              p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+              const lim = Math.max(bldgW, bldgH) * 4;
+              if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) {
+                // Grazing angle — track against the item's current wall plane instead.
+                wallPlane();
+                p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+                if (!p) return;
+              }
             }
             const pageX = mgX + (p.x + bldgW / 2) * scale;
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
             const sn = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+            if (vertical) {
+              // Quarter-foot steps, and the SAME bounds openSpanOf enforces at build time:
+              // y = 0 is the interior floor (which is what Carolyn specified — "off the
+              // floor, not off the ground"), and the header keeps its 0.2 ft.
+              const wh = sp[1] - sp[0];
+              const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+              const want = Math.max(0, Math.min(Math.round((p.y - wh / 2) * 4) / 4, Math.max(0, maxTop - wh)));
+              const moved = sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall;
+              if (moved || want !== it.sillFt) {
+                commitLive(it, { ...sn, sillFt: want }, { walls: [it.wall, sn.wall] });
+              }
+              return;
+            }
             if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) {
               // The door's ramp follows live — same derived placement as 2D.
               const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === it.id);
@@ -4781,7 +4833,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         render();
         if (d.moved) {
           const moved = liveItems.find((i) => i.id === d.id);
-          if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall });
+          // sillFt rides along for a window (139), or a height the customer just dragged
+          // would render live and then silently revert the moment the design is saved or
+          // reloaded — this commit, not commitLive, is what reaches the parent's state.
+          // Sent only when the item actually carries one, so nothing else gains the key.
+          if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall,
+            ...(moved.type === "window" && moved.sillFt != null ? { sillFt: moved.sillFt } : {}) });
           // A moved door commits its ramp's new derived position too.
           const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === d.id);
           if (ramp && onItemMove) onItemMove(ramp.id, { x: ramp.x, y: ramp.y, rotation: ramp.rotation, wall: ramp.wall });
@@ -7252,7 +7309,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))) };
+          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))), ...windowSillStamps(fx) };
       } else {
         const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
         const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -7486,7 +7543,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Drop the height a BUILT-IN placement stamped: openingHeightFt wins over heightIn
           // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
           // matter what the builder's door actually measures.
-          openingHeightFt: undefined, sillFt: undefined,
+          // sillMode goes too: a door has no height off the floor, and a leftover
+          // "variable" from the window this replaced is exactly the stale field the color
+          // note below is about. Nothing reads it on a door today, which is what would make
+          // it survive unnoticed until something does.
+          openingHeightFt: undefined, sillFt: undefined, sillMode: undefined,
           // All six color fields set EXPLICITLY (nulls when absent) — same stale-field
           // discipline as openingHeightFt: the old door's colors must never survive a swap.
           ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
@@ -7581,10 +7642,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setItems((p) => p.map((it) => it.id === swapId ? { ...it, ...sn, type: "window", fixtureItemId: fx.id, windowName: fx.name || "Window",
         planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
         price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-        // As on the door swap: a built-in window stamped openingHeightFt/sillFt, and those
-        // beat the catalog window's own heightIn in openingSpan. Color fields likewise set
-        // explicitly so the old window's color never survives the swap.
-        openingHeightFt: undefined, sillFt: undefined, ...windowColorStamps(windowColor), widthFt: wFt } : it));
+        // As on the door swap: a built-in window stamped openingHeightFt, and that beats the
+        // catalog window's own heightIn in openingSpan. Color fields likewise set explicitly
+        // so the old window's color never survives the swap.
+        //
+        // sillFt is no longer blanked here — windowSillStamps supplies the NEW window's own
+        // height off the floor (and undefined when it has none), which is what stops the
+        // window being swapped INTO inheriting the height of the one it replaced.
+        openingHeightFt: undefined, ...windowColorStamps(windowColor), ...windowSillStamps(fx), widthFt: wFt } : it));
       setSwapId(null); setWindowPick(null); setToast(null); return;
     }
     if (!windowPick || !fx) return;
@@ -7605,7 +7670,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
       price: (fx.price != null ? fx.price : null),
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-      ...windowColorStamps(windowColor),
+      ...windowColorStamps(windowColor), ...windowSillStamps(fx),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("Something's already there — pick a different spot on the wall.");
