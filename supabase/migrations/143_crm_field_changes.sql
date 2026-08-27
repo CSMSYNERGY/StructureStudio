@@ -1,4 +1,4 @@
--- 141_crm_field_changes.sql — the changelog gets something to log, and contacts get an editor.
+-- 143_crm_field_changes.sql — the changelog gets something to log, and contacts get an editor.
 --
 -- Carolyn, 2026-08-26 25:18, on what "changelog" meant in the CRM she came from: "if they
 -- changed ownership of a lead from one person to another person, that was logged. Everything
