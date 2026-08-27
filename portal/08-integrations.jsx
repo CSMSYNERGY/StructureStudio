@@ -1012,7 +1012,23 @@ function CommissionStructure({ clientId }) {
 
   const load = useCallback(async () => {
     setLoading(true); setMsg(null);
-    const { data, error } = await sb.from("commission_settings").select("*").eq("client_id", clientId).limit(1);
+    let { data, error } = await sb.from("commission_settings").select("*").eq("client_id", clientId).limit(1);
+    // An empty read is ambiguous exactly as it is for the tenant read in 09-shell.jsx: a
+    // request that went out without a user token gets zero rows and NO error. Here that is
+    // worse than misleading, because zero rows becomes the hard-coded DEFAULTS below and the
+    // next Save upserts them — replacing a tenant's live commission terms with "disabled,
+    // biweekly", and reporting "Commission structure saved." while doing it. So prove a
+    // session first and let a second read agree before believing this tenant has no row.
+    if (!error && !(data && data[0])) {
+      const { data: ssSess } = await sb.auth.getSession();
+      if (!ssSess || !ssSess.session) {
+        // Leave `s` null: the card above renders its loading state and no form exists, so
+        // nothing can be written over. Reopening the tab re-runs this.
+        setLoading(false); return;
+      }
+      const retry = await sb.from("commission_settings").select("*").eq("client_id", clientId).limit(1);
+      data = retry.data; error = retry.error;
+    }
     if (error) setMsg({ err: error.message });
     setS((data && data[0]) || { enabled: false, base_type: "pretax_subtotal", earned_on: "collected", payout_frequency: "biweekly", custom_days: null, clawback_on_cancel: true });
     setLoading(false);

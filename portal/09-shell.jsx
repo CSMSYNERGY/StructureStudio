@@ -253,8 +253,28 @@ function Dashboard({ session }) {
       // matches (a duplicate/multi-tenant client_users row), which would lock the
       // user out of their own dashboard; take the first mapping instead. (audit #F6)
       const { data: cuRows, error } = await sb.from("client_users").select("client_id, role").limit(1);
-      const mapping = cuRows && cuRows[0];
-      if (error || !mapping) { setTenant("none"); return; }
+      let mapping = cuRows && cuRows[0];
+      if (error || !mapping) {
+        // An empty read is AMBIGUOUS, and the ambiguity is the whole problem: RLS answers
+        // "you are not linked to a tenant" and "your request carried no user at all"
+        // identically — zero rows, no error. The second case is the anon-key fallback
+        // described in 01-core.jsx's invoke wrapper, and telling a real owner "No business
+        // linked to this account" then is a falsehood they act on, ringing CSM Synergy
+        // about an account that is perfectly fine.
+        const { data: ssSess } = await sb.auth.getSession();
+        // No token to be had: stay on "Loading your business…" rather than assert something
+        // false. This effect is keyed on session.access_token, so it re-runs itself the
+        // moment one lands — which is what every one of the 34 logged tabs did.
+        if (!ssSess || !ssSess.session) return;
+        // A session EXISTS — but that is not enough to trust the read above, because
+        // getSession() repairs the very thing it reports on: a rotation still in flight
+        // during that read has finished by the time it answers. So the first read's
+        // emptiness proves nothing. Ask again now that a token demonstrably exists, and
+        // believe only this second answer.
+        const retry = await sb.from("client_users").select("client_id, role").limit(1);
+        mapping = retry.data && retry.data[0];
+        if (!mapping) { setTenant("none"); return; }
+      }
       let businessName = mapping.client_id;
       // client_configs is now column-structured (no monolithic `config` blob);
       // read the dedicated company_name column for the dashboard heading.

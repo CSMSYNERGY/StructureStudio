@@ -136,6 +136,16 @@ const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-
 const __ssFunctions = sb.functions;
 const __ssInvoke = __ssFunctions.invoke.bind(__ssFunctions);
 __ssFunctions.invoke = async (name, opts) => {
+  // ⛔ THE VIEW-AS TARGET IS READ FIRST, BEFORE ANY `await`, AND NOTHING MAY MOVE ABOVE IT.
+  // `ssTargetClientId` is a module global that openAccount/exitAccount/onPop reassign
+  // synchronously inside their handlers ("same tick as the click", 09-shell.jsx), and
+  // 09-shell.jsx's own `if (!ssTargetClientId)` guard is only conclusive while this read
+  // happens in the caller's tick. Put an await in front of it and the wrapper can inject a
+  // target armed AFTER the call was issued — a tenant-scoped write such as `save_colors`
+  // (a full-list replace with a server-side delete) landing on the WRONG tenant, silently:
+  // the tripwire below only fires when the server disagrees with `injected`, and here it
+  // agrees. Mid-flight view-as already poisoned a call once (audit 2026-08-20). Capture the
+  // value synchronously; the session guard runs after.
   let injected = null;
   if (
     ssTargetClientId &&
@@ -148,6 +158,34 @@ __ssFunctions.invoke = async (name, opts) => {
     // Never mutate the caller's object — several call sites build a local `body` and reuse it.
     opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
   }
+  // A tab whose session vanished under it must NOT fall back to the anon key. supabase-js
+  // puts that key on the wire as the Bearer whenever getSession() resolves null — our
+  // legacy `eyJ` anon key defeats supabase-js's own omitApiKeyAsBearer opt-out, which only
+  // engages for `sb_publishable_` keys — and the server then correctly reads a valid JWT
+  // with no `sub` and answers "Not signed in." So the call CANNOT succeed; firing it only
+  // buys an error row nobody can act on. That is every one of the 34 such rows from
+  // 2026-07-31 on, each from a tab that recovered by itself moments later: the multi-tab
+  // refresh-token race named at the top of this file. Skip the round trip and say so
+  // plainly instead — the effects that fire these calls are keyed on the session, so they
+  // re-run on their own the moment a token lands. Returning an error rather than staying
+  // silent is deliberate: a caller left waiting forever on a promise that never settles is
+  // the worse failure, and this message tells the truth about a transient state.
+  try {
+    const { data: ssSess } = await sb.auth.getSession();
+    if (!ssSess || !ssSess.session) {
+      // Still record it, under its own code. Suppressing the call without a trace would
+      // trade 34 visible rows for an invisible condition, and we would have no way to tell
+      // "the race is fixed" from "the race now happens fifty times a day in silence".
+      // Deliberately NOT routed through the 401 path below: this is a counter, not a fault.
+      try {
+        ssLogError(SS_ERR_SOURCE, "call skipped: no session on the wire", "session_reconnecting",
+          { fn: name, action: opts && opts.body && opts.body.action, target: injected, status: null });
+      } catch (_l) { /* logging must never break the guard */ }
+      const err = new Error("Your session is reconnecting — try that again in a moment.");
+      err.ssNoSession = true;
+      return { data: null, error: err };
+    }
+  } catch (_e) { /* the guard must never be the reason a call fails */ }
   const res = await __ssInvoke(name, opts);
   // Recover the SERVER'S message on a non-2xx. supabase-js reports every 4xx/5xx as
   // FunctionsHttpError("Edge Function returned a non-2xx status code") and leaves the JSON
@@ -165,6 +203,11 @@ __ssFunctions.invoke = async (name, opts) => {
         const status = res.error.context.status;
         res.error.message = String(serverMsg);
         res.error.ssStatus = status;
+        // resolveTenant now classifies WHY a 401 happened ("missing" | "anon_key" |
+        // "rejected"). Carry it into the log context below — that enum is the difference
+        // between "this tab's session had gone" and "a real token was refused", which the
+        // previous four weeks of rows could not tell apart. Never shown to the user.
+        if (body.reason) res.error.ssReason = String(body.reason);
         // 401/403 are the two a builder can act on themselves, so say what to do.
         if (status === 401) res.error.message += " — sign out and back in.";
         else if (status === 403) res.error.message += " — ask an owner or admin to do this.";
@@ -176,7 +219,8 @@ __ssFunctions.invoke = async (name, opts) => {
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
         (res.error && res.error.name) || null,
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
-          status: (res.error && res.error.ssStatus) || null });
+          status: (res.error && res.error.ssStatus) || null,
+          reason: (res.error && res.error.ssReason) || null });
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
