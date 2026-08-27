@@ -179,7 +179,35 @@ export async function resolveTenant(
   });
   const { data: userData, error: userErr } = await userClient.auth.getUser();
   const user = userData?.user;
-  if (userErr || !user) return { ok: false, status: 401, body: { error: "Not signed in." } };
+  if (userErr || !user) {
+    // WHICH failure this was is the one thing the log could never say. Every cause
+    // collapsed into this single string with `userErr` thrown away, so 34 "Not signed in."
+    // rows across four weeks could not distinguish a tab that sent the BARE ANON KEY
+    // because its session had momentarily vanished from a real token being rejected — and
+    // those two want opposite fixes. Classify instead of guessing. It costs no round trip,
+    // and naming the credential back to the caller that just sent it leaks nothing (the
+    // reason is deliberately a fixed enum, never `userErr.message`, which is provider text
+    // this project's error contract keeps out of the browser).
+    // Classify STRUCTURALLY rather than by comparing against SUPABASE_ANON_KEY. That env
+    // value and the literal baked into the browser bundle live in two different deploy
+    // pipelines, and the day they drift the classifier would invert in silence — reporting
+    // "a real token was refused" for precisely the case where no user token was sent, which
+    // is worse than the one ambiguous string it replaces. The shape is the fact: an anon key
+    // is a well-formed JWT whose payload carries role "anon" and no `sub`.
+    const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
+    const claims: Record<string, unknown> | null = (() => {
+      try {
+        const part = bearer.split(".")[1];
+        if (!part) return null;
+        const b = part.replace(/-/g, "+").replace(/_/g, "/");
+        return JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
+      } catch { return null; }
+    })();
+    const reason = !bearer
+      ? "missing"
+      : (claims && !claims.sub && claims.role === "anon") ? "anon_key" : "rejected";
+    return { ok: false, status: 401, body: { error: "Not signed in.", reason } };
+  }
 
   // 2. Body.
   // deno-lint-ignore no-explicit-any
