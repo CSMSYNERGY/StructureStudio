@@ -1,4 +1,4 @@
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 const { createClient } = window.supabase;
 
 // ─── StructureStudio Operator Admin ───
@@ -230,6 +230,7 @@ function AdminApp() {
   const [linkResult, setLinkResult] = useState(null); // { email, client, roleLabel, created, emailSent, setupLink, movedFrom }
   const [reassignFrom, setReassignFrom] = useState(null); // email already linked elsewhere: { email, role, fromClient } — drives the one-click Reassign prompt
   const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
+  const itemsDirty = useRef(false); // true while itemSel holds unsaved ticks — see the re-sync effect below
   const [delOpen, setDelOpen] = useState(false);
   const [delConfirm, setDelConfirm] = useState("");
   // Operator-global email sender (Supabase Auth custom SMTP → a Google account).
@@ -241,7 +242,10 @@ function AdminApp() {
   const [emailTestTo, setEmailTestTo] = useState(""); // recipient for the "Send test email" button (must be an existing login)
   const [emailTestBusy, setEmailTestBusy] = useState(false);
 
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
+  // Auto-dismiss clears only the message it announced: the timer captures its own m and
+  // the functional update checks identity, so a newer message flashed inside the 2.5s
+  // window (e.g. an error from the next action) is never wiped by the stale timer.
+  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
   const login = async () => {
     setBusy(true); setMsg(null);
@@ -447,15 +451,21 @@ function AdminApp() {
   };
 
   // Layout-item editing is staged: the pills toggle a local selection and nothing is
-  // written until "Save". Re-sync the staged set whenever the loaded client/catalog
-  // changes (client switch or a post-save refresh). cat only changes on an explicit
-  // load/refresh, so an operator's in-progress ticks are never clobbered mid-edit.
+  // written until "Save". Re-sync the staged set when the loaded builder or catalog
+  // changes — but NOT while the operator has unsaved ticks: cat also refreshes after
+  // UNRELATED writes (act()'s best-effort refresh — e.g. a Building Styles active-pill
+  // toggle — createStyle, a CSV import), and re-syncing then would silently discard
+  // the staged picks. itemsDirty is set by the tick handlers, cleared on a builder
+  // switch (stale staging must not leak into the next tenant's view) and by saveItems
+  // once its writes land — its post-save refresh is a cat change that SHOULD re-sync.
+  useEffect(() => { itemsDirty.current = false; }, [sel]);   // declared first so a builder switch re-syncs below
   useEffect(() => {
+    if (itemsDirty.current) return;
     setItemSel(new Set((((cat && cat.clientLayoutItems) || []).filter((i) => i.active)).map((i) => i.item_key)));
   }, [sel, cat]);
-  const toggleItemSel = (key) => setItemSel((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-  const selectAllItems = () => setItemSel(new Set(((master && master.layoutItemTypes) || []).map((i) => i.item_key)));
-  const clearAllItems = () => setItemSel(new Set());
+  const toggleItemSel = (key) => { itemsDirty.current = true; setItemSel((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; }); };
+  const selectAllItems = () => { itemsDirty.current = true; setItemSel(new Set(((master && master.layoutItemTypes) || []).map((i) => i.item_key))); };
+  const clearAllItems = () => { itemsDirty.current = true; setItemSel(new Set()); };
   // Diff the staged set against what's actually assigned, then apply only the changes
   // (enable newly-ticked, disable newly-unticked) and refresh once at the end — so the
   // operator ticks everything and clicks Save once instead of one request per pill.
@@ -466,12 +476,17 @@ function AdminApp() {
     const toEnable  = keys.filter((k) => itemSel.has(k) && !saved.has(k));
     const toDisable = keys.filter((k) => !itemSel.has(k) && saved.has(k));
     const total = toEnable.length + toDisable.length;
-    if (total === 0) { flash({ ok: "No changes to save." }); return; }
+    // Staged set matches what's saved (ticks toggled back, or none touched): nothing
+    // unsaved left to protect, so let the next catalog refresh re-sync again.
+    if (total === 0) { itemsDirty.current = false; flash({ ok: "No changes to save." }); return; }
     setBusy(true); setMsg(null);
     try {
       for (const k of toEnable)  await api("toggle_item", pwd, { clientId: sel, itemKey: k, active: true });
       for (const k of toDisable) await api("toggle_item", pwd, { clientId: sel, itemKey: k, active: false });
     } catch (e) { flash({ err: e.message }); setBusy(false); return; }
+    // Writes landed: the staging is no longer "unsaved", so clear the dirty flag BEFORE
+    // the refresh below — that refresh is the one cat change that must re-sync itemSel.
+    itemsDirty.current = false;
     flash({ ok: `Saved ${total} change${total === 1 ? "" : "s"}.` });
     try { setCat(await api("get_client_catalog", pwd, { clientId: sel })); setMaster(await api("get_master", pwd)); }
     catch (_) { /* UI catches up on the next action */ }

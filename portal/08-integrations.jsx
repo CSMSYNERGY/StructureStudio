@@ -51,6 +51,46 @@ function qboReasonText(reason, company) {
   return QBO_REASONS[reason];
 }
 
+// Grouped <select> of QuickBooks items; keeps a saved-but-vanished id selectable so a
+// transient QuickBooks outage can't blank a stored mapping on save (the stage-dropdown
+// idiom used across Settings).
+// HOISTED to module scope on purpose, like FeatureScope in 07-admin.jsx: declared inside
+// QuickBooksView it was a new component type on every render, so React remounted every
+// dropdown whenever the view re-rendered — an open list snapped shut when a background
+// fetch landed, and focus was lost after every pick. Everything it reads arrives as props
+// (mappedId/setMapped/qboItems/mappings); it closes over nothing from the view. Qbo-prefixed
+// because the portal parts concatenate into one shared scope, like QBO_KINDS above.
+function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMapped, qboItems, mappings }) {
+  const val = mappedId(kind, itemKey, styleId);
+  const items = qboItems || [];
+  // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
+  // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
+  // grouping they can navigate. Items with no category (and any response from a
+  // not-yet-updated function, where fullName is absent) fall back to the old grouping by
+  // Type, so this degrades to previous behaviour instead of collapsing into one blob.
+  const groupOf = (i) => {
+    const fn = i.fullName || "";
+    const cut = fn.lastIndexOf(":");
+    return cut > 0 ? fn.slice(0, cut) : (i.type || "Other");
+  };
+  const byGroup = {};
+  items.forEach((i) => { const g = groupOf(i); (byGroup[g] = byGroup[g] || []).push(i); });
+  const stale = val && !items.some((i) => i.id === val);
+  const savedRow = stale ? (mappings || []).find((m) => m.qbo_item_id === val) : null;
+  return (
+    <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
+      style={{ ...S.input, maxWidth: 340 }}>
+      <option value="">{placeholder || "— not mapped —"}</option>
+      {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
+      {Object.keys(byGroup).sort().map((g) => (
+        <optgroup key={g} label={g}>
+          {byGroup[g].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
 function QuickBooksView({ clientId, viewingLabel = null }) {
   const [status, setStatus] = useState(null);   // qbo_status response; null = loading
   const [error, setError] = useState(null);
@@ -228,39 +268,10 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     if (!g.error && g.data && !g.data.error) setGrid(g.data);
   };
 
-  // Grouped <select> of QuickBooks items; keeps a saved-but-vanished id selectable so a
-  // transient QuickBooks outage can't blank a stored mapping on save (the stage-dropdown
-  // idiom used across Settings).
-  const ItemSelect = ({ kind, itemKey, styleId, placeholder }) => {
-    const val = mappedId(kind, itemKey, styleId);
-    const items = qboItems || [];
-    // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
-    // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
-    // grouping they can navigate. Items with no category (and any response from a
-    // not-yet-updated function, where fullName is absent) fall back to the old grouping by
-    // Type, so this degrades to previous behaviour instead of collapsing into one blob.
-    const groupOf = (i) => {
-      const fn = i.fullName || "";
-      const cut = fn.lastIndexOf(":");
-      return cut > 0 ? fn.slice(0, cut) : (i.type || "Other");
-    };
-    const byGroup = {};
-    items.forEach((i) => { const g = groupOf(i); (byGroup[g] = byGroup[g] || []).push(i); });
-    const stale = val && !items.some((i) => i.id === val);
-    const savedRow = stale ? (grid && grid.mappings || []).find((m) => m.qbo_item_id === val) : null;
-    return (
-      <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
-        style={{ ...S.input, maxWidth: 340 }}>
-        <option value="">{placeholder || "— not mapped —"}</option>
-        {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
-        {Object.keys(byGroup).sort().map((g) => (
-          <optgroup key={g} label={g}>
-            {byGroup[g].map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
-          </optgroup>
-        ))}
-      </select>
-    );
-  };
+  // Wiring for the module-scope QboItemSelect (hoisted — see its comment). The functions
+  // are re-created each render, which is fine as PROPS: the component TYPE stays stable, so
+  // nothing remounts.
+  const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings };
 
   if (status === null) return <div style={{ padding: 24, color: "#64748B", fontSize: 13 }}>Loading QuickBooks…</div>;
 
@@ -410,7 +421,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
                     ? (grid.layoutItems || []).map((li) => (
                         <div key={li.item_key} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 12.5, fontWeight: 600, color: "#475569", minWidth: 140 }}>{li.label || li.item_key}</span>
-                          <ItemSelect kind="layout_item" itemKey={li.item_key} styleId={null} />
+                          <QboItemSelect kind="layout_item" itemKey={li.item_key} styleId={null} {...selProps} />
                         </div>
                       ))
                     : <p style={{ fontSize: 12, color: "#94A3B8" }}>No active layout items.</p>
@@ -418,17 +429,17 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
                   <div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 12.5, fontWeight: 600, color: "#475569", minWidth: 140 }}>Default (all styles)</span>
-                      <ItemSelect kind="building" itemKey="" styleId={null} />
+                      <QboItemSelect kind="building" itemKey="" styleId={null} {...selProps} />
                     </div>
                     {(grid.styles || []).map((s) => (
                       <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 12.5, fontWeight: 600, color: "#94A3B8", minWidth: 140 }}>{s.label}</span>
-                        <ItemSelect kind="building" itemKey="" styleId={s.id} placeholder="— use default —" />
+                        <QboItemSelect kind="building" itemKey="" styleId={s.id} placeholder="— use default —" {...selProps} />
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <ItemSelect kind={kind} itemKey="" styleId={null} />
+                  <QboItemSelect kind={kind} itemKey="" styleId={null} {...selProps} />
                 )}
               </div>
             ))}

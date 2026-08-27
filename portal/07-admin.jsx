@@ -472,9 +472,13 @@ function FeatureScope({ features, all, setAll, picked, setPicked, disabled }) {
           ))}
         </div>
       )}
+      {/* Server semantics (admin-catalog, create_client/set_billing): an EMPTY list is
+          stored as null = the discount applies to EVERY feature. An earlier version of this
+          warning claimed the exact opposite ("no discount applies anywhere"), which taught
+          operators that leaving it empty was the safe choice. */}
       {!all && picked.length === 0 && (
         <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 6 }}>
-          Pick at least one feature, or choose "Every feature" — an empty list means no discount applies anywhere.
+          Pick at least one feature, or choose "Every feature" — saved empty, the list means no restriction, and the discount would apply to every feature.
         </div>
       )}
     </div>
@@ -877,7 +881,11 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   const [bootErr, setBootErr] = useState(null);
   const promptedFor = useRef({});                 // so the picker nags at most once per tab
 
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg(null), 6000); };
+  // The ok auto-dismiss clears only ITS OWN message: an unconditional setMsg(null) fires 6s
+  // after whatever is current — including an error flashed 5s after the save it reports on,
+  // gone before anyone could read it. The functional updater checks identity (every flash
+  // makes a fresh object), so a superseded timer no-ops instead of clobbering.
+  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000); };
   const selRow = (clients || []).find((c) => c.client_id === sel) || null;
   const active = ADM_TABS.find((t) => t[0] === sub) || ADM_TABS[0];
   const needsClient = active[3] === "client";
@@ -1110,6 +1118,14 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
 
   const create = async () => {
     if (!canCreate) return;
+    // Same guard as the Account tab's saveBilling: the server stores an EMPTY
+    // discountFeatures list as null = the discount applies to EVERY feature (admin-catalog,
+    // create_client/set_billing). So "only the ones I pick" with nothing picked would not
+    // create no discount — it would silently create an all-features one.
+    if (!exempt && (Number(discount) || 0) > 0 && !allFeat && picked.length === 0) {
+      onFlash({ err: "Choose which features the discount applies to, or select “Every feature”." });
+      return;
+    }
     setBusy(true);
     try {
       await adminApi("create_client", {
@@ -1334,12 +1350,19 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
 
   const [delOpen, setDelOpen] = useState(false);
 
-  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  const emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  const emailOk = emailRe.test(email.trim());
 
-  const link = async (reassign) => {
-    if (!emailOk || linkBusy) return;
+  // `addrOverride` exists for the reassign banner: `email` below is THIS render's closure,
+  // so a setEmail(...) in the same click handler is invisible to link() — the request would
+  // carry whatever the input held when this render happened. If the operator edited the
+  // field after the banner appeared, "Move them" reassigned the WRONG address (or, with the
+  // field now invalid, silently no-op'd on the emailOk guard). The banner passes the address
+  // it displays, so what the operator read is what gets moved.
+  const link = async (reassign, addrOverride) => {
+    const addr = (addrOverride != null ? addrOverride : email).trim();
+    if (!emailRe.test(addr) || linkBusy) return;
     setLinkBusy(true); setLinkResult(null);
-    const addr = email.trim();
     try {
       const r = await adminApi("link_owner", { clientId, email: addr, role, ...(reassign ? { reassign: true } : {}) });
       const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
@@ -1418,7 +1441,11 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div style={{ flex: "1 1 240px", minWidth: 200 }}>
             <label style={S.lbl}>Email</label>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@theirbusiness.com"
+            {/* Editing the address retires the reassign banner below: it names ONE specific
+                email, and a lingering banner would offer to move somebody the operator is no
+                longer typing about. (Programmatic setEmail — the banner's own button, the
+                post-link clear — does not fire onChange, so those keep the banner alive.) */}
+            <input value={email} onChange={(e) => { setEmail(e.target.value); setReassignFrom(null); }} placeholder="owner@theirbusiness.com"
               onKeyDown={(e) => { if (e.key === "Enter" && emailOk) link(false); }} style={S.input} />
           </div>
           <div style={{ width: 200 }}>
@@ -1439,7 +1466,9 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             <strong>{reassignFrom.email}</strong> already belongs to <strong>{reassignFrom.fromClient || "another builder"}</strong>.
             Moving them removes their access to that account.
             <div style={{ marginTop: 8 }}>
-              <button type="button" onClick={() => { setEmail(reassignFrom.email); link(true); }} disabled={linkBusy}
+              {/* The address goes as an argument — see link(): setEmail alone would not reach
+                  this call, which reads the pre-click render's `email`. */}
+              <button type="button" onClick={() => { setEmail(reassignFrom.email); link(true, reassignFrom.email); }} disabled={linkBusy}
                 style={{ ...S.btn("#92400E", "#FFF"), padding: "6px 12px", fontSize: 12 }}>Move them to {label}</button>
             </div>
           </div>

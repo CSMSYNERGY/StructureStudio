@@ -960,6 +960,11 @@ function computeSelectionRows(sel, paintColors, C, items) {
   }
   return rows;
 }
+// The one Supabase storage host a design's image_url may legitimately point at, derived
+// from SUPABASE_URL so the two can never drift. A ".supabase.co" SUFFIX test admitted ANY
+// Supabase project — attacker-controlled storage on someone else's free project shares
+// that suffix, which defeats the anti-phishing gate below. Only THIS project's host is safe.
+const SS_SUPABASE_HOST = new URL(SUPABASE_URL).hostname;
 // Only allow a design's image_url to be used as a clickable href when it is an
 // https Supabase-storage (or same-origin) URL. image_url is stored verbatim by the
 // anon-granted save_design RPC, so a hostile caller could stash a javascript: or
@@ -969,7 +974,7 @@ function ssSafeUrl(u) {
     const url = new URL(u, window.location.origin);
     if (url.protocol !== "https:") return null;
     const h = url.hostname;
-    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+    return (h === window.location.hostname || h === SS_SUPABASE_HOST) ? u : null;
   } catch { return null; }
 }
 
@@ -1394,6 +1399,18 @@ function formatPhoneDisplay(v) {
   if (d.length <= 3) return p + d;
   if (d.length <= 6) return `${p}(${d.slice(0, 3)}) ${d.slice(3)}`;
   return `${p}(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+// Digits-for-validation view of a phone. formatPhoneDisplay above deliberately preserves a
+// typed or browser-tel-autofilled "+1", so a perfectly valid US number can reach the
+// validators as 11 digits with a leading 1 — counting those as "not 10" rejected genuine
+// autofilled numbers. Every "exactly 10 digits" check AND the submitted payload use this
+// same view, so downstream (the GHL upsert, customer-auth phone matching) always sees one
+// consistent 10-digit value. Only the 11-digit leading-1 case is normalized; anything else
+// passes through unchanged for the validators to reject exactly as before.
+function ssPhone10(v) {
+  const d = String(v == null ? "" : v).replace(/\D/g, "");
+  return d.length === 11 && d[0] === "1" ? d.slice(1) : d;
 }
 
 // Lazy-load Google Maps JS API via the official inline bootstrap loader. Resolves
@@ -4686,6 +4703,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const placeFixture3 = (fx, type, ptx, pty) => {
         const w = getWallFromClick(ptx, pty, pWpx, pHpx, mgX, mgY) || getNearestWall(ptx, pty, pWpx, pHpx, mgX, mgY);
         const widthFt = (Number(fx.widthIn) || (type === "window" ? 24 : 36)) / 12;
+        // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
+        // overhangs the building corner; refuse up front — same computation the 2D
+        // included-chip branch gained in the 2026-08-20 audit.
+        if (widthFt > (w === "north" || w === "south" ? pWpx : pHpx) / scale + 1e-6) {
+          flash3(`That ${type === "window" ? "window" : "door"} is wider than this wall — pick a longer wall.`);
+          return false;
+        }
         const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY);
         let ni;
         if (type === "window") {
@@ -4706,6 +4730,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
         if (checkDoorCollision(ni, { width: widthFt }, liveItems, itemTypes, scale)) {
           flash3("Something's already there — pick a different spot on the wall.");
+          return false;
+        }
+        // Workbench check too — checkDoorCollision deliberately skips workbenches, so the
+        // in-viewer picker / included chip could drop its door or window straight onto one.
+        // Same refusal the 2D placement paths gained in the 2026-08-20 audit.
+        if (checkWorkbenchOverlap(sn, widthFt * scale, liveItems, itemTypes, scale)) {
+          flash3("A workbench is on that wall — place this somewhere else on the wall.");
           return false;
         }
         commitPlaced3(ni);
@@ -4936,6 +4967,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
             const sn = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+            // Refuse the move rather than commit an overlap — same posture as the 2D wallOnly
+            // drag (audit 2026-08-20) and the workbench branch below, which simply return.
+            // Until now the 3D drag was the one path that could still land a door/window/RO
+            // on another opening or on a workbench; the argument shapes mirror the 2D
+            // refusal exactly so semantics match. Guarding here, above the vertical branch,
+            // covers both commit sites below with one check.
+            const dOthers3 = liveItems.filter((i) => i.id !== it.id);
+            if (checkDoorCollision({ ...it, ...sn, widthFt: wFt }, { ...c, width: wFt }, dOthers3, itemTypes, scale)) return;
+            if (checkWorkbenchOverlap(sn, wFt * scale, dOthers3, itemTypes, scale)) return;
             if (vertical) {
               // Quarter-foot steps, and the SAME bounds openSpanOf enforces at build time:
               // y = 0 is the interior floor (which is what Carolyn specified — "off the
@@ -5906,7 +5946,7 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
-  const digits = phone.replace(/\D/g, "");
+  const digits = ssPhone10(phone); // a "+1" preserved by formatPhoneDisplay still counts as 10
   const valid = name.trim().length > 0 && digits.length === 10;
   const brand = (config && config.branding) || {};
   const acc = accent || "#3D3672";
@@ -6500,6 +6540,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     } catch (_e) {}
     return false;
   });
+  // Whether the interaction-triggered lead gate must pop, and whether it is currently
+  // open. Declared HERE — above the 2D pointer handlers — and not down by the gate's
+  // render (whose comment describes the modal), because gateRequired sits in handleClick's
+  // and onPtrDown's useCallback dependency arrays, which are evaluated during render: as a
+  // `const`, reading it before this line runs is a temporal-dead-zone crash in the
+  // ES-module build (the compiled twin only survived because preset-env rewrites
+  // const→var). The useState is still unconditional top-level, so hook order is stable.
+  const gateRequired = !gatePassed && !isAdmin && !embedded;
+  const [gateOpen, setGateOpen] = useState(false);
   // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
   // design overrides this from design.paint_colors on load.
   const [paintColors, setPaintColors] = useState(() => {
@@ -6578,7 +6627,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const contactComplete = useMemo(() => {
     const req = ["name", "email", "phone", "street", "city", "state", "zip"].filter((f) => C.contactFields.includes(f));
     if (req.some((f) => !String(contact[f] || "").trim())) return false;
-    if (C.contactFields.includes("phone") && String(contact.phone || "").replace(/\D/g, "").length !== 10) return false;
+    if (C.contactFields.includes("phone") && ssPhone10(contact.phone).length !== 10) return false;
     return true;
   }, [contact, C.contactFields]);
   // The public Details section is locked until the contact form is complete. Content is
@@ -9309,7 +9358,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSubmitError(`Please fill in: ${missing.join(", ")}.`);
       return;
     }
-    if (C.contactFields.includes("phone") && contact.phone.replace(/\D/g, "").length !== 10) {
+    if (C.contactFields.includes("phone") && ssPhone10(contact.phone).length !== 10) {
       setSubmitError("Phone number must be 10 digits.");
       return;
     }
@@ -9504,8 +9553,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         contact: {
           name: contact.name,
           email: contact.email,
-          // Strip display formatting; n8n/GHL store raw digits.
-          phone: contact.phone.replace(/\D/g, ""),
+          // Strip display formatting (n8n/GHL store raw digits) — via ssPhone10, not a bare
+          // digit strip: submit the same normalized 10 digits the validator counted (an
+          // autofilled "+1" otherwise submits 11 digits and splits the customer into two
+          // GHL contacts / breaks customer-auth phone matching).
+          phone: ssPhone10(contact.phone),
           street: contact.street,
           city: contact.city,
           state: contact.state,
@@ -9983,8 +10035,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // tries to work the 2D canvas (arm a tool, place, or drag an item). gatePassed
   // (remembered browsers, ?id= reopens), the operator preview (isAdmin), and
   // embedded portal mounts never see it.
-  const gateRequired = !gatePassed && !isAdmin && !embedded;
-  const [gateOpen, setGateOpen] = useState(false);
+  // gateRequired + gateOpen are declared up beside gatePassed (search "temporal-dead-zone"):
+  // they are read by handleClick/onPtrDown's useCallback dependency arrays far above here.
   const showGate = gateRequired && gateOpen;
   // Gate identity chip (public page only): who this browser is remembered as, plus a
   // reset. contact.name is live right after passing the gate; the localStorage copy
@@ -11821,7 +11873,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <div onClick={(e) => e.stopPropagation()}
             style={{ background: "#FFF", borderRadius: 14, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
             {invDialog.done ? (
-              <React.Fragment>
+              <>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", marginBottom: 6 }}>
                   {invDialog.done.updated
                     ? "Inventory building updated"
@@ -11838,9 +11890,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <button type="button" onClick={() => setInvDialog(null)}
                     style={{ background: "#1E293B", color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
                 </div>
-              </React.Fragment>
+              </>
             ) : (
-              <React.Fragment>
+              <>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>
                   {inventoryMaster && inventoryMaster.unitId ? "Update inventory building" : "Request this build"}
                 </div>
@@ -11874,7 +11926,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Send request")}
                   </button>
                 </div>
-              </React.Fragment>
+              </>
             )}
           </div>
         </div>
@@ -12306,7 +12358,10 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
     if (!clientId) {
       const host = window.location.hostname.toLowerCase();
       const TENANT_APEXES = ["structurestudio.app", "structurestudiosuite.com"];
-      const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app"];
+      // "beta-2-0" is a DEPLOY label (beta-2-0.structurestudiosuite.com), not a tenant —
+      // a single-label hyphenated deploy name has no "." and so defeats the multi-label
+      // deploy-host heuristic above; it must be reserved by name.
+      const RESERVED_SUBDOMAINS = ["www", "beta", "dev", "staging", "app", "beta-2-0"];
       for (const base of TENANT_APEXES) {
         if (!host.endsWith("." + base)) continue;
         const sub = host.slice(0, host.length - base.length - 1);

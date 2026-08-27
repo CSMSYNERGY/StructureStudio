@@ -144,9 +144,18 @@ function Dashboard({ session }) {
     const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
+    // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
+    // go with it: a team member landing on /portal/admin/billing bounces to designs, where
+    // "billing" matches none of that tab's sub branches (c-/d-/deals/people) — the body
+    // rendered EMPTY and the rewrite below then published /portal/designs/billing, a URL
+    // that reproduces the blank on every reload. Null it and let the re-run write the clean
+    // path. Safe to do only HERE, after the wanted/gatesResolved wait above — at clamp time
+    // proper (first render) isOperator is still false, and stripping then would cost an
+    // operator's /portal/admin/<sub> deep link its sub before the answer arrives.
+    if (resolvedTab !== tab && sub !== null) { setSub(null); return; }
     if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
     try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
-  }, [resolvedTab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
+  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -916,7 +925,11 @@ function Dashboard({ session }) {
                 onOpenRecord={(code) => navigate("designs", "d-" + code)}
                 onOpenDesign={openInDesigner} />
             )}
-            {!gateLocked && activeTab === "designs" && (!sub || sub === "people") && (
+            {/* Anything that isn't "deals" or a record sub renders the DEFAULT view — the
+                same treatment SettingsShell gives an unknown slug. A sub this branch does
+                not recognise (a foreign segment surviving a tab clamp, or a hand-typed
+                URL) must never leave the section bodiless. */}
+            {!gateLocked && activeTab === "designs" && sub !== "deals" && !(sub && /^[cd]-/.test(sub)) && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
                 onOpenRecord={(contactId) => navigate("designs", "c-" + contactId)}

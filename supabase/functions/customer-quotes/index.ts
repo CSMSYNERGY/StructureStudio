@@ -45,6 +45,16 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
  *  renders as "sent" — the safe floor — rather than leaking internal vocabulary. */
 const CUSTOMER_STATUSES = new Set(["sent", "accepted", "invoiced", "delivered"]);
 
+/** Canonical last-10-digits phone form for the ownership compare. The session identity is
+ *  the 10 digits after "+1" (customer-auth), but stored contact phones are formatted
+ *  display strings — "+1 (816) 555-0123" strips to 11 digits, which used to never match
+ *  and hid every quote from a verified customer. Strips exactly one leading US "1" from
+ *  an 11-digit string; nothing looser — any other shape compares as-is. */
+function phoneKey(value: unknown): string {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+
 // totalFromSnapshot moved to _shared/estimateLines.ts (2026-08-23): the acceptance record
 // and the SS invoice snapshot the same number, and four copies of money math is how the
 // customer's screen and the books learn to disagree.
@@ -96,11 +106,13 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
 
+  const identityPhone = phoneKey(identity.phoneDigits);
   const mine = (rows ?? [])
     .filter((d) => {
-      // The verified phone is the identity — only this customer's designs.
-      const phone = String(d?.contact?.phone ?? "").replace(/\D/g, "");
-      if (!phone || phone !== identity.phoneDigits) return false;
+      // The verified phone is the identity — only this customer's designs. Both sides
+      // through phoneKey: an 11-digit stored "1816…" must match the 10-digit session.
+      const phone = phoneKey(d?.contact?.phone);
+      if (!phone || phone !== identityPhone) return false;
       // 'inventory' is the tenant's own spec-build master designs — internal stock, never
       // something this customer asked for. 'draft' is a silent capture the visitor never
       // knowingly created (saveDraftSilently fires when they open quote Details) — showing
@@ -176,11 +188,17 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     // not yield address or email on top of the quote list. Only what the list screen
     // renders leaves this function.
     .map((d) => ({
-      estimateNumber: d.ghl_estimate_number != null && d.ghl_estimate_number !== ""
-        ? `EST-${d.ghl_estimate_number}`
-        // SS-mode quotes carry the builder's own number, prefix included, verbatim —
-        // "JB-1041" must render exactly as it reads on the PDF (migration 122).
-        : (ssMode && d.ss_quote_number ? String(d.ss_quote_number) : null),
+      // SS-mode quotes carry the builder's own number, prefix included, verbatim —
+      // "JB-1041" must render exactly as it reads on the PDF (migration 122). It WINS
+      // over a leftover ghl_estimate_number (a tenant who flipped GHL→SS and resubmitted
+      // carries both): customer-accept composes and STORES the consent sentence from
+      // ss_quote_number under the same ssMode + ss_quote_number rule, and the number the
+      // customer reads must be the number the consent evidence names.
+      estimateNumber: ssMode && d.ss_quote_number
+        ? String(d.ss_quote_number)
+        : (d.ghl_estimate_number != null && d.ghl_estimate_number !== ""
+          ? `EST-${d.ghl_estimate_number}`
+          : null),
       style: d?.selections?.style ?? null,
       size: d?.selections?.size ?? null,
       status: CUSTOMER_STATUSES.has(String(d?.status)) ? String(d.status) : "sent",

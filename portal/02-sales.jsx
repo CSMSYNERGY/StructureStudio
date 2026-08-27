@@ -150,7 +150,11 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   const myQuotesLink = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
   const copyCustomerLink = (code) => {
     const done = () => { setCopiedKey(code); setTimeout(() => setCopiedKey((k) => (k === code ? null : k)), 2000); };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, done);
+    // A rejected writeText is NOT a copy: the API exists but can still refuse (permissions
+    // policy, unfocused tab), and `.then(done, done)` used to flash "Copied ✓" over a
+    // clipboard that still held something else — the rep then pastes the wrong thing to a
+    // customer. On rejection, fall back to the same manual prompt no-clipboard browsers get.
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, () => window.prompt("Copy the customer link:", myQuotesLink));
     else window.prompt("Copy the customer link:", myQuotesLink);
   };
   const resendQuoteEmail = async (r) => {
@@ -1003,6 +1007,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [mail, setMail] = useState({ subject: "", body: "" });
   const [mailMsg, setMailMsg] = useState(null);
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
+  // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
+  // renders only inside the Email tab — these controls need their own slot, keyed by control
+  // so a note error can't surface under Focus too. Every new attempt clears it first, so a
+  // stale failure never outlives the action that follows it.
+  const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus", msg }
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1038,8 +1047,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const saveNote = async () => {
     const body = draft.trim();
     if (!body) return;
-    setBusy(true);
-    const { error } = await sb.functions.invoke("portal-settings", {
+    setBusy(true); setOpErr(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
       body: {
         action: "crm_save_note", body,
         contactId: (data.contact && data.contact.id) || null,
@@ -1047,7 +1056,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       },
     });
     setBusy(false);
-    if (!error) { setDraft(""); load(); }
+    // A silent failure here looked exactly like a save — no message, and the note simply
+    // never appeared in History. Say so, and keep the draft: nothing was saved, so clearing
+    // the box would destroy the one copy of what they typed.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setOpErr({ where: "note", msg: `Note not saved — ${failMsg}` }); return; }
+    setDraft(""); load();
   };
 
   // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
@@ -1057,8 +1071,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const saveActivity = async () => {
     const subject = act.subject.trim();
     if (!subject) return;
-    setBusy(true);
-    const { error } = await sb.functions.invoke("portal-settings", {
+    setBusy(true); setOpErr(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
       body: {
         action: "crm_save_activity", kind: act.kind, subject,
         // A date-only input is midday-anchored, the same trick the payments and change-order
@@ -1069,7 +1083,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       },
     });
     setBusy(false);
-    if (!error) { setAct({ kind: "call", subject: "", dueAt: "" }); load(); }
+    // Same as saveNote: a silent failure looked like a save, and the activity never showed
+    // in Focus. Report it and keep the form filled — nothing was saved.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setOpErr({ where: "activity", msg: `Activity not saved — ${failMsg}` }); return; }
+    setAct({ kind: "call", subject: "", dueAt: "" }); load();
   };
 
   const sendEmail = async () => {
@@ -1240,6 +1258,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !act.subject.trim()} onClick={saveActivity}>
                     {busy ? "Saving…" : "Save activity"}
                   </button>
+                  {opErr && opErr.where === "activity" && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{opErr.msg}</span>}
                 </div>
               </div>
             )}
@@ -1302,10 +1321,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                 <button style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 5 }} disabled={busy || !draft.trim()} onClick={saveNote}>
                   {busy ? "Saving…" : "Save note"}
                 </button>
+                {opErr && opErr.where === "note" && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginLeft: 8 }}>{opErr.msg}</span>}
               </div>
             )}
 
             <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>Focus</div>
+            {opErr && opErr.where === "focus" && <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginBottom: 6 }}>{opErr.msg}</div>}
             {(data.focus || []).length === 0 ? (
               <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>
                 No focus items yet. Scheduled activities and pinned notes appear here.
@@ -1314,8 +1335,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               <div style={{ marginBottom: 12 }}>
                 {(data.focus || []).map((f) => (
                   <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 0" }}>
-                    <input type="checkbox" onChange={async () => {
-                      await sb.functions.invoke("portal-settings", { body: { action: "crm_complete_activity", id: f.id, done: true } });
+                    <input type="checkbox" onChange={async (e) => {
+                      // The box is uncontrolled, so a failed complete would leave it ticked
+                      // while the item stays in Focus — looking done when it isn't. Untick
+                      // it and say what happened instead of failing silently.
+                      const box = e.target;
+                      setOpErr(null);
+                      const { data: r, error } = await sb.functions.invoke("portal-settings", { body: { action: "crm_complete_activity", id: f.id, done: true } });
+                      const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+                      if (failMsg) { box.checked = false; setOpErr({ where: "focus", msg: `Could not complete "${f.subject}" — ${failMsg}` }); return; }
                       load();
                     }} />
                     <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{f.subject}</span>

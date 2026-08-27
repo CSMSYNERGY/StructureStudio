@@ -100,6 +100,17 @@ const fmtMoney = (n: number): string => {
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
 
+/** Canonical last-10-digits phone form for the ownership compares. The session identity is
+ *  the 10 digits after "+1" (customer-auth), but stored contact phones are formatted
+ *  display strings — "+1 (816) 555-0123" strips to 11 digits, which used to never match
+ *  and refused a verified customer their own signature (fails closed, but wrongly). Strips
+ *  exactly one leading US "1" from an 11-digit string; nothing looser — any other shape
+ *  compares as-is. Compare-only: the stored phone_digits evidence stays the raw identity. */
+function phoneKey(value: unknown): string {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+
 const MAX_SIGNATURE_BYTES = 300 * 1024;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
 
@@ -188,8 +199,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
     if (coDesignErr) return dbFail(req, identity.clientId, "load the quote", coDesignErr);
     if (!coDesign) return notYoursCo;
-    const coPhone = String(coDesign?.contact?.phone ?? "").replace(/\D/g, "");
-    if (!coPhone || coPhone !== identity.phoneDigits) return notYoursCo;
+    const coPhone = phoneKey(coDesign?.contact?.phone);
+    if (!coPhone || coPhone !== phoneKey(identity.phoneDigits)) return notYoursCo;
 
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status === "void") return json({ error: "This change was withdrawn by your builder — nothing to sign." }, 409);
@@ -299,8 +310,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     if (dErr) return dbFail(req, identity.clientId, "load the invoice", dErr);
     const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
     if (!d) return notYours;
-    const dPhone = String(d?.contact?.phone ?? "").replace(/\D/g, "");
-    if (!dPhone || dPhone !== identity.phoneDigits) return notYours;
+    const dPhone = phoneKey(d?.contact?.phone);
+    if (!dPhone || dPhone !== phoneKey(identity.phoneDigits)) return notYours;
 
     const { data: settings, error: sErr } = await admin
       .from("client_settings")
@@ -515,8 +526,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // learns nothing about which short codes exist.
   const notYours = json({ error: "That quote wasn't found on your account." }, 404);
   if (!design) return notYours;
-  const designPhone = String(design?.contact?.phone ?? "").replace(/\D/g, "");
-  if (!designPhone || designPhone !== identity.phoneDigits) return notYours;
+  const designPhone = phoneKey(design?.contact?.phone);
+  if (!designPhone || designPhone !== phoneKey(identity.phoneDigits)) return notYours;
 
   // ── SS mode only ─────────────────────────────────────────────────────────────────────
   const { data: settings, error: settingsErr } = await admin

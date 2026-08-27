@@ -561,6 +561,18 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           contactFields = tmpl.data.contact_fields; defaultSizes = tmpl.data.default_sizes; options = tmpl.data.options;
           templateId = tmplId;
         }
+        // Discount inputs are validated BEFORE the config insert: a throw after the row
+        // lands would leave a half-created tenant that the exists-check above then blocks
+        // from ever retrying — validation must come before the first write.
+        const newDiscount = Math.round(Number(p.discountPercent) || 0);
+        if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
+          throw new Error("discountPercent must be a whole number from 0 to 100.");
+        }
+        // Empty/absent = the discount applies to EVERY feature. A list narrows it.
+        const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
+          ? p.discountFeatures.map((f: unknown) => String(f))
+          : null;
+
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
           client_id: clientId, company_name: companyName,
@@ -576,14 +588,6 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // owner to fill in via the portal. A normal new client gets no row here, so
         // billing_exempt reads false and the gate applies: they land on Billing and pay
         // before anything unlocks.
-        const newDiscount = Math.round(Number(p.discountPercent) || 0);
-        if (!Number.isFinite(newDiscount) || newDiscount < 0 || newDiscount > 100) {
-          throw new Error("discountPercent must be a whole number from 0 to 100.");
-        }
-        // Empty/absent = the discount applies to EVERY feature. A list narrows it.
-        const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
-          ? p.discountFeatures.map((f: unknown) => String(f))
-          : null;
         if (p.billingExempt === true || newDiscount > 0) {
           const bx = await sb.from("client_settings").upsert({
             client_id: clientId,

@@ -791,7 +791,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         if (!data || data.length < page) return { data: out };
       }
     };
-    const [{ data: dsn }, paysRes, coRes] = await Promise.all([
+    const [dsnRes, paysRes, coRes] = await Promise.all([
       codes.length
         ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
         : Promise.resolve({ data: [] }),
@@ -805,7 +805,15 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     // A failed payments read must not render every order as unpaid — that's the same
     // silent understatement the paging above exists to prevent.
     if (paysRes.error) { setError(paysRes.error.message); setRows([]); return; }
+    // A failed designs read must not read as "no designs": byCode would come up empty,
+    // the SS-only filter below would drop EVERY order, and the tab would show
+    // "No orders yet." + $0.00 tiles with nothing anywhere saying a read failed.
+    if (dsnRes.error) { setError(dsnRes.error.message); setRows([]); return; }
+    // Same for change orders: swallowing this read hides every "CO pending" chip while
+    // the server's invoice 409 still stands — the courtesy half of the rule goes dark.
+    if (coRes.error) { setError(coRes.error.message); setRows([]); return; }
     const pays = paysRes.data;
+    const dsn = dsnRes.data;
     const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
     const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
     const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
@@ -1169,12 +1177,25 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
     if (!vConfirm) { setMsg({ err: "Tick the confirmation box — it is your attestation." }); return; }
     if (!vRep.trim() || !vDate) { setMsg({ err: "Verbal confirmation needs your name and the date of the conversation." }); return; }
     setBusy(true); setMsg(null);
-    const { error } = await sb.from("change_orders")
+    // .select() makes the conditional update prove itself: without it, zero rows matched
+    // (the CO was signed or voided elsewhere while this form sat open) still comes back
+    // error:null, and we'd report "confirmed verbally" AND overwrite the order total
+    // from a CO that is no longer pending. The returned ids are the proof the
+    // status guard actually matched a row.
+    const { data: upd, error } = await sb.from("change_orders")
       .update({ status: "acknowledged", ack_method: "verbal", verbal_rep_name: vRep.trim(), verbal_conversation_date: vDate, verbal_note: vNote.trim() || null })
-      .eq("id", co.id).eq("status", "pending_ack");
+      .eq("id", co.id).eq("status", "pending_ack")
+      .select("id");
     setBusy(false);
     if (error) { setMsg({ err: error.message }); return; }
     setVerbalFor(null); setVRep(""); setVNote(""); setVConfirm(false);
+    if (!upd || upd.length === 0) {
+      // Nothing was pending to confirm — reload so the list shows the CO's real state,
+      // and leave the order total alone (it may already reflect a signed or voided CO).
+      setMsg({ err: `CO-${co.co_no} is no longer pending — it was signed or voided in the meantime. Nothing was changed.` });
+      load(); onChanged();
+      return;
+    }
     await applyAckedTotal(co);
     setMsg({ ok: `CO-${co.co_no} confirmed verbally.` });
     load(); onChanged();
@@ -1369,13 +1390,29 @@ const ssUsd = (n) => {
 const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
 const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null }) {
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const debounceRef = useRef(null);
 
+  // A sub-read failed: say so, in place of the WHOLE body. Rendering off partial data
+  // looks healthy while lying — with paperwork missing it would offer "Create & send
+  // invoice" on an order that may already be invoiced and awaiting signature. This
+  // must come before the loading gate: on a failed designs read design is null, and
+  // the null-design branch below reads as "Loading the order…" forever.
+  if (doc && doc.error) {
+    return (
+      <div style={S.card}>
+        <div style={S.err}>Couldn't load this order's paperwork: {doc.error}</div>
+        {onRetry && (
+          <button type="button" onClick={onRetry}
+            style={{ ...S.btn("#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5 }}>Retry</button>
+        )}
+      </div>
+    );
+  }
   if (!doc || !doc.design) {
     return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading the order…</p></div>;
   }
@@ -1834,7 +1871,23 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         sb.functions.invoke("portal-settings", { body: { action: "order_paperwork", shortCode: o.short_code } }),
       ]);
       if (!alive) return;
+      // A failed sub-read must NOT be coerced to "no data" — each coercion told its own
+      // lie: designs failing left the card on "Loading the order…" forever (design:null
+      // IS the loading sentinel), order_paperwork failing rendered "not yet invoiced"
+      // plus a live "Create & send invoice" button on an order that may already be
+      // awaiting signature (duplicate-send bait), and change_orders failing hid the
+      // pending-CO invoice gate. Carry the first error on the payload instead; the
+      // document card renders it with a Retry in place of the normal body.
+      const loadError =
+        dRes.error ? dRes.error.message
+          : aRes.error ? aRes.error.message
+            : cRes.error ? cRes.error.message
+              : (pRes.data && pRes.data.error) ? pRes.data.error
+                : pRes.error ? await fnError(pRes.error)
+                  : null;
+      if (!alive) return; // fnError awaits the response body — the unmount race reopens
       setSsDoc({
+        error: loadError,
         design: dRes.data || null,
         acceptances: aRes.data || [],
         cos: cRes.data || [],
@@ -1927,7 +1980,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                action row. It replaces the old thin header card for SS orders. */
             <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
               busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
-              onPreview={(url, title) => setPdfView({ url, title })} />
+              onPreview={(url, title) => setPdfView({ url, title })}
+              onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />
           ) : (
             <div style={S.card}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>

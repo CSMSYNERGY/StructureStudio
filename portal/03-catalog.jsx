@@ -737,6 +737,20 @@ function BillingView({ viewingLabel = null }) {
     // which independently re-checks confirmChargeCents.
     const amt = amountCents != null ? (amountCents / 100).toFixed(2) : null;
     const start = () => {
+      // Collect.js only ever settles us through `callback`, and it fires that ONLY on a
+      // tokenization attempt — closing the lightbox (the ✕, Esc, click-away) fires nothing
+      // in the config surface we use, which used to leave this promise pending forever:
+      // `subscribe` awaited it, `busy` never cleared, and the Billing tab was dead until a
+      // reload. There is no close/cancel hook to wire, so watch the DOM instead: the
+      // lightbox arrives as injected iframe(s); once one has been visible and none is any
+      // more — with no token — the customer closed it. Two consecutive misses (3s apart)
+      // before rejecting, so a re-layout blip can't fire a false abandon while the card
+      // form is still up; a 5-minute backstop covers a lightbox that hides rather than
+      // removes itself, or that never appeared at all.
+      let settled = false, poll = null, backstop = null;
+      const settle = (fn, v) => { if (settled) return; settled = true; if (poll) clearInterval(poll); if (backstop) clearTimeout(backstop); fn(v); };
+      // Snapshot BEFORE Collect.js runs, so whatever iframes it injects read as "added".
+      const before = new Set(Array.from(document.querySelectorAll("iframe")));
       try {
         window.CollectJS.configure({
           variant: "lightbox",
@@ -750,10 +764,19 @@ function BillingView({ viewingLabel = null }) {
             // note already lives on the page's due-today line and the pay button.
             instructionText: `You'll be charged ${fmt$(amountCents)} today.`,
           } : {}),
-          callback: (resp) => resp && resp.token ? resolve(resp.token) : reject(new Error("Card entry was cancelled.")),
+          callback: (resp) => resp && resp.token ? settle(resolve, resp.token) : settle(reject, new Error("Card entry was cancelled.")),
         });
         window.CollectJS.startPaymentRequest();
-      } catch (e) { reject(e); }
+      } catch (e) { return settle(reject, e); }
+      let seen = false, gone = 0;
+      poll = setInterval(() => {
+        const visible = Array.from(document.querySelectorAll("iframe")).some((el) =>
+          !before.has(el) && el.isConnected && (el.offsetWidth > 0 || el.offsetHeight > 0));
+        if (visible) { seen = true; gone = 0; return; }
+        // Soft wording on purpose: abandoning card entry is a normal choice, not a fault.
+        if (seen && ++gone >= 2) settle(reject, new Error("Card entry was closed — nothing was charged. Press the button again whenever you're ready."));
+      }, 3000);
+      backstop = setTimeout(() => settle(reject, new Error("Card entry timed out — nothing was charged. Press the button again whenever you're ready.")), 5 * 60 * 1000);
     };
     if (window.CollectJS) return start();
     const s = document.createElement("script");
@@ -767,10 +790,20 @@ function BillingView({ viewingLabel = null }) {
   const toggleFeature = (f) => {
     if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
-    if (f.required && !baseLive && !sel["full_suite"]) return; // Simple Layout stays unless the Suite covers it
+    // Only block REMOVING the required base (it's in `sel` and the click would delete it);
+    // re-adding must always work. Blocking both directions stranded the cart: selecting the
+    // Suite deletes Simple Layout from `sel`, deselecting the Suite then left NEITHER in the
+    // cart, and this guard refused the click that would put the base back — checkout dead
+    // until a reload re-ran the [data] preselect (the server 400s a cart without the base).
+    if (f.required && !baseLive && !sel["full_suite"] && sel[f.feature]) return; // Simple Layout stays unless the Suite covers it
     setSel((p) => {
       const n = { ...p };
-      if (n[f.feature]) delete n[f.feature];
+      if (n[f.feature]) {
+        delete n[f.feature];
+        // Deselecting the Suite re-seeds the required base — the [data] preselect effect
+        // only re-runs on a reload, so without this the cart strands with neither.
+        if (f.feature === "full_suite" && !baseLive && !liveFeatures["full_suite"] && byFeature["simple_layout"]) n.simple_layout = "annual";
+      }
       else {
         n[f.feature] = "annual";
         if (f.feature === "full_suite") SUITE_MEMBERS.forEach((m) => delete n[m]); // the Suite replaces the à-la-carte pieces
@@ -2764,9 +2797,17 @@ function WindowColorsEditor({ viewingLabel = null, clientId = null, onSaved = nu
     if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE window color list with these ${rows.length} color(s)?\n\nAnything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
+      // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
+      // rate into a silent $0 BEFORE the request, sneaking past the server's own invalid-rate
+      // guard, so the color then priced at $0 on every customer estimate — the same hole the
+      // 2026-08-20 audit closed in LayoutPricing.save. Refuse and name the rows instead. A
+      // blank rate still means 0 — that's how an untouched row round-trips.
+      const rateOf = (r) => { const s = String(r.rate ?? "").trim(); return s === "" ? 0 : Number(s); };
+      const bad = rows.filter((r) => { const n = rateOf(r); return !Number.isFinite(n) || n < 0; });
+      if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.map((r) => `${r.label || "unnamed color"} ("${r.rate}")`).join(", ")}.`);
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label, hex: r.hex || null,
-        rate: Number(r.rate) || 0, isDefault: r.is_default === true, active: r.active !== false, sortOrder: i,
+        rate: rateOf(r), isDefault: r.is_default === true, active: r.active !== false, sortOrder: i,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_window_colors", colors }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -2912,12 +2953,27 @@ function ColorsView({ viewingLabel = null }) {
 Anything not shown here will be removed from their account.`)) return;
     setBusy(true); setMsg(null);
     try {
+      // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
+      // rate into a silent $0 BEFORE the request, sneaking past the server's own invalid-rate
+      // guard, so the colour then priced at $0 on every customer estimate — the same hole the
+      // 2026-08-20 audit closed in LayoutPricing.save. Refuse and name the rows (and which of
+      // the two rates is broken) instead. A blank rate still means 0 — that's how an
+      // untouched row round-trips.
+      const numOf = (v) => { const s = String(v ?? "").trim(); return s === "" ? 0 : Number(s); };
+      const badRate = (v) => { const n = numOf(v); return !Number.isFinite(n) || n < 0; };
+      const bad = [];
+      rows.forEach((r) => {
+        const name = r.label || "unnamed colour";
+        if (badRate(r.rate)) bad.push(`${name} ("${r.rate}")`);
+        if (badRate(r.door_rate)) bad.push(`${name} door price ("${r.door_rate}")`);
+      });
+      if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.join(", ")}.`);
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label,
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
-        sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: Number(r.rate) || 0,
-        doorRate: Number(r.door_rate) || 0,
+        sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
+        doorRate: numOf(r.door_rate),
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);

@@ -3051,6 +3051,11 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           );
         };
 
+        // Same honesty rule as the Build Schedule's totals strips: with weekends off, a
+        // Saturday load stays scheduled (the toggle hides it, nothing moves it — the
+        // truck still rolls), so any weekend-dated loads in the rendered range are named
+        // below rather than silently dropped. Silent hiding was ruled a bug over there.
+        let hiddenWkndLoads = [];
         let label, cells, cols, headRow = null;
         if (calView === "month") {
           const m0 = new Date(monthCursor); m0.setDate(1); m0.setHours(0, 0, 0, 0);
@@ -3059,7 +3064,11 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           // By DATE, not +86,400,000ms — the DST fall-back day would repeat a local key
           // (same constraint as the Build Schedule calendar; audit 2026-08-20).
           let mc = []; for (let i = 0; i < 42; i++) { const d = new Date(gStart); d.setDate(d.getDate() + i); mc.push(d); }
-          if (!showWeekends) mc = mc.filter((d) => d.getDay() !== 0 && d.getDay() !== 6);
+          if (!showWeekends) {
+            const hiddenIsos = mc.filter((d) => d.getDay() === 0 || d.getDay() === 6).map(isoOf);
+            hiddenWkndLoads = visibleLoads.filter((l) => l.load_date && hiddenIsos.includes(l.load_date));
+            mc = mc.filter((d) => d.getDay() !== 0 && d.getDay() !== 6);
+          }
           cells = mc.map((d) => ({ iso: isoOf(d), d, inMonth: d.getMonth() === m0.getMonth() }));
           cols = showWeekends ? 7 : 5;
           headRow = showWeekends ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["Mon", "Tue", "Wed", "Thu", "Fri"];
@@ -3068,7 +3077,11 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           let wd = []; for (let i = 0; i < 7; i++) { const d = new Date(b); d.setDate(d.getDate() + i); wd.push({ iso: isoOf(d), d, inMonth: true }); }
           const wknd = wd[6].d;
           label = b.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " – " + wknd.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", " + wknd.getFullYear();
-          if (!showWeekends) wd = wd.filter(({ d }) => d.getDay() !== 0 && d.getDay() !== 6);
+          if (!showWeekends) {
+            const hiddenIsos = wd.filter(({ d }) => d.getDay() === 0 || d.getDay() === 6).map((c) => c.iso);
+            hiddenWkndLoads = visibleLoads.filter((l) => l.load_date && hiddenIsos.includes(l.load_date));
+            wd = wd.filter(({ d }) => d.getDay() !== 0 && d.getDay() !== 6);
+          }
           cells = wd; cols = showWeekends ? 7 : 5;
         }
 
@@ -3117,6 +3130,15 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Non-empty only with weekends hidden (see hiddenWkndLoads above) — the
+                Build Schedule's wording, so both calendars flag hidden work the same way. */}
+            {hiddenWkndLoads.length > 0 && (
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#B45309", marginBottom: 9 }}
+                title="Turn weekends back on to see them — they are still scheduled">
+                +{hiddenWkndLoads.length} load{hiddenWkndLoads.length === 1 ? "" : "s"} on hidden weekend day{hiddenWkndLoads.length === 1 ? "" : "s"}, not shown
               </div>
             )}
 

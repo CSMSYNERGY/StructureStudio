@@ -30,3 +30,11 @@
   X-Frame-Options: DENY
 /portal/*
   X-Frame-Options: DENY
+
+# my-quotes has no framing use either, and it carries customer actions (Accept/Sign)
+# behind a localStorage token — exactly the shape clickjacking targets. Both the
+# pretty route and the .html spelling need a rule (see the "requested path" note up top).
+/my-quotes
+  X-Frame-Options: DENY
+/my-quotes.html
+  X-Frame-Options: DENY

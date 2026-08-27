@@ -138,10 +138,14 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
 
   // 2. Map the caller to their tenant + role (service role; client_id is never trusted from the body).
+  //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
+  //    exists, which would lock the user out entirely. portal.html already guards this
+  //    the same way (its "audit #F6" comment), as does _shared/resolveTenant.ts.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: me, error: meErr } = await admin
-    .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).maybeSingle();
+  const { data: meRows, error: meErr } = await admin
+    .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).limit(1);
   if (meErr) return json({ error: meErr.message }, 500);
+  const me = meRows && meRows[0];
   if (!me?.client_id) return json({ error: "Your login isn't attached to an account." }, 403);
   const clientId: string = me.client_id;
   const role: string = me.role || "user";

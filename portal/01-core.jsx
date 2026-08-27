@@ -609,20 +609,26 @@ const invSellable = (u) => invStage(u) === "at_location" && !invSold(u);
 const invSoldLabel = (u) => (u && u.soldFirstName ? `SOLD — ${u.soldFirstName}` : "SOLD");
 
 // Only let a design's image_url become a clickable href when it is an https URL on our own
-// origin or Supabase storage. image_url is stored VERBATIM by the anon-granted save_design
-// RPC, so a hostile caller can stash a javascript: or off-site phishing URL against any
-// tenant's design — and this link renders inside the owner's authenticated portal, behind a
-// "PDF" button they have every reason to trust. Returns null if unsafe, so the caller can
-// drop the link entirely rather than render a dead one.
+// origin or our own Supabase project's storage. image_url is stored VERBATIM by the
+// anon-granted save_design RPC, so a hostile caller can stash a javascript: or off-site
+// phishing URL against any tenant's design — and this link renders inside the owner's
+// authenticated portal, behind a "PDF" button they have every reason to trust. Returns
+// null if unsafe, so the caller can drop the link entirely rather than render a dead one.
 // This is the twin of ssSafeUrl in StructureStudio.jsx / structure-studio.component.js
 // (audit #F8). portal.html has no .jsx sibling, so it needs its own copy — keep the three
 // in step if the rule changes.
+//
+// OUR project's storage host, derived from SUPABASE_URL so a project move can't strand it.
+// It must be an exact-host match, not a ".supabase.co" suffix: anyone can spin up a free
+// Supabase project and get their own *.supabase.co hostname, so the suffix check admitted
+// exactly the off-site phishing hosts this function exists to refuse.
+const SS_SUPABASE_HOST = new URL(SUPABASE_URL).hostname;
 const ssSafeUrl = (u) => {
   try {
     const url = new URL(u, window.location.origin);
     if (url.protocol !== "https:") return null;
     const h = url.hostname;
-    return (h === window.location.hostname || h.endsWith(".supabase.co")) ? u : null;
+    return (h === window.location.hostname || h === SS_SUPABASE_HOST) ? u : null;
   } catch { return null; }
 };
 
@@ -850,7 +856,15 @@ function inDateRange(dateStr, from, to) {
   const t = new Date(dateStr).getTime();
   if (!Number.isFinite(t)) return false;
   if (from) { const f = new Date(from + "T00:00:00").getTime(); if (t < f) return false; }
-  if (to) { const e = new Date(to + "T00:00:00").getTime() + 86400000; if (t >= e) return false; }
+  if (to) {
+    // setDate, NOT midnight + 86400000: a fixed 24h misses the two DST-transition days.
+    // On the 25h fall-back day it lands at 23:00 — rows from the end day's last hour were
+    // silently excluded — and on the 23h spring-forward day it lands at 01:00 the next
+    // day, including an hour nobody asked for. Rolling the calendar date lets the Date
+    // engine apply the day's real UTC offset.
+    const e = new Date(to + "T00:00:00"); e.setDate(e.getDate() + 1);
+    if (t >= e.getTime()) return false;
+  }
   return true;
 }
 function FilterBar({ children, hasFilters, onClear, shown, total, noun = "row" }) {
