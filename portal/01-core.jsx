@@ -923,6 +923,100 @@ function FilterBar({ children, hasFilters, onClear, shown, total, noun = "row" }
   );
 }
 
+// ─── Skeletons ───
+// Carolyn, 2026-08-26, watching a list sit empty: "the page opens and there's nothing
+// there." Then, after Ahsan showed her the grey blocks another product paints while it
+// loads (36:26): "so let's do that."
+//
+// A skeleton is not decoration — it is the difference between "this is broken" and "this
+// is coming". The word "Loading…" on an empty card says the former to everyone who has
+// ever waited on a broken page, which is everyone.
+//
+// ⚠️ NO CSS ANIMATION HERE, deliberately. The obvious shimmer is a keyframed gradient, and
+// keyframes need a <style> rule — this codebase has no stylesheet for components, every
+// style is an inline object, and rAF-driven animation does not run in a backgrounded tab
+// (documented on the 3D viewer). A flat block that is honestly still is better than a
+// shimmer that freezes half-swept and reads as a hang.
+function SkelBar({ w = "100%", h = 11, style = {} }) {
+  return <div style={{ width: w, height: h, borderRadius: 4, background: "#E2E8F0", ...style }} />;
+}
+
+// Table-shaped skeleton: the same column count as the real table, so the header row and the
+// first paint line up and nothing jumps when the rows arrive.
+function SkelRows({ cols = 5, rows = 6, widths = null }) {
+  const w = widths || Array.from({ length: cols }, (_, i) => (i === 0 ? "62%" : i === cols - 1 ? "40%" : "72%"));
+  return (
+    <>
+      {Array.from({ length: rows }, (_, r) => (
+        <tr key={r}>
+          {Array.from({ length: cols }, (_, c) => (
+            <td key={c} style={{ padding: "11px 10px", borderTop: "1px solid #F1F5F9" }}>
+              {/* Fade down the list: the eye reads it as "more below", not as six equal
+                  pending things it has to track. */}
+              <SkelBar w={w[c]} style={{ opacity: 1 - r * 0.11 }} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+// ─── Page size ───
+// Carolyn, 2026-08-26 37:40: "some companies have 10, 20, 30, 40, 50, 100 — which is
+// probably what we need to build into it." Thirty is her default because it is the number
+// she said last and the number the tenants she was looking at were already showing.
+//
+// This pages what is ALREADY IN MEMORY. It is a rendering cap, not a query cap: the reads
+// stay whole, so the counts, the KPI tiles and the search still see every row. Paging the
+// query instead would make "3 of 412" a lie the moment someone typed in the search box.
+const PAGE_SIZES = [10, 20, 30, 50, 100];
+const DEFAULT_PAGE_SIZE = 30;
+
+function PageBar({ size, onSize, page, onPage, total, noun = "row" }) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  const cur = Math.min(page, pages);
+  const from = total === 0 ? 0 : (cur - 1) * size + 1;
+  const to = Math.min(total, cur * size);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12, fontSize: 12, color: "#64748B" }}>
+      <span>Show</span>
+      <select value={size} onChange={(e) => { onSize(Number(e.target.value)); onPage(1); }}
+        style={{ ...S.input, width: "auto", padding: "4px 8px", fontSize: 12 }}>
+        {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+      </select>
+      <span>{total === 0 ? `No ${noun}s` : `${from}–${to} of ${total} ${noun}${total === 1 ? "" : "s"}`}</span>
+      {pages > 1 && (
+        <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <button type="button" disabled={cur <= 1} onClick={() => onPage(cur - 1)}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", opacity: cur <= 1 ? 0.45 : 1, cursor: cur <= 1 ? "default" : "pointer" }}>← Prev</button>
+          <span style={{ fontWeight: 700, color: "#475569" }}>Page {cur} of {pages}</span>
+          <button type="button" disabled={cur >= pages} onClick={() => onPage(cur + 1)}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", opacity: cur >= pages ? 0.45 : 1, cursor: cur >= pages ? "default" : "pointer" }}>Next →</button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Remembering the choice is the whole point — a rep who picks 100 wants 100 tomorrow too,
+// and re-picking it every morning is how a setting becomes an annoyance. Per table, because
+// Contacts and Orders are different-shaped lists. localStorage can throw (private windows,
+// blocked site data), so every read and write is guarded and falls back to the default.
+function usePageSize(key) {
+  const [size, setSize] = useState(() => {
+    try {
+      const v = Number(window.localStorage.getItem("ss.pageSize." + key));
+      return PAGE_SIZES.includes(v) ? v : DEFAULT_PAGE_SIZE;
+    } catch (_e) { return DEFAULT_PAGE_SIZE; }
+  });
+  const set = useCallback((n) => {
+    setSize(n);
+    try { window.localStorage.setItem("ss.pageSize." + key, String(n)); } catch (_e) { /* a remembered size is a nicety */ }
+  }, [key]);
+  return [size, set];
+}
+
 // ─── Delete a design ───
 // Carolyn, 2026-06-24: until now a deletion meant going into Supabase by hand.
 //

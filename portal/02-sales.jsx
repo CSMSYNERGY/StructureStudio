@@ -205,6 +205,16 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
 
+  // Paging applies to the LIST only. A board showing "30 of 400" cards is not a pipeline —
+  // the whole point of the board is seeing where everything sits at once, and a column that
+  // silently holds back its tail would be read as an empty stage.
+  const [pageSize, setPageSize] = usePageSize("designs");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, view]);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   return (
     <div style={S.card}>
       <CardHead
@@ -242,7 +252,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {error && <div style={S.err}>{error}</div>}
-      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
+          see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              {["Date", "Customer", "Contact", "Building", "Estimate #", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+            </tr></thead>
+            <tbody><SkelRows cols={7} rows={6} /></tbody>
+          </table>
+        </div>
+      )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
@@ -312,7 +333,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {sorted.map((r) => {
+              {paged.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const vs = vmap[r.short_code] || [];       // newest first
                 const older = vs.slice(1);                  // everything below the latest
@@ -421,6 +442,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               })}
             </tbody>
           </table>
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="design" />
         </div>
       )}
       {delTarget && (
@@ -687,6 +709,17 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
 
+  // Paging is the LAST step, over the fully filtered and sorted list, so the counts above
+  // ("12 of 340") keep describing the whole tenant rather than the visible page.
+  const [pageSize, setPageSize] = usePageSize("contacts");
+  const [page, setPage] = useState(1);
+  // Any change to what is being listed sends you back to page 1 — staying on page 7 of a
+  // search that now returns four contacts shows an empty table and reads as a broken page.
+  useEffect(() => { setPage(1); }, [query, statusFilter, fFrom, fTo, fContact]);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   // ── Details drawer (per contact): what they changed + their estimate activity ──
   const [detailsFor, setDetailsFor] = useState(null); // group key | null
   const [activity, setActivity] = useState(null);     // contact_activity payload
@@ -748,7 +781,19 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
       )}
       {error && <div style={S.err}>{error}</div>}
-      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* The skeleton carries the real table's seven columns, so when the rows land they
+          replace grey bars that are already the right shape and nothing shifts under the
+          cursor. This is the state Carolyn was describing as "there's nothing there". */}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              {["Customer", "Contact", "Designs", "First seen", "Last activity", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+            </tr></thead>
+            <tbody><SkelRows cols={7} rows={6} /></tbody>
+          </table>
+        </div>
+      )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts yet. Share your customer link — everyone who submits a design shows up here.</p>
       )}
@@ -774,7 +819,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
               <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {sorted.map((g) => {
+              {paged.map((g) => {
                 // Browsing leads get the brand light blue rather than a fulfillment colour —
                 // they are interest, not an order state.
                 const sc = g.browsing ? { bg: "#DBEAFF", fg: "#3D3672" } : (STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent);
@@ -865,6 +910,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
               })}
             </tbody>
           </table>
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="contact" />
         </div>
       )}
     </div>

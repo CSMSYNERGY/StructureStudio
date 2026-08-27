@@ -765,8 +765,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   const hasFacets = !!fFrom || !!fTo || fMin !== "" || fMax !== "";
   const clearFacets = () => { setFFrom(""); setFTo(""); setFMin(""); setFMax(""); };
 
+  // MONEY ARRIVES SECOND, and the screen says so until it does.
+  //
+  // Carolyn, 2026-08-26, on Orders: "I feel like it takes a while for that to load too."
+  // It did, for the same reason Contacts did — one await chain, one setRows at the end. But
+  // Orders cannot simply paint its first read: the SS-only row filter needs `designs` (a
+  // GHL-quoted order must never appear), so orders+designs is the smallest honest unit.
+  //
+  // Payments are the slow leg — a paginated loop over every payment the tenant has ever
+  // taken — and they only affect MONEY, not which rows exist. So they land second, and
+  // until they do, every figure derived from them is rendered as pending rather than as
+  // zero. Painting $0 collected and "Awaiting payment" on a settled order for two seconds
+  // is not a faster page, it is a page that lies about money and then corrects itself,
+  // which is exactly the silent understatement the payment pagination exists to prevent.
+  const [moneyReady, setMoneyReady] = useState(false);
   const load = useCallback(async () => {
     setError(null);
+    setMoneyReady(false);
     const { data: ords, error: oErr } = await sb
       .from("orders").select("*").eq("client_id", clientId).order("ordered_at", { ascending: false }).limit(2000);
     if (oErr) { setError(oErr.message); setRows([]); return; }
@@ -791,10 +806,26 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         if (!data || data.length < page) return { data: out };
       }
     };
-    const [dsnRes, paysRes, coRes] = await Promise.all([
-      codes.length
-        ? sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
-        : Promise.resolve({ data: [] }),
+    const dsnRes = codes.length
+      ? await sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
+      : { data: [] };
+    // A failed designs read must not read as "no designs": byCode would come up empty,
+    // the SS-only filter below would drop EVERY order, and the tab would show
+    // "No orders yet." + $0.00 tiles with nothing anywhere saying a read failed.
+    if (dsnRes.error) { setError(dsnRes.error.message); setRows([]); return; }
+    const byCode = {}; (dsnRes.data || []).forEach((d) => { byCode[d.short_code] = d; });
+    // SS ORDERS ONLY (Carolyn 2026-08-24: "the Orders tab should NOT show any orders
+    // from GHL — only the SS invoices/orders"). The designs_ensure_order trigger mints
+    // a row for EVERY accepted/invoiced design, GHL-quoted ones included — those rows
+    // stay in the table (other code may care), but this tab is the ledger of paperwork
+    // StructureStudio issued: the design carries an ss_quote_number, or the order has no
+    // design at all (a future manual/walk-in order is SS-native by definition).
+    const ssOrders = list.filter((o) => !o.short_code || (byCode[o.short_code] && byCode[o.short_code].ss_quote_number));
+    // PAINT NOW: the right rows, with the money still marked pending. `paid: 0` is never
+    // read while moneyReady is false — every consumer of it is gated below.
+    setRows(ssOrders.map((o) => ({ o, d: byCode[o.short_code] || null, pays: [], paid: 0, coPending: false })));
+
+    const [paysRes, coRes] = await Promise.all([
       fetchAllPayments(),
       // Pending change orders (migration 126): the row wears an amber chip, and the server
       // 409s an invoice while one is open — the chip is the courtesy half of that rule.
@@ -803,36 +834,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         : Promise.resolve({ data: [] }),
     ]);
     // A failed payments read must not render every order as unpaid — that's the same
-    // silent understatement the paging above exists to prevent.
-    if (paysRes.error) { setError(paysRes.error.message); setRows([]); return; }
-    // A failed designs read must not read as "no designs": byCode would come up empty,
-    // the SS-only filter below would drop EVERY order, and the tab would show
-    // "No orders yet." + $0.00 tiles with nothing anywhere saying a read failed.
-    if (dsnRes.error) { setError(dsnRes.error.message); setRows([]); return; }
+    // silent understatement the paging above exists to prevent. moneyReady stays false, so
+    // the figures stay pending rather than resolving to a wrong number behind an error.
+    if (paysRes.error) { setError(paysRes.error.message); return; }
     // Same for change orders: swallowing this read hides every "CO pending" chip while
     // the server's invoice 409 still stands — the courtesy half of the rule goes dark.
-    if (coRes.error) { setError(coRes.error.message); setRows([]); return; }
-    const pays = paysRes.data;
-    const dsn = dsnRes.data;
-    const byCode = {}; (dsn || []).forEach((d) => { byCode[d.short_code] = d; });
-    const payByOrder = {}; (pays || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
+    if (coRes.error) { setError(coRes.error.message); return; }
+    const payByOrder = {}; (paysRes.data || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
     const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
-    setRows(list
-      // SS ORDERS ONLY (Carolyn 2026-08-24: "the Orders tab should NOT show any orders
-      // from GHL — only the SS invoices/orders"). The designs_ensure_order trigger mints
-      // a row for EVERY accepted/invoiced design, GHL-quoted ones included — those rows
-      // stay in the table (other code may care), but this tab is the ledger of paperwork
-      // StructureStudio issued: the design carries an ss_quote_number, or the order has no
-      // design at all (a future manual/walk-in order is SS-native by definition).
-      .filter((o) => !o.short_code || (byCode[o.short_code] && byCode[o.short_code].ss_quote_number))
-      .map((o) => {
-        const ps = payByOrder[o.id] || [];
-        return {
-          o, d: byCode[o.short_code] || null, pays: ps,
-          paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
-          coPending: pendingCo.has(o.short_code),
-        };
-      }));
+    setRows(ssOrders.map((o) => {
+      const ps = payByOrder[o.id] || [];
+      return {
+        o, d: byCode[o.short_code] || null, pays: ps,
+        paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
+        coPending: pendingCo.has(o.short_code),
+      };
+    }));
+    setMoneyReady(true);
   }, [clientId]);
 
   // Refresh = re-read the tables. This used to also pull totals/statuses from GHL
@@ -921,6 +939,10 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   };
   const balOf = (r) => (r.o.total_cents == null ? null : r.o.total_cents - r.paid);
   const stateOf = (r) => {
+    // Every state below "Needs total" is a claim about what has been collected, and until
+    // the payments read lands we do not know. One honest pending state beats six confident
+    // wrong ones. It is deliberately not a filterable key — see the chip guard below.
+    if (!moneyReady) return { key: "pending", label: "…", bg: "#F1F5F9", fg: "#94A3B8" };
     const bal = balOf(r);
     if (bal == null) return { key: "nototal", label: "Needs total", bg: "#F1F5F9", fg: "#475569" };
     // Collected more than the total — say so plainly instead of "Paid in full",
@@ -944,7 +966,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
 
   const all = rows || [];
   const shown = all.filter((r) => {
-    if (filter !== "all" && stateOf(r).key !== filter) return false;
+    // While the money is pending every row reads "pending", so a state filter left over
+    // from before a Refresh would empty the table for a second and look like a wipe.
+    if (moneyReady && filter !== "all" && stateOf(r).key !== filter) return false;
     if (!inDateRange(r.o.ordered_at, fFrom, fTo)) return false;
     // Amount range compares the ORDER TOTAL in dollars; an order with no total yet only
     // shows while no amount bound is set (it has no amount to compare).
@@ -960,6 +984,14 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   });
   const openRow = openId ? all.find((r) => r.o.id === openId) : null;
 
+  // Paging over the filtered list; the tiles and counts above still read the whole tenant.
+  const [pageSize, setPageSize] = usePageSize("orders");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [query, filter, fFrom, fTo, fMin, fMax]);
+  const pageCount = Math.max(1, Math.ceil(shown.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const pagedShown = shown.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   // Summary tiles — only orders with a known total can contribute to money figures.
   const withTotal = all.filter((r) => r.o.total_cents != null);
   const openBalance = withTotal.reduce((s, r) => s + Math.max(0, balOf(r)), 0);
@@ -972,7 +1004,33 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   const needsTotal = all.filter((r) => r.o.total_cents == null).length;
 
   if (error) return <div style={S.err}>Couldn't load orders: {error}</div>;
-  if (rows === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading orders…</div>;
+  if (rows === null) {
+    // Tiles then table, in the shape they will occupy — the page stops jumping when the
+    // data lands, which is half of what makes a load feel fast.
+    return (
+      <div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} style={{ ...S.card, marginBottom: 0, padding: "13px 15px" }}>
+              <SkelBar w="58%" h={9} />
+              <SkelBar w="72%" h={21} style={{ marginTop: 9 }} />
+              <SkelBar w="46%" h={8} style={{ marginTop: 8 }} />
+            </div>
+          ))}
+        </div>
+        <div style={S.card}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                {["Order", "Customer", "Building", "Ordered", "Total", "Paid", "Status", "Schedule"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+              </tr></thead>
+              <tbody><SkelRows cols={8} rows={6} /></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} />;
 
@@ -992,23 +1050,45 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     <div>
       {schedMsg && schedMsg.ok && <div style={S.okMsg}>{schedMsg.ok}</div>}
       {schedMsg && schedMsg.err && <div style={S.err}>{schedMsg.err}</div>}
+      {/* Money tiles stay grey until the payments read lands. A $0.00 "Collected" that
+          becomes $84,000 a second later is worse than a placeholder — the first number is
+          the one someone reads out loud. "Needs a total" is safe either way: it counts
+          orders with no total_cents, which the first read already knows. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
-        {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
-        {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
-        {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
-        {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
-        {tile("Awaiting payment", String(awaitingCount), "signed, nothing collected", "#9F1239")}
+        {moneyReady ? (
+          <>
+            {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
+            {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
+            {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
+            {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
+            {tile("Awaiting payment", String(awaitingCount), "signed, nothing collected", "#9F1239")}
+          </>
+        ) : (
+          ["Open balance", "Collected", "Needs invoice", "Awaiting payment"].map((label) => (
+            <div key={label} style={{ ...S.card, marginBottom: 0, padding: "13px 15px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+              <SkelBar w="70%" h={21} style={{ marginTop: 9 }} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5 }}>counting payments…</div>
+            </div>
+          ))
+        )}
         {needsTotal > 0 && tile("Needs a total", String(needsTotal), "set it on the order", null)}
       </div>
 
       <div style={S.card}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders {rows ? (query || filter !== "all" || hasFacets ? `(${shown.length} of ${all.length})` : `(${all.length})`) : ""}</div>
-          {chip("all", "All")}{chip("needsinvoice", "Needs invoice")}
-          {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
-          {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
-          {needsTotal > 0 && chip("nototal", "Needs total")}
-          {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
+          {/* Every chip below "All" filters on a payment-derived state, so they only appear
+              once the payments are counted — a chip that reliably returns nothing for two
+              seconds teaches people it is broken. */}
+          {chip("all", "All")}
+          {moneyReady && (<>
+            {chip("needsinvoice", "Needs invoice")}
+            {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
+            {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
+            {needsTotal > 0 && chip("nototal", "Needs total")}
+            {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
+          </>)}
           <div style={{ marginLeft: "auto", minWidth: 240, flex: "0 1 300px" }}>
             <SearchInput value={query} onChange={setQuery} placeholder="Search orders — name, building, order #…" />
           </div>
@@ -1050,7 +1130,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
                 <th style={S.th}></th>
               </tr></thead>
               <tbody>
-                {shown.map((r) => {
+                {pagedShown.map((r) => {
                   const st = stateOf(r); const bal = balOf(r);
                   const numCell = { ...S.td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
                   return (
@@ -1061,9 +1141,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
                       <td style={S.td}>{bldgOf(r)}</td>
                       <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.o.ordered_at)}</td>
                       <td style={numCell}>{r.o.total_cents == null ? <span style={{ color: ACCENT, fontWeight: 700 }}>Set total</span> : money(r.o.total_cents)}</td>
-                      <td style={numCell}>{r.paid ? money(r.paid) : <span style={{ color: "#94A3B8" }}>—</span>}</td>
+                      {/* Paid and Balance are unknown until the payments read lands. A dash
+                          would read as "nothing paid", which is a claim, so these stay grey
+                          bars — the one cell shape that says "not yet" rather than "zero". */}
+                      <td style={numCell}>{!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : r.paid ? money(r.paid) : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={{ ...numCell, fontWeight: bal ? 800 : 600, color: bal === 0 ? "#94A3B8" : bal < 0 ? "#9A3412" : "#1E293B" }}>
-                        {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+                        {!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
                       </td>
                       <td style={S.td}>
                         <span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
@@ -1082,6 +1165,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
                 })}
               </tbody>
             </table>
+            <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={shown.length} noun="order" />
           </div>
         )}
       </div>
