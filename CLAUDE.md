@@ -21,6 +21,9 @@ StructureStudio is a multi-tenant SaaS floor-plan designer + quote builder for c
   | `2d67060` → `beta` 07:21:02 | structurestudio-beta | 07:23:55 | ~3 min |
   | `00ebd85` merge → `main` 11:17:42 | structurestudio-app | 11:18:38 | ~1 min |
   | `b3706e3` → `beta` 14:17:15 | structurestudio-beta | 14:18:38 | ~1 min |
+  | `1d1bc11` → `beta` 16:22:29 (**this edit**) | structurestudio-beta | 16:24:44 | ~2 min |
+
+  The last row is the important one, because it is the only PROSPECTIVE test: the claim was written first, then a docs-only commit was pushed to see whether a deployment appeared, and one did — unattended, with no `wrangler` invocation, inside three minutes. The four rows above it are retrospective correlation; that one is a prediction that held.
 
   Production's earlier promotions match the same shape unattended — 08-10T10:34 (merge 10:33), 08-17T10:25 (merge 10:24), 08-24T10:31 (merge 10:30) — which is exactly what the migration work log independently closed as "connected and working" on 2026-08-21. Note what those rows prove in passing: they are Workers Builds deployments beyond doubt (nobody was at a keyboard at 10:25 UTC on a Sunday), and they all read `Source: Unknown (deployment)`. That single fact retires the old heuristic on its own.
 
