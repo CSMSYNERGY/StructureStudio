@@ -280,7 +280,53 @@ function SettingsView({ section }) {
     );
   };
 
-  if (!status && !error) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading settings…</p></div>;
+  // Grey blocks in the form's own shape instead of the word "Loading" — see SkelBar in
+  // 01-core. The `status` read genuinely has to land before the real form paints: every
+  // field is prefilled from it, and `status.configured` is what decides between
+  // "Connected — location …" and "Not connected yet", so painting the form early would
+  // state a connection we can't prove. The shape is the part we CAN show honestly.
+  //
+  // Section-aware on purpose. Connection and Branding share this one gate but render
+  // different cards, and a single shared skeleton would promise the Branding logo tile to
+  // someone sitting on the CRM screen — a skeleton that overstates the answer is the exact
+  // thing skeletons exist to avoid.
+  if (!status && !error) {
+    const skFields = (n, seed) => (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+        {Array.from({ length: n }, (_, i) => (
+          <div key={seed + i}><SkelBar w="42%" h={9} style={{ marginBottom: 7 }} /><SkelBar w="100%" h={30} /></div>
+        ))}
+      </div>
+    );
+    return (
+      <div>
+        {show("connection") && (
+          <div style={S.card}>
+            <SkelBar w={150} h={15} style={{ marginBottom: 14 }} />
+            {skFields(2, 0)}
+            <SkelBar w={210} h={32} style={{ marginTop: 14 }} />
+          </div>
+        )}
+        {show("branding") && (
+          <div style={S.card}>
+            <SkelBar w={250} h={15} style={{ marginBottom: 14 }} />
+            {skFields(4, 10)}
+            {/* The logo tile, at the size the real one renders (96×64). */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 14 }}>
+              <SkelBar w={96} h={64} /><SkelBar w={170} h={12} />
+            </div>
+          </div>
+        )}
+        {show("branding") && (
+          <div style={S.card}>
+            <SkelBar w={210} h={15} style={{ marginBottom: 14 }} />
+            {skFields(4, 20)}
+            <div style={{ marginTop: 12 }}><SkelBar w="30%" h={9} style={{ marginBottom: 7 }} /><SkelBar w="100%" h={70} /></div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={save} autoComplete="off">
@@ -881,7 +927,37 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
     cancelled: { bg: "#F1F5F9", fg: "#64748B", label: "Cancelled" },
   };
 
-  if (data === null) return <div style={S.card}><p style={{ fontSize: 13, color: "#64748B" }}>Loading billing…</p></div>;
+  // The whole tab sat behind this one early return — the founding-price banner, the wallet
+  // card and every plan card withheld until portal-billing's `status` landed. That read is
+  // the only leg here and all of it is used (plans, subscriptions, wallet, discount), so
+  // there is no fast/slow split to exploit and nothing to defer; what there IS to fix is
+  // the empty card. Same early return, in the tab's real shape: banner strip, wallet card,
+  // then the plan grid at the same `minmax(230px, 1fr)` the real one uses, so nothing jumps
+  // when the answer arrives.
+  if (data === null) return (
+    <div>
+      <SkelBar w="100%" h={62} style={{ borderRadius: 10, marginBottom: 14 }} />
+      <div style={S.card}>
+        <SkelBar w={110} h={15} style={{ marginBottom: 14 }} />
+        <div style={{ display: "flex", gap: 26, flexWrap: "wrap", marginBottom: 14 }}>
+          {[0, 1].map((i) => <div key={i} style={{ minWidth: 120 }}><SkelBar w="60%" h={9} style={{ marginBottom: 5 }} /><SkelBar w="80%" h={16} /></div>)}
+        </div>
+        <SkelBar w="70%" h={12} />
+      </div>
+      <div style={S.card}>
+        <SkelBar w={180} h={15} style={{ marginBottom: 14 }} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12 }}>
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
+              <SkelBar w="65%" h={13} style={{ marginBottom: 10 }} />
+              <SkelBar w={120} h={22} style={{ borderRadius: 20, marginBottom: 10 }} />
+              <SkelBar w="45%" h={19} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div>
@@ -1564,7 +1640,26 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
           use it only when you’re sure you won’t need that style again.
         </p>
-        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+        {/* Grey blocks in the row's own shape rather than the word "Loading" (see SkelBar in
+            01-core). This tab is NOT a blank screen — the headings, the sequencing banner and
+            all the explanatory copy paint immediately; it is the one data region that sat grey
+            for a whole `catalog` round trip. SkelRows is <tr>-based and belongs only where a
+            real table exists, and this is a flex list, so the blocks are composed into the same
+            row: handle, photo, name, then the controls on the right. */}
+        {!cat ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {[0, 1, 2].map((i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: "1px solid #E2E8F0", borderRadius: 8, opacity: 1 - i * 0.18 }}>
+                <SkelBar w={10} h={14} style={{ flexShrink: 0 }} />
+                <SkelBar w={48} h={36} style={{ flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 80 }}><SkelBar w="45%" h={12} /></div>
+                <SkelBar w={44} h={20} style={{ flexShrink: 0 }} />
+                <SkelBar w={106} h={14} style={{ flexShrink: 0 }} />
+                <SkelBar w={46} h={26} style={{ flexShrink: 0 }} /><SkelBar w={46} h={26} style={{ flexShrink: 0 }} /><SkelBar w={56} h={26} style={{ flexShrink: 0 }} />
+              </div>
+            ))}
+          </div>
+        ) : (
           <div>
             {allStyles().length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
@@ -1577,8 +1672,10 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                     onDragEnd={() => setDragIdx(null)}
                     style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", border: `1px solid ${dragIdx === i ? ACCENT : "#E2E8F0"}`, borderRadius: 8, opacity: dragIdx === i ? 0.4 : (s.active ? 1 : 0.55), background: "#FFF", cursor: styleBusy ? "default" : "grab" }}>
                     <span title="Drag to reorder" style={{ color: "#CBD5E1", fontSize: 16, userSelect: "none", flexShrink: 0 }}>⠿</span>
+                    {/* loading="lazy": one image request per style, every one fired the instant
+                        the list paints and competing with whatever the tab is still fetching. */}
                     {s.image_url
-                      ? <img src={s.image_url} alt="" style={thumb} />
+                      ? <img src={s.image_url} alt="" loading="lazy" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
                     <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
                     {/* Whether this style has a 3D look of its own yet. Read-only here —
@@ -1637,7 +1734,14 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
           built-in items — so you can set how many of a specific catalog item come included with each size.
         </p>
-        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : activeStyles().length === 0 ? (
+        {/* This gate gives way to a two-button row (download template / upload sheet), so the
+            skeleton is two button-sized blocks — nothing more. Claiming any more shape here
+            would be inventing controls this card doesn't have. */}
+        {!cat ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <SkelBar w={186} h={30} /><SkelBar w={156} h={30} />
+          </div>
+        ) : activeStyles().length === 0 ? (
           <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
             <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
             (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
@@ -1664,6 +1768,48 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     </>
   );
 }
+
+// ─── One catalog read on mount, not five ───
+// Settings → Options mounts four components side by side (08-integrations.jsx:2127:
+// LayoutPricing, DoorsView, RampsView, WindowsView) and FIVE of the things inside them —
+// LayoutPricing, the door catalog, RampsView, WindowColorsEditor, the window catalog —
+// each fire their OWN identical portal-settings {action:"catalog"} in the same mount tick.
+// That action is one edge invocation doing ten parallel table reads
+// (supabase/functions/portal-settings/index.ts:1027-1082) and returning the whole payload
+// every time; four of the five callers keep a slice of it (one fixture category + colors,
+// windowColors alone, rampSettings alone). Five identical copies contend on the same edge
+// instance and the tab is only whole when the SLOWEST lands — so the wait was the tail of
+// the distribution, not the mean.
+//
+// This coalesces those flights and does nothing else: same action, same arguments, same
+// payload, same tenant scoping. Only how many copies go on the wire changes.
+//
+// ⚠️ IN-FLIGHT ONLY, AND ONLY WITHIN THE TICK THAT STARTED IT — a settled result is NEVER
+// reused. Every mutation on this tab ends in `await load()` (LayoutPricing.toggleArchive,
+// FixtureCatalog.quickSave, save_window_colors → WindowsView's refreshKey), and handing one
+// of those a cached pre-mutation payload would change what the screen MEANS, not when it
+// paints. Same-tick is what makes that airtight without hooking every mutation: React
+// flushes all of a commit's mount effects in one synchronous pass, so the five share, while
+// a post-mutation reload is always a later tick and always gets its own read. The reset is
+// a microtask rather than a timer because background tabs throttle timers and would leave
+// the flight joinable for up to a second.
+//
+// Hung off `window` rather than declared here on purpose: portal/01..09 are concatenated
+// into ONE lexical scope, so a top-level binding in this file is a top-level binding for
+// every other part too.
+window.__ssCatalogFlight = window.__ssCatalogFlight || (function () {
+  let key = null, flight = null;
+  return function (invoke, k) {
+    if (flight && key === k) return flight;
+    key = k;
+    flight = invoke();
+    const mine = flight;
+    const done = () => { if (flight === mine) { flight = null; key = null; } };
+    Promise.resolve().then(done);
+    flight.then(done, done);   // belt and braces if a caller ever reaches this off-tick
+    return flight;
+  };
+})();
 
 // ─── Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp) ───
 // Edits the DEFAULT (all-styles) price for each enabled layout item. Per-style overrides
@@ -1699,7 +1845,14 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   };
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    // Joins the other catalog reads fired in this same mount tick instead of being a fifth
+    // contending copy of the same ten-table fan-out — see window.__ssCatalogFlight above.
+    // The key is the effective tenant: `scoped` states it explicitly in operator view-as,
+    // and 01-core.jsx:157-165 injects the same value when it doesn't.
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data); setRows(buildRows(data));
   };
@@ -1832,7 +1985,20 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
           These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Structures</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
-        {!cat ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : rows.length === 0 ? (
+        {/* A real table, so the skeleton keeps the real <thead> and puts SkelRows in the body
+            at the same six columns — Item / How it's priced / Rate / Image / Internal /
+            archive — so the header and the first paint line up and nothing jumps when the
+            rows land. Grey blocks, not the word "Loading" (see SkelRows in 01-core). */}
+        {!cat ? (
+          <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal</th><th style={S.th}></th>
+              </tr></thead>
+              <tbody><SkelRows cols={6} rows={6} widths={["58%", "80%", "60%", "50%", "24%", "44%"]} /></tbody>
+            </table>
+          </div>
+        ) : rows.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
         ) : (
           <>
@@ -1859,7 +2025,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                     <td style={S.td}>
                       {r.image_url ? (
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <img src={r.image_url} alt="" style={thumb} />
+                          <img src={r.image_url} alt="" loading="lazy" style={thumb} />
                           <button onClick={() => removeRowImg(r.item_key)} disabled={busy || imgBusyKey === r.item_key} style={S.btn("#F1F5F9", "#334155")}>Remove</button>
                         </div>
                       ) : (
@@ -1959,6 +2125,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   const [straighten, setStraighten] = useState(null);   // File awaiting the straighten step
   const [dlBusy, setDlBusy] = useState(false);
   const [fileKey, setFileKey] = useState(0);
+  // Paging. This is the one list on the Options tab that plausibly passes 30 rows — a builder
+  // with forty window sizes — and every row renders its own <img>, so forty rows meant forty
+  // image requests competing with the page. Per category, because doors, ramps and windows
+  // are different-length lists and a builder who picks 100 windows didn't ask for 100 ramps.
+  const [pageSize, setPageSize] = usePageSize("fixtures." + category);
+  const [page, setPage] = useState(1);
   // Door-flagged palette rows (Colors tab → Doors tick), for the color-mode UI. Doors only.
   const [doorColors, setDoorColors] = useState([]);
   const isDoorCat = category === "door";
@@ -1984,7 +2156,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
   });
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    // Joins the sibling catalog reads fired in this same mount tick — see
+    // window.__ssCatalogFlight above. The door and window catalogs each used to be one more
+    // contending copy of the whole ten-table payload for the sake of one filtered slice.
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const list = (data.fixtures || []).filter((f) => (f.category || "door") === category).map(mapRow);
     // Display order = the order drag persists: live items first, archived sink to the bottom.
@@ -2023,6 +2201,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       const saved = { ...edit.draft, id: edit.draft.id || (data && data.id) || null };
       setRows((rs) => edit.idx < 0 ? [...rs, saved] : rs.map((r, j) => j === edit.idx ? saved : r));
+      // A new line is APPENDED, so with paging on it lands on the last page. Follow it there,
+      // or a builder on page 1 of a long catalog saves a door and watches it vanish.
+      if (edit.idx < 0) setPage(Math.max(1, Math.ceil((rows.length + 1) / pageSize)));
       setEdit(null);
       setMsg({ ok: `Saved “${saved.name}”.` });
     } catch (e) { setMsg({ err: e.message }); }
@@ -2043,12 +2224,28 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     setBusy(false);
   };
 
+  // `edit.idx` is a FULL-ARRAY index and every delete shifts the array under it. Unmaintained,
+  // it addresses a different row than the one on screen: saveLine does
+  // `rs.map((r, j) => j === edit.idx ? saved : r)`, so an edit opened on index 5 with index 0
+  // then deleted writes the saved values over what used to be row 6 — old row 5 appears twice
+  // and old row 6 vanishes, with no error, because the SERVER write is keyed on draft.id and
+  // succeeds. Past the end of the array the same map matches nothing at all and Save reports
+  // success over a list it never changed. Both are silent, so the index is maintained here.
+  const dropFromEdit = (removedIdx) => {
+    if (removedIdx < 0) return;
+    setEdit((e) => {
+      if (!e || e.idx < 0) return e;            // the add-new panel has no row to follow
+      if (e.idx === removedIdx) return null;    // editing the row that just went — close it
+      return e.idx > removedIdx ? { ...e, idx: e.idx - 1 } : e;
+    });
+  };
   const confirmDelete = async () => {
     const row = pendingDelete; if (!row) return;
     // A line that never reached the server has no id. Drop it locally instead of asking the
     // server to delete nothing — that round trip could only ever come back as an error, and
     // it left the builder unable to clear a row they could see.
     if (!row.id) {
+      dropFromEdit(rows.indexOf(row));
       setRows((rs) => rs.filter((r) => r !== row));
       setPendingDelete(null);
       setMsg({ ok: "Removed the unsaved line." });
@@ -2058,6 +2255,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delete_fixture", id: row.id }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      dropFromEdit(rows.indexOf(row));
       setRows((rs) => rs.filter((r) => r !== row));
       setPendingDelete(null);
       setMsg({ ok: `Deleted “${row.name}”.` });
@@ -2495,8 +2693,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       onDragEnd={() => setDragIdx(null)}
       style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${dragIdx === i ? ACCENT : "#E2E8F0"}`, borderRadius: 8, padding: "7px 10px", marginBottom: 8, opacity: dragIdx === i ? 0.4 : (r.archived ? 0.55 : 1), background: "#FFF", cursor: (!busy && !edit) ? "grab" : "default" }}>
       <span title="Drag to reorder — this is the order customers see" style={{ color: "#CBD5E1", fontSize: 16, userSelect: "none", flexShrink: 0 }}>⠿</span>
+      {/* loading="lazy": one image request per line, all fired at once the moment the list
+          paints. Paging caps how many exist at all; lazy caps how many of those race. */}
       {r.image_url
-        ? <img src={r.image_url} alt="" style={thumb} />
+        ? <img src={r.image_url} alt="" loading="lazy" style={thumb} />
         : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, color: "#CBD5E1" }}>📷</div>}
       <div style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
         <span style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }}>{r.name || "(unnamed)"}</span>
@@ -2512,6 +2712,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       <button onClick={() => setPendingDelete(r)} disabled={busy} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
     </div>
   );
+
+  // Clamped rather than reset: deleting the last row on the last page should fall back a
+  // page, not leave the builder staring at an empty list with no way to tell why.
+  const curPage = Math.min(page, Math.max(1, Math.ceil(rows.length / pageSize)));
 
   return (
     <>
@@ -2533,7 +2737,28 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       )}
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+      {/* Grey blocks in the line's own shape rather than the word "Loading" (see SkelBar in
+          01-core). These are flex lines, not a table, so SkelRows — which is <tr>-based —
+          would be the wrong component here; the blocks are composed into the same row
+          instead: handle, photo, name + summary, then the three per-line buttons. */}
+      {!loaded ? (
+        <div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+            <span style={{ flex: 1 }} /><SkelBar w={116} h={30} /><SkelBar w={78} h={30} />
+          </div>
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 10px", marginBottom: 8, opacity: 1 - i * 0.16 }}>
+              <SkelBar w={10} h={14} style={{ flexShrink: 0 }} />
+              <SkelBar w={48} h={36} style={{ flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "baseline", gap: 10 }}>
+                <SkelBar w={110} h={12} /><SkelBar w={150} h={10} />
+              </div>
+              <SkelBar w={44} h={26} style={{ flexShrink: 0 }} /><SkelBar w={62} h={26} style={{ flexShrink: 0 }} /><SkelBar w={28} h={26} style={{ flexShrink: 0 }} />
+            </div>
+          ))}
+          <SkelBar w={104} h={30} />
+        </div>
+      ) : (
         <>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
             <span style={{ flex: 1 }} />
@@ -2544,8 +2769,38 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
             </label>
           </div>
           {rows.length === 0 && !edit && <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Nothing here yet — click <b>+ {addLabel}</b> below to create your first one.</div>}
-          {rows.map((r, i) => (edit && edit.idx === i) ? <React.Fragment key={r.id || `edit-${i}`}>{editPanel()}</React.Fragment> : line(r, i))}
-          {edit && edit.idx < 0 && editPanel()}
+          {/* ⚠️ `edit.idx`, `dragIdx` and `moveRow(from,to)` are FULL-ARRAY indices, and
+              persistOrder posts the whole ordered id list to reorder_fixtures — so every
+              handler is still handed the GLOBAL index `i`, never the page-local `j`. Passing
+              the page-local one would reorder the wrong rows and silently persist that.
+              Dragging across a page boundary is impossible either way (there is no unrendered
+              row to drop onto) — a real limit of paging this list, not something to paper over. */}
+          {rows.slice((curPage - 1) * pageSize, curPage * pageSize).map((r, j) => {
+            const i = (curPage - 1) * pageSize + j;
+            return (edit && edit.idx === i) ? <React.Fragment key={r.id || `edit-${i}`}>{editPanel()}</React.Fragment> : line(r, i);
+          })}
+          {/* Shown once the list is longer than the SMALLEST offered size, not longer than the
+              current one: gated on `> pageSize`, a builder who picked 100 for their 40 windows
+              would watch the control that did it disappear, with no way back to 30. Below 10
+              rows no offered size can page the list, so the bar would be furniture. */}
+          {rows.length > PAGE_SIZES[0] && <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={rows.length} noun={noun} />}
+          {/* The panel also renders HERE when the row being edited is not on this page, which is
+              reachable the moment paging exists: open Edit on window #12, click "Next →", and the
+              panel — whose only Cancel button lives inside it — disappears with the row, while
+              `edit` stays set. That leaves "+ Add" greyed and every row undraggable with nothing
+              on screen explaining why, and the only escapes are paging back or clicking Edit on
+              another row, which silently discards the typed draft. Changing the page size does it
+              too (onSize resets to page 1). Keeping the panel visible lets the edit be finished or
+              cancelled from wherever the builder ended up.
+
+              The upper bound is min(page end, rows.length) and NOT the page end, because the slice
+              above is truncated by rows.length: on a partly-filled last page the band between them
+              is rendered by neither branch. `curPage * pageSize` alone put the panel back in the
+              exact lockout this comment describes, with no paging involved at all — a two-row
+              catalog, Edit the second row, delete the first. */}
+          {edit && (edit.idx < 0
+            || edit.idx < (curPage - 1) * pageSize
+            || edit.idx >= Math.min(curPage * pageSize, rows.length)) && editPanel()}
           <button onClick={() => setEdit({ idx: -1, draft: blank() })} disabled={busy || !!edit} style={{ ...S.btn("#1E293B", "#FFF"), opacity: (busy || !!edit) ? 0.55 : 1 }}>+ {addLabel}</button>
         </>
       )}
@@ -2660,7 +2915,13 @@ function RampsView({ viewingLabel = null, clientId = null }) {
   const [imgFileKey, setImgFileKey] = useState(0);
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    // Joins the sibling catalog reads fired in this same mount tick — see
+    // window.__ssCatalogFlight above. This component keeps `rampSettings` alone out of the
+    // whole ten-table payload, so its own copy of the round trip bought nothing.
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const rs = data.rampSettings || {};
     setMode(rs.mode === "custom" ? "custom" : "simple");
@@ -2722,7 +2983,33 @@ function RampsView({ viewingLabel = null, clientId = null }) {
           saves on its own. Enter sizes in feet/inches (8', 6'3", 36"). The <b>Save ramp settings</b> button applies the offer/mode
           and simple-ramp price.
         </p>
-        {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (<>
+        {/* Grey blocks in this card's own shape rather than the word "Loading" (see SkelBar in
+            01-core): the offer checkbox, the two mode cards at the same 1fr 1fr grid the real
+            ones use, then the simple-ramp fields. Nothing about which MODE the tenant is on is
+            claimed here — that answer is exactly what the read is still fetching. */}
+        {!loaded ? (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+              <SkelBar w={18} h={18} /><SkelBar w={210} h={13} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+              {[0, 1].map((i) => (
+                <div key={i} style={{ border: "2px solid #E2E8F0", borderRadius: 12, padding: "12px 14px", display: "flex", gap: 10 }}>
+                  <SkelBar w={16} h={16} style={{ borderRadius: "50%", flex: "0 0 auto" }} />
+                  <div style={{ flex: 1 }}><SkelBar w="50%" h={12} style={{ marginBottom: 7 }} /><SkelBar w="92%" h={10} /></div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div><SkelBar w={92} h={10} style={{ marginBottom: 6 }} /><SkelBar w={210} h={30} /></div>
+              <div><SkelBar w={40} h={10} style={{ marginBottom: 6 }} /><SkelBar w={130} h={30} /></div>
+              <div><SkelBar w={108} h={10} style={{ marginBottom: 6 }} /><SkelBar w={104} h={30} /></div>
+            </div>
+            <div style={{ display: "flex", marginTop: 20 }}>
+              <div style={{ flex: 1 }} /><SkelBar w={150} h={30} />
+            </div>
+          </div>
+        ) : (<>
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, fontSize: 14, fontWeight: 700, color: "#334155", cursor: "pointer" }}>
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ width: 18, height: 18, cursor: "pointer", accentColor: DOOR_MINT }} />
             Offer a ramp on your buildings
@@ -2774,7 +3061,14 @@ function WindowColorsEditor({ viewingLabel = null, clientId = null, onSaved = nu
   const [msg, setMsg] = useState(null);
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) });
+    // Joins the sibling catalog reads fired in this same mount tick — see
+    // window.__ssCatalogFlight above. This editor keeps `windowColors` alone out of the whole
+    // ten-table payload. NOTE the post-save `load()` below is a LATER tick and therefore
+    // always gets its own read — which is the point: it must never see pre-save colors.
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setRows((data.windowColors || []).map((c) => ({
       id: c.id, label: c.label || "", hex: c.hex || null,
@@ -2837,7 +3131,24 @@ function WindowColorsEditor({ viewingLabel = null, clientId = null, onSaved = nu
       </p>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      {!loaded ? <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div> : (
+      {/* A real table, so the skeleton keeps the real colgroup + header and drops SkelRows into
+          the body at the same seven columns — the header and the first paint line up and
+          nothing shifts when the colors land. Grey blocks, not the word "Loading" (see
+          SkelRows in 01-core). */}
+      {!loaded ? (
+        <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 12 }}>
+          <colgroup>
+            <col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "34%" }} />
+            <col style={{ width: "17%" }} /><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
+          </colgroup>
+          <thead><tr>
+            <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+            <th style={thc}>Price per window (USD)</th>
+            <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+          </tr></thead>
+          <tbody><SkelRows cols={7} rows={4} widths={["55%", "40%", "80%", "60%", "35%", "35%", "30%"]} /></tbody>
+        </table>
+      ) : (
         <>
           {rows.length > 0 && (
             <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 12 }}>
@@ -3147,7 +3458,36 @@ Anything not shown here will be removed from their account.`)) return;
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
-      {!cat ? <div style={S.card}><div style={{ fontSize: 13, color: "#94A3B8" }}>Loading…</div></div> : (
+      {/* This gate wraps ALL THREE sections, so the whole tab used to be one grey "Loading…"
+          line inside one card until the `catalog` read landed. Grey blocks in the real table's
+          shape instead (see SkelRows in 01-core): the paint section's own 13-column colgroup
+          and header, so the header and the first paint line up.
+          ONE section, not three. Three stacked skeletons would claim shingle and metal lists
+          this tenant may not have — and a skeleton that overstates the answer is the thing
+          skeletons exist to avoid. */}
+      {!cat ? (
+        <div style={S.card}>
+          <SkelBar w={140} h={15} style={{ marginBottom: 14 }} />
+          <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 14 }}>
+            <colgroup>
+              <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} />
+              <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} />
+              <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+            </colgroup>
+            <thead><tr>
+              <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+              <th style={thc}>Siding</th><th style={thc}>Trim</th><th style={thc}>Doors</th>
+              <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th><th style={thc}>Door price (USD)</th>
+              <th style={thc}>Custom</th><th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+            </tr></thead>
+            <tbody><SkelRows cols={13} rows={5} /></tbody>
+          </table>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <SkelBar w={98} h={30} /><SkelBar w={168} h={30} />
+            <div style={{ flex: 1 }} /><SkelBar w={100} h={30} />
+          </div>
+        </div>
+      ) : (
         <>
           {renderSection("paint", "Paint colors", paintDesc, true)}
           {renderSection("shingle", "Shingle colors", shingleDesc, false)}

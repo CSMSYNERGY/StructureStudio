@@ -184,8 +184,12 @@ __ssFunctions.invoke = async (name, opts) => {
       // "the race is fixed" from "the race now happens fifty times a day in silence".
       // Deliberately NOT routed through the 401 path below: this is a counter, not a fault.
       try {
+        // info, not error: this is a COUNTER for a transient condition the app then
+        // recovers from by itself, and filing it as a fault would put it straight back in
+        // the queue the severity split exists to keep clean. It shipped as an error for
+        // one afternoon and promptly became the top row there.
         ssLogError(SS_ERR_SOURCE, "call skipped: no session on the wire", "session_reconnecting",
-          { fn: name, action: opts && opts.body && opts.body.action, target: injected, status: null });
+          { fn: name, action: opts && opts.body && opts.body.action, target: injected, status: null }, "info");
       } catch (_l) { /* logging must never break the guard */ }
       const err = new Error("Your session is reconnecting — try that again in a moment.");
       err.ssNoSession = true;
