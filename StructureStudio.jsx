@@ -3863,9 +3863,41 @@ function buildShed3DModel(THREE, p) {
       plat.position.set(cx, elev - D3.LOFT_T / 2, cz);
       lg.add(plat);
       const ph = elev - D3.LOFT_T;
-      [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach((sgn) => {
-        const post = box(mat(D3_COLORS.bench), 0.28, ph, 0.28);
-        post.position.set(cx + sgn[0] * (w / 2 - 0.25), ph / 2, cz + sgn[1] * (d / 2 - 0.25));
+      // A loft is CARRIED BY THE WALLS IT TOUCHES. Carolyn, 2026-08-25, looking inside:
+      // "The loft is built sitting on this wall. So it does not have this here."
+      //
+      // It used to grow four posts unconditionally, inset a quarter foot from the platform
+      // edge. A click-placed loft is seeded widthFt = bldgW, so it spans wall to wall and
+      // those posts stood INSIDE the wall — a post buried in the siding, holding up a
+      // platform the wall was already holding up. Nobody frames it that way.
+      //
+      // So: a ledger board along every edge that meets a wall, and a post only at a corner
+      // where NEITHER adjacent edge does. A wall-to-wall loft ends up with two ledgers and no
+      // posts at all, which is the shape she was describing.
+      //
+      // Same 0.3 ft tolerance as checkLoftAttached, deliberately — that function decides
+      // whether the plan ALLOWS the loft, this decides how it is drawn, and the two
+      // disagreeing would mean a loft the plan calls supported drawn floating on posts.
+      // Edges here are in feet from the building's near corner, matching its convention.
+      const tol = 0.3;
+      const lF = (it.x - mgX) / scale - w / 2, rF = (it.x - mgX) / scale + w / 2;
+      const tF = (it.y - mgY) / scale - d / 2, bF = (it.y - mgY) / scale + d / 2;
+      const onW = Math.abs(lF - 0) < tol, onE = Math.abs(rF - bldgW) < tol;
+      const onN = Math.abs(tF - 0) < tol, onS = Math.abs(bF - bldgH) < tol;
+      const ledgerMat = mat(D3_COLORS.bench);
+      // Tucked under the platform and against the wall face, so it reads as the board the
+      // joists land on rather than a second slab.
+      const LD = 0.3, LT = 0.45;
+      if (onW) { const b1 = box(ledgerMat, LD, LT, d); b1.position.set(cx - w / 2 + LD / 2, elev - D3.LOFT_T - LT / 2, cz); lg.add(b1); }
+      if (onE) { const b2 = box(ledgerMat, LD, LT, d); b2.position.set(cx + w / 2 - LD / 2, elev - D3.LOFT_T - LT / 2, cz); lg.add(b2); }
+      if (onN) { const b3 = box(ledgerMat, w, LT, LD); b3.position.set(cx, elev - D3.LOFT_T - LT / 2, cz - d / 2 + LD / 2); lg.add(b3); }
+      if (onS) { const b4 = box(ledgerMat, w, LT, LD); b4.position.set(cx, elev - D3.LOFT_T - LT / 2, cz + d / 2 - LD / 2); lg.add(b4); }
+      // [x sign, z sign, this corner's two edges]. A corner with either edge on a wall is
+      // already carried; only a genuinely free corner needs a leg to the floor.
+      [[-1, -1, onW || onN], [1, -1, onE || onN], [-1, 1, onW || onS], [1, 1, onE || onS]].forEach(([sx, sz, carried]) => {
+        if (carried) return;
+        const post = box(ledgerMat, 0.28, ph, 0.28);
+        post.position.set(cx + sx * (w / 2 - 0.25), ph / 2, cz + sz * (d / 2 - 0.25));
         lg.add(post);
       });
       interiorGroup.add(lg);
