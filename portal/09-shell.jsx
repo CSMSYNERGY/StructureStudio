@@ -1,13 +1,20 @@
-// The `leads` tab no longer renders anything — it rewrites itself into the merged
-// Contacts & Designs section. Kept rather than deleted because /portal/leads is a link
-// people already have: it is in release notes, in bookmarks, and in any ?view= URL an
-// operator has shared. Deleting the tab would 404 all of them; redirecting self-corrects
-// the URL and lands them where the content actually lives.
+// The merged Contacts & Designs era (2026-08-24 → 08-26, commit 4a54dad) published two
+// sub-view URLs: /portal/designs/people and /portal/designs/deals. The 08-26 split makes
+// each of those views a whole tab again, so the two legacy subs rewrite themselves —
+// "people" is now /portal/leads, "deals" is now plain /portal/designs.
 //
-// `replace` so the alias does not sit in history and trap the back button on it.
-function LeadsRedirect({ sub, navigate }) {
+// `replace` so an alias never sits in history and traps the back button on itself.
+//
+// ⚠️ RECORD SUBS (c-…/d-…) ARE DELIBERATELY NOT TOUCHED HERE. The record dispatch below
+// accepts them under either tab, and rewriting one across tabs would be actively harmful:
+// the URL-normalising effect nulls a refused tab's sub, so sending a designs-only user's
+// /portal/designs/c-<id> over to `leads` would bounce off the clamp and lose the record
+// they were looking at. A legacy record URL renders the record; only the two list views
+// need correcting, because only they stopped existing.
+function DesignsLegacySub({ sub, navigate }) {
   useEffect(() => {
-    navigate("designs", sub && /^[cd]-/.test(sub) ? sub : "people", true);
+    if (sub === "people") navigate("leads", null, true);
+    else if (sub === "deals") navigate("designs", null, true);
   }, [sub]);
   return null;
 }
@@ -552,7 +559,9 @@ function Dashboard({ session }) {
     designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
     quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
     accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
-    designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>,
+    // Kanban columns of descending height — the section is named Pipeline now, and the old
+    // staggered grid read as "a dashboard of things" rather than a board of stages.
+    designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
     leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
     orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
     pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
@@ -670,9 +679,13 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
-          {/* ONE item. Carolyn, 2026-08-24: "these two needs to be consolidated." The views
-              live inside it (Contacts / Designs / Pipeline) rather than as sibling tabs. */}
-          {navItem("designs", "Contacts & Designs")}
+          {/* TWO items again. Carolyn, 2026-08-26 12:15, having used the merged one: "we have
+              contacts as one, and then we have another one that says pipeline ... I would
+              rather have more tabs and one specific name on it." Contacts first — a person,
+              then what they are quoting. The List | Pipeline board toggle stays INSIDE
+              Pipeline (02-sales); it is the section, not a third nav item. */}
+          {navItem("leads", "Contacts")}
+          {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
           {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
@@ -878,21 +891,19 @@ function Dashboard({ session }) {
               </div>
             )}
             {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
-            {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "these two need to be
-                consolidated ... the view of being in an opportunity and the view of being
-                in a person are different, but they're the same."
+            {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "the view of being in
+                an opportunity and the view of being in a person are different, but they're
+                the same."
 
-                Routed on the EXISTING `sub` segment rather than a new merged tab:
-                /portal/leads/c-<uuid> and /portal/designs/d-<code>. ssParsePath, ssPagePath
-                and the popstate handler already carry `sub`, so this needs no router
-                change, no TAB_META entry, no TAB_AREA/ssFallbackTab/NONADMIN_TABS edit, and
-                no PORTAL_PARTS renumber — all of which are edits to files a second session
-                is committing to today. The prefix (c-/d-) is what tells the two record
-                kinds apart, so one shell serves both from either tab.
+                Routed on the `sub` segment: /portal/leads/c-<uuid> for a contact and
+                /portal/designs/d-<code> for a design. The prefix (c-/d-) is what tells the
+                two record kinds apart, so ONE shell serves both.
 
-                Consolidating the two LISTS into one tab is the remaining half and is
-                deliberately not done here: it touches six hardcoded "designs" literals in
-                this file plus the landing clamp, and it is not what makes the demo. */}
+                It accepts a record sub under EITHER tab, which is what keeps the merged
+                era's /portal/designs/c-<uuid> links working after the 08-26 split. The tab
+                only decides which nav item is highlighted; the prefix decides what renders.
+                Do not "tidy" this into a per-tab check — that would 404 every record link
+                shared between 08-24 and 08-26. */}
             {/* ⚠️ canEdit WAS `ssCanRead(myAccess, "contacts") === "edit"`, which was ALWAYS
                 FALSE: ssCanRead returns a BOOLEAN (01-core), so it compared `true` to the
                 string "edit". The whole conversation half of the record page — Activity,
@@ -902,10 +913,6 @@ function Dashboard({ session }) {
                 email address on file") in front of a contact whose address is rendered
                 directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
                 admin or owner always holds it, otherwise read the area out of the map. */}
-            {/* `leads` is a REDIRECT ALIAS now, kept so old bookmarks, release-note links and
-                any ?view= URL still land somewhere real. It rewrites itself to the merged tab
-                and preserves a record sub, so /portal/leads/c-<id> still opens that contact. */}
-            {activeTab === "leads" ? <LeadsRedirect sub={sub} navigate={navigate} /> : null}
             {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
@@ -913,31 +920,23 @@ function Dashboard({ session }) {
                 recordId={sub.slice(2)}
                 isAdmin={canAdmin}
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
-                onBack={() => navigate("designs", sub.charAt(0) === "c" ? "people" : "deals")}
-                onNavigate={(k, id) => navigate("designs", (k === "contact" ? "c-" : "d-") + id)}
+                /* Back goes to the list this record belongs to, which after the split is a
+                   whole tab rather than a sub-view. */
+                onBack={() => navigate(sub.charAt(0) === "c" ? "leads" : "designs")}
+                onNavigate={(k, id) => navigate(k === "contact" ? "leads" : "designs", (k === "contact" ? "c-" : "d-") + id)}
                 onOpenDesign={(code) => openInDesigner(code)}
               />
             ) : null}
-            {/* CONTACTS | DESIGNS, as views of one section. The switch rides on `sub`, so each
-                view is linkable, the back button works, and a rep can send someone straight to
-                /portal/designs/people. Contacts is the DEFAULT because that is the view Carolyn
-                demonstrated — a person first, their buildings alongside. */}
-            {!gateLocked && activeTab === "designs" && !(sub && /^[cd]-/.test(sub)) && (
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                {[["people", "Contacts"], ["deals", "Designs"]].map(([k, label]) => {
-                  const on = (sub || "people") === k;
-                  return (
-                    <button key={k} type="button" onClick={() => navigate("designs", k)}
-                      style={{
-                        background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155",
-                        border: "1px solid " + (on ? ACCENT : "#E2E8F0"), borderRadius: 8,
-                        padding: "7px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
-                      }}>{label}</button>
-                  );
-                })}
-              </div>
-            )}
-            {!gateLocked && activeTab === "designs" && sub === "deals" && (
+            {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
+            {!gateLocked && activeTab === "designs" && (sub === "people" || sub === "deals") ? (
+              <DesignsLegacySub sub={sub} navigate={navigate} />
+            ) : null}
+            {/* PIPELINE — the designs list, with the List | Pipeline board toggle inside it.
+                `sub === "deals"` still renders it, so a legacy /portal/designs/deals link
+                shows content immediately instead of a blank frame while the URL normalises.
+                Anything unrecognised renders it too — the same treatment SettingsShell gives
+                an unknown slug, so a stray segment never leaves the section bodiless. */}
+            {!gateLocked && activeTab === "designs" && sub !== "people" && !(sub && /^[cd]-/.test(sub)) && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
                 isAdmin={canAdmin}
@@ -945,14 +944,11 @@ function Dashboard({ session }) {
                 onOpenRecord={(code) => navigate("designs", "d-" + code)}
                 onOpenDesign={openInDesigner} />
             )}
-            {/* Anything that isn't "deals" or a record sub renders the DEFAULT view — the
-                same treatment SettingsShell gives an unknown slug. A sub this branch does
-                not recognise (a foreign segment surviving a tab clamp, or a hand-typed
-                URL) must never leave the section bodiless. */}
-            {!gateLocked && activeTab === "designs" && sub !== "deals" && !(sub && /^[cd]-/.test(sub)) && (
+            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads. */}
+            {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
               <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                onOpenRecord={(contactId) => navigate("designs", "c-" + contactId)}
+                onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
                 onOpenDesign={openInDesigner} />
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (

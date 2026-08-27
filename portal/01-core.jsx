@@ -247,15 +247,28 @@ const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
-  // ONE SECTION, not two. Carolyn, 2026-08-24, after walking Pipedrive: "designs, contacts,
-  // pipelines ... these two needs to be consolidated." Contacts and Designs are two views of
-  // the same sales record — a person, and the buildings they are quoting — and keeping them
-  // in separate nav items is what made her click back and forth in the first place.
+  // TWO SECTIONS AGAIN, reversing the 2026-08-24 merge (commit 4a54dad).
   //
-  // The tab id stays `designs` so every existing deep link, ?view= URL and bookmark keeps
-  // working. `leads` survives below purely as a redirect alias.
-  designs: ["Contacts & Designs", "Everyone who has enquired, and what they are quoting"],
-  leads: ["Contacts", "Everyone who has submitted a design"],
+  // She asked for the merge on 08-24 after walking Pipedrive — "these two needs to be
+  // consolidated" — and then, on 08-26 at 12:15, having used it: "I was envisioning it that
+  // we have contacts as one, and then we have another one that says pipeline. I would call
+  // it a pipeline, not opportunities ... I would rather have MORE TABS and one specific
+  // name on it." Ahsan confirmed on the call that they do not need to be one tab.
+  //
+  // What she actually disliked on 08-24 turned out to be the two lists looking alike, not
+  // their being separate — she could not find the pipeline board at all until Ahsan pointed
+  // at it ("I didn't see that you had the pipeline thing"). The board is what makes this
+  // section different from a contact list, so the section is now NAMED after it.
+  //
+  // The ids stay `designs` and `leads` so deep links from BOTH eras keep working: these are
+  // native pages again, and the merged era's /portal/designs/people|deals normalise
+  // themselves in the shell. `leads` was already the pre-merge id for Contacts, so this is
+  // a genuine revert rather than a third naming scheme.
+  //
+  // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
+  // do more than one quote for one deal, so let's leave it on the deals side right now."
+  designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
+  leads: ["Contacts", "Everyone who has enquired, and their activity"],
   orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
   releases: ["What's New", "Latest features and fixes"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -315,9 +328,11 @@ const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
-  // The merged tab shows both, so EITHER area is enough to see it — gating on "designs"
-  // alone would hide contacts from someone who is allowed to read them.
-  designs: ["designs", "contacts"],
+  // Back to one area each, with the 08-26 split: Pipeline is the designs list, Contacts is
+  // the contacts list, and each gates on the area whose data it actually shows. The merged
+  // tab needed EITHER because it showed both; a rep granted only contacts must not get the
+  // customer-designs list back through a tab that no longer contains it.
+  designs: "designs",
   leads: "contacts",
   inventory: "inventory",
   orders: "orders",
@@ -361,8 +376,10 @@ function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
   if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
   const area = TAB_AREA[tab];
-  // An ARRAY means "any of these is enough" — the merged Contacts & Designs tab. Mirrors
-  // the server's `{ any: [...] }` gate shape so the two cannot drift.
+  // An ARRAY means "any of these is enough". No entry uses one since the 08-26 split undid
+  // the merged Contacts & Designs tab, but the branch stays: it mirrors the server's
+  // `{ any: [...] }` gate shape, and the next page that needs it should not have to
+  // rediscover that the two must agree.
   if (Array.isArray(area)) return area.some((a) => ssCanRead(access, a));
   return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
 }
