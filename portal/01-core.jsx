@@ -268,6 +268,7 @@ const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
+  projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
   // TWO SECTIONS AGAIN, reversing the 2026-08-24 merge (commit 4a54dad).
   //
   // She asked for the merge on 08-24 after walking Pipedrive — "these two needs to be
@@ -419,9 +420,9 @@ function ssFallbackTab(access) {
   return t || "releases";
 }
 
-// "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
-// the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
-// that array is the role escape hatch and would hand the operator console to every team
+// "accounts", "admin" and "projects" are operator-gated (independent of tenant role) and sit
+// OUTSIDE the role clamp; everything else keeps it. Note none of them may go in NONADMIN_TABS —
+// that array is the role escape hatch and would hand the operator surfaces to every team
 // member. Content renders are ALSO gated (and the server re-checks regardless).
 //
 // At module scope so the router's URL-normalising effect can call it too. That effect has
@@ -429,7 +430,7 @@ function ssFallbackTab(access) {
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
 function ssClampTab(tab, isOperator, canAdmin, access) {
-  if (tab === "accounts" || tab === "admin") return isOperator ? tab : ssFallbackTab(access);
+  if (tab === "accounts" || tab === "admin" || tab === "projects") return isOperator ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;
@@ -450,6 +451,75 @@ const S = {
   okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   th: { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "2px solid #E2E8F0", whiteSpace: "nowrap" },
   td: { fontSize: 13, color: "#1E293B", padding: "10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "top" },
+};
+
+// ── The WHEN date filter — Carolyn's full Monday-style condition list ────────────────────
+// LIFTED from 05-schedule.jsx (2026-08-27) so the Projects table engine and the Build
+// Schedule share ONE implementation; the sched* names there are aliases onto these. Pure
+// functions of ISO strings; weeks are Sunday-first; quarters are calendar quarters.
+//
+// Date-ONLY strings (YYYY-MM-DD) parse as UTC midnight through bare new Date(), so they
+// render and compare a DAY EARLY in every US timezone (audit 2026-08-20). The constraint:
+// parse a date-only string as LOCAL midnight, and build a day key / "today" from LOCAL
+// components — never toISOString().
+const ssLocalDate = (iso) => (iso ? new Date(String(iso).slice(0, 10) + "T00:00:00") : null);
+const ssLocalIso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const SS_WHEN = [
+  ["any", "Any date", "none"],
+  ["today", "Today", "none"],
+  ["yesterday", "Yesterday", "none"],
+  ["this_week", "This week", "none"],
+  ["this_month", "This month", "none"],
+  ["this_quarter", "This quarter", "none"],
+  ["in_month", "In month", "month"],
+  ["this_year", "This year", "none"],
+  ["on", "On", "date"],
+  ["between", "Between", "date2"],
+  ["more_than", "More than", "count"],
+  ["after", "After date", "date"],
+  ["less_than", "Less than", "count"],
+  ["before", "Before date", "date"],
+  ["in_next", "In the next", "count"],
+  ["in_last", "In the last", "count"],
+];
+const SS_WHEN_PARAM = Object.fromEntries(SS_WHEN.map(([k, _l, p]) => [k, p]));
+// ISO date + or - N days/weeks/months, in local time.
+const ssShiftIso = (iso, n, unit) => {
+  const d = ssLocalDate(iso);
+  if (unit === "months") d.setMonth(d.getMonth() + n);
+  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  return ssLocalIso(d);
+};
+// Does a date pass the condition? p = { a, b, month, n, unit }. A condition whose parameter
+// is not filled in yet MATCHES EVERYTHING — filtering nothing while she types beats blanking
+// the list mid-keystroke. More than / Less than measure distance FORWARD from today ("In the
+// last" covers looking back). Between is inclusive at both ends.
+const ssWhenMatch = (cond, p, iso, todayIso) => {
+  switch (cond) {
+    case "today": return iso === todayIso;
+    case "yesterday": return iso === ssShiftIso(todayIso, -1, "days");
+    case "this_week": {
+      const t = ssLocalDate(todayIso); t.setDate(t.getDate() - t.getDay());
+      const sun = ssLocalIso(t);
+      return iso >= sun && iso <= ssShiftIso(sun, 6, "days");
+    }
+    case "this_month": return iso.slice(0, 7) === todayIso.slice(0, 7);
+    case "this_quarter": {
+      const q = (m) => Math.floor((Number(m.slice(5, 7)) - 1) / 3);
+      return iso.slice(0, 4) === todayIso.slice(0, 4) && q(iso) === q(todayIso);
+    }
+    case "in_month": return !p.month || iso.slice(0, 7) === p.month;
+    case "this_year": return iso.slice(0, 4) === todayIso.slice(0, 4);
+    case "on": return !p.a || iso === p.a;
+    case "between": return (!p.a || iso >= p.a) && (!p.b || iso <= p.b);
+    case "more_than": return !p.n || iso > ssShiftIso(todayIso, Number(p.n), p.unit || "days");
+    case "after": return !p.a || iso > p.a;
+    case "less_than": return !p.n || (iso >= todayIso && iso <= ssShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "before": return !p.a || iso < p.a;
+    case "in_next": return !p.n || (iso >= todayIso && iso <= ssShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "in_last": return !p.n || (iso <= todayIso && iso >= ssShiftIso(todayIso, -Number(p.n), p.unit || "days"));
+    default: return true;
+  }
 };
 
 function fmtDate(iso) {

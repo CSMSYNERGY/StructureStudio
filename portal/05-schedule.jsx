@@ -24,8 +24,10 @@ const schedBuildDate = (job) => job.due_date || job.scheduled_start || null;
 // UTC midnight through bare new Date(), so they render and compare a DAY EARLY in every
 // US timezone (audit 2026-08-20). The constraint: parse a date-only string as LOCAL
 // midnight, and build a day key / "today" from LOCAL components — never toISOString().
-const schedLocalDate = (iso) => (iso ? new Date(String(iso).slice(0, 10) + "T00:00:00") : null);
-const schedLocalIso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+// Aliases onto the shared implementations in 01-core.jsx (lifted 2026-08-27 so the
+// Projects table engine and this tab share one WHEN filter / local-date kernel).
+const schedLocalDate = ssLocalDate;
+const schedLocalIso = ssLocalIso;
 // Past due = has a build date, that date is before today, and the stage isn't finished.
 const schedPastDue = (job, kind) => {
   const d = schedBuildDate(job);
@@ -55,65 +57,13 @@ const schedStyle = (j) => String(j.building_label || "")
 // plus a contextual parameter input (`param` says which). All date math on ISO strings via
 // schedLocalDate/schedLocalIso; weeks are Sunday-first (the tab's convention throughout);
 // quarters are calendar quarters.
-const SCHED_WHEN = [
-  ["any", "Any date", "none"],
-  ["today", "Today", "none"],
-  ["yesterday", "Yesterday", "none"],
-  ["this_week", "This week", "none"],
-  ["this_month", "This month", "none"],
-  ["this_quarter", "This quarter", "none"],
-  ["in_month", "In month", "month"],
-  ["this_year", "This year", "none"],
-  ["on", "On", "date"],
-  ["between", "Between", "date2"],
-  ["more_than", "More than", "count"],
-  ["after", "After date", "date"],
-  ["less_than", "Less than", "count"],
-  ["before", "Before date", "date"],
-  ["in_next", "In the next", "count"],
-  ["in_last", "In the last", "count"],
-];
-const SCHED_WHEN_PARAM = Object.fromEntries(SCHED_WHEN.map(([k, _l, p]) => [k, p]));
-// ISO date + or - N days/weeks/months, in local time.
-const schedShiftIso = (iso, n, unit) => {
-  const d = schedLocalDate(iso);
-  if (unit === "months") d.setMonth(d.getMonth() + n);
-  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
-  return schedLocalIso(d);
-};
-// Does a build date pass the condition? Pure function of strings so it unit-tests cleanly.
-// p = { a, b, month, n, unit }. A condition whose parameter is not filled in yet MATCHES
-// EVERYTHING — filtering nothing while she types beats blanking the list mid-keystroke.
-// More than / Less than measure distance FORWARD from today: this is a build schedule, so
-// "more than 30 days" means further out than 30 days ("In the last" covers looking back).
-// Between is inclusive at both ends.
-const schedWhenMatch = (cond, p, iso, todayIso) => {
-  switch (cond) {
-    case "today": return iso === todayIso;
-    case "yesterday": return iso === schedShiftIso(todayIso, -1, "days");
-    case "this_week": {
-      const t = schedLocalDate(todayIso); t.setDate(t.getDate() - t.getDay());
-      const sun = schedLocalIso(t);
-      return iso >= sun && iso <= schedShiftIso(sun, 6, "days");
-    }
-    case "this_month": return iso.slice(0, 7) === todayIso.slice(0, 7);
-    case "this_quarter": {
-      const q = (m) => Math.floor((Number(m.slice(5, 7)) - 1) / 3);
-      return iso.slice(0, 4) === todayIso.slice(0, 4) && q(iso) === q(todayIso);
-    }
-    case "in_month": return !p.month || iso.slice(0, 7) === p.month;
-    case "this_year": return iso.slice(0, 4) === todayIso.slice(0, 4);
-    case "on": return !p.a || iso === p.a;
-    case "between": return (!p.a || iso >= p.a) && (!p.b || iso <= p.b);
-    case "more_than": return !p.n || iso > schedShiftIso(todayIso, Number(p.n), p.unit || "days");
-    case "after": return !p.a || iso > p.a;
-    case "less_than": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
-    case "before": return !p.a || iso < p.a;
-    case "in_next": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
-    case "in_last": return !p.n || (iso <= todayIso && iso >= schedShiftIso(todayIso, -Number(p.n), p.unit || "days"));
-    default: return true;
-  }
-};
+// The condition list, param map, shifter and matcher now live in 01-core.jsx (SS_WHEN /
+// SS_WHEN_PARAM / ssShiftIso / ssWhenMatch) — one implementation for this tab and the
+// Projects table engine. These aliases keep every call site below unchanged.
+const SCHED_WHEN = SS_WHEN;
+const SCHED_WHEN_PARAM = SS_WHEN_PARAM;
+const schedShiftIso = ssShiftIso;
+const schedWhenMatch = ssWhenMatch;
 
 // ── What a set of jobs is worth, and how much building it is ──────────────────────────────
 // ONE computation, at module scope, because four places need it: the calendar's day headers,

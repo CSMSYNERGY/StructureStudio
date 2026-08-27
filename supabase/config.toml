@@ -98,6 +98,12 @@ verify_jwt = true
 [functions.operator-portal]
 verify_jwt = true
 
+[functions.portal-projects]
+# Internal "Projects" module (Monday.com replacement) — operators only. Same auth shape
+# as operator-portal: auth.getUser() + service-role app_operators lookup; writes need
+# can_write. Not tenant-scoped: never add it to portal.html's SS_TENANT_SCOPED_FNS.
+verify_jwt = true
+
 [functions.submit-estimate]
 verify_jwt = true
 
