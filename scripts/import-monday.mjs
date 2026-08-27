@@ -238,7 +238,9 @@ async function main() {
         if (!SKIP_ASSETS) {
           for (const a of u.assets || []) {
             try {
-              const dl = await fetch(a.public_url, { headers: { Authorization: TOKEN } });
+              // public_url is a pre-SIGNED S3 URL — an Authorization header breaks the
+              // signature (S3 answers 400). Fetch it bare.
+              const dl = await fetch(a.public_url);
               if (!dl.ok) throw new Error(`download ${dl.status}`);
               const bytes = Buffer.from(await dl.arrayBuffer());
               const safeName = String(a.name || "file").replace(/[^\w.\- ]+/g, "_").slice(0, 100);

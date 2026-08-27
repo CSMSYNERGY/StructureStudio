@@ -104,6 +104,13 @@ verify_jwt = true
 # can_write. Not tenant-scoped: never add it to portal.html's SS_TENANT_SCOPED_FNS.
 verify_jwt = true
 
+[functions.admin-import-monday]
+# ONE-SHOT, RETIRED: the Monday→Projects import, run and then DELETED from the project
+# on 2026-08-27 (26 items + updates + assets imported; report in the worklog). The source
+# stays in the repo as the record of the mapping. If it ever needs re-deploying (re-import
+# is idempotent), it is operator-gated + can_write like portal-projects.
+verify_jwt = true
+
 [functions.submit-estimate]
 verify_jwt = true
 
