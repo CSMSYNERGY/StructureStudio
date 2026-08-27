@@ -9,6 +9,7 @@ import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inv
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
   rsCreateDomain, rsDeleteDomain, rsGetDomain, rsVerifyDomain, rsDomainVerified,
+  rsInboundRecords, rsReceivingEnabled,
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -141,6 +142,12 @@ const GATES: GateTable = {
   email_activate:       { area: "settings_email", level: "edit" },
   email_send_test:      { area: "settings_email", level: "edit" },
   email_disconnect:     { area: "settings_email", level: "edit" },
+  // Receiving replies on reply.<domain>. Same area as sending: the two halves are one
+  // decision to a builder, and splitting the permission would let someone redirect where a
+  // customer's replies land without being trusted to change how mail goes out.
+  email_inbound_connect:    { area: "settings_email", level: "edit" },
+  email_inbound_verify:     { area: "settings_email", level: "edit" },
+  email_inbound_disconnect: { area: "settings_email", level: "edit" },
 
   // ── Workspace ────────────────────────────────────────────────────────────
   contact_activity: { area: "contacts", level: "view" },
@@ -155,6 +162,7 @@ const GATES: GateTable = {
   crm_delete_note:       { area: "contacts", level: "edit" },
   crm_save_activity:     { area: "contacts", level: "edit" },
   crm_complete_activity: { area: "contacts", level: "edit" },
+  crm_save_contact:      { area: "contacts", level: "edit" },
   delete_design:    { area: "designs", level: "edit" },
   // NOT inventory:edit. A sales rep's preset is inventory:'view', and this only tags a
   // design they just created with the unit it was quoted from — gating it on inventory:edit
@@ -3277,6 +3285,58 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true });
   }
 
+  // ── EDIT A CONTACT FROM THE RECORD PAGE ────────────────────────────────────────────
+  // Carolyn, 2026-08-26 11:19, with the person card circled on her screen: "I want to be
+  // able to click on person and be able to make changes to it right here. I don't want to
+  // switch the screen."
+  //
+  // The write itself is one SECURITY DEFINER call (migration 141) rather than an update
+  // here, because three things have to happen together: the row changes, phone_digits is
+  // rederived through crm_phone_key, and one changelog row is written per field that moved.
+  // Doing that in three statements from here would let a save land with no audit trail —
+  // and the audit trail is the other half of what she asked for (25:18, "everything that
+  // they did with that lead was logged").
+  //
+  // NULL means "leave this field alone"; "" means "clear it". crm_ensure_contact cannot
+  // express the second — it is enrich-never-blank by design, because anonymous design
+  // submissions feed it — which is exactly why a human editor needs its own function.
+  if (action === "crm_save_contact") {
+    const id = String(payload.id ?? "").slice(0, 64);
+    if (!id) return json({ error: "A contact id is required." }, 400);
+    // undefined => not being edited. An empty string is a real instruction to clear.
+    const fld = (v: unknown, max: number) => (v === undefined || v === null ? null : String(v).trim().slice(0, max));
+    const name = fld(payload.name, 200);
+    const phone = fld(payload.phone, 40);
+    const email = fld(payload.email, 320);
+    if (name === null && phone === null && email === null) {
+      return json({ error: "Nothing to change." }, 400);
+    }
+    // Only validate an address that is actually being SET. "" is a deliberate clear and
+    // must not be refused as malformed.
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return json({ error: "That doesn't look like an email address." }, 400);
+    }
+    const { data: n, error } = await admin.rpc("crm_update_contact", {
+      p_client_id: clientId, p_id: id,
+      p_name: name, p_phone: phone, p_email: email,
+      p_actor: userId ?? null,
+    });
+    if (error) {
+      // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.
+      // Typing a phone that already belongs to somebody else is a real thing a person does,
+      // and "duplicate key value violates unique constraint" is not an answer they can act
+      // on. Say which field, and what it means.
+      if (String(error.code) === "23505") {
+        return json({ error: "Another contact already has that phone number. Open that contact instead, or clear the number there first." }, 409);
+      }
+      if (String(error.code) === "P0002" || /contact not found/i.test(String(error.message ?? ""))) {
+        return json({ error: "That contact no longer exists." }, 404);
+      }
+      return dbFail(req, clientId, "save that contact", error);
+    }
+    return json({ ok: true, changed: Number(n ?? 0) });
+  }
+
   if (action === "contact_activity") {
     const codes: string[] = Array.isArray(payload?.codes)
       ? payload.codes.map((c: unknown) => String(c)).filter(Boolean).slice(0, 50)
@@ -3711,7 +3771,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "email_status") {
     const { data: s, error } = await admin
       .from("client_settings")
-      .select("email_provider, email_domain, email_from_local, email_from_name, email_domain_status, email_dns_records, email_verified_at, email_last_error, email_template_copy")
+      .select("email_provider, email_domain, email_from_local, email_from_name, email_domain_status, email_dns_records, email_verified_at, email_last_error, email_template_copy, inbound_domain, inbound_status, inbound_dns_records, inbound_verified_at, inbound_last_error")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your email sending settings", error);
@@ -3738,6 +3798,20 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       lastError: s?.email_last_error ?? null,
       active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
+      // ── Receiving replies ────────────────────────────────────────────────────────────
+      // One nested block rather than five loose keys, so the screen can render the whole
+      // receiving card from a single object and a future provider swap changes one shape.
+      // `replyExample` is built HERE because the address format is the webhook's contract
+      // (parseReplyToken), not the UI's — a builder is shown the real thing, and the two
+      // spellings cannot drift apart in a JSX template nobody tests.
+      inbound: {
+        status: s?.inbound_status ?? "off",
+        domain: s?.inbound_domain ?? null,
+        dnsRecords: Array.isArray(s?.inbound_dns_records) ? s.inbound_dns_records : [],
+        verifiedAt: s?.inbound_verified_at ?? null,
+        lastError: s?.inbound_last_error ?? null,
+        replyExample: s?.inbound_domain ? `d.ss-9r8uhjgtdj@${s.inbound_domain}` : null,
+      },
       // deno-lint-ignore no-explicit-any
       recentSends: (sends ?? []).map((r: any) => ({
         id: r.id, kind: r.kind, to: r.to_email, status: r.status,
@@ -3999,9 +4073,158 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       email_dns_records: null,
       email_verified_at: null,
       email_last_error: null,
+      // ⚠️ TEAR INBOUND DOWN IN THE SAME WRITE. Receiving lives on a SUBDOMAIN of the
+      // sending domain, so a tenant who disconnects has given up the whole domain — leaving
+      // inbound_status='active' behind would keep sendTenantEmail stamping
+      // d.<code>@reply.<domain> as Reply-To on a domain nobody is watching any more, and
+      // every customer reply would vanish with no error on either side.
+      inbound_domain: null,
+      inbound_status: "off",
+      inbound_dns_records: null,
+      resend_inbound_domain_id: null,
+      inbound_verified_at: null,
+      inbound_last_error: null,
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "disconnect your email domain", upErr);
+    return json({ ok: true });
+  }
+
+  // ── Receiving replies ────────────────────────────────────────────────────────────────
+  //
+  // Ahsan, 2026-08-26: "if Junior Barns connects his domain, he should be able to send AND
+  // receive emails in there."
+  //
+  // ⚠️ ALWAYS A SUBDOMAIN, NEVER THE APEX. The builder already receives their real business
+  // mail at @jrbarns.com — pointing that MX at us would take over their company inbox. The
+  // subdomain is derived HERE from the verified sending domain rather than accepted from the
+  // request: a tenant-supplied inbound domain would let someone route a customer's replies
+  // at a host they do not own, and it is also the field a confused builder would most likely
+  // fill in with their apex.
+  if (action === "email_inbound_connect") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings")
+      .select("email_domain, email_domain_status, inbound_domain, resend_inbound_domain_id")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email settings", curErr);
+
+    // Sending must be verified first. Receiving on a domain we have not proved the tenant
+    // controls would publish an MX for someone else's host.
+    const sendingDomain = String(cur?.email_domain ?? "").trim().toLowerCase();
+    if (!sendingDomain || cur?.email_domain_status !== "verified") {
+      return json({ error: "Verify your sending domain first — replies use a subdomain of it." }, 400);
+    }
+    const inboundDomain = `reply.${sendingDomain}`;
+
+    // Another tenant holding this exact subdomain means two builders would receive each
+    // other's replies. The partial unique index (migration 137) is the race-proof backstop;
+    // this is the readable refusal.
+    const { data: holder, error: holderErr } = await admin
+      .from("client_settings").select("client_id")
+      .eq("inbound_domain", inboundDomain).neq("client_id", clientId).maybeSingle();
+    if (holderErr) return dbFail(req, clientId, "check that reply address", holderErr);
+    if (holder) return json({ error: "That reply address is already in use by another account." }, 409);
+
+    let d: RsDomain;
+    try {
+      d = cur?.resend_inbound_domain_id && cur?.inbound_domain === inboundDomain
+        ? await rsGetDomain(String(cur.resend_inbound_domain_id))
+        : await rsCreateDomain(inboundDomain, { receiving: true });
+    } catch (e) {
+      return rsFail(req, clientId, "set up your reply address", e);
+    }
+
+    // FAIL LOUDLY rather than inventing a hostname. If the provider did not hand back an MX
+    // there is nothing honest to show a builder, and a guessed inbound host is a mail path
+    // that bounces with no error anywhere. Better a clear refusal than a table of fiction.
+    const mx = rsInboundRecords(d);
+    if (mx.length === 0) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "inbound_no_mx_record",
+        message: "Resend returned no MX record for a receiving domain; the DNS table cannot be rendered.",
+        context: { inboundDomain, domainId: d.id, recordCount: d.records.length },
+      });
+      return json({ error: "We couldn't get the mail record for your reply address. Tell CSM Synergy — nothing is broken on your side." }, 502);
+    }
+
+    const { error: upErr } = await admin.from("client_settings").update({
+      inbound_domain: inboundDomain,
+      resend_inbound_domain_id: d.id,
+      // 'pending' until the MX actually resolves. It must NOT be 'active' here: the moment
+      // it is, every outbound email starts advertising a reply address whose MX does not
+      // exist yet, and the customer's reply bounces back at the customer.
+      inbound_status: "pending",
+      inbound_dns_records: mx,
+      inbound_verified_at: null,
+      inbound_last_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "save your reply address", upErr);
+    return json({ ok: true, inboundDomain, dnsRecords: mx });
+  }
+
+  if (action === "email_inbound_verify") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("inbound_domain, resend_inbound_domain_id")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your reply address", curErr);
+    if (!cur?.resend_inbound_domain_id) return json({ error: "Set up your reply address first." }, 400);
+
+    let d: RsDomain;
+    try {
+      d = await rsVerifyDomain(String(cur.resend_inbound_domain_id));
+    } catch (e) {
+      return rsFail(req, clientId, "check your reply address", e);
+    }
+
+    // BOTH conditions, and they are genuinely different questions: `status` is Resend's
+    // verdict on the records, `capabilities.receiving` is whether the domain is switched on
+    // for mail at all. A domain can be verified and still not receiving, and calling that
+    // 'active' would advertise a mailbox that does not exist.
+    const ok = rsDomainVerified(d) && rsReceivingEnabled(d);
+    const mx = rsInboundRecords(d);
+    const { error: upErr } = await admin.from("client_settings").update({
+      inbound_status: ok ? "active" : "pending",
+      // Keep the previous snapshot if a verify round-trip returned none, rather than blanking
+      // the table the builder is mid-way through copying.
+      ...(mx.length ? { inbound_dns_records: mx } : {}),
+      inbound_verified_at: ok ? new Date().toISOString() : null,
+      inbound_last_error: ok ? null : (rsReceivingEnabled(d) ? null : "Receiving is not switched on for this domain yet."),
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "save your reply address", upErr);
+    return json({ ok: true, verified: ok, inboundStatus: ok ? "active" : "pending", dnsRecords: mx });
+  }
+
+  if (action === "email_inbound_disconnect") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("resend_inbound_domain_id")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your reply address", curErr);
+    if (cur?.resend_inbound_domain_id) {
+      // Best-effort, same posture as email_disconnect: a stuck provider must not trap a
+      // tenant on a reply address they are trying to switch off.
+      try {
+        await rsDeleteDomain(String(cur.resend_inbound_domain_id));
+      } catch (e) {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "inbound_disconnect_provider",
+          message: `provider inbound domain delete failed (id ${cur.resend_inbound_domain_id}): ${
+            e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
+          }`,
+        }).catch(() => {});
+      }
+    }
+    const { error: upErr } = await admin.from("client_settings").update({
+      inbound_domain: null,
+      inbound_status: "off",
+      inbound_dns_records: null,
+      resend_inbound_domain_id: null,
+      inbound_verified_at: null,
+      inbound_last_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "turn off your reply address", upErr);
     return json({ ok: true });
   }
 

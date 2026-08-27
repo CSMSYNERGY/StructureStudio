@@ -1037,7 +1037,7 @@ const CRM_CHIPS = [
   // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
   // screen. Keep the two lists identical.
   { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
-    "change_order", "invoice_created", "invoice_sent", "lead_captured"] },
+    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change"] },
 ];
 
 // The stage bar. Carolyn's own stage names, from her Pipedrive screen.
@@ -1156,6 +1156,40 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     setDraft(""); load();
   };
 
+  // ── EDIT THE PERSON, WITHOUT LEAVING THE PERSON ──────────────────────────────────────
+  // Carolyn, 2026-08-26 11:19, circling the person card: "I want to be able to click on
+  // person and be able to make changes to it right here. I don't want to switch the screen."
+  //
+  // ⚠️ NEVER a direct sb.from("crm_contacts").update(). This component makes exactly one
+  // fetch and no direct table access on purpose: crm_contacts RLS is scoped to
+  // current_client_id(), so in operator view-as a direct write silently affects nothing (or
+  // the wrong tenant). Everything goes through portal-settings, which resolves the tenant.
+  const [edit, setEdit] = useState(null);  // { name, phone, email } | null — null = not editing
+  const startEdit = () => setEdit({
+    name: (data.contact && data.contact.name) || "",
+    phone: (data.contact && data.contact.phone) || "",
+    email: (data.contact && data.contact.email) || "",
+  });
+  const saveContact = async () => {
+    if (!edit) return;
+    setBusy(true); setOpErr(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_save_contact",
+        id: (data.contact && data.contact.id) || null,
+        // Sent as-typed, including "" — the server reads an empty string as "clear this
+        // field", which is the one thing the anonymous-submission path cannot do.
+        name: edit.name, phone: edit.phone, email: edit.email,
+      },
+    });
+    setBusy(false);
+    // Keep the form open on failure. Closing it would throw away what they typed, and the
+    // duplicate-phone case is one they can actually act on once they have read it.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setOpErr({ where: "contact", msg: failMsg }); return; }
+    setEdit(null); load();
+  };
+
   // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
   // since 131, with `crm_complete_activity` to tick one off and a Focus block promising
   // "scheduled activities appear here" — but nothing in the UI could ever CREATE one, so the
@@ -1207,11 +1241,47 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
 
   const renderSection = (key) => {
     if (key === "summary") {
+      // Editing needs a REAL contact row. On an old design record predating the 130
+      // backfill the server synthesizes `contact` from the design's jsonb blob with a null
+      // id (portal-settings), and there is nothing to write to — so the pencil is absent
+      // rather than present and broken.
+      const canEditContact = canEdit && kind === "contact" && !!(data.contact && data.contact.id);
       return kind === "contact" ? (
-        <div style={{ fontSize: 13, color: "#475569" }}>
-          <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
-          <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
-        </div>
+        edit ? (
+          <div style={{ fontSize: 13 }}>
+            <span style={S.lbl}>Name</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
+              onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
+            <span style={S.lbl}>Email</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
+              onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
+            <span style={S.lbl}>Phone</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
+              onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+            {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
+            <div style={{ display: "flex", gap: 7 }}>
+              <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
+                disabled={busy} onClick={saveContact}>{busy ? "Saving…" : "Save"}</button>
+              <button style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 13px", fontSize: 12.5 }}
+                disabled={busy} onClick={() => { setEdit(null); setOpErr(null); }}>Cancel</button>
+            </div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 7, lineHeight: 1.5 }}>
+              Clearing a field empties it. Every change is recorded under Changelog.
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "#475569" }}>
+            <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
+            <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
+            {canEditContact && (
+              <button type="button" onClick={startEdit}
+                title="Edit this contact's name, email and phone"
+                style={{ background: "none", border: "none", padding: 0, marginTop: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
+                ✎ Edit
+              </button>
+            )}
+          </div>
+        )
       ) : (
         <div style={{ fontSize: 13, color: "#475569" }}>
           <div>Estimate {record.ss_quote_number || record.ghl_estimate_number || "—"}</div>
