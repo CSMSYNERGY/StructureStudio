@@ -26,6 +26,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
   const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
   const [query, setQuery] = useState("");        // free-text search across all fields
+  const [pdf, setPdf] = useState(null);          // { url, title } — the pop-up viewer
 
   const load = useCallback(async () => {
     setError(null);
@@ -370,14 +371,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           customer's design there would corrupt that activity. */}
                       <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                      {ssSafeUrl(r.image_url) && <a href={ssSafeUrl(r.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                      {/* Pop-up, not a new tab — Carolyn 2026-08-26. See PdfModal. */}
+                      {ssSafeUrl(r.image_url) && (
+                        <button type="button" onClick={() => setPdf({ url: r.image_url, title: `Floor plan — ${c.name || r.short_code}` })}
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
+                      )}
                       {/* SS-issued quote (migration 122): the printable 3-sheet document plus the
                           two hand-delivery tools — most lot customers want paper, and a design
                           with no email address never blocks. */}
                       {r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && (
-                        <a href={ssSafeUrl(r.ss_quote_pdf_url)} target="_blank" rel="noopener noreferrer"
+                        <button type="button" onClick={() => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` })}
                           title="Open the printable quote document"
-                          style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginLeft: 10 }}>Quote PDF</a>
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700, marginLeft: 10 }}>Quote PDF</button>
                       )}
                       {r.ss_quote_number && (
                         <button type="button" onClick={() => copyCustomerLink(r.short_code)}
@@ -432,7 +437,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                           <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code, v.version)}
                             style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                          {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                          {ssSafeUrl(v.image_url) && (
+                            <button type="button" onClick={() => setPdf({ url: v.image_url, title: `Floor plan v${v.version} — ${r.short_code}` })}
+                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -445,6 +453,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="design" />
         </div>
       )}
+      {pdf && <PdfModal url={pdf.url} title={pdf.title} onClose={() => setPdf(null)} />}
       {delTarget && (
         <DeleteDesignDialog design={delTarget} onClose={() => setDelTarget(null)}
           onDeleted={(res) => {
@@ -1077,6 +1086,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // so a note error can't surface under Focus too. Every new attempt clears it first, so a
   // stale failure never outlives the action that follows it.
   const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus", msg }
+  const [pdf, setPdf] = useState(null);     // { url, title } — the pop-up viewer
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1300,11 +1310,23 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               </div>
             )}
             {/* ACTIVITY. Kind first, because "call" and "deadline" read completely
-                differently in the feed, and the kind is what the icon and label key on. */}
+                differently in the feed, and the kind is what the icon and label key on.
+
+                NO "meeting" AND NO "lunch" CHIP. Carolyn walked this row on 2026-08-26
+                (18:00): "I don't want meeting in there — we have a meeting scheduler",
+                and the same for lunch. Meetings belong to the Meeting scheduler tab, and
+                two ways to book the same thing is how a calendar drifts out of sync with
+                itself. Ahsan confirmed both on 2026-08-27.
+
+                The SERVER still accepts both kinds, on purpose — portal-settings' KINDS,
+                labelActivity in _shared/crmFeed.ts, and migration 131's CHECK are all
+                untouched. Tenants have meeting and lunch rows already logged, and a chip
+                the composer no longer offers is not the same thing as a kind the history
+                can no longer render. Removing them server-side would blank those rows. */}
             {tab === "activity" && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-                  {["call", "meeting", "task", "deadline", "lunch"].map((k) => (
+                  {["call", "task", "deadline"].map((k) => (
                     <button key={k} type="button" onClick={() => setAct((p) => ({ ...p, kind: k }))}
                       style={{
                         background: act.kind === k ? ACCENT : "#F1F5F9", color: act.kind === k ? "#FFF" : "#475569",
@@ -1343,12 +1365,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   if (docs.length === 0) {
                     return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No documents yet. A quote PDF appears here as soon as one is sent.</div>;
                   }
+                  // Pop-up, never a new tab (Carolyn 2026-08-26 21:15). This is the list she
+                  // was looking at when she said it.
                   return docs.map((doc) => (
-                    <a key={doc.k} href={doc.url} target="_blank" rel="noopener"
+                    <button key={doc.k} type="button" onClick={() => setPdf({ url: doc.url, title: doc.label })}
                       style={{
-                        display: "block", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
-                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, textDecoration: "none",
-                      }}>📄 {doc.label}</a>
+                        display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
+                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, cursor: "pointer", fontFamily: "inherit",
+                      }}>📄 {doc.label}</button>
                   ));
                 })()}
               </div>
@@ -1470,6 +1494,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
           </div>
         </div>
       </div>
+      {pdf && <PdfModal url={pdf.url} title={pdf.title} onClose={() => setPdf(null)} />}
     </div>
   );
 }

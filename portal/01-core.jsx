@@ -676,6 +676,62 @@ const ssSafeUrl = (u) => {
   } catch { return null; }
 };
 
+// ─── PDF pop-up ───
+// Carolyn, 2026-08-26 21:15: "I want PDFs to open in a pop-up always. I don't want another
+// tab to open."
+//
+// Every quote, floor plan and invoice used to be an <a target="_blank">, so reading one
+// meant leaving the portal, and closing it meant hunting for the tab you came from. Her
+// whole session was about staying on the record — this is the same instinct as "I don't
+// want to switch the screen" about the person card.
+//
+// ⚠️ The URL goes through ssSafeUrl BEFORE it reaches the iframe, exactly as it did on the
+// anchor. An iframe src is a more permissive sink than an href, not a less one: a design
+// row's image_url is tenant-writable, and framing an arbitrary origin inside the
+// authenticated portal is worse than opening it in a tab where the user can at least see
+// the address bar. An unsafe URL renders no viewer at all.
+//
+// The "Open in a new tab" link stays, deliberately. Some browsers and enterprise policies
+// refuse to render PDFs inline, and a viewer that silently shows a grey rectangle with no
+// way out is worse than the tab we just took away. It is the escape hatch, not the default.
+function PdfModal({ url, title, onClose }) {
+  const safe = ssSafeUrl(url);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    // The page behind a modal must not scroll under it.
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="presentation"
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+      <div role="dialog" aria-modal="true" aria-label={title || "Document"} onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, width: "min(1000px, 100%)", height: "min(88vh, 100%)", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {title || "Document"}
+          </div>
+          {safe && (
+            <a href={safe} target="_blank" rel="noopener noreferrer"
+              style={{ fontSize: 12, fontWeight: 700, color: "#475569", textDecoration: "none", whiteSpace: "nowrap" }}>Open in a new tab ↗</a>
+          )}
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 12px", fontSize: 12 }}>Close</button>
+        </div>
+        {safe ? (
+          <iframe src={safe} title={title || "Document"} style={{ flex: 1, width: "100%", border: "none" }} />
+        ) : (
+          <div style={{ padding: 20, fontSize: 13, color: "#B91C1C" }}>
+            This document's address is not one we can open safely, so it has not been loaded.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // The one place an unrecognised/absent status becomes "sent". This expression was written out
 // by hand in seven places (search, sort, badge, and three times inside the Leads grouping),
 // and LeadsTable additionally kept its own private copy of STATUS_RANK — so a filter deriving
