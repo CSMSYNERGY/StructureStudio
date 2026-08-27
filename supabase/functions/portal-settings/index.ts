@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
-import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
+import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
@@ -3214,7 +3214,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ ok: true, messageId: out.messageId });
     }
     if (out.reason === "not_active") {
-      return json({ error: "Email sending isn't switched on for your account yet — connect your sending domain in Settings → Email Sending." }, 503);
+      // Not a fault: this tenant has not connected a sending domain yet. 503 is the closest
+      // status, so it declares itself a refusal — otherwise every send attempt on an
+      // un-onboarded tenant files as an error someone has to triage.
+      const r = json({ error: "Email sending isn't switched on for your account yet — connect your sending domain in Settings → Email Sending." }, 503);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      return r;
     }
     return json({ error: `That email didn't send${out.error ? ` (${out.error})` : ""}. Try again — if it keeps happening, tell CSM Synergy.` }, 502);
   }

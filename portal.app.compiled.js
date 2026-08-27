@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 1ec04fee1d40)
+// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 49deda06c2fc)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -38,7 +38,12 @@ return read(opts&&opts.headers)||read(url&&url.headers);};var ssFetch=function s
 // on purpose — this one only decides what the UI lets you SAVE, so if it were looser than
 // the server's the owner would get a rejected save with no explanation, and if it were
 // stricter they could not save a value the server would happily accept.
-var ssIsEmail=function ssIsEmail(v){return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v||"").trim());};var SS_ERR_SOURCE="portal";function ssLogError(source,message,code,context){try{var params=new URLSearchParams(location.search);fetch(SUPABASE_URL+"/rest/v1/rpc/log_error",{method:"POST",keepalive:true,headers:{"Content-Type":"application/json","apikey":SUPABASE_ANON_KEY,"Authorization":"Bearer "+SUPABASE_ANON_KEY},body:JSON.stringify({p_source:String(source||SS_ERR_SOURCE).slice(0,100),p_message:String(message==null?"":message.message||message).slice(0,4000),p_code:code==null?null:String(code).slice(0,100),p_client_id:window.__SS_CLIENT_ID__||params.get("client")||null,p_url:location.href.slice(0,600),p_context:context||null})})["catch"](function(){});}catch(_){/* logging must never break the app */}}window.ssLogError=ssLogError;window.addEventListener("error",function(e){return ssLogError(SS_ERR_SOURCE,e&&e.message||"window.onerror",e&&e.error&&e.error.name,{stack:e&&e.error&&e.error.stack?String(e.error.stack).slice(0,2000):null,file:e&&e.filename,line:e&&e.lineno});});window.addEventListener("unhandledrejection",function(e){var r=e&&e.reason;ssLogError(SS_ERR_SOURCE,r&&r.message||String(r),r&&r.name,{stack:r&&r.stack?String(r.stack).slice(0,2000):null});});// ── The shared designer module, if it did not load ────────────────────────────
+var ssIsEmail=function ssIsEmail(v){return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v||"").trim());};var SS_ERR_SOURCE="portal";// `severity` is optional and defaults to "error", so every existing call site keeps its
+// current meaning. Pass "info" for a REFUSAL — the product correctly declining something
+// ("send the invoice first", "that width isn't valid"). Those still get a row, because a
+// refusal that fires constantly is a bug in disguise (see migration 140), but they no
+// longer sit in the same bucket as things that actually broke.
+function ssLogError(source,message,code,context,severity){try{var params=new URLSearchParams(location.search);fetch(SUPABASE_URL+"/rest/v1/rpc/log_error",{method:"POST",keepalive:true,headers:{"Content-Type":"application/json","apikey":SUPABASE_ANON_KEY,"Authorization":"Bearer "+SUPABASE_ANON_KEY},body:JSON.stringify({p_source:String(source||SS_ERR_SOURCE).slice(0,100),p_message:String(message==null?"":message.message||message).slice(0,4000),p_code:code==null?null:String(code).slice(0,100),p_client_id:window.__SS_CLIENT_ID__||params.get("client")||null,p_url:location.href.slice(0,600),p_context:context||null,p_severity:severity||"error"})})["catch"](function(){});}catch(_){/* logging must never break the app */}}window.ssLogError=ssLogError;window.addEventListener("error",function(e){return ssLogError(SS_ERR_SOURCE,e&&e.message||"window.onerror",e&&e.error&&e.error.name,{stack:e&&e.error&&e.error.stack?String(e.error.stack).slice(0,2000):null,file:e&&e.filename,line:e&&e.lineno});});window.addEventListener("unhandledrejection",function(e){var r=e&&e.reason;ssLogError(SS_ERR_SOURCE,r&&r.message||String(r),r&&r.name,{stack:r&&r.stack?String(r.stack).slice(0,2000):null});});// ── The shared designer module, if it did not load ────────────────────────────
 // REPORT ONLY, deliberately — and this is the opposite treatment from index.html, on
 // purpose. There the module IS the page, so losing it is a blank screen and the boot guard's
 // failure message replaces the page. Here it backs exactly ONE tab: with the module gone the
@@ -80,7 +85,7 @@ var SS_TENANT_SCOPED_FNS=["portal-settings","portal-billing","sync-design-status
 // portal-settings call in operator view-as resolved the OPERATOR'S OWN tenant. The fix
 // is to mint ONE instance, wrap it, and pin it as an own data property so it shadows
 // the prototype getter (verify in a console: `sb.functions === sb.functions` → true).
-var __ssFunctions=sb.functions;var __ssInvoke=__ssFunctions.invoke.bind(__ssFunctions);__ssFunctions.invoke=/*#__PURE__*/function(){var _ref=_asyncToGenerator(/*#__PURE__*/_regeneratorRuntime().mark(function _callee(name,opts){var injected,_yield$sb$auth$getSes,ssSess,err,res,body,serverMsg,status;return _regeneratorRuntime().wrap(function _callee$(_context){while(1)switch(_context.prev=_context.next){case 0:// ⛔ THE VIEW-AS TARGET IS READ FIRST, BEFORE ANY `await`, AND NOTHING MAY MOVE ABOVE IT.
+var __ssFunctions=sb.functions;var __ssInvoke=__ssFunctions.invoke.bind(__ssFunctions);__ssFunctions.invoke=/*#__PURE__*/function(){var _ref=_asyncToGenerator(/*#__PURE__*/_regeneratorRuntime().mark(function _callee(name,opts){var injected,_yield$sb$auth$getSes,ssSess,err,res,body,serverMsg,status,st;return _regeneratorRuntime().wrap(function _callee$(_context){while(1)switch(_context.prev=_context.next){case 0:// ⛔ THE VIEW-AS TARGET IS READ FIRST, BEFORE ANY `await`, AND NOTHING MAY MOVE ABOVE IT.
 // `ssTargetClientId` is a module global that openAccount/exitAccount/onPop reassign
 // synchronously inside their handlers ("same tick as the click", 09-shell.jsx), and
 // 09-shell.jsx's own `if (!ssTargetClientId)` guard is only conclusive while this read
@@ -113,7 +118,20 @@ try{ssLogError(SS_ERR_SOURCE,"call skipped: no session on the wire","session_rec
 // between "this tab's session had gone" and "a real token was refused", which the
 // previous four weeks of rows could not tell apart. Never shown to the user.
 if(body.reason)res.error.ssReason=String(body.reason);// 401/403 are the two a builder can act on themselves, so say what to do.
-if(status===401)res.error.message+=" — sign out and back in.";else if(status===403)res.error.message+=" — ask an owner or admin to do this.";}_context.next=30;break;case 28:_context.prev=28;_context.t1=_context["catch"](20);case 30:try{if(res&&(res.error||res.data&&res.data.error)){ssLogError(SS_ERR_SOURCE,res.error&&res.error.message||res.data&&res.data.error,res.error&&res.error.name||null,{fn:name,action:opts&&opts.body&&opts.body.action,target:injected,status:res.error&&res.error.ssStatus||null,reason:res.error&&res.error.ssReason||null});}}catch(_){}// Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
+if(status===401)res.error.message+=" — sign out and back in.";else if(status===403)res.error.message+=" — ask an owner or admin to do this.";}_context.next=30;break;case 28:_context.prev=28;_context.t1=_context["catch"](20);case 30:try{if(res&&(res.error||res.data&&res.data.error)){// A 4xx is the SERVER REFUSING this request, and every one of ours answers with a
+// sentence written for the person reading it ("send the invoice first", "that width
+// isn't valid", "ask an owner or admin to do this"). That is the product working, so
+// it is logged as info, not as a fault. 5xx, a network failure and an unreadable
+// response stay errors: those are things that broke.
+//
+// Demoted, NOT dropped — the distinction earns its keep. "Driver not found." was a
+// 400 that read exactly like a validation message and was really the client posting
+// driver_profiles.user_id where the server matches on .id, so reassigning a driver
+// failed every single time for twelve days. It was caught by reading these rows.
+// What makes a refusal suspicious is REPETITION, so the row has to survive:
+//   select message, count(*) from app_errors where severity = 'info'
+//   group by 1 having count(*) > 20 order by 2 desc;
+st=res.error&&res.error.ssStatus||null;ssLogError(SS_ERR_SOURCE,res.error&&res.error.message||res.data&&res.data.error,res.error&&res.error.name||null,{fn:name,action:opts&&opts.body&&opts.body.action,target:injected,status:st,reason:res.error&&res.error.ssReason||null},st>=400&&st<500?"info":"error");}}catch(_){}// Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
 // what we asked for, the backend is older than this page and is silently serving the
 // operator's OWN tenant — so refuse the response instead of rendering someone else's
 // data under this client's name. This is what makes the deploy order (backend first)

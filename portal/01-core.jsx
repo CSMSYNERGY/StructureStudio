@@ -62,7 +62,12 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
 const SS_ERR_SOURCE = "portal";
-function ssLogError(source, message, code, context) {
+// `severity` is optional and defaults to "error", so every existing call site keeps its
+// current meaning. Pass "info" for a REFUSAL — the product correctly declining something
+// ("send the invoice first", "that width isn't valid"). Those still get a row, because a
+// refusal that fires constantly is a bug in disguise (see migration 140), but they no
+// longer sit in the same bucket as things that actually broke.
+function ssLogError(source, message, code, context, severity) {
   try {
     const params = new URLSearchParams(location.search);
     fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
@@ -75,6 +80,7 @@ function ssLogError(source, message, code, context) {
         p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
         p_url: location.href.slice(0, 600),
         p_context: context || null,
+        p_severity: severity || "error",
       }),
     }).catch(() => {});
   } catch (_) { /* logging must never break the app */ }
@@ -216,11 +222,26 @@ __ssFunctions.invoke = async (name, opts) => {
   }
   try {
     if (res && (res.error || (res.data && res.data.error))) {
+      // A 4xx is the SERVER REFUSING this request, and every one of ours answers with a
+      // sentence written for the person reading it ("send the invoice first", "that width
+      // isn't valid", "ask an owner or admin to do this"). That is the product working, so
+      // it is logged as info, not as a fault. 5xx, a network failure and an unreadable
+      // response stay errors: those are things that broke.
+      //
+      // Demoted, NOT dropped — the distinction earns its keep. "Driver not found." was a
+      // 400 that read exactly like a validation message and was really the client posting
+      // driver_profiles.user_id where the server matches on .id, so reassigning a driver
+      // failed every single time for twelve days. It was caught by reading these rows.
+      // What makes a refusal suspicious is REPETITION, so the row has to survive:
+      //   select message, count(*) from app_errors where severity = 'info'
+      //   group by 1 having count(*) > 20 order by 2 desc;
+      const st = (res.error && res.error.ssStatus) || null;
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
         (res.error && res.error.name) || null,
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
-          status: (res.error && res.error.ssStatus) || null,
-          reason: (res.error && res.error.ssReason) || null });
+          status: st,
+          reason: (res.error && res.error.ssReason) || null },
+        (st >= 400 && st < 500) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
