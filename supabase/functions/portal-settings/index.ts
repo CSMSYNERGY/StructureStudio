@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
-import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
+import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
@@ -3113,7 +3113,27 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .or(contact?.id ? `contact_id.eq.${contact.id}` : `short_code.in.(${codes.join(",") || "''"})`)
       .order("due_at", { ascending: true, nullsFirst: false }).limit(25);
 
-    return json({ ok: true, kind, contact, designs, feed, focus: focus ?? [] });
+    // ORDERS ON THE RECORD. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a
+    // contact, I feel like you should see the deal. You should see the orders."
+    //
+    // The deal half already existed (the designs/person reciprocal embed); this is the half
+    // that was missing, and it is the one that answers "have they actually bought anything".
+    // Joined on short_code because orders.short_code is a soft link with no FK for PostgREST
+    // to embed — the same reason OrdersView reads them separately.
+    //
+    // It rides THIS fetch rather than adding a second round-trip from the browser: the
+    // record page makes exactly one call on purpose, because designs/orders RLS is scoped to
+    // current_client_id() and a direct read returns nothing in operator view-as.
+    let orders: any[] = [];
+    if (codes.length) {
+      const { data: os } = await admin.from("orders")
+        .select("id, order_no, short_code, status, total_cents, ordered_at")
+        .eq("client_id", clientId).in("short_code", codes)
+        .order("ordered_at", { ascending: false }).limit(50);
+      orders = os ?? [];
+    }
+
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [] });
   }
 
   if (action === "crm_feed") {
@@ -3143,47 +3163,24 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
 
-    // REPLY-TO IS THE STAFF MEMBER WHO WROTE IT, and that is the answer to a problem this
-    // codebase has had open for a while: there is no `business_email` column to default a
-    // reply address from (emailSend.ts says so in as many words), and the tenant's sending
-    // address is a no-reply-shaped local part on their sending domain. So a customer hitting
-    // Reply on a document email has nowhere good to land.
-    //
-    // For a CONVERSATION that is unacceptable — a reply is the entire point. The signed-in
-    // sender's own address is the correct destination, it needs no new column, and it is
+    // REPLY-TO FALLBACK ONLY: the staff member who wrote it. There is no `business_email`
+    // column to default a reply address from (emailSend.ts says so in as many words), and the
+    // tenant's sending address is a no-reply-shaped local part, so a customer hitting Reply
+    // needs somewhere real to land. The signed-in sender is the right answer, and it is
     // resolved SERVER-SIDE from the JWT rather than trusted from the body, so nobody can
     // route a customer's replies at a third party.
-    // PREFERRED: a routable address on the TENANT'S OWN inbound subdomain, so the reply
-    // comes back into the portal and the customer only ever sees the builder's domain.
     //
-    //   d.SS-9R8UHJGTDJ@reply.jrbarns.com   → that design
-    //   c.<contact-uuid>@reply.jrbarns.com  → that person
-    //
-    // The token is in the ADDRESS rather than relying on In-Reply-To because the address is
-    // the one thing that always survives: it is what the customer's mail client puts in the
-    // To field. References headers get stripped and rewritten by real clients constantly.
-    //
-    // FALLBACK: the staff member who wrote it. Every tenant is in this state until they
-    // configure an inbound domain, and it is a genuinely good fallback — the reply reaches a
-    // human immediately, it just does not appear in the portal.
+    // The ROUTABLE address (`d.SS-…@reply.jrbarns.com`) used to be computed right here and is
+    // now derived inside sendTenantEmail, where it covers all ten send paths instead of this
+    // one. That move is the point: a customer replying to their QUOTE was never routed
+    // anywhere, because quotes go through submit-estimate and only this branch had the code.
+    // Do not reintroduce it here — sendTenantEmail prefers its own and falls back to this.
     let replyTo: string | undefined;
     try {
-      const { data: cs } = await admin.from("client_settings")
-        .select("inbound_domain, inbound_status").eq("client_id", clientId).maybeSingle();
-      const dom = String(cs?.inbound_domain ?? "").trim().toLowerCase();
-      if (dom && cs?.inbound_status === "active") {
-        // Lowercased because a local part is compared case-insensitively in practice and
-        // the webhook lowercases before matching; short codes are uppercase on the row.
-        replyTo = (shortCode ? `d.${shortCode}` : `c.${contactId}`).toLowerCase() + "@" + dom;
-      }
-    } catch (_) { /* fall through to the sender's own address */ }
-    if (!replyTo) {
-      try {
-        const { data: u } = await admin.auth.admin.getUserById(userId ?? "");
-        const addr = u?.user?.email;
-        if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
-      } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
-    }
+      const { data: u } = await admin.auth.admin.getUserById(userId ?? "");
+      const addr = u?.user?.email;
+      if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
+    } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and
@@ -3199,6 +3196,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       text: body,
       ...(replyTo ? { replyTo } : {}),
       ...(shortCode ? { shortCode } : {}),
+      // Carried so sendTenantEmail can build the threading Message-ID. Without it a
+      // conversation email about no particular design gets no threading id, and a reply
+      // could only be placed by the sender's address — which cannot tell two people at the
+      // same company apart.
+      ...(contactId ? { contactId } : {}),
     } as any);
 
     if (out.sent) {
@@ -3212,7 +3214,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ ok: true, messageId: out.messageId });
     }
     if (out.reason === "not_active") {
-      return json({ error: "Email sending isn't switched on for your account yet — connect your sending domain in Settings → Email Sending." }, 503);
+      // Not a fault: this tenant has not connected a sending domain yet. 503 is the closest
+      // status, so it declares itself a refusal — otherwise every send attempt on an
+      // un-onboarded tenant files as an error someone has to triage.
+      const r = json({ error: "Email sending isn't switched on for your account yet — connect your sending domain in Settings → Email Sending." }, 503);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      return r;
     }
     return json({ error: `That email didn't send${out.error ? ` (${out.error})` : ""}. Try again — if it keeps happening, tell CSM Synergy.` }, 502);
   }

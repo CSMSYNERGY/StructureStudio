@@ -26,6 +26,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
   const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
   const [query, setQuery] = useState("");        // free-text search across all fields
+  const [pdf, setPdf] = useState(null);          // { url, title } — the pop-up viewer
 
   const load = useCallback(async () => {
     setError(null);
@@ -205,6 +206,16 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
 
+  // Paging applies to the LIST only. A board showing "30 of 400" cards is not a pipeline —
+  // the whole point of the board is seeing where everything sits at once, and a column that
+  // silently holds back its tail would be read as an empty stage.
+  const [pageSize, setPageSize] = usePageSize("designs");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, view]);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   return (
     <div style={S.card}>
       <CardHead
@@ -242,7 +253,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {error && <div style={S.err}>{error}</div>}
-      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
+          see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              {["Date", "Customer", "Contact", "Building", "Estimate #", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+            </tr></thead>
+            <tbody><SkelRows cols={7} rows={6} /></tbody>
+          </table>
+        </div>
+      )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
@@ -312,7 +334,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {sorted.map((r) => {
+              {paged.map((r) => {
                 const c = r.contact || {}; const sel = r.selections || {};
                 const vs = vmap[r.short_code] || [];       // newest first
                 const older = vs.slice(1);                  // everything below the latest
@@ -349,14 +371,18 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           customer's design there would corrupt that activity. */}
                       <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                      {ssSafeUrl(r.image_url) && <a href={ssSafeUrl(r.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                      {/* Pop-up, not a new tab — Carolyn 2026-08-26. See PdfModal. */}
+                      {ssSafeUrl(r.image_url) && (
+                        <button type="button" onClick={() => setPdf({ url: r.image_url, title: `Floor plan — ${c.name || r.short_code}` })}
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
+                      )}
                       {/* SS-issued quote (migration 122): the printable 3-sheet document plus the
                           two hand-delivery tools — most lot customers want paper, and a design
                           with no email address never blocks. */}
                       {r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && (
-                        <a href={ssSafeUrl(r.ss_quote_pdf_url)} target="_blank" rel="noopener noreferrer"
+                        <button type="button" onClick={() => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` })}
                           title="Open the printable quote document"
-                          style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginLeft: 10 }}>Quote PDF</a>
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700, marginLeft: 10 }}>Quote PDF</button>
                       )}
                       {r.ss_quote_number && (
                         <button type="button" onClick={() => copyCustomerLink(r.short_code)}
@@ -411,7 +437,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                           <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code, v.version)}
                             style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
-                          {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener noreferrer" style={{ color: "#334155", fontWeight: 700, textDecoration: "none" }}>PDF</a>}
+                          {ssSafeUrl(v.image_url) && (
+                            <button type="button" onClick={() => setPdf({ url: v.image_url, title: `Floor plan v${v.version} — ${r.short_code}` })}
+                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -421,8 +450,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               })}
             </tbody>
           </table>
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="design" />
         </div>
       )}
+      {pdf && <PdfModal url={pdf.url} title={pdf.title} onClose={() => setPdf(null)} />}
       {delTarget && (
         <DeleteDesignDialog design={delTarget} onClose={() => setDelTarget(null)}
           onDeleted={(res) => {
@@ -537,6 +568,71 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // Inventory masters are lot buildings, not contacts — exclude on both paths (they
     // have an empty contact, so they'd otherwise group as a nameless short_code row).
     const notInventoryLead = (r) => r.status !== "inventory";
+    // Grouping is a FUNCTION rather than a straight-line block because this list paints
+    // TWICE: once on the cached statuses the moment the rows arrive, and again when the
+    // GHL sync comes back.
+    //
+    // Carolyn, 2026-08-26, three separate times: "the contact page always takes a while to
+    // load ... this is the only page that takes that long." It was the only slow one
+    // because it was the only list that awaited sync-design-status BEFORE its first
+    // setRows, so `rows` sat at null — the "Loading…" state — for a whole round-trip over
+    // every short code in the tenant. DesignsTable had always painted its cached rows
+    // first and synced after (see its load()); this is that same shape, finally.
+    //
+    // She read the delay as a scale problem and asked for pagination. Pagination is worth
+    // having, but it would not have fixed this: the wait was one round-trip, not 30 rows.
+    const paint = (rowsIn, browsingIn) => {
+      // Group by person: normalized phone, else email, else name (fallback: short_code).
+      const normPhone = (p) => String(p || "").replace(/\D/g, "");
+      const groups = new Map();
+      rowsIn.forEach((r) => { // newest-first
+        const c = r.contact || {};
+        const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
+        let g = groups.get(key);
+        // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
+        // wins the > comparison below — seeded at "sent", a draft-only contact could never
+        // display as Draft (its -1 never beats 0).
+        if (!g) { g = { key, contactId: null, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
+        // The real crm_contacts id, once migration 130 has stamped it. Absent until the
+        // backfill runs, which is why the record link below is conditional rather than assumed.
+        if (!g.contactId && r.contact_id) g.contactId = r.contact_id;
+        g.count += 1;
+        g.codes.push(r.short_code);                     // newest-first (list order)
+        // Accumulate design-level searchable text (building + estimate #) so a lead is
+        // findable by those too — they aren't columns here but the requirement is all-fields.
+        const gsel = r.selections || {};
+        g.search += " " + [titleCase(gsel.style), gsel.size, r.ghl_estimate_number, r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : ""].filter(Boolean).join(" ");
+        if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
+        if (!g.email && c.email) g.email = c.email;
+        if (!g.phone && c.phone) g.phone = c.phone;
+        const act = r.updated_at || r.created_at;
+        if (act > g.lastActivity) g.lastActivity = act;
+        if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
+        const st = normStatus(r.status);
+        // was `RANK[st]`: the refactor that replaced LeadsTable's private RANK copy with the
+        // shared STATUS_RANK missed this one usage, so load() threw ReferenceError on the
+        // first design row and Contacts sat on "Loading…" forever.
+        if (STATUS_RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
+      });
+      // Browsing leads join the same list, SUPPRESSED once the person has a real design —
+      // matched by normalized phone first, then email, the same identity rules the design
+      // grouping itself uses. A browsing lead who later submits simply becomes their design
+      // row; the browsing entry disappears rather than duplicating them.
+      const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
+      browsingIn.forEach((l) => {
+        const em = String(l.email || "").trim().toLowerCase();
+        if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
+        groups.set("lead-" + l.id, {
+          key: "lead-" + l.id, browsing: true, source: l.source,
+          name: l.name || "", email: l.email || "", phone: l.phone || "",
+          count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
+          latestCode: null, topStatus: "browsing",
+          search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
+          codes: [],
+        });
+      });
+      setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+    };
     if (fetchDesigns) {
       // Operator view-as: rows from operator-portal (service-role, audit-logged);
       // live status sync skipped (owner-JWT-bound) — cached statuses show.
@@ -559,7 +655,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         .eq("client_id", clientId).order("updated_at", { ascending: false });
       browsing = cl || [];
     } catch (_e) { /* leads are additive */ }
-    // Freshen fulfillment status from GHL (read-only projection); non-fatal.
+    // PAINT NOW, on the cached statuses. Everything below only ever improves them.
+    paint(list, browsing);
+    // Freshen fulfillment status from GHL (read-only projection); non-fatal. The rows
+    // are already on screen by now — this only repaints them, at the tail below.
     if (list.length > 0) {
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
@@ -568,56 +667,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       } catch (_e) { /* keep cached statuses */ }
     }
     }
-    // Group by person: normalized phone, else email, else name (fallback: short_code).
-    const normPhone = (p) => String(p || "").replace(/\D/g, "");
-    const groups = new Map();
-    list.forEach((r) => { // list is newest-first
-      const c = r.contact || {};
-      const key = normPhone(c.phone) || String(c.email || "").trim().toLowerCase() || String(c.name || "").trim().toLowerCase() || r.short_code;
-      let g = groups.get(key);
-      // topStatus starts at the LOWEST rank ("draft", -1) so the very first row always
-      // wins the > comparison below — seeded at "sent", a draft-only contact could never
-      // display as Draft (its -1 never beats 0).
-      if (!g) { g = { key, contactId: null, name: "", email: "", phone: "", count: 0, firstSeen: r.created_at, lastActivity: r.created_at, latestCode: r.short_code, topStatus: "draft", search: "", codes: [] }; groups.set(key, g); }
-      // The real crm_contacts id, once migration 130 has stamped it. Absent until the
-      // backfill runs, which is why the record link below is conditional rather than assumed.
-      if (!g.contactId && r.contact_id) g.contactId = r.contact_id;
-      g.count += 1;
-      g.codes.push(r.short_code);                     // newest-first (list order)
-      // Accumulate design-level searchable text (building + estimate #) so a lead is
-      // findable by those too — they aren't columns here but the requirement is all-fields.
-      const gsel = r.selections || {};
-      g.search += " " + [titleCase(gsel.style), gsel.size, r.ghl_estimate_number, r.ghl_estimate_number ? "EST-" + r.ghl_estimate_number : ""].filter(Boolean).join(" ");
-      if (!g.name && c.name) g.name = c.name;       // newest-first → prefer the most recent non-empty value
-      if (!g.email && c.email) g.email = c.email;
-      if (!g.phone && c.phone) g.phone = c.phone;
-      const act = r.updated_at || r.created_at;
-      if (act > g.lastActivity) g.lastActivity = act;
-      if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
-      const st = normStatus(r.status);
-      // was `RANK[st]`: the refactor that replaced LeadsTable's private RANK copy with the
-      // shared STATUS_RANK missed this one usage, so load() threw ReferenceError on the
-      // first design row and Contacts sat on "Loading…" forever.
-      if (STATUS_RANK[st] > STATUS_RANK[g.topStatus]) g.topStatus = st;
-    });
-    // Browsing leads join the same list, SUPPRESSED once the person has a real design —
-    // matched by normalized phone first, then email, the same identity rules the design
-    // grouping itself uses. A browsing lead who later submits simply becomes their design
-    // row; the browsing entry disappears rather than duplicating them.
-    const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
-    browsing.forEach((l) => {
-      const em = String(l.email || "").trim().toLowerCase();
-      if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
-      groups.set("lead-" + l.id, {
-        key: "lead-" + l.id, browsing: true, source: l.source,
-        name: l.name || "", email: l.email || "", phone: l.phone || "",
-        count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
-        latestCode: null, topStatus: "browsing",
-        search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
-        codes: [],
-      });
-    });
-    setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+    paint(list, browsing);
   }, [fetchDesigns]);
 
   useEffect(() => { load(); }, [load]);
@@ -667,6 +717,17 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     }
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
+
+  // Paging is the LAST step, over the fully filtered and sorted list, so the counts above
+  // ("12 of 340") keep describing the whole tenant rather than the visible page.
+  const [pageSize, setPageSize] = usePageSize("contacts");
+  const [page, setPage] = useState(1);
+  // Any change to what is being listed sends you back to page 1 — staying on page 7 of a
+  // search that now returns four contacts shows an empty table and reads as a broken page.
+  useEffect(() => { setPage(1); }, [query, statusFilter, fFrom, fTo, fContact]);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
 
   // ── Details drawer (per contact): what they changed + their estimate activity ──
   const [detailsFor, setDetailsFor] = useState(null); // group key | null
@@ -729,7 +790,19 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
       )}
       {error && <div style={S.err}>{error}</div>}
-      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* The skeleton carries the real table's seven columns, so when the rows land they
+          replace grey bars that are already the right shape and nothing shifts under the
+          cursor. This is the state Carolyn was describing as "there's nothing there". */}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              {["Customer", "Contact", "Designs", "First seen", "Last activity", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+            </tr></thead>
+            <tbody><SkelRows cols={7} rows={6} /></tbody>
+          </table>
+        </div>
+      )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts yet. Share your customer link — everyone who submits a design shows up here.</p>
       )}
@@ -755,7 +828,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
               <th style={S.th}>Actions</th>
             </tr></thead>
             <tbody>
-              {sorted.map((g) => {
+              {paged.map((g) => {
                 // Browsing leads get the brand light blue rather than a fulfillment colour —
                 // they are interest, not an order state.
                 const sc = g.browsing ? { bg: "#DBEAFF", fg: "#3D3672" } : (STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent);
@@ -846,6 +919,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
               })}
             </tbody>
           </table>
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="contact" />
         </div>
       )}
     </div>
@@ -886,6 +960,11 @@ const CRM_SECTIONS = [
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
   { key: "deals", title: "Deals", when: (c) => c.kind === "contact" },
+  // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
+  // you should see the deal. You should see the orders." Deals were already here; orders
+  // are what say whether any of them turned into a sale. Contact-side only — a design's
+  // order is the same one row and would just repeat the stage bar above it.
+  { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
   { key: "person", title: "Person", when: (c) => c.kind === "design" },
   { key: "overview", title: "Overview", when: () => true },
 ];
@@ -928,8 +1007,16 @@ const CRM_TABS = [
       ? "This contact has no email address on file."
       : "You don't have permission to email contacts."),
   },
-  { key: "files", label: "Files", enabled: () => false, hint: "Needs a contact-scoped storage bucket." },
-  { key: "documents", label: "Documents", enabled: () => true },
+  // TWO NAMES THAT SAY WHOSE FILES THEY ARE. Carolyn spent the longest stretch of the
+  // 2026-08-26 call on this (20:08–26:45): "documents is what we create ... customer files
+  // is like customer files", and "I don't want it all mixed together."
+  //
+  // "Documents" and "Files" are the same word twice — neither tells you which pile you are
+  // looking at. Design Documents is what WE generated (quote PDFs, floor plans, invoices);
+  // Customer Uploads is what THEY sent us. The names now carry the distinction, so the two
+  // can never read as interchangeable tabs.
+  { key: "files", label: "Customer Uploads", enabled: () => false, hint: "Arrives with customer file storage — nothing they send is lost in the meantime, it is still on the email." },
+  { key: "documents", label: "Design Documents", enabled: () => true },
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
 ];
 
@@ -946,7 +1033,11 @@ const CRM_CHIPS = [
   { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
-  { key: "changelog", label: "Changelog", types: ["design_version", "status_change", "lead_captured"] },
+  // Everything that happened, not three types two of which were never emitted — see the
+  // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
+  // screen. Keep the two lists identical.
+  { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
+    "change_order", "invoice_created", "invoice_sent", "lead_captured"] },
 ];
 
 // The stage bar. Carolyn's own stage names, from her Pipedrive screen.
@@ -1012,6 +1103,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // so a note error can't surface under Focus too. Every new attempt clears it first, so a
   // stale failure never outlives the action that follows it.
   const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus", msg }
+  const [pdf, setPdf] = useState(null);     // { url, title } — the pop-up viewer
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1150,6 +1242,43 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         </div>
       );
     }
+    if (key === "orders") {
+      // ⚠️ ABSENT is not EMPTY. The frontend auto-deploys on push; the edge function that
+      // supplies `orders` is deployed separately, so between those two moments the field is
+      // undefined. Rendering "No orders yet" then would state, on a contact who has bought
+      // two buildings, that they have bought nothing — the same class of lie the Orders
+      // money-pending state exists to avoid. Undefined says the server is behind; [] says
+      // there are genuinely none.
+      if (!data.orders) {
+        return <div style={{ fontSize: 12, color: "#94A3B8" }}>Orders appear here once the server update lands.</div>;
+      }
+      const os = data.orders;
+      // No link out yet: Orders is its own tab with its own row-click detail, and there is
+      // no /portal/orders/<id> route to deep-link to. Showing the order number, what it was
+      // for and where it stands answers her question ("have they bought anything, and is it
+      // paid") without inventing a route that would then need its own back button.
+      return (
+        <div>
+          {os.map((o) => {
+            const d = (data.designs || []).find((x) => x.short_code === o.short_code);
+            const what = d ? [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") : "";
+            return (
+              <div key={o.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+                  #{o.order_no}{what ? ` · ${what}` : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "#64748B" }}>
+                  {fmtDate(o.ordered_at)}
+                  {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
+                  {o.status ? ` · ${o.status}` : ""}
+                </div>
+              </div>
+            );
+          })}
+          {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
+        </div>
+      );
+    }
     if (key === "person") {
       return data.contact ? (
         <button onClick={() => data.contact.id && onNavigate("contact", data.contact.id)}
@@ -1235,11 +1364,23 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               </div>
             )}
             {/* ACTIVITY. Kind first, because "call" and "deadline" read completely
-                differently in the feed, and the kind is what the icon and label key on. */}
+                differently in the feed, and the kind is what the icon and label key on.
+
+                NO "meeting" AND NO "lunch" CHIP. Carolyn walked this row on 2026-08-26
+                (18:00): "I don't want meeting in there — we have a meeting scheduler",
+                and the same for lunch. Meetings belong to the Meeting scheduler tab, and
+                two ways to book the same thing is how a calendar drifts out of sync with
+                itself. Ahsan confirmed both on 2026-08-27.
+
+                The SERVER still accepts both kinds, on purpose — portal-settings' KINDS,
+                labelActivity in _shared/crmFeed.ts, and migration 131's CHECK are all
+                untouched. Tenants have meeting and lunch rows already logged, and a chip
+                the composer no longer offers is not the same thing as a kind the history
+                can no longer render. Removing them server-side would blank those rows. */}
             {tab === "activity" && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-                  {["call", "meeting", "task", "deadline", "lunch"].map((k) => (
+                  {["call", "task", "deadline"].map((k) => (
                     <button key={k} type="button" onClick={() => setAct((p) => ({ ...p, kind: k }))}
                       style={{
                         background: act.kind === k ? ACCENT : "#F1F5F9", color: act.kind === k ? "#FFF" : "#475569",
@@ -1278,12 +1419,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   if (docs.length === 0) {
                     return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No documents yet. A quote PDF appears here as soon as one is sent.</div>;
                   }
+                  // Pop-up, never a new tab (Carolyn 2026-08-26 21:15). This is the list she
+                  // was looking at when she said it.
                   return docs.map((doc) => (
-                    <a key={doc.k} href={doc.url} target="_blank" rel="noopener"
+                    <button key={doc.k} type="button" onClick={() => setPdf({ url: doc.url, title: doc.label })}
                       style={{
-                        display: "block", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
-                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, textDecoration: "none",
-                      }}>📄 {doc.label}</a>
+                        display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
+                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, cursor: "pointer", fontFamily: "inherit",
+                      }}>📄 {doc.label}</button>
                   ));
                 })()}
               </div>
@@ -1405,6 +1548,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
           </div>
         </div>
       </div>
+      {pdf && <PdfModal url={pdf.url} title={pdf.title} onClose={() => setPdf(null)} />}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
 import {
   toE164US,
   TwilioApiError,
@@ -68,6 +68,16 @@ const cors = {
 };
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
+
+// Sign-in by text is simply not switched on for this tenant — no Twilio credentials, no
+// Verify service. There is no 4xx that says "the operator has not enabled this", so it
+// answers 503, which would otherwise file as a fault every time a customer taps the
+// button. It is the product declining, so it says so and lands as info instead.
+const refusal = (b: unknown, s = 503) => {
+  const r = json(b, s);
+  r.headers.set(SS_REFUSAL_HEADER, "1");
+  return r;
+};
 
 type BucketState = {
   bucket: string;
@@ -243,7 +253,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       await twStartVerification(e164, brand);
     } catch (e) {
       if (e instanceof TwilioNotConfigured) {
-        return json({ error: MSG_NOT_CONFIGURED }, 503);
+        return refusal({ error: MSG_NOT_CONFIGURED });
       }
       if (e instanceof TwilioApiError) {
         if (e.code === 60203) {
@@ -313,7 +323,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     check = await twCheckVerification(e164, code);
   } catch (e) {
     if (e instanceof TwilioNotConfigured) {
-      return json({ error: MSG_NOT_CONFIGURED }, 503);
+      return refusal({ error: MSG_NOT_CONFIGURED });
     }
     if (e instanceof TwilioApiError) {
       if (e.code === 60202) {

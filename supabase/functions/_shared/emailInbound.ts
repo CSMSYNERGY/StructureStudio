@@ -83,3 +83,141 @@ export function parseReplyToken(addr: unknown): { kind: "design" | "contact"; id
     ? { kind: "design", id: m[2].toUpperCase() }
     : { kind: "contact", id: m[2] };
 }
+
+/** Build the routable reply address — the exact inverse of parseReplyToken, and its neighbour
+ *  so the two spellings can never drift apart.
+ *
+ *   d.ss-9r8uhjgtdj@reply.jrbarns.com   → that design
+ *   c.<contact-uuid>@reply.jrbarns.com  → that person
+ *
+ * Returns null unless the tenant's inbound domain is genuinely ACTIVE and there is something
+ * to reference. Null is the signal to fall back to a real human's inbox, which is a good
+ * outcome — the reply reaches someone immediately, it just does not appear in the portal.
+ *
+ * ⚠️ 'pending' MUST NOT PRODUCE AN ADDRESS. A tenant who has typed the domain but not proved
+ * MX control has no working mailbox there, and a Reply-To pointing at dead MX means the
+ * customer's reply bounces back to the CUSTOMER while the builder learns nothing. The old
+ * behaviour — a staff member's own address — is strictly better than that, so the bar for
+ * replacing it is a domain that has actually been verified.
+ *
+ * Lowercased throughout: a local part is compared case-insensitively in practice, short codes
+ * are uppercase on the row, and the webhook lowercases before matching.
+ */
+export function buildReplyAddress(
+  inboundDomain: unknown,
+  inboundStatus: unknown,
+  ref: { shortCode?: string | null; contactId?: string | null },
+): string | null {
+  const dom = String(inboundDomain ?? "").trim().toLowerCase();
+  if (!dom || !dom.includes(".") || String(inboundStatus ?? "") !== "active") return null;
+  const local = ref.shortCode
+    ? `d.${String(ref.shortCode).trim()}`
+    : (ref.contactId ? `c.${String(ref.contactId).trim()}` : "");
+  // A send with neither a design nor a contact has nothing to route back to. Guarded rather
+  // than templated, or a null id renders the literal address `c.null@reply.<domain>`.
+  if (local === "d." || local === "c." || !local) return null;
+  return `${local.toLowerCase()}@${dom}`;
+}
+
+/** The SMTP envelope recipients (RCPT TO), which is the only recipient a sender cannot forge.
+ *
+ * ⚠️ THIS IS A SECURITY BOUNDARY, not a convenience. The `To:` header is written by whoever
+ * composed the message; the envelope is written by the sending MTA and is what actually
+ * routed the mail to us. Choosing a tenant from `To:` lets anyone who has seen a quote link
+ * — and those get forwarded to spouses, lenders and Facebook groups — mail us with
+ * `To: d.SS-XXXX@reply.someoneelse.com` and post whatever they like onto that builder's
+ * conversation feed. The short code is a capability for READING a design, never a
+ * capability for writing to a tenant's record.
+ *
+ * Every provider spells the envelope differently, so this returns ALL candidates in
+ * confidence order and the caller takes the first that resolves to a tenant:
+ *   Resend      data.to[] (+ received_for[] when the mail was forwarded)
+ *   Mailgun     recipient
+ *   SendGrid    envelope (a JSON *string*) -> { to: [...] }
+ *   SES via SNS receipt.recipients[]
+ *   CloudMailin envelope.to
+ * Header `to`/`To` is deliberately EXCLUDED. It is fine for display; it is never evidence.
+ */
+export function envelopeRecipients(payload: unknown, m: unknown): string[] {
+  const out: string[] = [];
+  const push = (v: unknown) => {
+    if (Array.isArray(v)) { v.forEach(push); return; }
+    if (v && typeof v === "object") { push((v as Record<string, unknown>).email ?? (v as Record<string, unknown>).address); return; }
+    const s = String(v ?? "").trim().toLowerCase();
+    // Tolerate a display-name wrapper; some MTAs put one on the envelope copy.
+    const bare = /<([^>]+)>/.exec(s)?.[1]?.trim() ?? s;
+    if (bare.includes("@") && bare.length < 320 && !out.includes(bare)) out.push(bare);
+  };
+
+  const p = (payload ?? {}) as Record<string, unknown>;
+  const msg = (m ?? {}) as Record<string, unknown>;
+
+  // SES delivers the envelope on the SNS receipt, OUTSIDE the mail object.
+  const receipt = (p.receipt ?? msg.receipt) as Record<string, unknown> | undefined;
+  if (receipt && typeof receipt === "object") push(receipt.recipients);
+
+  // SendGrid ships `envelope` as a JSON string; CloudMailin ships an object.
+  const env = msg.envelope ?? p.envelope;
+  if (typeof env === "string") {
+    try { push((JSON.parse(env) as Record<string, unknown>)?.to); } catch { /* not JSON: ignore */ }
+  } else if (env && typeof env === "object") {
+    push((env as Record<string, unknown>).to);
+  }
+
+  push(msg.recipient ?? p.recipient);   // Mailgun
+  push(msg.received_for);               // Resend, forwarded mail
+  push(msg.to);                         // Resend `data.to[]` — an envelope-derived array
+  return out;
+}
+
+/** Build the RFC 5322 Message-ID we put on outbound mail, encoding what the reply belongs to.
+ *
+ *   <ss.junior-barns.d.ss-9r8uhjgtdj.k3f9x2@jrbarns.com>
+ *
+ * WHY THIS EXISTS. The obvious design — store the provider's send id and match a reply's
+ * In-Reply-To against it — CANNOT WORK, and shipped broken: `email_sends.provider_message_id`
+ * holds Resend's API id (a bare uuid, no `@`), while In-Reply-To always carries an RFC 5322
+ * id ending `@domain`. A string with no `@` can never equal one that has it, so that join has
+ * matched zero rows on every send since it was written. Generating the id ourselves makes it
+ * comparable AND self-describing, so a reply routes with no database round trip at all.
+ *
+ * `clientId` is carried so a reply can be checked against the tenant the envelope already
+ * chose: a Message-ID is echoed back by the customer's mail client and is therefore
+ * ATTACKER-VISIBLE, exactly like the short code. It narrows WITHIN a tenant; it must never
+ * select one. Callers enforce that.
+ *
+ * Dots separate the fields, so no field may contain one: client ids are DNS-safe slugs and
+ * short codes / uuids are alphanumeric-plus-dash. Returns null rather than a malformed id if
+ * that ever stops being true.
+ */
+export function buildThreadMessageId(
+  clientId: string,
+  domain: string,
+  ref: { shortCode?: string | null; contactId?: string | null },
+  rand = Math.random().toString(36).slice(2, 10),
+): string | null {
+  const cid = String(clientId ?? "").trim().toLowerCase();
+  const dom = String(domain ?? "").trim().toLowerCase().replace(/^@/, "");
+  const kind = ref.shortCode ? "d" : (ref.contactId ? "c" : "");
+  const id = String((ref.shortCode ?? ref.contactId) ?? "").trim().toLowerCase();
+  if (!cid || !dom || !kind || !id) return null;
+  if (!/^[a-z0-9-]+$/.test(cid) || !/^[a-z0-9-]+$/.test(id) || !/^[a-z0-9.-]+$/.test(dom)) return null;
+  return `<ss.${cid}.${kind}.${id}.${rand}@${dom}>`;
+}
+
+/** Inverse of buildThreadMessageId. Accepts the id with or without angle brackets. */
+export function parseThreadMessageId(
+  raw: unknown,
+): { clientId: string; kind: "design" | "contact"; id: string } | null {
+  const s = String(raw ?? "").trim().toLowerCase().replace(/^<|>$/g, "");
+  const local = s.split("@")[0];
+  const m = /^ss\.([a-z0-9-]+)\.([dc])\.([a-z0-9-]+)\.[a-z0-9]+$/.exec(local);
+  if (!m) return null;
+  return {
+    clientId: m[1],
+    kind: m[2] === "d" ? "design" : "contact",
+    // Short codes are uppercase on the row but lowercase in a Message-ID, same as the
+    // reply-token address. A uuid is already lowercase, so upper-casing would break it.
+    id: m[2] === "d" ? m[3].toUpperCase() : m[3],
+  };
+}

@@ -46,6 +46,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
 import { logEdgeError } from "./logError.ts";
+import { buildThreadMessageId, buildReplyAddress } from "./emailInbound.ts";
 
 /** The platform-owned fallback sender for tenants whose own domain is not yet verified.
  *  Usable only while PLATFORM_EMAIL_DOMAIN_READY === 'true' (read at request time, so
@@ -56,19 +57,27 @@ export type TenantMail = {
   // Mirrors the email_sends.kind CHECK: 'acceptance' + 'change_order' added by migration 124.
   kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order";
   /**
-   * Where a REPLY should go. Optional, and deliberately not defaulted from client_settings:
-   * there is no business_email column to default it FROM (checked 2026-08-21), so inventing
-   * one here would mean guessing.
+   * FALLBACK reply address — used only when the tenant has no ACTIVE inbound domain.
+   *
+   * ⚠️ Its meaning changed: this is no longer "where a reply goes". sendTenantEmail now
+   * derives a routable address on the tenant's own inbound subdomain
+   * (`d.<short_code>@reply.<domain>`) and that WINS when it exists, so a reply lands in the
+   * portal instead of a personal inbox. Pass a real human's address here for the — currently
+   * universal — case where inbound is not configured; there is still no business_email
+   * column to default one from (checked 2026-08-21), so the caller has to say who.
    *
    * It matters most on the platform-fallback path, whose From is no-reply@ on a domain with
    * no MX — under RFC 5321 an A record with no MX becomes an implicit MX, so a customer who
    * replies gets a multi-day queue and then a bounce, and the builder never learns they
-   * tried. A tenant on their OWN verified domain needs nothing here: their From is already
-   * a real mailbox.
+   * tried.
    */
   replyTo?: string;
   /** Design short code; null/absent for kind 'test'. */
   shortCode?: string | null;
+  /** Who this is about, when there is no design — the CRM composer's case. Used only to
+   *  build the threading Message-ID, so a reply to a plain conversation email lands on the
+   *  right person. A send with neither this nor shortCode simply gets no threading id. */
+  contactId?: string | null;
   to: string;
   subject: string;
   html: string;
@@ -126,7 +135,10 @@ export async function sendTenantEmail(
     const { data: s } = await admin.from("client_settings")
       .select(
         "email_provider, email_domain_status, email_domain, email_from_local, " +
-          "email_from_name, business_name, beta_mode, beta_email",
+          "email_from_name, business_name, beta_mode, beta_email, " +
+          // For the routing Reply-To below. Read here rather than by the caller so all ten
+          // send paths get it from one place instead of one of them getting it by hand.
+          "inbound_domain, inbound_status",
       )
       .eq("client_id", clientId).maybeSingle();
     if (!s || s.email_provider !== "resend") return { sent: false, reason: "not_active" };
@@ -190,6 +202,44 @@ export async function sendTenantEmail(
     }
     const rowId = row.id;
 
+    // ── Threading id ────────────────────────────────────────────────────────────────
+    // An RFC 5322 Message-ID we generate ourselves, encoding the tenant and what the mail
+    // is about, so a reply's In-Reply-To routes straight back to this design or contact.
+    //
+    // It exists because the obvious alternative CANNOT work: `provider_message_id` below
+    // stores Resend's API id, a bare uuid with no `@`, while In-Reply-To always carries an
+    // id ending `@domain`. The webhook's join against that column has therefore matched
+    // nothing on every send since it was written (migration 135's table comment still
+    // claims otherwise). Generating the id makes it comparable AND self-describing.
+    //
+    // Built on the SENDING domain so it aligns with From, and omitted entirely when the
+    // pieces are missing — a send with no threading id behaves exactly as it did before.
+    const threadId = buildThreadMessageId(
+      clientId,
+      fromEmail.split("@")[1] ?? "",
+      { shortCode: mail.shortCode, contactId: mail.contactId },
+    );
+
+    // ── Reply-To ────────────────────────────────────────────────────────────────────
+    // A routable address on the TENANT'S OWN inbound subdomain, so a reply comes back into
+    // the portal and the customer only ever sees the builder's domain.
+    //
+    // THIS LIVES HERE, NOT AT THE CALL SITES, and that is the fix. It used to be computed by
+    // hand inside portal-settings' crm_send_email — one of TEN sendTenantEmail call sites —
+    // so a customer replying to their QUOTE, by far the likeliest reply in the product, was
+    // never routed anywhere. Every document send already passes shortCode, so deriving it
+    // here lights up all ten paths with no caller plumbing and no way to forget the next one.
+    //
+    // The caller's explicit replyTo is the FALLBACK, not an override: it is the staff
+    // member's own address, which reaches a human immediately but never appears in the
+    // portal. A verified inbound domain beats it; anything less loses to it (buildReplyAddress
+    // returns null unless the domain is genuinely 'active').
+    const replyTo = buildReplyAddress(
+      (s as Record<string, unknown>).inbound_domain,
+      (s as Record<string, unknown>).inbound_status,
+      { shortCode: mail.shortCode, contactId: mail.contactId },
+    ) ?? mail.replyTo;
+
     // ── Send, then record the outcome on the claimed row ────────────────────────────
     let messageId: string;
     try {
@@ -199,7 +249,8 @@ export async function sendTenantEmail(
         subject: mail.subject,
         html: mail.html,
         ...(mail.text ? { text: mail.text } : {}),
-        ...(mail.replyTo ? { replyTo: mail.replyTo } : {}),
+        ...(replyTo ? { replyTo } : {}),
+        ...(threadId ? { headers: { "Message-ID": threadId } } : {}),
         // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
         // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
         // failing the whole send.

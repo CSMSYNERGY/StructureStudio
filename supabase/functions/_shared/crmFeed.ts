@@ -50,10 +50,27 @@ export const CRM_FEED_TYPES = {
   // A reserved seam for a feature nobody intends to build is not foresight, it is a
   // misleading comment that survives long enough for someone to act on it. Conversations
   // are email, and `email` above is where that grows.
-  document: ["quote_pdf", "invoice_pdf", "change_order"],
-  deal: ["design_created", "design_version", "stage_change", "accepted", "quote_opened"],
-  invoice: ["invoice_created", "invoice_sent", "payment"],
-  changelog: ["design_version", "stage_change", "status_change"],
+  document: ["change_order", "invoice_created", "invoice_sent"],
+  deal: ["design_created", "design_version", "accepted", "quote_opened"],
+  invoice: ["invoice_created", "invoice_sent"],
+  // CHANGELOG MEANS EVERYTHING THAT HAPPENED TO THIS RECORD. Carolyn, 2026-08-26 25:18,
+  // describing what the word meant in Pipedrive: "if they changed ownership of a lead from
+  // one person to another person, that was logged. Everything that they did with that lead
+  // was logged." On her screen it read 0.
+  //
+  // It read 0 because it filtered on three types, two of which — stage_change and
+  // status_change — are emitted NOWHERE in this file. A chip whose vocabulary names events
+  // that do not exist cannot show anything, and it fails silently: an empty changelog reads
+  // as "nothing has happened here", which on a contact with four documents and two change
+  // orders was simply false. Those two phantom names are gone from every list above, along
+  // with quote_pdf, invoice_pdf and payment, which were never emitted either.
+  //
+  // ⚠️ STILL NOT LOGGED, because nothing in the product does them yet: field edits, owner
+  // and assignee changes, permission changes. The record page is read-only today. Whoever
+  // adds the quick-edit popover owes this list the events it starts producing — that is the
+  // half of her sentence about "changed ownership" that this cannot yet answer.
+  changelog: ["design_created", "design_version", "accepted", "quote_opened",
+    "change_order", "invoice_created", "invoice_sent", "lead_captured"],
 } as const;
 
 const iso = (v: unknown): string => (typeof v === "string" ? v : new Date(0).toISOString());

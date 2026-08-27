@@ -62,7 +62,12 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
 const SS_ERR_SOURCE = "portal";
-function ssLogError(source, message, code, context) {
+// `severity` is optional and defaults to "error", so every existing call site keeps its
+// current meaning. Pass "info" for a REFUSAL — the product correctly declining something
+// ("send the invoice first", "that width isn't valid"). Those still get a row, because a
+// refusal that fires constantly is a bug in disguise (see migration 140), but they no
+// longer sit in the same bucket as things that actually broke.
+function ssLogError(source, message, code, context, severity) {
   try {
     const params = new URLSearchParams(location.search);
     fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
@@ -75,6 +80,7 @@ function ssLogError(source, message, code, context) {
         p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
         p_url: location.href.slice(0, 600),
         p_context: context || null,
+        p_severity: severity || "error",
       }),
     }).catch(() => {});
   } catch (_) { /* logging must never break the app */ }
@@ -216,11 +222,26 @@ __ssFunctions.invoke = async (name, opts) => {
   }
   try {
     if (res && (res.error || (res.data && res.data.error))) {
+      // A 4xx is the SERVER REFUSING this request, and every one of ours answers with a
+      // sentence written for the person reading it ("send the invoice first", "that width
+      // isn't valid", "ask an owner or admin to do this"). That is the product working, so
+      // it is logged as info, not as a fault. 5xx, a network failure and an unreadable
+      // response stay errors: those are things that broke.
+      //
+      // Demoted, NOT dropped — the distinction earns its keep. "Driver not found." was a
+      // 400 that read exactly like a validation message and was really the client posting
+      // driver_profiles.user_id where the server matches on .id, so reassigning a driver
+      // failed every single time for twelve days. It was caught by reading these rows.
+      // What makes a refusal suspicious is REPETITION, so the row has to survive:
+      //   select message, count(*) from app_errors where severity = 'info'
+      //   group by 1 having count(*) > 20 order by 2 desc;
+      const st = (res.error && res.error.ssStatus) || null;
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
         (res.error && res.error.name) || null,
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
-          status: (res.error && res.error.ssStatus) || null,
-          reason: (res.error && res.error.ssReason) || null });
+          status: st,
+          reason: (res.error && res.error.ssReason) || null },
+        (st >= 400 && st < 500) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
@@ -247,15 +268,28 @@ const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
-  // ONE SECTION, not two. Carolyn, 2026-08-24, after walking Pipedrive: "designs, contacts,
-  // pipelines ... these two needs to be consolidated." Contacts and Designs are two views of
-  // the same sales record — a person, and the buildings they are quoting — and keeping them
-  // in separate nav items is what made her click back and forth in the first place.
+  // TWO SECTIONS AGAIN, reversing the 2026-08-24 merge (commit 4a54dad).
   //
-  // The tab id stays `designs` so every existing deep link, ?view= URL and bookmark keeps
-  // working. `leads` survives below purely as a redirect alias.
-  designs: ["Contacts & Designs", "Everyone who has enquired, and what they are quoting"],
-  leads: ["Contacts", "Everyone who has submitted a design"],
+  // She asked for the merge on 08-24 after walking Pipedrive — "these two needs to be
+  // consolidated" — and then, on 08-26 at 12:15, having used it: "I was envisioning it that
+  // we have contacts as one, and then we have another one that says pipeline. I would call
+  // it a pipeline, not opportunities ... I would rather have MORE TABS and one specific
+  // name on it." Ahsan confirmed on the call that they do not need to be one tab.
+  //
+  // What she actually disliked on 08-24 turned out to be the two lists looking alike, not
+  // their being separate — she could not find the pipeline board at all until Ahsan pointed
+  // at it ("I didn't see that you had the pipeline thing"). The board is what makes this
+  // section different from a contact list, so the section is now NAMED after it.
+  //
+  // The ids stay `designs` and `leads` so deep links from BOTH eras keep working: these are
+  // native pages again, and the merged era's /portal/designs/people|deals normalise
+  // themselves in the shell. `leads` was already the pre-merge id for Contacts, so this is
+  // a genuine revert rather than a third naming scheme.
+  //
+  // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
+  // do more than one quote for one deal, so let's leave it on the deals side right now."
+  designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
+  leads: ["Contacts", "Everyone who has enquired, and their activity"],
   orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
   releases: ["What's New", "Latest features and fixes"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -315,9 +349,11 @@ const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
-  // The merged tab shows both, so EITHER area is enough to see it — gating on "designs"
-  // alone would hide contacts from someone who is allowed to read them.
-  designs: ["designs", "contacts"],
+  // Back to one area each, with the 08-26 split: Pipeline is the designs list, Contacts is
+  // the contacts list, and each gates on the area whose data it actually shows. The merged
+  // tab needed EITHER because it showed both; a rep granted only contacts must not get the
+  // customer-designs list back through a tab that no longer contains it.
+  designs: "designs",
   leads: "contacts",
   inventory: "inventory",
   orders: "orders",
@@ -361,8 +397,10 @@ function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
   if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
   const area = TAB_AREA[tab];
-  // An ARRAY means "any of these is enough" — the merged Contacts & Designs tab. Mirrors
-  // the server's `{ any: [...] }` gate shape so the two cannot drift.
+  // An ARRAY means "any of these is enough". No entry uses one since the 08-26 split undid
+  // the merged Contacts & Designs tab, but the branch stays: it mirrors the server's
+  // `{ any: [...] }` gate shape, and the next page that needs it should not have to
+  // rediscover that the two must agree.
   if (Array.isArray(area)) return area.some((a) => ssCanRead(access, a));
   return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
 }
@@ -676,6 +714,62 @@ const ssSafeUrl = (u) => {
   } catch { return null; }
 };
 
+// ─── PDF pop-up ───
+// Carolyn, 2026-08-26 21:15: "I want PDFs to open in a pop-up always. I don't want another
+// tab to open."
+//
+// Every quote, floor plan and invoice used to be an <a target="_blank">, so reading one
+// meant leaving the portal, and closing it meant hunting for the tab you came from. Her
+// whole session was about staying on the record — this is the same instinct as "I don't
+// want to switch the screen" about the person card.
+//
+// ⚠️ The URL goes through ssSafeUrl BEFORE it reaches the iframe, exactly as it did on the
+// anchor. An iframe src is a more permissive sink than an href, not a less one: a design
+// row's image_url is tenant-writable, and framing an arbitrary origin inside the
+// authenticated portal is worse than opening it in a tab where the user can at least see
+// the address bar. An unsafe URL renders no viewer at all.
+//
+// The "Open in a new tab" link stays, deliberately. Some browsers and enterprise policies
+// refuse to render PDFs inline, and a viewer that silently shows a grey rectangle with no
+// way out is worse than the tab we just took away. It is the escape hatch, not the default.
+function PdfModal({ url, title, onClose }) {
+  const safe = ssSafeUrl(url);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    // The page behind a modal must not scroll under it.
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="presentation"
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+      <div role="dialog" aria-modal="true" aria-label={title || "Document"} onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, width: "min(1000px, 100%)", height: "min(88vh, 100%)", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {title || "Document"}
+          </div>
+          {safe && (
+            <a href={safe} target="_blank" rel="noopener noreferrer"
+              style={{ fontSize: 12, fontWeight: 700, color: "#475569", textDecoration: "none", whiteSpace: "nowrap" }}>Open in a new tab ↗</a>
+          )}
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 12px", fontSize: 12 }}>Close</button>
+        </div>
+        {safe ? (
+          <iframe src={safe} title={title || "Document"} style={{ flex: 1, width: "100%", border: "none" }} />
+        ) : (
+          <div style={{ padding: 20, fontSize: 13, color: "#B91C1C" }}>
+            This document's address is not one we can open safely, so it has not been loaded.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // The one place an unrecognised/absent status becomes "sent". This expression was written out
 // by hand in seven places (search, sort, badge, and three times inside the Leads grouping),
 // and LeadsTable additionally kept its own private copy of STATUS_RANK — so a filter deriving
@@ -921,6 +1015,100 @@ function FilterBar({ children, hasFilters, onClear, shown, total, noun = "row" }
       {hasFilters && <div style={{ fontSize: 12, color: "#64748B", marginTop: 8 }}>Showing <b>{shown}</b> of {total} {noun}{total === 1 ? "" : "s"}.{shown === 0 ? " Nothing matches — adjust the filters." : ""}</div>}
     </div>
   );
+}
+
+// ─── Skeletons ───
+// Carolyn, 2026-08-26, watching a list sit empty: "the page opens and there's nothing
+// there." Then, after Ahsan showed her the grey blocks another product paints while it
+// loads (36:26): "so let's do that."
+//
+// A skeleton is not decoration — it is the difference between "this is broken" and "this
+// is coming". The word "Loading…" on an empty card says the former to everyone who has
+// ever waited on a broken page, which is everyone.
+//
+// ⚠️ NO CSS ANIMATION HERE, deliberately. The obvious shimmer is a keyframed gradient, and
+// keyframes need a <style> rule — this codebase has no stylesheet for components, every
+// style is an inline object, and rAF-driven animation does not run in a backgrounded tab
+// (documented on the 3D viewer). A flat block that is honestly still is better than a
+// shimmer that freezes half-swept and reads as a hang.
+function SkelBar({ w = "100%", h = 11, style = {} }) {
+  return <div style={{ width: w, height: h, borderRadius: 4, background: "#E2E8F0", ...style }} />;
+}
+
+// Table-shaped skeleton: the same column count as the real table, so the header row and the
+// first paint line up and nothing jumps when the rows arrive.
+function SkelRows({ cols = 5, rows = 6, widths = null }) {
+  const w = widths || Array.from({ length: cols }, (_, i) => (i === 0 ? "62%" : i === cols - 1 ? "40%" : "72%"));
+  return (
+    <>
+      {Array.from({ length: rows }, (_, r) => (
+        <tr key={r}>
+          {Array.from({ length: cols }, (_, c) => (
+            <td key={c} style={{ padding: "11px 10px", borderTop: "1px solid #F1F5F9" }}>
+              {/* Fade down the list: the eye reads it as "more below", not as six equal
+                  pending things it has to track. */}
+              <SkelBar w={w[c]} style={{ opacity: 1 - r * 0.11 }} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+// ─── Page size ───
+// Carolyn, 2026-08-26 37:40: "some companies have 10, 20, 30, 40, 50, 100 — which is
+// probably what we need to build into it." Thirty is her default because it is the number
+// she said last and the number the tenants she was looking at were already showing.
+//
+// This pages what is ALREADY IN MEMORY. It is a rendering cap, not a query cap: the reads
+// stay whole, so the counts, the KPI tiles and the search still see every row. Paging the
+// query instead would make "3 of 412" a lie the moment someone typed in the search box.
+const PAGE_SIZES = [10, 20, 30, 50, 100];
+const DEFAULT_PAGE_SIZE = 30;
+
+function PageBar({ size, onSize, page, onPage, total, noun = "row" }) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  const cur = Math.min(page, pages);
+  const from = total === 0 ? 0 : (cur - 1) * size + 1;
+  const to = Math.min(total, cur * size);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12, fontSize: 12, color: "#64748B" }}>
+      <span>Show</span>
+      <select value={size} onChange={(e) => { onSize(Number(e.target.value)); onPage(1); }}
+        style={{ ...S.input, width: "auto", padding: "4px 8px", fontSize: 12 }}>
+        {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+      </select>
+      <span>{total === 0 ? `No ${noun}s` : `${from}–${to} of ${total} ${noun}${total === 1 ? "" : "s"}`}</span>
+      {pages > 1 && (
+        <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <button type="button" disabled={cur <= 1} onClick={() => onPage(cur - 1)}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", opacity: cur <= 1 ? 0.45 : 1, cursor: cur <= 1 ? "default" : "pointer" }}>← Prev</button>
+          <span style={{ fontWeight: 700, color: "#475569" }}>Page {cur} of {pages}</span>
+          <button type="button" disabled={cur >= pages} onClick={() => onPage(cur + 1)}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "4px 10px", opacity: cur >= pages ? 0.45 : 1, cursor: cur >= pages ? "default" : "pointer" }}>Next →</button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Remembering the choice is the whole point — a rep who picks 100 wants 100 tomorrow too,
+// and re-picking it every morning is how a setting becomes an annoyance. Per table, because
+// Contacts and Orders are different-shaped lists. localStorage can throw (private windows,
+// blocked site data), so every read and write is guarded and falls back to the default.
+function usePageSize(key) {
+  const [size, setSize] = useState(() => {
+    try {
+      const v = Number(window.localStorage.getItem("ss.pageSize." + key));
+      return PAGE_SIZES.includes(v) ? v : DEFAULT_PAGE_SIZE;
+    } catch (_e) { return DEFAULT_PAGE_SIZE; }
+  });
+  const set = useCallback((n) => {
+    setSize(n);
+    try { window.localStorage.setItem("ss.pageSize." + key, String(n)); } catch (_e) { /* a remembered size is a nicety */ }
+  }, [key]);
+  return [size, set];
 }
 
 // ─── Delete a design ───
