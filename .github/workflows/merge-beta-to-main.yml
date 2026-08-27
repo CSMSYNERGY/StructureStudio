@@ -2,16 +2,18 @@
 #
 # Every Monday: merge beta into main. The merge ALWAYS completes.
 # On conflict, beta's version wins and the conflicted files are listed
-# in the monday.com report so nothing is silently overwritten.
+# in the Projects report so nothing is silently overwritten.
 # Runs on GitHub's servers - nothing needs to be open on your computer.
 #
 # Cron is UTC-only (no timezone). 10:00 UTC = 6am US Eastern (summer)
 # / 5am (winter). Edit the cron to taste (https://crontab.guru).
 #
-# Reporting: posts an update to the "StructureStudio" item on the
-# monday.com "Projects (Repos)" board after every run. Requires a repo
-# secret named MONDAY_API_TOKEN (a monday personal API token). If that
-# secret is missing, the merge still runs and only the report is skipped.
+# Reporting: posts an update onto the "Beta->main merge reports" item
+# in the internal Projects module (the in-product Monday replacement,
+# 2026-08-27) via the Supabase REST API. Requires the existing repo
+# secret SUPABASE_SERVICE_ROLE_KEY (already used by the release-notes
+# step). If that secret is missing, the merge still runs and only the
+# report is skipped.
 
 name: Weekly merge beta into main
 
@@ -28,13 +30,16 @@ permissions:
   contents: write
 
 env:
-  MONDAY_ITEM_ID: "12385631316"   # StructureStudio row on "Projects (Repos)"
+  # pm_items.id of "Beta->main merge reports" (Roadmap board / Ops group) in the
+  # internal Projects module - minted by the 2026-08-27 Monday import. A uuid, not
+  # a secret. If Projects is ever reseeded, look the item up by that name.
+  PM_MERGE_ITEM_ID: "e5777007-d882-44b0-ac0f-10ffe4c4e04b"
 
 jobs:
   merge-beta-into-main:
     runs-on: ubuntu-latest
     env:
-      MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
@@ -108,7 +113,7 @@ jobs:
       #
       # Needs repo secret SUPABASE_SERVICE_ROLE_KEY. Without it the step SKIPS rather than
       # failing the run — the merge itself has already pushed and must not be reported as
-      # broken — but it says so, and the monday.com update below carries the outcome, which
+      # broken — but it says so, and the Projects report below carries the outcome, which
       # is the channel the team actually reads.
       - name: Flip beta release notes to Live
         id: notes
@@ -154,8 +159,8 @@ jobs:
             echo "notes_result=${COUNT} note(s) now Live" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Report to monday.com
-        if: ${{ always() && env.MONDAY_API_TOKEN != '' }}
+      - name: Report to Projects
+        if: ${{ always() && env.SUPABASE_SERVICE_ROLE_KEY != '' }}
         env:
           JOB_STATUS: ${{ job.status }}
           NOTES_RESULT: ${{ steps.notes.outputs.notes_result }}
@@ -165,31 +170,47 @@ jobs:
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SUPABASE_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co"
         run: |
           set -euo pipefail
           DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
           if [ "$JOB_STATUS" != "success" ]; then
-            HEADER="[FAILED] Beta-&gt;Main merge did not complete"
+            HEADER="[FAILED] Beta->Main merge did not complete"
           elif [ "$RESULT" = "clean" ]; then
-            HEADER="[OK] Beta-&gt;Main merged cleanly"
+            HEADER="[OK] Beta->Main merged cleanly"
           else
-            HEADER="[CONFLICTS RESOLVED] Beta-&gt;Main merged (beta won)"
+            HEADER="[CONFLICTS RESOLVED] Beta->Main merged (beta won)"
           fi
 
-          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+          # Plain text - pm_updates bodies render pre-wrap in the Projects item modal.
+          BODY="${HEADER}
+          ${DATE}
+          Repo: ${REPO}
+          Result: ${RESULT:-n/a}
+          Merge commit: ${MERGED_SHA:-n/a}
+          Release notes: ${NOTES_RESULT:-not attempted}
 
-          BODY="<b>${HEADER}</b><br>${DATE}<br>Repo: ${REPO}<br>Result: ${RESULT:-n/a}<br>Merge commit: ${MERGED_SHA:-n/a}<br>Release notes: ${NOTES_RESULT:-not attempted}<br><br><b>Commits promoted from beta:</b><br>"
-          BODY="${BODY}$(printf '%s\n' "$COMMITS" | esc | sed 's/$/<br>/')"
+          Commits promoted from beta:
+          ${COMMITS}"
           if [ -n "${CONFLICTS:-}" ]; then
-            BODY="${BODY}<br><b>Files that conflicted (auto-resolved in beta's favor - please review):</b><br>"
-            BODY="${BODY}$(printf '%s\n' "$CONFLICTS" | esc | sed 's/$/<br>/')"
+            BODY="${BODY}
+
+          Files that conflicted (auto-resolved in beta's favor - please review):
+          ${CONFLICTS}"
           fi
-          BODY="${BODY}<br><a href=\"${RUN_URL}\">View the workflow run</a>"
+          BODY="${BODY}
 
-          QUERY='mutation ($item: ID!, $body: String!) { create_update (item_id: $item, body: $body) { id } }'
-          PAYLOAD="$(jq -n --arg q "$QUERY" --arg item "$MONDAY_ITEM_ID" --arg body "$BODY" '{query:$q, variables:{item:$item, body:$body}}')"
+          Run: ${RUN_URL}"
 
-          RESP="$(curl -sS https://api.monday.com/v2 -H "Authorization: $MONDAY_API_TOKEN" -H "Content-Type: application/json" -d "$PAYLOAD")"
-          echo "$RESP"
-          echo "$RESP" | jq -e '.data.create_update.id' >/dev/null || { echo "monday.com update failed"; exit 1; }
+          PAYLOAD="$(jq -n --arg item "$PM_MERGE_ITEM_ID" --arg body "$BODY" \
+            '{item_id:$item, body:$body, client_visible:false, author_email:"github-actions"}')"
+
+          RESP="$(curl -sS -X POST "${SUPABASE_URL}/rest/v1/pm_updates" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d "$PAYLOAD")"
+          echo "$RESP" | jq -e '.[0].id' >/dev/null || { echo "Projects report failed: $RESP"; exit 1; }
+          echo "Reported to Projects."
