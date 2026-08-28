@@ -948,6 +948,9 @@ function ProjectsTab({ sub, onSub }) {
         </div>
         {err && <div style={S.err}>{err}</div>}
         {!boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
+        {/* The board body has its own wait: the first open after new roadmap entries also
+            runs the sync, and a silent blank panel reads as a broken screen. */}
+        {boards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
 
         {data && (
           <>
