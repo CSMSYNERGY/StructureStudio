@@ -12405,7 +12405,17 @@ export default function StructureStudio({ config: configProp = null, clientId: c
         // SECURITY DEFINER, so it keeps working after the table's anon SELECT is
         // revoked at cutover. Returns the config jsonb, or null for an unknown
         // client (→ the error screen, same as a missing row used to do).
-        const { data: cfg, error } = await sb.rpc("get_config", { p_client_id: clientId });
+        // BOTH RPCs key on clientId alone — get_fixtures never reads the config — so these were
+        // two INDEPENDENT round trips being paid one after the other, with the designer showing
+        // nothing until the second returned. Starting them together halves the wait. Everything
+        // below is unchanged in ORDER and in meaning: a config failure still wins and still
+        // renders the error screen, the completeness check still runs before anything paints,
+        // and a fixtures failure is still non-fatal. The catch is attached at creation, not at
+        // the await, because an early `return` on a config error would otherwise leave this
+        // promise rejecting with nobody listening.
+        const cfgPromise = sb.rpc("get_config", { p_client_id: clientId });
+        const fixturesPromise = Promise.resolve(sb.rpc("get_fixtures", { p_client_id: clientId })).catch(() => null);
+        const { data: cfg, error } = await cfgPromise;
         if (cancelled) return;
         if (error || !cfg) {
           console.warn(`Could not load config for client "${clientId}":`, error);
@@ -12421,7 +12431,7 @@ export default function StructureStudio({ config: configProp = null, clientId: c
         // just means no catalog doors in the palette, it never blocks the designer.
         let fixtures = [], rampSettings = null, windowColors = [];
         try {
-          const fxRes = await sb.rpc("get_fixtures", { p_client_id: clientId });
+          const fxRes = await fixturesPromise;
           const fx = fxRes && fxRes.data;
           if (!cancelled && fx) {
             // get_fixtures returns either the legacy array or { items, ramp, windowColors }.

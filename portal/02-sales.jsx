@@ -1,3 +1,99 @@
+// ── "⋯" — THE ROW ACTIONS THAT DON'T FIT ────────────────────────────────────────────────
+// Ahsan, 2026-08-28: "the pipeline view is floating off the screen from the right side. So
+// under actions just add two options, Open and PDF … I'll add three dot options, so when I
+// click the three dots, other options pop up in the more options."
+//
+// The Actions cell rendered up to seven inline buttons (Open · PDF · Quote PDF · Copy link ·
+// Resend email · Send invoice · Delete), every one `white-space: nowrap`. That column set the
+// table's minimum width, so the whole pipeline ran off the right edge of the screen and the
+// Status chips fell into the horizontal scrollbar — the table was widest exactly where the
+// information matters least.
+//
+// POSITION: FIXED, MEASURED AT OPEN — NOT ABSOLUTE. The table lives inside `overflow-x:
+// auto`, which is a clipping context: an absolutely-positioned menu is cut off at the cell
+// edge, and on the last row it would be clipped below the table too. So the menu is measured
+// off the trigger's client rect and painted in viewport coordinates, flipping ABOVE the
+// button when there is no room beneath it and pulling left when it would cross the right
+// edge. Scrolling or resizing CLOSES it rather than chasing the anchor — the same thing every
+// native menu does, and one fewer thing to keep in sync.
+//
+// `items` is a plain array of { key, label, onClick, title?, danger?, disabled?, keepOpen? },
+// and FALSY ENTRIES ARE ALLOWED so callers can write `cond && {...}` inline. With nothing to
+// show, the trigger itself does not render — a "⋯" that opens an empty box is worse than no
+// "⋯" at all.
+function RowMenu({ items, label = "More actions" }) {
+  const [pos, setPos] = useState(null); // { top, left, width } in viewport px | null = closed
+  const btnRef = useRef(null);
+  const boxRef = useRef(null);
+  const open = !!pos;
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => {
+      if (btnRef.current && btnRef.current.contains(e.target)) return; // the trigger toggles itself
+      if (boxRef.current && boxRef.current.contains(e.target)) return;
+      setPos(null);
+    };
+    const key = (e) => { if (e.key === "Escape") setPos(null); };
+    const shut = () => setPos(null);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", key);
+    // Capture phase: the scroll that matters is the TABLE's own horizontal one, and a
+    // scroll event on an inner element does not bubble to window.
+    window.addEventListener("scroll", shut, true);
+    window.addEventListener("resize", shut);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", shut, true);
+      window.removeEventListener("resize", shut);
+    };
+  }, [open]);
+  const shown = (items || []).filter(Boolean);
+  if (shown.length === 0) return null;
+  const openMenu = () => {
+    const r = btnRef.current.getBoundingClientRect();
+    const W = 186, H = shown.length * 32 + 10;
+    const left = Math.max(8, Math.min(r.right - W, window.innerWidth - W - 8));
+    const below = r.bottom + 5;
+    const top = below + H > window.innerHeight - 8 ? Math.max(8, r.top - H - 5) : below;
+    setPos({ top, left, width: W });
+  };
+  return (
+    <span style={{ display: "inline-block" }}>
+      <button ref={btnRef} type="button" aria-haspopup="menu" aria-expanded={open} aria-label={label} title={label}
+        onClick={() => (open ? setPos(null) : openMenu())}
+        style={{
+          background: open ? "#EEF2FF" : "transparent", border: "none", borderRadius: 6, padding: "1px 7px",
+          cursor: "pointer", fontFamily: "inherit", fontSize: 16, lineHeight: 1.1, fontWeight: 700,
+          color: open ? ACCENT : "#64748B",
+        }}>⋯</button>
+      {open && (
+        <div ref={boxRef} role="menu"
+          style={{
+            position: "fixed", top: pos.top, left: pos.left, width: pos.width, zIndex: 60,
+            background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5,
+            boxShadow: "0 10px 26px rgba(15,23,42,0.16)",
+          }}>
+          {shown.map((it) => (
+            <button key={it.key} type="button" role="menuitem" disabled={!!it.disabled} title={it.title || ""}
+              onClick={() => { if (!it.keepOpen) setPos(null); it.onClick(); }}
+              style={{
+                display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none",
+                borderRadius: 6, padding: "6px 8px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700,
+                color: it.disabled ? "#94A3B8" : (it.danger ? "#B91C1C" : "#334155"),
+                cursor: it.disabled ? "not-allowed" : "pointer",
+              }}
+              onMouseEnter={(e) => { if (!it.disabled) e.currentTarget.style.background = it.danger ? "#FEF2F2" : "#F1F5F9"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
@@ -376,51 +472,56 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <button type="button" onClick={() => setPdf({ url: r.image_url, title: `Floor plan — ${c.name || r.short_code}` })}
                           style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
                       )}
-                      {/* SS-issued quote (migration 122): the printable 3-sheet document plus the
-                          two hand-delivery tools — most lot customers want paper, and a design
-                          with no email address never blocks. */}
-                      {r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && (
-                        <button type="button" onClick={() => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` })}
-                          title="Open the printable quote document"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700, marginLeft: 10 }}>Quote PDF</button>
-                      )}
-                      {r.ss_quote_number && (
-                        <button type="button" onClick={() => copyCustomerLink(r.short_code)}
-                          title="Copy the customer quote-page link (they sign in with their phone)"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginLeft: 10 }}>
-                          {copiedKey === r.short_code ? "Copied ✓" : "Copy link"}
-                        </button>
-                      )}
-                      {r.ss_quote_number && (
-                        <button type="button" onClick={() => resendQuoteEmail(r)} disabled={resendBusyKey === r.short_code}
-                          title="Re-send the quote email to the customer"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginLeft: 10, opacity: resendBusyKey === r.short_code ? 0.5 : 1 }}>
-                          {resendBusyKey === r.short_code ? "Sending…" : "Resend email"}
-                        </button>
-                      )}
-                      {/* Only on an ACCEPTED design — that is the one state where an invoice
-                          is the next step, and it is what the server gates on too. Keyed on
-                          this row's own short code, so what gets invoiced is the design the
-                          button sits on. */}
-                      {isAdmin && normStatus(r.status) === "accepted" && (
-                        <button type="button" onClick={() => sendInvoice(r)} disabled={invBusyKey === r.short_code}
-                          title="Create and email the invoice for this accepted estimate"
-                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === r.short_code ? 0.6 : 1 }}>
-                          {invBusyKey === r.short_code ? "Sending…" : "Send invoice"}
-                        </button>
-                      )}
-                      {/* Owner/admin only — a team member must not be able to destroy a
-                          customer record. The server re-checks regardless (delete_design is
-                          absent from READ_ACTIONS, so the resolver requires owner/admin). */}
-                      {isAdmin && (
-                        <button type="button" onClick={() => setDelTarget(r)} title="Delete this design"
-                          aria-label={`Delete design ${r.short_code}`}
-                          style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
-                          onMouseEnter={(e) => { e.currentTarget.style.color = "#DC2626"; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.color = "#94A3B8"; }}>
-                          Delete
-                        </button>
-                      )}
+                      {/* EVERYTHING ELSE LIVES BEHIND THE "⋯" — see RowMenu at the top of this
+                          file for why (the column was pushing the table off-screen). Each entry
+                          keeps the condition, the title text and the busy label it had as an
+                          inline button; only the container changed. */}
+                      <span style={{ marginLeft: 10, verticalAlign: "middle" }}>
+                        <RowMenu label={`More actions for ${c.name || r.short_code}`} items={[
+                          // SS-issued quote (migration 122): the printable 3-sheet document plus
+                          // the two hand-delivery tools — most lot customers want paper, and a
+                          // design with no email address never blocks.
+                          r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && {
+                            key: "quote", label: "Quote PDF", title: "Open the printable quote document",
+                            onClick: () => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` }),
+                          },
+                          // keepOpen, because "Copied ✓" IS the confirmation and it is drawn on
+                          // this very item — closing the menu on click would take the only
+                          // feedback this action has away with it.
+                          r.ss_quote_number && {
+                            key: "copy", keepOpen: true,
+                            label: copiedKey === r.short_code ? "Copied ✓" : "Copy link",
+                            title: "Copy the customer quote-page link (they sign in with their phone)",
+                            onClick: () => copyCustomerLink(r.short_code),
+                          },
+                          // These two report through the invMsg banner above the table, which is
+                          // why they close: the outcome is not written on the button.
+                          r.ss_quote_number && {
+                            key: "resend", disabled: resendBusyKey === r.short_code,
+                            label: resendBusyKey === r.short_code ? "Sending…" : "Resend email",
+                            title: "Re-send the quote email to the customer",
+                            onClick: () => resendQuoteEmail(r),
+                          },
+                          // Only on an ACCEPTED design — that is the one state where an invoice
+                          // is the next step, and it is what the server gates on too. Keyed on
+                          // this row's own short code, so what gets invoiced is the design the
+                          // menu sits on.
+                          isAdmin && normStatus(r.status) === "accepted" && {
+                            key: "invoice", disabled: invBusyKey === r.short_code,
+                            label: invBusyKey === r.short_code ? "Sending invoice…" : "Send invoice",
+                            title: "Create and email the invoice for this accepted estimate",
+                            onClick: () => sendInvoice(r),
+                          },
+                          // Owner/admin only — a team member must not be able to destroy a
+                          // customer record. The server re-checks regardless (delete_design is
+                          // absent from READ_ACTIONS, so the resolver requires owner/admin).
+                          isAdmin && {
+                            key: "delete", label: "Delete design", danger: true,
+                            title: "Delete this design",
+                            onClick: () => setDelTarget(r),
+                          },
+                        ]} />
+                      </span>
                     </td>
                   </tr>
                   {isOpen && older.map((v) => {
@@ -980,22 +1081,42 @@ const CRM_TABS = [
   { key: "note", label: "Notes", enabled: (c) => c.canEdit, hint: "You don't have permission to add notes." },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
-  // NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE. Ahsan, 2026-08-25:
-  // "we are not using Twilio for conversation or campaigns. We are only using Twilio to get
-  // the code to log in. That's it. For conversation, we are using emails."
+  // SMS — A REAL CHANNEL NOW, REVERSING A DECISION THIS COMMENT USED TO RECORD.
   //
-  // An earlier version of this registry carried a greyed WhatsApp tab hinted "arrives when
-  // the Twilio account is connected" — a promise that was never going to be kept, sitting on
-  // a screen Carolyn shows at a trade show. A greyed tab says "next"; removing it says "not
-  // part of this product", which is the truth. Twilio's only job here is the Verify code
-  // that logs a customer into my-quotes, and that needs no phone number, no messaging
-  // service and no A2P registration.
+  // What stood here read "NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE" (Ahsan,
+  // 2026-08-25: "we are not using Twilio for conversation or campaigns. We are only using
+  // Twilio to get the code to log in"). It was written after deleting a greyed WhatsApp tab
+  // hinted "arrives when the Twilio account is connected" — a promise nobody intended to
+  // keep, sitting on a screen Carolyn shows at a trade show.
   //
-  // Conversations ARE email. That is why the Email tab is the one that grows a composer.
-  // Email IS the conversation channel (Ahsan, 2026-08-25), so this is the tab that carries
-  // a composer. Needs an address to write to — a contact with neither an email nor a design
-  // is a browsing artefact, and offering a compose box that cannot send is worse than not
-  // offering one.
+  // Carolyn asked for texting on 2026-08-26 (27:02): "and we have calls. We probably need
+  // SMS in there, too." Ahsan approved building it properly on 08-27, so this is a working
+  // channel — per-tenant Twilio numbers, a send path, an inbound webhook, an opt-out column
+  // — and not the greyed promise the old comment was right to delete.
+  //
+  // WhatsApp is still not a feature, and nothing here reserves a slot for it.
+  //
+  // THREE different things disable this tab and it names which one, for the same reason the
+  // Email tab's hint is a function: a rep without contacts:edit was once shown "this contact
+  // has no email address" while the address sat rendered directly above it. "Not available"
+  // sends somebody off editing a contact that is fine.
+  {
+    key: "sms", label: "SMS",
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone) && !!(c.sms && c.sms.ready),
+    hint: (c) => (!c.canEdit
+      ? "You don't have permission to text contacts."
+      : !(c.contact && c.contact.phone)
+        ? "This contact has no phone number on file."
+        : "Texting switches on once this account's number clears carrier registration."),
+  },
+  // Conversations were email ONLY, until the tab above. Email remains the channel that
+  // carries a document — a quote, an invoice, anything with a link — and needs an address to
+  // write to: a contact with neither an email nor a design is a browsing artefact, and
+  // offering a compose box that cannot send is worse than not offering one.
+  // The hint is a FUNCTION because two different things disable this tab, and a fixed
+  // string told the wrong story: a rep without contacts:edit was shown "this contact has no
+  // email address" while the address sat rendered directly above it. A tooltip that blames
+  // the data for a permissions problem sends someone off editing a contact that is fine.
   // The hint is a FUNCTION because two different things disable this tab, and a fixed
   // string told the wrong story: a rep without contacts:edit was shown "this contact has no
   // email address" while the address sat rendered directly above it. A tooltip that blames
@@ -1030,6 +1151,10 @@ const CRM_CHIPS = [
   // Both directions under one chip. Carolyn: "I want to be able to see my emails and only
   // emails in a quick and easy way" — a conversation split across two filters is not that.
   { key: "emails", label: "Emails", types: ["email", "email_in"] },
+  // Texts, both directions, one chip — the Emails-chip precedent, and for the same reason.
+  // Shown only once the account can actually text: a permanently empty filter teaches
+  // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
+  { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
   { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
@@ -1037,7 +1162,7 @@ const CRM_CHIPS = [
   // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
   // screen. Keep the two lists identical.
   { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
-    "change_order", "invoice_created", "invoice_sent", "lead_captured"] },
+    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change"] },
 ];
 
 // The stage bar. Carolyn's own stage names, from her Pipedrive screen.
@@ -1097,13 +1222,27 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
   const [mailMsg, setMailMsg] = useState(null);
+  // ⚠️ These live in the TOP hook block, not beside sendSms below. CrmRecord returns early
+  // on `!data`, so a hook declared next to its handler runs only on the renders that get
+  // past the guard — React #310, and the whole record page goes white the instant its data
+  // arrives. That shipped once (13ca37e) and was caught before release; do not move them.
+  const [text, setText] = useState("");
+  const [textMsg, setTextMsg] = useState(null);
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
   // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
   // renders only inside the Email tab — these controls need their own slot, keyed by control
   // so a note error can't surface under Focus too. Every new attempt clears it first, so a
   // stale failure never outlives the action that follows it.
-  const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus", msg }
+  const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus" | "contact", msg }
   const [pdf, setPdf] = useState(null);     // { url, title } — the pop-up viewer
+  // The person editor's state. ⚠️ IT MUST BE DECLARED HERE, ABOVE the `if (err)` and
+  // `if (!data)` early returns below. A useState placed after them is skipped on the first
+  // render (data is null, the component returns early) and runs on the second — React then
+  // throws "Rendered more hooks than during the previous render" and the record page blanks
+  // the moment its data arrives. The handlers that read this state stay down with the
+  // section they serve; only the hook has to live up here.
+  const [edit, setEdit] = useState(null);              // { name, phone, email } | null — null = not editing
+  const [personOpen, setPersonOpen] = useState(false); // the Person card's drop-down, on a DEAL
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1125,7 +1264,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   if (!data) return <div style={S.card}>Loading…</div>;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
-  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [] };
+  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [], sms: data.sms || null };
   const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
@@ -1156,6 +1295,42 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     setDraft(""); load();
   };
 
+  // ── EDIT THE PERSON, WITHOUT LEAVING THE PERSON ──────────────────────────────────────
+  // Carolyn, 2026-08-26 11:19, circling the person card: "I want to be able to click on
+  // person and be able to make changes to it right here. I don't want to switch the screen."
+  //
+  // ⚠️ NEVER a direct sb.from("crm_contacts").update(). This component makes exactly one
+  // fetch and no direct table access on purpose: crm_contacts RLS is scoped to
+  // current_client_id(), so in operator view-as a direct write silently affects nothing (or
+  // the wrong tenant). Everything goes through portal-settings, which resolves the tenant.
+  //
+  // `edit` itself is declared with the other hooks at the top of this component — see the
+  // warning there; it cannot live at this line, below the early returns.
+  const startEdit = () => setEdit({
+    name: (data.contact && data.contact.name) || "",
+    phone: (data.contact && data.contact.phone) || "",
+    email: (data.contact && data.contact.email) || "",
+  });
+  const saveContact = async () => {
+    if (!edit) return;
+    setBusy(true); setOpErr(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_save_contact",
+        id: (data.contact && data.contact.id) || null,
+        // Sent as-typed, including "" — the server reads an empty string as "clear this
+        // field", which is the one thing the anonymous-submission path cannot do.
+        name: edit.name, phone: edit.phone, email: edit.email,
+      },
+    });
+    setBusy(false);
+    // Keep the form open on failure. Closing it would throw away what they typed, and the
+    // duplicate-phone case is one they can actually act on once they have read it.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setOpErr({ where: "contact", msg: failMsg }); return; }
+    setEdit(null); load();
+  };
+
   // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
   // since 131, with `crm_complete_activity` to tick one off and a Focus block promising
   // "scheduled activities appear here" — but nothing in the UI could ever CREATE one, so the
@@ -1180,6 +1355,31 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     const failMsg = (r && r.error) || (error ? await fnError(error) : null);
     if (failMsg) { setOpErr({ where: "activity", msg: `Activity not saved — ${failMsg}` }); return; }
     setAct({ kind: "call", subject: "", dueAt: "" }); load();
+  };
+
+  // Texting. Carolyn, 2026-08-26 27:02: "we probably need SMS in there, too."
+  //
+  // ⚠️ THE BODY CARRIES IDS, NEVER A PHONE NUMBER. The server reads the number off
+  // crm_contacts and normalizes it there. Posting a number from here would let anyone with
+  // a portal login text any handset from the tenant's registered number.
+  const sendSms = async () => {
+    const body = text.trim();
+    if (!body) return;
+    setBusy(true); setTextMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_send_sms", body,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    // Keep the draft on failure. Nothing was sent, so clearing the box would destroy the
+    // one copy of what they wrote — and "they have opted out" is a message worth reading
+    // before the words disappear.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setTextMsg({ err: failMsg }); return; }
+    setText(""); setTextMsg({ ok: "Sent." }); load();
   };
 
   const sendEmail = async () => {
@@ -1207,11 +1407,47 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
 
   const renderSection = (key) => {
     if (key === "summary") {
+      // Editing needs a REAL contact row. On an old design record predating the 130
+      // backfill the server synthesizes `contact` from the design's jsonb blob with a null
+      // id (portal-settings), and there is nothing to write to — so the pencil is absent
+      // rather than present and broken.
+      const canEditContact = canEdit && kind === "contact" && !!(data.contact && data.contact.id);
       return kind === "contact" ? (
-        <div style={{ fontSize: 13, color: "#475569" }}>
-          <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
-          <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
-        </div>
+        edit ? (
+          <div style={{ fontSize: 13 }}>
+            <span style={S.lbl}>Name</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
+              onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
+            <span style={S.lbl}>Email</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
+              onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
+            <span style={S.lbl}>Phone</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
+              onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+            {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
+            <div style={{ display: "flex", gap: 7 }}>
+              <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
+                disabled={busy} onClick={saveContact}>{busy ? "Saving…" : "Save"}</button>
+              <button style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 13px", fontSize: 12.5 }}
+                disabled={busy} onClick={() => { setEdit(null); setOpErr(null); }}>Cancel</button>
+            </div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 7, lineHeight: 1.5 }}>
+              Clearing a field empties it. Every change is recorded under Changelog.
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "#475569" }}>
+            <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
+            <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
+            {canEditContact && (
+              <button type="button" onClick={startEdit}
+                title="Edit this contact's name, email and phone"
+                style={{ background: "none", border: "none", padding: 0, marginTop: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
+                ✎ Edit
+              </button>
+            )}
+          </div>
+        )
       ) : (
         <div style={{ fontSize: 13, color: "#475569" }}>
           <div>Estimate {record.ss_quote_number || record.ghl_estimate_number || "—"}</div>
@@ -1280,13 +1516,114 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       );
     }
     if (key === "person") {
-      return data.contact ? (
-        <button onClick={() => data.contact.id && onNavigate("contact", data.contact.id)}
-          style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", cursor: data.contact.id ? "pointer" : "default" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>{cname}</div>
-          <div style={{ fontSize: 11, color: "#64748B" }}>{data.contact.email || data.contact.phone || "—"}</div>
-        </button>
-      ) : <div style={{ fontSize: 12, color: "#94A3B8" }}>No contact linked.</div>;
+      if (!data.contact) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No contact linked.</div>;
+      // THE CARD OPENS; THE ARROW LEAVES. Ahsan, 2026-08-28: "if I click the card itself it
+      // shows a dropdown and in the dropdown it has its personal information, the email,
+      // contact and all of that stuff, which should be editable in here … add a small arrow
+      // on the right side of the card [that] takes me to the contact page."
+      //
+      // The whole card used to be one navigate button, so the commonest edit on this screen
+      // — fixing a typo in the customer's email before the quote goes out — cost a page
+      // change and a page change back, which is the same complaint Carolyn made about the
+      // contact side on 08-26. Both destinations survive; they are just no longer the same
+      // click. The arrow is a separate <button> rather than a corner of the card because a
+      // nested button inside a button is invalid HTML and React will not render it.
+      const cid = data.contact.id || null;
+      // Same rule as the contact-side pencil: an old design predating the 130 backfill has
+      // a SYNTHESIZED contact (id null) built from the design's jsonb blob, and there is no
+      // row to write to. The panel still opens and still shows what is on file — it just
+      // says why it cannot be edited instead of offering inputs that would 400.
+      const canEditContact = canEdit && !!cid;
+      const openPanel = () => {
+        if (personOpen) { setPersonOpen(false); setEdit(null); setOpErr(null); return; }
+        setPersonOpen(true);
+        // Opening IS starting the edit when they are allowed to edit — Ahsan asked for the
+        // fields to be editable "in here", and a second click on a pencil to reach them is
+        // the friction this change exists to remove. Nothing is written until Save.
+        if (canEditContact) startEdit();
+      };
+      const ro = (label, value) => (
+        <div style={{ marginBottom: 6 }}>
+          <span style={S.lbl}>{label}</span>
+          <div style={{ fontSize: 13, color: value ? "#1E293B" : "#94A3B8", fontWeight: 600, wordBreak: "break-word" }}>{value || "—"}</div>
+        </div>
+      );
+      return (
+        <div>
+          <div style={{ display: "flex", alignItems: "stretch", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, overflow: "hidden" }}>
+            <button type="button" onClick={openPanel} aria-expanded={personOpen}
+              title={personOpen ? "Hide this person's details" : "Show and edit this person's details"}
+              style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none", padding: "7px 9px", cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT, display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ color: "#94A3B8", fontSize: 10 }}>{personOpen ? "▾" : "▸"}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cname}</span>
+              </div>
+              <div style={{ fontSize: 11, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {data.contact.email || data.contact.phone || "—"}
+              </div>
+            </button>
+            {cid && (
+              <button type="button" onClick={() => onNavigate("contact", cid)}
+                title="Open the full contact record" aria-label={`Open the contact record for ${cname}`}
+                style={{ background: "transparent", border: "none", borderLeft: "1px solid #E2E8F0", padding: "0 11px", cursor: "pointer", color: ACCENT, fontSize: 15, fontWeight: 700, fontFamily: "inherit", lineHeight: 1 }}>
+                ›
+              </button>
+            )}
+          </div>
+          {personOpen && (
+            <div style={{ border: "1px solid #E2E8F0", borderTop: "none", borderRadius: "0 0 6px 6px", padding: "9px 9px 8px", marginTop: -1 }}>
+              {edit && canEditContact ? (
+                <div style={{ fontSize: 13 }}>
+                  <span style={S.lbl}>Name</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
+                    onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
+                  <span style={S.lbl}>Email</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
+                    onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
+                  <span style={S.lbl}>Phone</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
+                    onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+                  {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
+                  <div style={{ display: "flex", gap: 7 }}>
+                    <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
+                      disabled={busy} onClick={saveContact}>{busy ? "Saving…" : "Save"}</button>
+                    <button style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 13px", fontSize: 12.5 }}
+                      disabled={busy} onClick={() => { setEdit(null); setOpErr(null); setPersonOpen(false); }}>Cancel</button>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 7, lineHeight: 1.5 }}>
+                    This edits the customer everywhere, not just on this deal. Clearing a field empties it, and every change is recorded under Changelog.
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {ro("Name", data.contact.name)}
+                  {ro("Email", data.contact.email)}
+                  {ro("Phone", data.contact.phone)}
+                  {data.contact.first_seen_at && ro("First seen", fmtDate(data.contact.first_seen_at))}
+                  {/* Reached two ways: no permission / no contact row (the messages), or a
+                      save that just landed — `saveContact` clears `edit` and reloads, so the
+                      panel stays open showing the NEW values. That re-read is the receipt;
+                      the pencil is here so a second correction doesn't need the card closed
+                      and re-opened. */}
+                  {canEditContact ? (
+                    <button type="button" onClick={startEdit}
+                      title="Edit this contact's name, email and phone"
+                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
+                      ✎ Edit
+                    </button>
+                  ) : (
+                    <div style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.5 }}>
+                      {cid
+                        ? "You don't have permission to edit contacts."
+                        : "This design predates contact records, so there is nothing here to edit yet. It gets its own contact the next time this customer submits."}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
     }
     if (key === "overview") {
       const last = (data.feed || [])[0];
@@ -1344,6 +1681,57 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               })}
             </div>
 
+            {tab === "sms" && canEdit && data.contact && data.contact.phone && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
+                  To <strong>{data.contact.phone}</strong>
+                  {data.sms && data.sms.from ? <> — they see <strong>{data.sms.from}</strong>, this account&rsquo;s number.</> : null}
+                </div>
+                {/* Opted out is not an error state to discover by pressing Send. STOP is a
+                    legal instruction, so the composer says so and offers no box. */}
+                {data.sms && data.sms.optedOut ? (
+                  <div style={{ ...S.err, marginBottom: 0 }}>
+                    This customer replied STOP, so we can&rsquo;t text them. They can reply START to that
+                    same number to opt back in.
+                  </div>
+                ) : (
+                  <>
+                    <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
+                      maxLength={1600}
+                      placeholder="Text this customer…"
+                      style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
+                      <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
+                        {busy ? "Sending…" : "Send text"}
+                      </button>
+                      {/* Segments, not just characters. One pasted curly quote flips the whole
+                          message to UCS-2 and roughly halves the per-segment budget, which is
+                          how a one-segment text quietly becomes three billable ones. */}
+                      {(() => {
+                        const t = text;
+                        // GSM-7 is effectively ASCII here; anything above it (a curly
+                        // quote, an emoji, an accent) forces the whole message to UCS-2,
+                        // roughly halving the per-segment budget. Written as a code scan
+                        // rather than a regex so no unicode escape can be mangled on its
+                        // way into this file.
+                        let uni = false;
+                        for (let i = 0; i < t.length; i++) { if (t.charCodeAt(i) > 127) { uni = true; break; } }
+                        const per = uni ? 70 : 160, cat = uni ? 67 : 153;
+                        const n = t.length === 0 ? 0 : (t.length <= per ? 1 : Math.ceil(t.length / cat));
+                        return (
+                          <span style={{ fontSize: 11.5, color: n > 1 ? "#92400E" : "#94A3B8" }}>
+                            {t.length} character{t.length === 1 ? "" : "s"} · {n} segment{n === 1 ? "" : "s"}
+                            {uni ? " (unicode)" : ""}
+                          </span>
+                        );
+                      })()}
+                      {textMsg && textMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{textMsg.ok}</span>}
+                    </div>
+                    {textMsg && textMsg.err && <div style={{ ...S.err, marginTop: 7, marginBottom: 0 }}>{textMsg.err}</div>}
+                  </>
+                )}
+              </div>
+            )}
             {tab === "email" && canEdit && data.contact && data.contact.email && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
@@ -1532,6 +1920,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                       </div>
                       {e.title && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{e.title}</div>}
                       {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", marginTop: 2 }}>{e.body}</div>}
+                    </div>
+                  ) : e.type === "sms_in" ? (
+                    /* An arriving TEXT is the customer speaking too, so it gets the same
+                       treatment as a reply — a different tint only so the channel is
+                       readable at a glance in a mixed conversation. */
+                    <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, padding: "7px 9px" }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#15803D", marginBottom: 2 }}>
+                        💬 {e.actor || "Customer"} texted
+                      </div>
+                      {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap" }}>{e.body}</div>}
                     </div>
                   ) : e.type === "note" ? (
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>

@@ -106,7 +106,9 @@ export const PORTAL_PARTS = [
   "portal/06-3d.jsx",            // Studio3DStatus, DesignerTab, fixture-photo straightening (ssWarpQuad et al)
   "portal/07-admin.jsx",         // AccountsTab, BillingGate, the operator admin console (Adm*)
   "portal/08-integrations.jsx",  // QuickBooks, email sending, commissions, per-person access, SettingsShell
-  "portal/09-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
+  "portal/09-table-engine.jsx",  // generic Monday-style grouped table (PMTable, PM_TYPES, cell editors)
+  "portal/10-projects.jsx",      // internal Projects boards (operator-only Monday replacement)
+  "portal/11-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
 ];
 
 // source → artifact. The component's artifact name is load-bearing in preflight

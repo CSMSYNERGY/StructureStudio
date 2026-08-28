@@ -562,6 +562,9 @@ function Dashboard({ session }) {
     // Kanban columns of descending height — the section is named Pipeline now, and the old
     // staggered grid read as "a dashboard of things" rather than a board of stages.
     designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
+    // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
+    // took that glyph in the same week, and two column icons in one rail read as one thing.
+    projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
     leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
     orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
     pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
@@ -644,7 +647,7 @@ function Dashboard({ session }) {
   // A page your access does not include is not something you can buy your way into, so
   // showing it would just be a dead end. accounts/admin are operator-gated separately.
   const navHidden = (id) =>
-    id !== "accounts" && id !== "admin" && !canAdmin && !ssCanSeeTab(id, myAccess);
+    id !== "accounts" && id !== "admin" && id !== "projects" && !canAdmin && !ssCanSeeTab(id, myAccess);
   const navItem = (id, label, badge) => navHidden(id) ? null : (
     <button type="button" className={activeTab === id ? "active" : ""}
       title={gateLocked ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
@@ -721,6 +724,7 @@ function Dashboard({ session }) {
         <nav className="ss-nav">
           {navItem("accounts", "Accounts")}
           {navItem("admin", "Admin")}
+          {navItem("projects", "Projects")}
         </nav>
         </>)}
 
@@ -991,6 +995,13 @@ function Dashboard({ session }) {
                 <AdminShell onOpenAccount={openAccount}
                   sub={activeTab === "admin" ? sub : null} onSub={(x) => navigate("admin", x)} />
               </div>
+            )}
+            {/* Internal Projects boards (Monday.com replacement). Operator-gated like
+                accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
+                `!gateLocked` — like the Admin console, an operator whose OWN tenant is
+                billing-locked must still reach the internal boards. */}
+            {activeTab === "projects" && isOperator && (
+              <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
             {!gateLocked && activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'

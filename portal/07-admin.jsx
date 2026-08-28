@@ -56,6 +56,13 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
         return;
       }
       setUsers((u) => ({ ...u, [clientId]: Array.isArray(data && data.users) ? data.users : [] }));
+    } catch (e) {
+      // A REJECTION (not an {error} result) used to leave users[clientId] undefined forever.
+      // That was harmless when only a click could call this; the page-scoped effect below
+      // retries whenever its guard is still open, so an undefined entry would re-request on
+      // every render. Recording the failure closes the guard on every outcome.
+      setUserErr((er) => ({ ...er, [clientId]: (e && e.message) || "Could not load users." }));
+      setUsers((u) => ({ ...u, [clientId]: [] }));
     } finally {
       // Always released, including on the error path — otherwise one failure would leave
       // that tenant permanently unrefreshable for the rest of the session.
@@ -75,22 +82,65 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   // Expand/collapse acts on what is CURRENTLY FILTERED, not the whole list — after a search
   // for "barns", "Expand all" that also opened every hidden tenant would be a surprise (and
   // would fetch personal details for accounts you are not looking at).
+  //
+  // The EXPAND STATE stays on `filtered`, so the control still means what it says and paging
+  // forward finds those tenants already open. The FETCH does not: it follows what is actually
+  // on screen, via the effect below.
+  //
+  // That split is the whole point, and paging is what forced it. `loadUsers` is an
+  // operator-portal `list_users` call that reads names, emails and phones for another tenant
+  // and is audit-logged as exactly that. Before the 30-row cap, "expand all" fetching every
+  // filtered tenant WAS "the ones you are looking at" — they were all rendered. With the cap,
+  // one click on a 340-tenant list fired 340 concurrent cross-tenant PII reads to fill 30
+  // visible rows, and the comment above still promised the opposite. Paging redefined
+  // "looking at"; this follows it rather than leaving the promise false.
   const expandAll = () => {
     setOpen((o) => {
       const next = { ...o };
       filtered.forEach((c) => { next[c.clientId] = true; });
       return next;
     });
-    filtered.forEach((c) => { if (users[c.clientId] === undefined) loadUsers(c.clientId); });
   };
   const collapseAll = () => setOpen({});
   const openCount = filtered.filter((c) => open[c.clientId]).length;
 
-  // After an edit, re-fetch only the tenants currently expanded — the edited name has to
+  // Paging at 30, the same rendering cap the tenant-facing lists use (LeadsTable, Designs,
+  // Orders). The read stays whole, so the header count, the search and Expand all all still
+  // see every tenant — "12 of 340" keeps describing the platform, not the page.
+  const [pageSize, setPageSize] = usePageSize("adm-accounts");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [query]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  // useMemo'd so the effect below does not read like the classic every-render loop. It never
+  // was one (its body only calls loadUsers under a guard that closes), but the dep array is
+  // load-bearing enough that the next reader should not have to prove that again.
+  const paged = useMemo(() => filtered.slice((curPage - 1) * pageSize, curPage * pageSize), [filtered, curPage, pageSize]);
+
+  // Fetch personal details only for rows that are open AND on the current page. Rows do not
+  // self-fetch when they scroll into view (only the toggle at :69 and the refresh below do),
+  // so without this an "expand all" followed by "Next →" would show open rows that never load.
+  useEffect(() => {
+    paged.forEach((c) => { if (open[c.clientId] && users[c.clientId] === undefined) loadUsers(c.clientId); });
+  }, [paged, open, users, loadUsers]);
+
+  // After an edit, re-fetch the expanded tenants that are ON THIS PAGE — the edited name has to
   // appear without collapsing what the operator was looking at.
+  //
+  // ⛔ "Expanded" is NOT the bound here, and that was the whole bug. `expandAll` writes `true`
+  // for every FILTERED tenant, so on a 340-tenant list `open` holds 340 keys while 30 render.
+  // Iterating `open` therefore fired 340 concurrent cross-tenant list_users calls — names,
+  // emails and phones for 310 tenants that were never on screen, each one an audit-logged
+  // read — every time an operator saved a user, which is the ordinary reason to expand a row
+  // at all. It was also strictly worse than the expandAll fan-out it mirrored, because that
+  // one at least skipped tenants already loaded and this re-fetched all 340 every save.
+  // A ref, because `paged` cannot go in a dep array keyed on usersRefreshKey without
+  // re-firing the refresh on every page change.
+  const pagedRef = useRef([]);
+  useEffect(() => { pagedRef.current = paged; }, [paged]);
   useEffect(() => {
     if (!usersRefreshKey) return;
-    Object.keys(open).filter((k) => open[k]).forEach((k) => loadUsers(k));
+    pagedRef.current.forEach((c) => { if (open[c.clientId]) loadUsers(c.clientId); });
   }, [usersRefreshKey]);
 
   const roleChip = (r) => ({
@@ -145,9 +195,29 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
         </>}
       />
       {error && <div style={{ color: "#B91C1C", fontSize: 13, marginBottom: 10 }}>{error}</div>}
-      {clients === null && <div style={{ color: "#64748B", fontSize: 13 }}>Loading accounts…</div>}
+      {/* Grey blocks in the row shape, not the word "Loading" on an empty card. This tab is
+          REMOUNTED on every visit (09-shell mounts it without a keep-mounted wrapper, unlike
+          AdminShell), so the whole list_clients round-trip is paid again each time the
+          operator comes back — this is the state they see most. The rows are flex divs
+          rather than a table, so SkelRows does not fit and the blocks are built from SkelBar
+          in the real row's shape: chevron, 34px tile, name over id, action button. */}
+      {clients === null && (
+        <div>
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: "1px solid #F1F5F9", opacity: 1 - i * 0.11 }}>
+              <SkelBar w={15} h={15} style={{ flexShrink: 0 }} />
+              <SkelBar w={34} h={34} style={{ borderRadius: 8, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <SkelBar w="40%" h={12} />
+                <SkelBar w="24%" h={9} style={{ marginTop: 6 }} />
+              </div>
+              <SkelBar w={104} h={30} style={{ borderRadius: 8, flexShrink: 0 }} />
+            </div>
+          ))}
+        </div>
+      )}
       {clients !== null && !error && filtered.length === 0 && <div style={{ color: "#64748B", fontSize: 13 }}>No accounts match.</div>}
-      {filtered.map((c) => (
+      {paged.map((c) => (
         <div key={c.clientId} style={{ borderBottom: "1px solid #F1F5F9" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px" }}>
             {/* The whole identity block toggles, so the hit target is the row rather than a
@@ -175,7 +245,24 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
           </div>
           {open[c.clientId] && (
             <div style={{ padding: "2px 4px 12px 42px" }}>
-              {users[c.clientId] === undefined && <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "6px 0" }}>Loading users…</div>}
+              {/* The same six columns as the real user table below, so nothing reflows when
+                  list_users lands. That read is the genuinely expensive one in this feature —
+                  operator-portal does one admin.getUserById per user, sequentially — and
+                  Expand all fires one of them per filtered tenant at once. Both are
+                  post-paint and operator-initiated, which is already the right shape; this
+                  only stops the wait looking like a hang. */}
+              {users[c.clientId] === undefined && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead><tr>
+                      {["Name", "Email", "Phone", "Role", "Last sign-in", ""].map((h, i) => (
+                        <th key={i} style={{ textAlign: "left", fontSize: 10.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: "#94A3B8", padding: "4px 8px 6px 0", whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody><SkelRows cols={6} rows={3} /></tbody>
+                  </table>
+                </div>
+              )}
               {userErr[c.clientId] && <div style={{ fontSize: 12.5, color: "#B91C1C", padding: "6px 0" }}>{userErr[c.clientId]}</div>}
               {Array.isArray(users[c.clientId]) && users[c.clientId].length === 0 && (
                 <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "6px 0" }}>No logins linked to this account yet.</div>
@@ -273,6 +360,9 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
           )}
         </div>
       ))}
+      {filtered.length > 0 && (
+        <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={filtered.length} noun="account" />
+      )}
     </div>
   );
 }
@@ -703,6 +793,18 @@ function AdmBilling() {
       .filter((s) => !needle || [s.company_name, s.client_id, s.plan_name].some((v) => String(v || "").toLowerCase().indexOf(needle) !== -1));
   }, [subs, q, showCancelled]);
 
+  // Paging sits strictly DOWNSTREAM of the `report` memo above and of `rows`. MRR, ARR, the
+  // active/past-due counts and payingBuilders are derived from `subs`, never from the page —
+  // deriving a revenue number from 30 visible rows would change what the KPI MEANS, and this
+  // is a change to when things paint, not to what they say. The CardHead count stays on
+  // rows.length for the same reason.
+  const [pageSize, setPageSize] = usePageSize("adm-subscribers");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [q, showCancelled]);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = rows.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   const statusChip = (s) => {
     if (s.status === "active") return <AdmChip tone="good">Active</AdmChip>;
     if (s.status === "past_due") return <AdmChip tone="warn">Past due</AdmChip>;
@@ -712,7 +814,44 @@ function AdmBilling() {
   const TH = { textAlign: "left", fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
   const TD = { fontSize: 13, color: "#1E293B", padding: "9px 10px", borderBottom: "1px solid #F1F5F9", whiteSpace: "nowrap" };
 
-  if (data === null) return <div style={S.card}><CardHead title="Billing" desc="Loading subscriptions…" /></div>;
+  // Tiles then table, in the shape they will occupy, instead of one card whose description
+  // reads "Loading subscriptions…" while the whole page is withheld.
+  //
+  // There is NO fast/slow split to exploit here, deliberately — do not add a second paint.
+  // get_billing_overview is the biggest read in this console (a 5-way Promise.all over
+  // billing_subscriptions/plans/client_configs/client_settings/feature_grants, then two more
+  // sequential reads) and every KPI above is a memo over the SAME rows the table shows.
+  // That is what stops the cards and the table disagreeing, so painting the cards early
+  // would mean painting provisional revenue, and a provisional MRR is worse than a wait.
+  if (data === null) {
+    return (
+      <div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginBottom: 12 }}>
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div key={i} style={{ ...S.card, marginBottom: 0 }}>
+              <SkelBar w="58%" h={9} />
+              <SkelBar w="70%" h={22} style={{ marginTop: 9 }} />
+              <SkelBar w="86%" h={9} style={{ marginTop: 9 }} />
+            </div>
+          ))}
+        </div>
+        <div style={S.card}>
+          <CardHead title="Subscribers"
+            desc="Every subscription across the platform. Amounts are what the gateway actually bills — founding members keep their locked amount when list prices change." />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={TH}>Builder</th><th style={TH}>Plan</th><th style={TH}>Interval</th>
+                <th style={{ ...TH, textAlign: "right" }}>Amount</th><th style={TH}>Status</th>
+                <th style={TH}>Started</th><th style={TH}>Renews</th>
+              </tr></thead>
+              <tbody><SkelRows cols={7} rows={6} widths={["70%", "55%", "40%", "45%", "38%", "50%", "50%"]} /></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -808,7 +947,7 @@ function AdmBilling() {
               <th style={TH}>Started</th><th style={TH}>Renews</th>
             </tr></thead>
             <tbody>
-              {rows.map((s) => (
+              {paged.map((s) => (
                 <React.Fragment key={s.id}>
                   <tr onClick={() => setOpenId(openId === s.id ? null : s.id)} style={{ cursor: "pointer", background: openId === s.id ? "#F8FAFC" : "transparent" }}>
                     <td style={TD}>
@@ -847,6 +986,9 @@ function AdmBilling() {
             </tbody>
           </table>
         </div>
+        {rows.length > 0 && (
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={rows.length} noun="subscription" />
+        )}
       </div>
     </div>
   );
@@ -872,6 +1014,10 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   const [clients, setClients] = useState(null);   // null = loading
   const [features, setFeatures] = useState([]);
   const [master, setMaster] = useState(null);
+  // master carries its OWN error, not bootErr's: after the split below, a failed get_master
+  // must neither blank the Builders list nor leave Master Catalog and Items sitting on a
+  // skeleton forever for a read that has already failed.
+  const [masterErr, setMasterErr] = useState(null);
   const [sel, setSel] = useState("");             // the administered client — NOT `viewing`
   const [subState, setSubState] = useState("clients");
   const setSub = onSub || setSubState;
@@ -897,23 +1043,45 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
     return c.clients || [];
   }, []);
 
+  // TWO independent awaits, not one Promise.all with a destructured result. The first paint
+  // of this console is the Builders list, and that needs list_clients ALONE: `master` feeds
+  // Master Catalog and the per-client Items/Pricing panes, none of which can render before a
+  // builder is selected — which itself requires the client list. Awaited jointly, the
+  // console showed "Loading builders…" and a dead "Choose builder" button until BOTH landed,
+  // so any hiccup on get_master delayed a list that never uses it.
+  //
+  // This is the Contacts defect verbatim (02-sales LeadsTable): a read the first paint does
+  // not need, awaited before the first setState. It is not the same magnitude — list_clients
+  // is four sequential table reads server-side and get_master is one select, so they already
+  // ran concurrently and wall time was max() — but splitting cannot be slower, and it takes
+  // get_master off the critical path entirely.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [list, m] = await Promise.all([adminApi("list_clients"), adminApi("get_master")]);
+        const list = await adminApi("list_clients");
         if (cancelled) return;
         setClients(list.clients || []);
         setFeatures(list.features || []);
-        setMaster(m);
         // Restore the last-administered client, but only if it still exists — a tenant
-        // deleted in another session must not come back as a selection.
+        // deleted in another session must not come back as a selection. Stays on this leg:
+        // it reads list.clients.
         try {
           const saved = sessionStorage.getItem("ss.admin.clientId");
           if (saved && (list.clients || []).some((c) => c.client_id === saved)) setSel(saved);
         } catch (_e) { /* private mode */ }
       } catch (e) {
         if (!cancelled) { setBootErr(e.message || "Could not load the operator console."); setClients([]); }
+      }
+    })();
+    // Own catch, own error state — the two failures mean different things and must not merge.
+    (async () => {
+      try {
+        const m = await adminApi("get_master");
+        if (cancelled) return;
+        setMaster(m);
+      } catch (e) {
+        if (!cancelled) setMasterErr(e.message || "Could not load the master item catalog.");
       }
     })();
     return () => { cancelled = true; };
@@ -1015,7 +1183,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
       )}
       {sub === "billing" && <AdmBilling />}
-      {sub === "master" && <AdmMaster master={master} />}
+      {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
 
       {needsClient && !sel && clients && (
         <div style={S.card}>
@@ -1035,7 +1203,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
           [sel, cat] wiped the ticks while the UI was still rendering "N unsaved changes". */}
       {needsClient && sel && (
         <AdminClientPanes key={"ac-" + sel} sub={sub} clientId={sel} clientRow={selRow}
-          master={master} features={features} onFlash={flash}
+          master={master} masterErr={masterErr} features={features} onFlash={flash}
           onReloadClients={loadClients} onDeleted={() => { setSel(""); setSub("clients"); try { sessionStorage.removeItem("ss.admin.clientId"); } catch (_e) {} }} />
       )}
 
@@ -1110,6 +1278,16 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
     || String(c.company_name || "").toLowerCase().indexOf(term) !== -1
     || String(c.client_id || "").toLowerCase().indexOf(term) !== -1);
 
+  // Rendering cap only. The count in CardHead stays on the whole filtered list because
+  // "12 of 340" is a fact about the platform, and paging must not quietly turn it into a
+  // fact about the page. The picker and "Copy catalog from" also keep reading `clients`.
+  const [pageSize, setPageSize] = usePageSize("adm-builders");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [q]);
+  const pageCount = Math.max(1, Math.ceil(list.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = list.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   const slug = id.trim().toLowerCase();
   const taken = (clients || []).some((c) => c.client_id === slug);
   const shapeOk = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
@@ -1152,11 +1330,28 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
             {openNew ? "Cancel" : "+ New builder"}
           </button>} />
         <SearchInput value={q} onChange={setQ} placeholder="Search builders…" />
-        {clients === null && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading builders…</div>}
+        {/* This list is what the console opens on, so it is the operator's first paint —
+            blocks in the ADM_ROW shape (tile, name over id, two buttons) rather than the word
+            "Loading". Since the boot split above it waits on list_clients alone. */}
+        {clients === null && (
+          <div>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} style={{ ...ADM_ROW, opacity: 1 - i * 0.11 }}>
+                <SkelBar w={34} h={34} style={{ borderRadius: 9, flexShrink: 0 }} />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <SkelBar w="38%" h={12} />
+                  <SkelBar w="22%" h={9} style={{ marginTop: 6 }} />
+                </div>
+                <SkelBar w={78} h={28} style={{ borderRadius: 8, flexShrink: 0 }} />
+                <SkelBar w={92} h={28} style={{ borderRadius: 8, flexShrink: 0 }} />
+              </div>
+            ))}
+          </div>
+        )}
         {clients && list.length === 0 && (
           <div style={{ fontSize: 13, color: "#94A3B8" }}>{term ? `No builders match “${q}”.` : "No builders yet — create the first one above."}</div>
         )}
-        {list.map((c) => (
+        {paged.map((c) => (
           <div key={c.client_id} style={ADM_ROW}>
             <AdmTile name={c.company_name || c.client_id} />
             <div style={{ minWidth: 0, flex: 1 }}>
@@ -1193,6 +1388,9 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
             )}
           </div>
         ))}
+        {list.length > 0 && (
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={list.length} noun="builder" />
+        )}
       </div>
 
       {openNew && (
@@ -1249,7 +1447,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
 }
 
 // ── Master catalog (global, read-only) ───────────────────────────────────────
-function AdmMaster({ master }) {
+function AdmMaster({ master, masterErr }) {
   const [q, setQ] = useState("");
   const items = (master && master.layoutItemTypes) || [];
   const term = q.trim().toLowerCase();
@@ -1260,7 +1458,20 @@ function AdmMaster({ master }) {
     <div style={S.card}>
       <CardHead title="Master layout items" count={master ? items.length : null}
         desc="The platform-wide palette. Every builder's Items tab is a selection from this list — nothing here belongs to one tenant, and turning an item on for a builder never edits this." />
-      {!master && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading master catalog…</div>}
+      {/* Deliberately NOT paginated. This is a chip cloud the operator scans and narrows with
+          the search box below, and a 30-item page boundary would hide items from the very
+          search being used to find one. Pagination is for the lists that actually run long —
+          Accounts, Builders, Subscribers — not for symmetry.
+          The real speed-up for this tab is the AdminShell split: get_master no longer waits
+          on list_clients, so the palette paints on its own timeline. */}
+      {masterErr && <div style={{ fontSize: 13, color: "#B91C1C" }}>{masterErr}</div>}
+      {!master && !masterErr && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {[128, 96, 150, 112, 90, 134, 104, 142, 98, 120].map((w, i) => (
+            <SkelBar key={i} w={w} h={31} style={{ borderRadius: 9, opacity: 1 - i * 0.06 }} />
+          ))}
+        </div>
+      )}
       {master && items.length > 0 && <SearchInput value={q} onChange={setQ} placeholder="Search items…" />}
       {master && items.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No master items defined yet.</div>}
       {master && items.length > 0 && list.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No items match “{q}”.</div>}
@@ -1280,7 +1491,7 @@ function AdmMaster({ master }) {
 // ── Per-client panes ─────────────────────────────────────────────────────────
 // Mounted with key={"ac-" + clientId}. Everything staged and uncommitted lives HERE, so a
 // client change destroys it structurally rather than by an effect that races the render.
-function AdminClientPanes({ sub, clientId, clientRow, master, features, onFlash, onReloadClients, onDeleted }) {
+function AdminClientPanes({ sub, clientId, clientRow, master, masterErr, features, onFlash, onReloadClients, onDeleted }) {
   const [cat, setCat] = useState(null);
   const [catErr, setCatErr] = useState(null);
 
@@ -1304,7 +1515,7 @@ function AdminClientPanes({ sub, clientId, clientRow, master, features, onFlash,
   };
 
   const label = (clientRow && clientRow.company_name) || clientId;
-  const common = { clientId, clientRow, label, cat, setCat, master, features, onFlash, act, loadCat, onReloadClients };
+  const common = { clientId, clientRow, label, cat, setCat, master, masterErr, features, onFlash, act, loadCat, onReloadClients };
 
   if (catErr && sub !== "account") return <div style={S.err}>{catErr}</div>;
 
@@ -1624,7 +1835,21 @@ function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
       <div style={S.card}>
         <CardHead title="Building styles" count={cat ? styles.length : null}
           desc={`What ${label} offers on their design page. Hiding a style stops offering it without touching its sizes or prices.`} />
-        {!cat && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading catalog…</div>}
+        {/* No pager here, on purpose: a tenant's style list is a handful of rows (Carolyn's
+            tenants run single-digit styles) and the next card down is the add-a-style form,
+            so "1–6 of 6 styles" would be furniture rather than help. No second paint either —
+            get_client_catalog is one round trip and every row on this tab, including the
+            per-style size join below, is derived from it. Skeleton only. */}
+        {!cat && [0, 1, 2, 3, 4].map((i) => (
+          <div key={i} style={{ ...ADM_ROW, alignItems: "flex-start", opacity: 1 - i * 0.13 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <SkelBar w="45%" h={12} />
+              <SkelBar w="30%" h={9} style={{ marginTop: 6 }} />
+            </div>
+            <SkelBar w={58} h={20} style={{ borderRadius: 6, flexShrink: 0 }} />
+            <SkelBar w={62} h={28} style={{ borderRadius: 8, flexShrink: 0 }} />
+          </div>
+        ))}
         {cat && styles.length === 0 && <div style={{ fontSize: 13, color: "#94A3B8" }}>No styles yet — add one below.</div>}
         {styles.map((row) => {
           // Sizes join on the style's UUID `id`, NOT its `key`. Getting this wrong is silent:
@@ -1671,7 +1896,7 @@ function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
   );
 }
 
-function AdmItems({ clientId, label, cat, setCat, master, onFlash }) {
+function AdmItems({ clientId, label, cat, setCat, master, masterErr, onFlash }) {
   const assigned = useMemo(() => new Set(((cat && cat.clientLayoutItems) || []).filter((i) => i.active).map((i) => i.item_key)), [cat]);
   const [staged, setStaged] = useState(null);      // null until cat lands
   const [q, setQ] = useState("");
@@ -1711,10 +1936,29 @@ function AdmItems({ clientId, label, cat, setCat, master, onFlash }) {
       <CardHead title="Layout items" count={cat && master ? `${sel.size} of ${all.length}` : null}
         desc={`Which items ${label}'s customers can place on a building. Ticking is staged — nothing is written until you save.`}
         right={<>
-          <button type="button" onClick={() => setStaged(new Set(all.map((i) => i.item_key)))} disabled={!cat || busy} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Select all</button>
-          <button type="button" onClick={() => setStaged(new Set())} disabled={!cat || busy} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Clear</button>
+          {/* Gated on master too, not just cat — the same window the boot split opens for
+              AdmPricing. `all` is the MASTER palette, so with master still in flight
+              "Select all" would stage the empty set (the exact opposite of its label) and,
+              because the seeding effect only re-runs on cat, it would stay empty once the
+              palette landed — an unintended mass-disable sitting in the pending banner. */}
+          <button type="button" onClick={() => setStaged(new Set(all.map((i) => i.item_key)))} disabled={!cat || !master || busy} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Select all</button>
+          <button type="button" onClick={() => setStaged(new Set())} disabled={!cat || !master || busy} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12 }}>Clear</button>
         </>} />
-      {(!cat || !master) && <div style={{ fontSize: 13, color: "#94A3B8" }}>Loading items…</div>}
+      {/* Deliberately NOT paginated. The ticks below are STAGED and unsaved — the pending
+          banner counts them and the AdminClientPanes remount key exists to protect exactly
+          that state — so a page boundary would hide unsaved changes from the banner that is
+          counting them. Paging a staged multi-select is a correctness problem in a layout
+          costume. The filter box above is the right way to narrow this list.
+          After the AdminShell split, cat and master arrive on independent timelines, so this
+          skeleton can now be waiting on either one. */}
+      {masterErr && <div style={{ fontSize: 13, color: "#B91C1C" }}>{masterErr}</div>}
+      {(!cat || !master) && !masterErr && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {[112, 88, 140, 104, 96, 128, 84, 136, 108, 92, 124, 100].map((w, i) => (
+            <SkelBar key={i} w={w} h={31} style={{ borderRadius: 9, opacity: 1 - i * 0.05 }} />
+          ))}
+        </div>
+      )}
       {cat && master && (
         <>
           {pending > 0 && (
@@ -1760,7 +2004,7 @@ function AdmItems({ clientId, label, cat, setCat, master, onFlash }) {
   );
 }
 
-function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
+function AdmPricing({ clientId, label, cat, setCat, master, masterErr, onFlash }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [fileKey, setFileKey] = useState(0);
@@ -1772,6 +2016,16 @@ function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
     ((master && master.layoutItemTypes) || []).forEach((m) => { byKey[m.item_key] = m.label || m.item_key; });
     return active.map((i) => ({ key: i.item_key, label: byKey[i.item_key] || i.item_key }));
   }, [cat, master]);
+
+  // Both controls below need `master`, not just `cat`. The item COLUMNS in the template come
+  // from the master palette (the memo above joins clientLayoutItems against it), so with
+  // master still in flight the download is a CSV with ZERO item columns — which an operator
+  // reads as "this builder has no items". Until the AdminShell boot split, master had always
+  // landed before any pane could mount, so `!cat` alone was accidentally sufficient; it is
+  // not any more. Re-importing such a file would not zero anyone's inclusions
+  // (import_pricing_csv only touches keys present in the row), but the file is still a false
+  // picture, and the rule is that a first paint never shows something read the wrong way.
+  const ready = !!cat && !!master;
 
   const download = () => {
     const headers = ["style", "width", "length", "price"].concat(items.map((i) => i.label)).concat(["active"]);
@@ -1848,14 +2102,20 @@ function AdmPricing({ clientId, label, cat, setCat, master, onFlash }) {
       <div style={S.card}>
         <CardHead title="Sizes &amp; prices" desc={`Download ${label}'s current sizes as a spreadsheet, edit it, and upload it back. Columns are one per active layout item, so the file matches whatever the Items tab has switched on.`} />
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <button type="button" onClick={download} disabled={!cat} style={S.btn("#F1F5F9", "#334155")}>Download template</button>
+          <button type="button" onClick={download} disabled={!ready}
+            title={!ready ? "Still loading this builder's catalog and the master item palette — the template's item columns come from both, so it can't be built yet." : undefined}
+            style={S.btn("#F1F5F9", "#334155")}>Download template</button>
           <div style={{ flex: "1 1 240px", minWidth: 200 }}>
             <label style={S.lbl}>Upload a filled-in file</label>
-            <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy || !cat}
+            <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy || !ready}
               onChange={(e) => onFile(e.target.files && e.target.files[0])}
               style={{ ...S.input, padding: 6, fontWeight: 400 }} />
           </div>
         </div>
+        {/* Two silently dead controls and nothing on screen saying why was the old state of
+            this tab. A grey line is not much, but it is honest about what is happening. */}
+        {!ready && !masterErr && <SkelBar w="34%" h={10} style={{ marginTop: 12 }} />}
+        {masterErr && <div style={{ fontSize: 12.5, color: "#B91C1C", marginTop: 12 }}>{masterErr}</div>}
         {busy && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Importing…</div>}
         {warn && (
           <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 8, padding: "12px 14px", color: "#92400E", fontSize: 12.5, marginTop: 12, lineHeight: 1.55 }}>
