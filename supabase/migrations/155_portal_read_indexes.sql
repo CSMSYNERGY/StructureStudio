@@ -1,4 +1,4 @@
--- 153_portal_read_indexes.sql — indexes for the portal's tenant-scoped status filters.
+-- 155_portal_read_indexes.sql — indexes for the portal's tenant-scoped status filters.
 --
 -- APPLY BY HAND (SQL editor / MCP execute_sql / `supabase db query --linked`), then record
 -- the row in supabase_migrations.schema_migrations. NEVER `supabase db push` — see 148's
