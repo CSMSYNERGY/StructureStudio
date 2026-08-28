@@ -332,7 +332,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const canEdit = canAdmin || !!(access && access.build_schedule === "edit");
   // Closing a repair is a REPAIRS write — offered only to someone who holds that area.
   const canRepairs = canAdmin || !!(access && access.repairs === "edit");
-  const [data, setData] = useState(null);        // { stages, jobs, stopByJob, tray, team } | null = loading
+  // Seeded from the tab cache so a revisit paints the board immediately and refreshes
+  // behind it — this component unmounts on every tab switch (see ssTabCache in 01-core).
+  const [data, setData] = useState(() => ssCacheGet("portal-schedule", "build_board", clientId));  // { stages, jobs, stopByJob, tray, team } | null = loading
   const [error, setError] = useState(null);
   const [view, setView] = useState("calendar"); // calendar (main) | board | table
   const [calView, setCalView] = useState("week"); // week | month
@@ -421,6 +423,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       return;
     }
     setData(d);
+    ssCachePut("portal-schedule", "build_board", clientId, d);
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
   // What the ↻ Refresh button calls. `load` alone gives no sign it ran: it sets no busy
@@ -1819,7 +1822,8 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   const canEdit = canAdmin || !!(access && access.repairs === "edit");
   // Putting a repair on a load is a DELIVERY write, not a repairs one — gate it on that.
   const canDeliver = canAdmin || !!(access && access.delivery_schedule === "edit");
-  const [data, setData] = useState(null);        // { repairs, jobs, stops } | null = loading
+  // Cache-seeded (see ssTabCache in 01-core): the list paints on revisit, then refreshes.
+  const [data, setData] = useState(() => ssCacheGet("portal-schedule", "list_repairs", clientId));  // { repairs, jobs, stops } | null = loading
   const [error, setError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [query, setQuery] = useState("");
@@ -1858,6 +1862,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
       return;
     }
     setData(d);
+    ssCachePut("portal-schedule", "list_repairs", clientId, d);
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
 
@@ -2475,8 +2480,9 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   // very level a Driver holds, the role check is the only thing separating "may dispatch"
   // from "may overrule the built check". portal-schedule re-checks it server-side.
   const canEdit = canAdmin || !!(access && access.delivery_schedule === "edit");
-  const [data, setData] = useState(null);      // loads payload
-  const [pool, setPool] = useState(null);      // pool payload
+  // Both legs seed from the tab cache independently, the same way they paint independently.
+  const [data, setData] = useState(() => ssCacheGet("portal-schedule", "loads", clientId));  // loads payload
+  const [pool, setPool] = useState(() => ssCacheGet("portal-schedule", "pool", clientId));   // pool payload
   const [error, setError] = useState(null);
   const [view, setView] = useState("loads");   // loads | table | calendar
   const [weekOffset, setWeekOffset] = useState(0);
@@ -2540,11 +2546,13 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
         if (!fresh()) return;
         setError(m);
         setData({ loads: [], stops: [], buildByJob: {}, drivers: [], territories: [], team: [] });
-      } else if (fresh()) setData(l.data);
+      } else if (fresh()) { setData(l.data); ssCachePut("portal-schedule", "loads", clientId, l.data); }
     });
     const pp = sb.functions.invoke("portal-schedule", { body: { action: "pool" } }).then((p) => {
       if (!fresh()) return;
-      if (!p.error && p.data && !p.data.error) setPool(p.data);
+      // The cache write sits inside the generation guard with the state write, so a
+      // superseded response can no more poison the cache than it can repaint the board.
+      if (!p.error && p.data && !p.data.error) { setPool(p.data); ssCachePut("portal-schedule", "pool", clientId, p.data); }
       else setPool({ orders: [], inventory: [], repairs: [] });
     // A REJECTION (rather than an {error} result) would leave `pool` null forever, and null is
     // now a rendered state: a permanent grey tile and a permanent skeleton tray, with no error

@@ -1263,6 +1263,82 @@ function SkelBar({ w = "100%", h = 11, style = {} }) {
   return <div style={{ width: w, height: h, borderRadius: 4, background: "#E2E8F0", ...style }} />;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tab payload cache — stale-while-revalidate for the slow tabs.
+//
+// 11-shell renders tabs as {activeTab === "x" && <Component/>}, so leaving a tab UNMOUNTS
+// it and its state is gone. Coming back re-ran the whole fetch and put the user in front of
+// a skeleton again, every time, even for data seconds old. Each slow tab now seeds its
+// state from here on mount (synchronously, via a useState initializer, so the first render
+// already has rows) and refetches in the background to correct it.
+//
+// Considered and rejected: keeping those tabs mounted behind display:none the way the
+// Designer and the admin console are. Those two are kept for USER state — an in-progress
+// design, a half-filled form — which cannot be refetched. A list can. Hidden mounts would
+// also keep their window-level key handlers live under whatever tab is on screen, and they
+// would show stale data without refreshing it, so the revalidate half of this would still
+// have to be built. One cache is less machinery than five hidden trees.
+//
+// IN-MEMORY ONLY, deliberately: these payloads carry customer names, addresses and money.
+// sessionStorage would outlive the sign-out clear below on a shared shop computer, and a
+// full reload re-pays the boot chain anyway, so persisting buys little.
+const SS_TAB_CACHE_ON = true;          // one-line kill switch if cached data is ever suspect
+const SS_TAB_CACHE_MAX_AGE = 10 * 60 * 1000;
+const ssTabCache = new Map();
+// Who the cached payloads belong to. A module global maintained by PortalApp, the same
+// shape as ssTargetClientId above, so a tab deep in the tree can key its cache correctly
+// without every component in between growing a prop it does not otherwise use.
+let ssCurrentUserId = null;
+function ssSetCurrentUser(id) {
+  if (id !== ssCurrentUserId) { ssCurrentUserId = id || null; ssTabCache.clear(); }
+}
+
+// The key carries WHO as well as WHAT. Tenant, because an operator viewing another builder
+// must never see the previous one's rows; user id, because portal-commissions scopes
+// list_entries to the CALLER (a rep sees only their own lines, and rates are hidden unless
+// they may see them), so a payload keyed by tenant alone would leak across a sign-out and
+// sign-in on the same machine.
+function ssCacheKey(fn, action, tenant) {
+  return (ssCurrentUserId || "anon") + "|" + (tenant || "own") + "|" + fn + "|" + action;
+}
+function ssCacheGet(fn, action, tenant) {
+  if (!SS_TAB_CACHE_ON) return null;
+  const hit = ssTabCache.get(ssCacheKey(fn, action, tenant));
+  return hit && (Date.now() - hit.at) < SS_TAB_CACHE_MAX_AGE ? hit.data : null;
+}
+// Only ever called with a payload that came back clean. Never cache the empty scaffold a
+// failed load falls back to ({ entries: [] } and friends) — one blip would otherwise paint
+// an empty tab instantly for the next ten minutes and look like data loss.
+function ssCachePut(fn, action, tenant, data) {
+  if (!SS_TAB_CACHE_ON || !data || data.error) return;
+  ssTabCache.set(ssCacheKey(fn, action, tenant), { data, at: Date.now() });
+}
+function ssCacheClear() { ssTabCache.clear(); }
+
+// Boot an edge function's isolate ahead of the click that needs it. A cold portal-schedule
+// or portal-commissions costs ~2.5s before it runs a single query — measured, and it is the
+// single largest slice of what "the schedule tab is slow" actually meant.
+//
+// Raw fetch, NOT sb.functions.invoke, for three reasons: invoke awaits getSession() first
+// (work this does not need), it logs any non-2xx to app_errors (a ping firing on every boot
+// must never file rows), and it goes through ssFetch, whose 401 handling drives the
+// session-expiry screen — a warm-up must not be able to sign anyone out. The response is
+// deliberately ignored: booting the isolate IS the whole point, and against a server that
+// predates the ?warm=1 endpoint this must fail in complete silence.
+function ssWarmFn(name) {
+  try {
+    fetch(SUPABASE_URL + "/functions/v1/" + name + "?warm=1", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+      },
+      body: "{}",
+    }).catch(() => {});
+  } catch (_e) { /* a warm-up must never be why something failed */ }
+}
+
 // Table-shaped skeleton: the same column count as the real table, so the header row and the
 // first paint line up and nothing jumps when the rows arrive.
 function SkelRows({ cols = 5, rows = 6, widths = null }) {

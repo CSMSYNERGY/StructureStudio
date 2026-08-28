@@ -2016,9 +2016,14 @@ function CommissionTeamInner() {
 // user granted "sees all payouts" sees the whole team; a plain rep sees only their own rows
 // and never a rate column. All data + actions go through portal-commissions (service-role);
 // the confidential ledger is never read directly by the browser.
-function CommissionsReport() {
-  const [data, setData] = useState(null);      // list_entries response | { entries: [] }
+function CommissionsReport({ clientId }) {
+  const [data, setData] = useState(() => ssCacheGet("portal-commissions", "list_entries", clientId));  // list_entries response | { entries: [] }
   const [err, setErr] = useState(null);
+  // True from mount until the background compute has finished and the ledger has been
+  // re-read. The figures on screen before that are the LAST computed ones, which is a
+  // different claim from "these are current" — the tab says so, and every control that
+  // commits to a number stays disabled until it clears. See the note on `load`.
+  const [reconciling, setReconciling] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [assign, setAssign] = useState(null);  // entry id whose rep dropdown is open
@@ -2049,66 +2054,93 @@ function CommissionsReport() {
   // Guards against two computes from THIS mount (a double Refresh click, StrictMode's double
   // effect). It cannot cover a remount or a second browser tab — see the note below.
   const inflight = useRef(null);
-  // ⛔ THE LEDGER IS NOT PAINTED BEFORE `compute` FINISHES, AND THAT IS DELIBERATE — this is the
-  // one list in the portal that keeps the old compute→read order while every other slow tab was
-  // moved to paint-first. FOUR attempts at painting it early were each rejected in review, and
-  // they failed for the same underlying reason rather than four different ones:
+  // THE LEDGER PAINTS BEFORE `compute` RUNS — and that is safe ONLY because of migration 148.
+  // Read this before reordering anything here.
   //
-  //   Painting early means CONTROLS EXIST while compute runs. compute is not a read — it reads
-  //   commission_entries ONCE (portal-commissions/index.ts:599) and then bare-INSERTs a line for
-  //   any order it did not find (:648). There is no upsert, no advisory lock, and migration 078
-  //   puts no unique constraint on (client_id, order_id). Any second overlapping compute inserts
-  //   the same orders again: the period double-counts, and because mark_paid freezes a paid row
-  //   forever (`if (ex.some(e => e.status === 'paid'…)) continue`), approving and paying that
-  //   period pays the rep TWICE with nothing flagging it.
+  // FOUR earlier attempts at painting early were each rejected in review, all for one reason:
+  // painting early means CONTROLS EXIST while compute runs, and compute was not safe to
+  // overlap. It read commission_entries once and then bare-INSERTed a line for any order it
+  // did not find, with no upsert, no lock, and no unique constraint behind it. A second
+  // overlapping compute inserted the same orders again, the period double-counted, and
+  // because mark_paid freezes a paid row forever, approving and paying that period paid the
+  // rep TWICE with nothing flagging it. Every guard tried was a client-side approximation of
+  // a server invariant that did not exist: a re-entrancy ref covers one mount, not a remount,
+  // a second browser tab or a reload; a timeout either re-armed the writers mid-insert or
+  // locked a slow tenant out of their own report.
   //
-  //   Every client-side guard tried was an approximation of a server invariant that does not
-  //   exist. A re-entrancy ref covers one mount, not the tab being left and re-entered (09-shell
-  //   unmounts this component), nor a second browser tab, nor a reload. A timeout re-armed the
-  //   writers while the server was still inserting; not re-arming them turned a slow tenant into
-  //   a locked-out one whose only escape — reload — starts the very second compute at issue.
+  // The invariant exists now. Migration 148 puts a partial unique index on
+  // commission_entries (client_id, order_id) WHERE kind='commission' AND is_override=false —
+  // narrow on purpose, because splits deliberately create several rows per order and a plain
+  // unique index would break them — and compute treats the losing insert's 23505 as "another
+  // compute already wrote this line" and skips it. Overlapping computes are idempotent, so
+  // the ledger can paint from list_entries first and reconcile behind it.
   //
-  // So the speed work here stops at PRESENTATION: the skeleton below replaces the bare word
-  // "Loading", and the table pages at 30. Both are free. The 8-second wait stays until the
-  // server can promise one compute at a time — a partial unique index on
-  // commission_entries(client_id, order_id) where kind='commission', or an advisory lock around
-  // the compute branch. NOTE a plain unique index would break SPLITS, which deliberately create
-  // several commission rows per order, so it needs the narrower predicate or the lock.
+  // ⛔ Do not weaken the index predicate or the 23505 skip; this ordering rests on both.
+  // ⛔ Do not add a fifth client-side guard. The database holds this now.
+  //
+  // What still protects the money is `reconciling`: figures painted before compute finishes
+  // are the last computed ones, so they are labelled as such and every control that COMMITS
+  // to a number stays disabled until the post-compute read lands. Money never paints
+  // optimistically — it just no longer makes the whole tab wait.
+
+  // Entries only. This is what every mutation needs: the server actions do their own writes,
+  // so re-running compute after each one bought nothing and cost the user eight seconds of
+  // spinner per click.
+  const refreshEntries = useCallback(async () => {
+    const r = await call({ action: "list_entries" });
+    setData(r);
+    ssCachePut("portal-commissions", "list_entries", clientId, r);
+    return r;
+  }, [clientId]);
   const load = useCallback(() => {
     if (inflight.current) return inflight.current;
     const run = (async () => {
       setErr(null);
-      // Owner / full-access: refresh the ledger from GHL (best-effort); a rep's compute 403s
-      // and is ignored, they just read their own rows.
-      try { await call({ action: "compute" }); } catch (_e) { /* non-owner or transient */ }
-      try { setData(await call({ action: "list_entries" })); }
+      setReconciling(true);
+      // 1. Paint the ledger as it stands. This is the leg that used to wait behind compute.
+      try { await refreshEntries(); }
       catch (e) { setErr(e.message); setData({ entries: [] }); }
+      // 2. Reconcile from GHL behind the paint, then repaint. A rep's compute 403s and is
+      //    ignored — they only ever read their own rows.
+      try { await call({ action: "compute" }); await refreshEntries(); }
+      catch (_e) { /* non-owner or transient — the painted rows stand */ }
+      setReconciling(false);
     })().finally(() => { inflight.current = null; });
     inflight.current = run;
     return run;
-  }, []);
+  }, [refreshEntries]);
   useEffect(() => { load(); }, [load]);
 
+  // What every control that COMMITS to a figure is disabled by. `busy` alone is not enough
+  // now that the ledger paints before compute finishes: approving, paying, splitting,
+  // adjusting or reassigning against a pre-reconcile number would commit the owner to an
+  // amount the reconcile is about to change. Reading the report is free during that window;
+  // acting on it is not. (The Refresh button deliberately keeps plain `busy` — re-entering
+  // load() while it is in flight is already a no-op via `inflight`.)
+  const committing = busy || reconciling;
   const money = (c) => c == null ? "—" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 
 
+  // Every mutation below re-reads the LEDGER, not the whole compute→read pair. Each of these
+  // server actions rebuilds the lines it touches (reset_order included), so re-running the
+  // GHL reconcile afterwards changed nothing and made the button sit busy for eight seconds.
   const assignEarner = async (entryId, userId) => {
     setBusy(true); setMsg(null); setAssign(null);
-    try { await call({ action: "assign_earner", entryId, userId: userId || null }); await load(); }
+    try { await call({ action: "assign_earner", entryId, userId: userId || null }); await refreshEntries(); }
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
   const markPeriodPaid = async (periodKey, label) => {
     if (!window.confirm(`Mark every payable commission in “${label}” as paid?`)) return;
     setBusy(true); setMsg(null);
-    try { const r = await call({ action: "mark_paid", periodKey }); setMsg({ ok: `Marked ${r.paid} commission${r.paid === 1 ? "" : "s"} paid.` }); await load(); }
+    try { const r = await call({ action: "mark_paid", periodKey }); setMsg({ ok: `Marked ${r.paid} commission${r.paid === 1 ? "" : "s"} paid.` }); await refreshEntries(); }
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
   const act = async (body, okMsg) => {
     setBusy(true); setMsg(null);
-    try { await call(body); if (okMsg) setMsg({ ok: okMsg }); await load(); }
+    try { await call(body); if (okMsg) setMsg({ ok: okMsg }); await refreshEntries(); }
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -2311,6 +2343,14 @@ function CommissionsReport() {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <div style={{ ...S.h2, marginBottom: 0 }}>{seesAll ? "Commissions" : "Your commissions"}</div>
         <button onClick={load} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
+        {/* The ledger is on screen before the reconcile finishes, so it says whose numbers
+            these are. Without this the amounts would silently claim to be current while the
+            controls that act on them sat disabled for no visible reason. */}
+        {reconciling && data && (
+          <span style={{ fontSize: 12, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 999, padding: "4px 10px", fontWeight: 600 }}>
+            Checking for new orders — amounts may still change
+          </span>
+        )}
       </div>
 
             {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
@@ -2391,7 +2431,7 @@ function CommissionsReport() {
                       Unscheduled pseudo-group (g.key = null) gets an explanation instead of a button —
                       its lines become approvable once they land in a real period. */}
                   {pendingRows.length > 0 && (g.key
-                    ? <button onClick={() => approvePeriod(g.key)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px" }}>Approve period</button>
+                    ? <button onClick={() => approvePeriod(g.key)} disabled={committing} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px" }}>Approve period</button>
                     : <span title="These commissions don't have a pay period yet — usually the order isn't fully collected. Once a line lands in a period, approve it there." style={{ fontSize: 11.5, fontWeight: 700, color: "#94A3B8", cursor: "help" }}>Approval waits for a pay period</span>)}
                   {/* unapprove_period and mark_paid reject a null period_key exactly as approve_period
                       does, so these two needed the same g.key gate and never had it, and both buttons
@@ -2410,8 +2450,8 @@ function CommissionsReport() {
                       than a button here — name it in the copy instead. */}
                   {approvedRows.length > 0 && (g.key
                     ? <>
-                        <button onClick={() => unapprovePeriod(g.key)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>Un-approve</button>
-                        <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), padding: "6px 13px" }}>Mark period paid</button>
+                        <button onClick={() => unapprovePeriod(g.key)} disabled={committing} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>Un-approve</button>
+                        <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={committing} style={{ ...S.btn("#059669", "#FFF"), padding: "6px 13px" }}>Mark period paid</button>
                       </>
                     : <span title="These lines were approved, then lost their pay period — a payment on the order was voided, so it stopped counting as collected. Nothing puts them back on its own. To clear one: open Split on the row, then “Reset to default” — that rebuilds the order's commission as a pending line, which joins a pay period again once the order collects, and can be approved and paid there. Note it also removes any split or adjustment on that order." style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309", cursor: "help" }}>Approved — no pay period</span>)}
                 </div>
@@ -2437,11 +2477,11 @@ function CommissionsReport() {
                         <td style={td}>
                           {e.earnerName || (canSeeRates
                             ? (assign === e.id
-                                ? <select autoFocus disabled={busy} defaultValue="" onChange={(ev) => assignEarner(e.id, ev.target.value)} onBlur={() => setAssign(null)} style={{ ...S.input, padding: "5px 8px" }}>
+                                ? <select autoFocus disabled={committing} defaultValue="" onChange={(ev) => assignEarner(e.id, ev.target.value)} onBlur={() => setAssign(null)} style={{ ...S.input, padding: "5px 8px" }}>
                                     <option value="" disabled>Assign rep…</option>
                                     {team.map((t) => <option key={t.userId} value={t.userId}>{t.name}</option>)}
                                   </select>
-                                : <button onClick={() => setAssign(e.id)} disabled={busy} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 6, color: "#3D3672", fontWeight: 700, fontSize: 11.5, padding: "4px 9px", cursor: "pointer", fontFamily: "inherit" }}>Assign rep</button>)
+                                : <button onClick={() => setAssign(e.id)} disabled={committing} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 6, color: "#3D3672", fontWeight: 700, fontSize: 11.5, padding: "4px 9px", cursor: "pointer", fontFamily: "inherit" }}>Assign rep</button>)
                             : <span style={{ color: "#94A3B8" }}>Unassigned</span>)}
                         </td>
                       )}
@@ -2457,8 +2497,8 @@ function CommissionsReport() {
                             : e.status === "paid" ? <span style={{ color: "#94A3B8", fontSize: 11 }}>—</span>
                             : e.status === "excluded" ? (
                               <span style={{ display: "inline-flex", gap: 10, flexWrap: "wrap" }}>
-                                <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: false })} disabled={busy} style={actLink("#3D3672")}>Restore</button>
-                                <button onClick={() => deleteEntry(e)} disabled={busy} title="Completely remove this line — unlike Exclude it won't show on any report" style={actLink("#DC2626")}>Delete</button>
+                                <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: false })} disabled={committing} style={actLink("#3D3672")}>Restore</button>
+                                <button onClick={() => deleteEntry(e)} disabled={committing} title="Completely remove this line — unlike Exclude it won't show on any report" style={actLink("#DC2626")}>Delete</button>
                               </span>
                             )
                             : (
@@ -2467,10 +2507,10 @@ function CommissionsReport() {
                                     Full-access admin without "sees all payouts" is served only their
                                     OWN lines — Split would then delete a colleague's line it never
                                     showed them. Editing an allocation needs the whole order. */}
-                                {seesAll && e.earnerUserId && <button onClick={() => openSplit(e)} disabled={busy} style={actLink("#3D3672")}>Split</button>}
-                                {e.earnerUserId && <button onClick={() => adjustEntry(e)} disabled={busy} style={actLink("#3D3672")}>Adjust</button>}
-                                <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: true })} disabled={busy} style={actLink("#94A3B8")}>Exclude</button>
-                                <button onClick={() => deleteEntry(e)} disabled={busy} title="Completely remove this line — unlike Exclude it won't show on any report" style={actLink("#DC2626")}>Delete</button>
+                                {seesAll && e.earnerUserId && <button onClick={() => openSplit(e)} disabled={committing} style={actLink("#3D3672")}>Split</button>}
+                                {e.earnerUserId && <button onClick={() => adjustEntry(e)} disabled={committing} style={actLink("#3D3672")}>Adjust</button>}
+                                <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: true })} disabled={committing} style={actLink("#94A3B8")}>Exclude</button>
+                                <button onClick={() => deleteEntry(e)} disabled={committing} title="Completely remove this line — unlike Exclude it won't show on any report" style={actLink("#DC2626")}>Delete</button>
                               </span>
                             )}
                         </td>
@@ -2514,8 +2554,8 @@ function CommissionsReport() {
               <button onClick={() => setSplitFor((s) => ({ ...s, rows: [...s.rows, { userId: "", share: "0" }] }))} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 8, color: "#3D3672", fontWeight: 700, fontSize: 12, padding: "6px 11px", cursor: "pointer", fontFamily: "inherit", marginTop: 2 }}>+ Add rep</button>
               <div style={{ fontSize: 12, color: "#64748B", marginTop: 10 }}>Total: <b style={{ color: Math.abs(splitFor.rows.reduce((s, r) => s + (Number(r.share) || 0), 0) - 100) < 0.01 ? "#166534" : "#DC2626" }}>{splitFor.rows.reduce((s, r) => s + (Number(r.share) || 0), 0)}%</b></div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
-                <button onClick={saveSplit} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), flex: 1 }}>Save</button>
-                <button onClick={resetOrder} disabled={busy} title="Remove every unpaid line on this order and rebuild the normal single entry" style={{ ...S.btn("#FEF2F2", "#DC2626") }}>Reset to default</button>
+                <button onClick={saveSplit} disabled={committing} style={{ ...S.btn(ACCENT, "#FFF"), flex: 1 }}>Save</button>
+                <button onClick={resetOrder} disabled={committing} title="Remove every unpaid line on this order and rebuild the normal single entry" style={{ ...S.btn("#FEF2F2", "#DC2626") }}>Reset to default</button>
                 <button onClick={() => setSplitFor(null)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
               </div>
             </div>

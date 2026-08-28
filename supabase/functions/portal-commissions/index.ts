@@ -126,6 +126,14 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ──────────────────────────────────────────────────────────────
+  // The portal pings this at sign-in so the first visit to the Commissions tab does not pay
+  // this function's cold start on top of its reads. It answers BEFORE the auth block on
+  // purpose: a ping fires on every boot, and one that could 401 would file a refusal row
+  // every time. A query param rather than an action keeps it out of the switch entirely and
+  // leaves the body stream untouched. Booting the isolate is the whole job.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -214,36 +222,41 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       // ── list the team (rates only if the caller may see them; grants only for the owner) ──
       case "list": {
         if (!canViewTeam) return json({ error: "You don't have access to the team list." }, 403);
-        const { data: rows, error } = await admin
-          .from("client_users").select("user_id, role, title, access, full_name, created_at").eq("client_id", clientId).order("created_at");
-        if (error) throw error;
-        const { data: cms } = await admin
-          .from("commission_members").select("user_id, commission_percent, sees_all_payouts, full_access").eq("client_id", clientId);
-        const cmById = new Map((cms || []).map((c: any) => [c.user_id, c]));
-        // Truck summary for the Driver callout in the access editor. Read-only here: the
-        // record itself is written in exactly one place (portal-schedule's save_driver), so
-        // the editor shows what is on file and points at that card rather than becoming a
+        // Three independent reads, one wave. Truck summary is read-only here: the record
+        // itself is written in exactly one place (portal-schedule's save_driver), so the
+        // editor shows what is on file and points at that card rather than becoming a
         // second writer of the same row.
-        const { data: dps } = await admin.from("driver_profiles")
-          .select("user_id, truck_name, deck_length_ft, max_width_ft, is_driver, active")
-          .eq("client_id", clientId).eq("is_driver", true).eq("active", true);
-        const dpById = new Map((dps || []).map((d: any) => [d.user_id, d]));
+        const [rowsRes, cmsRes, dpsRes] = await Promise.all([
+          admin.from("client_users").select("user_id, role, title, access, full_name, created_at").eq("client_id", clientId).order("created_at"),
+          admin.from("commission_members").select("user_id, commission_percent, sees_all_payouts, full_access").eq("client_id", clientId),
+          admin.from("driver_profiles")
+            .select("user_id, truck_name, deck_length_ft, max_width_ft, is_driver, active")
+            .eq("client_id", clientId).eq("is_driver", true).eq("active", true),
+        ]);
+        if (rowsRes.error) throw rowsRes.error;
+        const rows = rowsRes.data;
+        const cmById = new Map((cmsRes.data || []).map((c: any) => [c.user_id, c]));
+        const dpById = new Map((dpsRes.data || []).map((d: any) => [d.user_id, d]));
+        // One GoTrue round trip PER MEMBER, but concurrent rather than in single file — the
+        // roster screen used to wait through them one at a time. Not listUsers(): that pages
+        // every user in the project to answer a question about this tenant's roster.
+        const authById = new Map(await Promise.all((rows || []).map(async (r: any) => {
+          try {
+            const { data: au } = await admin.auth.admin.getUserById(r.user_id);
+            return [r.user_id, au?.user ?? null] as const;
+          } catch { return [r.user_id, null] as const; }   // one missing auth user must not break the list
+        })));
         const members = [];
         for (const r of rows || []) {
           const uid = (r as any).user_id;
-          let email = "";
-          let lastActive: string | null = null;
-          let deactivated = false;
-          try {
-            const { data: au } = await admin.auth.admin.getUserById(uid);
-            email = au?.user?.email || "";
-            lastActive = au?.user?.last_sign_in_at || null;
-            // A ~100-year ban is how remove_user deactivates a login. Surfacing it on the
-            // roster is what stops "I re-added them and they still can't get in" being an
-            // invisible state — see the ban-clearing in add_user.
-            const b = au?.user?.banned_until;
-            deactivated = !!b && new Date(b).getTime() > Date.now();
-          } catch { /* one missing auth user must not break the list */ }
+          const au: any = authById.get(uid) || null;
+          const email = au?.email || "";
+          const lastActive: string | null = au?.last_sign_in_at || null;
+          // A ~100-year ban is how remove_user deactivates a login. Surfacing it on the
+          // roster is what stops "I re-added them and they still can't get in" being an
+          // invisible state — see the ban-clearing in add_user.
+          const b = au?.banned_until;
+          const deactivated = !!b && new Date(b).getTime() > Date.now();
           const cm: any = cmById.get(uid) || {};
           members.push({
             userId: uid,
@@ -571,21 +584,30 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const codes = ords.map((o: any) => o.short_code).filter(Boolean);
 
         // designs → ghl_estimate_id (for the pre-tax fetch); invoice_sends → earner; members → rate; team → still-valid earners.
-        const { data: designs } = await admin.from("designs").select("short_code, ghl_estimate_id").eq("client_id", clientId).in("short_code", codes);
-        const estIdByCode = new Map<string, string>((designs || []).map((d: any) => [d.short_code, d.ghl_estimate_id]));
-        const { data: invs } = await admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator").eq("client_id", clientId);
+        // ⏱ One wave, not six. These reads share no dependency — they were simply written
+        // one under the other, and the tab waited for the sum. The existing-entry read joins
+        // them (it is keyed by tenant, not by anything above it) and now also carries the
+        // fields the no-op check below compares against.
+        const [designsRes, invsRes, memsRes, teamRowsRes, paysRes, existingRes] = await Promise.all([
+          admin.from("designs").select("short_code, ghl_estimate_id").eq("client_id", clientId).in("short_code", codes),
+          admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator").eq("client_id", clientId),
+          admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId),
+          admin.from("client_users").select("user_id").eq("client_id", clientId),
+          earnedOn === "collected"
+            ? admin.from("payments").select("order_id, amount_cents, received_at, voided_at").eq("client_id", clientId)
+            : Promise.resolve({ data: [] }),
+          admin.from("commission_entries")
+            .select("id, order_id, status, is_override, earner_user_id, base_cents, rate_percent, amount_cents, earned_on, period_key")
+            .eq("client_id", clientId).eq("kind", "commission"),
+        ]);
+        const estIdByCode = new Map<string, string>((designsRes.data || []).map((d: any) => [d.short_code, d.ghl_estimate_id]));
         const senderByCode = new Map<string, string>();
-        for (const iv of invs || []) if (iv.sender_user_id && !iv.sent_by_operator) senderByCode.set(iv.short_code, String(iv.sender_user_id));
-        const { data: mems } = await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId);
-        const rateByUser = new Map<string, number | null>((mems || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
-        const { data: teamRows } = await admin.from("client_users").select("user_id").eq("client_id", clientId);
-        const teamSet = new Set<string>((teamRows || []).map((t: any) => t.user_id));
+        for (const iv of invsRes.data || []) if (iv.sender_user_id && !iv.sent_by_operator) senderByCode.set(iv.short_code, String(iv.sender_user_id));
+        const rateByUser = new Map<string, number | null>((memsRes.data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
+        const teamSet = new Set<string>((teamRowsRes.data || []).map((t: any) => t.user_id));
 
-        let paysByOrder = new Map<string, any[]>();
-        if (earnedOn === "collected") {
-          const { data: pays } = await admin.from("payments").select("order_id, amount_cents, received_at, voided_at").eq("client_id", clientId);
-          for (const pmt of pays || []) if (!pmt.voided_at) { const a = paysByOrder.get(pmt.order_id) || []; a.push(pmt); paysByOrder.set(pmt.order_id, a); }
-        }
+        const paysByOrder = new Map<string, any[]>();
+        for (const pmt of paysRes.data || []) if (!pmt.voided_at) { const a = paysByOrder.get(pmt.order_id) || []; a.push(pmt); paysByOrder.set(pmt.order_id, a); }
 
         // One bounded estimate-list call, only when some order still lacks a stored base.
         const estById = new Map<string, any>();
@@ -596,7 +618,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           }
         }
 
-        const existing = (await admin.from("commission_entries").select("id, order_id, status, is_override").eq("client_id", clientId).eq("kind", "commission")).data || [];
+        const existing = existingRes.data || [];
         const existByOrder = new Map<string, any[]>();
         for (const e of existing) { const a = existByOrder.get(e.order_id) || []; a.push(e); existByOrder.set(e.order_id, a); }
 
@@ -650,8 +672,31 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             base_cents: baseCents, rate_percent: rate, amount_cents: amount,
             earned_on: earnedDate, period_key: period?.key ?? null, kind: "commission", updated_at: new Date().toISOString(),
           };
-          if (autoRow) { await admin.from("commission_entries").update(rowData).eq("id", autoRow.id); updated++; }
-          else {
+          if (autoRow) {
+            // Only write when something actually MOVED. compute runs on every mount of the
+            // tab, and it used to issue one UPDATE per order every single time — rewriting
+            // rows to the values they already held, purely to bump updated_at. On a steady
+            // ledger this loop now writes nothing at all, which is what lets compute run
+            // behind the paint instead of in front of it.
+            //
+            // Compare the fields this function OWNS. rate_percent is a Postgres numeric and
+            // comes back as a string often enough that a === would report every row as
+            // changed, so both sides go through Number(); the rest are ints or plain
+            // strings, and null-vs-null must read as equal.
+            const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
+            const sameNum = (a: unknown, b: unknown) =>
+              (a == null || b == null) ? (a ?? null) === (b ?? null) : Number(a) === Number(b);
+            const unchanged = same(autoRow.earner_user_id, earner)
+              && sameNum(autoRow.base_cents, baseCents)
+              && sameNum(autoRow.rate_percent, rate)
+              && sameNum(autoRow.amount_cents, amount)
+              && same(autoRow.earned_on, earnedDate)
+              && same(autoRow.period_key, period?.key ?? null);
+            if (!unchanged) {
+              await admin.from("commission_entries").update(rowData).eq("id", autoRow.id);
+              updated++;
+            }
+          } else {
             // 23505 here is NOT a failure — it is the database holding the one invariant this
             // function cannot hold itself. `existing` was snapshotted before this loop, so a
             // compute that started while ours was running may already have inserted this
@@ -674,26 +719,68 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
 
       // ── the report: entries scoped to what the caller may see (rep = own; owner/sees_all = everyone) ──
       case "list_entries": {
-        const { data: settings } = await admin.from("commission_settings").select("enabled, payout_frequency, custom_days").eq("client_id", clientId).maybeSingle();
+        // ⏱ THIS IS THE READ THE LEDGER PAINTS FROM, so it is kept to as few waves as its
+        // dependencies allow — the tab now shows entries before compute has run, and every
+        // trip saved here is one the user waits through.
+        //
+        // The two Auth-admin lookups below used to be sequential loops: one getUserById per
+        // earner missing a name, and one per team member UNCONDITIONALLY, every load. On a
+        // team of eight that was eight serial HTTP calls to GoTrue for nothing but an email
+        // column. They are batched with Promise.all now. Deliberately NOT auth.admin
+        // .listUsers(): that pages every user in the project, across all tenants, to answer
+        // a question about this tenant's handful of people.
+        const [settingsRes, entriesRes, teamRowsRes] = await Promise.all([
+          admin.from("commission_settings").select("enabled, payout_frequency, custom_days").eq("client_id", clientId).maybeSingle(),
+          (() => {
+            let q = admin.from("commission_entries").select("*").eq("client_id", clientId);
+            if (!seesAll) q = q.eq("earner_user_id", user.id);
+            return q;
+          })(),
+          canSeeRates
+            ? admin.from("client_users").select("user_id, full_name").eq("client_id", clientId).order("created_at")
+            : Promise.resolve({ data: [] }),
+        ]);
+        const settings = settingsRes.data;
         const freq = settings?.payout_frequency || "biweekly";
         const customDays = settings?.custom_days ?? null;
-        let q = admin.from("commission_entries").select("*").eq("client_id", clientId);
-        if (!seesAll) q = q.eq("earner_user_id", user.id);
-        const entries = (await q).data || [];
+        const entries = entriesRes.data || [];
 
         const orderIds = [...new Set(entries.map((e: any) => e.order_id))];
-        const ords = orderIds.length ? (await admin.from("orders").select("id, order_no, short_code").in("id", orderIds)).data || [] : [];
+        const earnerIds = [...new Set(entries.map((e: any) => e.earner_user_id).filter(Boolean))] as string[];
+        const [ordsRes, cuRes] = await Promise.all([
+          orderIds.length ? admin.from("orders").select("id, order_no, short_code").in("id", orderIds) : Promise.resolve({ data: [] }),
+          earnerIds.length ? admin.from("client_users").select("user_id, full_name").in("user_id", earnerIds) : Promise.resolve({ data: [] }),
+        ]);
+        const ords = ordsRes.data || [];
         const ordById = new Map(ords.map((o: any) => [o.id, o]));
         const codes = [...new Set(ords.map((o: any) => o.short_code).filter(Boolean))] as string[];
-        const dsns = codes.length ? (await admin.from("designs").select("short_code, contact, selections").eq("client_id", clientId).in("short_code", codes)).data || [] : [];
-        const dByCode = new Map(dsns.map((d: any) => [d.short_code, d]));
-        const earnerIds = [...new Set(entries.map((e: any) => e.earner_user_id).filter(Boolean))] as string[];
         const nameById = new Map<string, string>();
-        if (earnerIds.length) {
-          const cu = (await admin.from("client_users").select("user_id, full_name").in("user_id", earnerIds)).data || [];
-          for (const u of cu) nameById.set(u.user_id, u.full_name || "");
-          for (const id of earnerIds) if (!nameById.get(id)) { try { const { data: au } = await admin.auth.admin.getUserById(id); nameById.set(id, au?.user?.email || "—"); } catch { nameById.set(id, "—"); } }
-        }
+        for (const u of cuRes.data || []) nameById.set(u.user_id, u.full_name || "");
+
+        // Whose email we still have to ask GoTrue for: earners with no stored name, plus
+        // every team member (the picker shows the address under the name).
+        const tRows = teamRowsRes.data || [];
+        const needEmail = [...new Set([
+          ...earnerIds.filter((id) => !nameById.get(id)),
+          ...tRows.map((t: any) => t.user_id),
+        ])] as string[];
+        const [dsnsRes, emailPairs] = await Promise.all([
+          codes.length
+            ? admin.from("designs").select("short_code, contact, selections").eq("client_id", clientId).in("short_code", codes)
+            : Promise.resolve({ data: [] }),
+          Promise.all(needEmail.map(async (id) => {
+            // A user row that has gone missing must degrade to a dash, exactly as the
+            // sequential version did — never take the whole report down with it.
+            try {
+              const { data: au } = await admin.auth.admin.getUserById(id);
+              return [id, au?.user?.email || ""] as const;
+            } catch { return [id, ""] as const; }
+          })),
+        ]);
+        const emailById = new Map<string, string>(emailPairs);
+        const dsns = dsnsRes.data || [];
+        const dByCode = new Map(dsns.map((d: any) => [d.short_code, d]));
+        for (const id of earnerIds) if (!nameById.get(id)) nameById.set(id, emailById.get(id) || "—");
         const enriched = entries.map((e: any) => {
           const o: any = ordById.get(e.order_id) || {};
           const d: any = o.short_code ? dByCode.get(o.short_code) : null;
@@ -714,9 +801,10 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         // The assignable team (names) — only for someone who may edit commissions.
         let team: any = undefined;
         if (canSeeRates) {
-          const tRows = (await admin.from("client_users").select("user_id, full_name").eq("client_id", clientId).order("created_at")).data || [];
-          team = [];
-          for (const t of tRows) { let email = ""; try { const { data: au } = await admin.auth.admin.getUserById(t.user_id); email = au?.user?.email || ""; } catch { /* skip */ } team.push({ userId: t.user_id, name: t.full_name || email || "—", email }); }
+          team = tRows.map((t: any) => {
+            const email = emailById.get(t.user_id) || "";
+            return { userId: t.user_id, name: t.full_name || email || "—", email };
+          });
         }
         return json({ ok: true, isOwner, seesAll, canSeeRates, enabled: !!settings?.enabled, entries: enriched, team });
       }
