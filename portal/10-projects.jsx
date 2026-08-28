@@ -453,6 +453,12 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
             <input style={{ ...S.input, width: 180, padding: "4px 8px", fontSize: 12.5 }} defaultValue={g.name}
               onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== g.name) run({ action: "update_group", id: g.id, name: v }); }} />
             <PMSwatches value={g.color} onPick={(c) => run({ action: "update_group", id: g.id, color: c })} />
+            <label style={{ fontSize: 11, fontWeight: 600, color: g.intake ? ACCENT : "#94A3B8", display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}
+              title="New client submissions (and roadmap entries) land in this group.">
+              <input type="radio" name={"pm-intake-" + board.id} checked={!!g.intake}
+                onChange={() => run({ action: "update_group", id: g.id, intake: true })} />
+              intake
+            </label>
             {groups.length > 1 && (
               <button type="button" style={{ marginLeft: "auto", background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
                 onClick={() => {
