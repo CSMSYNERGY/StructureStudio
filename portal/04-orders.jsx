@@ -2190,6 +2190,22 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             </div>
           )}
 
+          {/* THE DOCUMENT SECTION ARRIVES SECOND, AND SAYS SO. Everything above renders
+              from the row the list already had; this needs `ssDoc` — four table reads plus
+              an edge function. It used to be simply ABSENT until they all resolved, so the
+              page grew by two cards under the reader's cursor. Reserving the shape is the
+              "load at segments" half of what Carolyn asked for (36:09): the layout settles
+              once, then fills in. */}
+          {ssMode && !ssDoc && (
+            <div style={{ ...S.card, padding: 12 }}>
+              <SkelBar w="34%" h={11} />
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 10, marginTop: 10 }}>
+                <SkelBar w="100%" h={280} style={{ borderRadius: 8 }} />
+                <SkelBar w="100%" h={280} style={{ borderRadius: 8, opacity: 0.8 }} />
+              </div>
+            </div>
+          )}
+
           {/* Floor plan + 3D as IMAGES, side by side in one card (Carolyn 2026-08-25).
               Thumbnails, not posters: capped height, natural aspect; the click opens the
               full-size plan/picture. Saved by the designer on every submit; older designs
@@ -2208,12 +2224,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {/* Both frames match at 280 tall (Carolyn 2026-08-25); clicks open the
                       in-portal viewer popup, never another tab. */}
                   {ssDesign.plan_image_url
-                    ? <button type="button" title="Open the full plan"
-                        onClick={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
-                        <img src={ssDesign.plan_image_url} alt="Floor plan"
-                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
-                      </button>
+                    ? <ThumbFrame src={ssDesign.plan_image_url} alt="Floor plan" title="Open the full plan"
+                        onOpen={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })} />
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
                       </div>}
@@ -2223,12 +2235,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
                   </div>
                   {ssDesign.view3d_image_url
-                    ? <button type="button" title="Open the 3D picture"
-                        onClick={() => setPdfView({ url: ssDesign.view3d_image_url, title: "3D view" })}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
-                        <img src={ssDesign.view3d_image_url} alt="3D view"
-                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
-                      </button>
+                    ? <ThumbFrame src={ssDesign.view3d_image_url} alt="3D view" title="Open the 3D picture"
+                        onOpen={() => setPdfView({ url: ssDesign.view3d_image_url, title: "3D view" })} />
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Open the design, click 🧊 3D View, then resubmit to capture one.</p>
                       </div>}

@@ -1139,6 +1139,62 @@ function SkelRows({ cols = 5, rows = 6, widths = null }) {
   );
 }
 
+// ─── Thumbnail frame ───
+// Carolyn, 2026-08-26, on the order screen: "it's taking a little bit for it to load here
+// … these are images." Then, once Ahsan showed her the grey blocks: "can we put things in
+// place to load … at segments".
+//
+// The frame is reserved at a fixed height either way, so nothing on the page moves when the
+// picture arrives — that part was already right. What was missing is that the reserved box
+// sat BLANK WHITE for the whole download, which is the same "there's nothing there" she
+// complained about on Contacts, one level down.
+//
+// Three things do the work:
+//   * `loading="lazy"` — these sit well below the fold on the order document, so on a page
+//     somebody opens to check a balance the bytes are never fetched at all.
+//   * `decoding="async"` — decoding a large plan render is not free, and it has no business
+//     blocking the main thread while the rest of the page is still settling.
+//   * a skeleton INSIDE the reserved box until `onLoad` fires, so the space reads as
+//     "coming" rather than as "empty".
+//
+// A failed image says so in words. The default is a broken-image glyph, which on a screen
+// full of a customer's paperwork reads as "their design is gone" rather than "this picture
+// did not load".
+function ThumbFrame({ src, alt, title, onOpen, height = 280 }) {
+  const [state, setState] = useState("loading"); // loading | ok | error
+  const box = {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8,
+    padding: 5, height, width: "100%", boxSizing: "border-box",
+  };
+  if (state === "error") {
+    return (
+      <div style={{ ...box, background: "#F8FAFC", borderStyle: "dashed" }}>
+        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45, textAlign: "center", margin: 0 }}>
+          This picture didn&rsquo;t load.{onOpen ? " Use Full ↗ to open it directly." : ""}
+        </p>
+      </div>
+    );
+  }
+  return (
+    <button type="button" title={title} onClick={onOpen}
+      style={{ ...box, cursor: onOpen ? "pointer" : "default", position: "relative" }}>
+      {state === "loading" && (
+        <SkelBar w="82%" h={Math.max(40, height - 90)} style={{ position: "absolute", borderRadius: 6 }} />
+      )}
+      <img src={src} alt={alt} loading="lazy" decoding="async"
+        onLoad={() => setState("ok")} onError={() => setState("error")}
+        style={{
+          maxHeight: height - 12, maxWidth: "100%", width: "auto", display: "block",
+          position: "relative",
+          // Hidden rather than unmounted: the <img> has to be in the DOM for the browser to
+          // start fetching it at all, and unmounting on load would restart the download.
+          opacity: state === "ok" ? 1 : 0,
+        }} />
+    </button>
+  );
+}
+
 // ─── Page size ───
 // Carolyn, 2026-08-26 37:40: "some companies have 10, 20, 30, 40, 50, 100 — which is
 // probably what we need to build into it." Thirty is her default because it is the number
