@@ -32,6 +32,8 @@ const PM_CTL = { display: "inline-flex", alignItems: "center", height: 32, boxSi
   border: "1px solid #CBD5E1", borderRadius: 8, background: "#FFF", fontSize: 12.5, whiteSpace: "nowrap" };
 const PM_CTL_SEL = { border: "none", outline: "none", background: "none", fontSize: 12.5, fontWeight: 700,
   color: "#1E293B", fontFamily: "inherit", cursor: "pointer", maxWidth: 170 };
+const PM_VIEW_CHIP = { border: "1px solid #CBD5E1", borderRadius: 999, background: "#FFF", color: "#334155",
+  padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" };
 function PMCtl({ label, children }) {
   return (
     <span style={{ ...PM_CTL, padding: "0 8px", gap: 5 }}>
@@ -93,16 +95,82 @@ function PMSwatches({ value, onPick }) {
   );
 }
 
-// ── Item modal — NOTES ONLY (Carolyn 2026-08-27) ─────────────────────────────
+// ── Saved views (Carolyn 2026-08-27: "a save this Filter option, and we give it a
+// name so we can easily go to saved views") ──────────────────────────────────────
+// A view is the whole working state of the board: search text, facets, the date
+// condition, grouping, sort and hidden columns. Stored per board in localStorage —
+// per browser, like every other view preference in the portal. Say the word and these
+// move to a pm_views table so they follow you between machines and reach the team.
+const pmViewsKey = (slug) => "ss_projects_views_" + slug;
+// The comparable shape of "what is on screen right now". Null/empty facets are stripped
+// so {status:null} and {} are the same view — otherwise clearing a filter by hand would
+// stop matching the saved view it actually equals.
+function pmSnapshot({ q, facets, whenColId, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, view }) {
+  const f = {};
+  Object.keys(facets || {}).sort().forEach((k) => { if (facets[k] != null && facets[k] !== "") f[k] = facets[k]; });
+  return {
+    q: (q || "").trim(),
+    facets: f,
+    when: whenCond === "any" ? null : { colId: whenColId || null, cond: whenCond, a: whenA || "", b: whenB || "", month: whenMonth || "", n: whenN || "", unit: whenUnit || "days" },
+    groupBy: view.groupBy, sortKey: view.sortKey, sortDir: view.sortDir,
+    hiddenCols: (view.hiddenCols || []).slice().sort(),
+  };
+}
+function pmLoadViews(slug) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(pmViewsKey(slug)) || "[]");
+    if (!Array.isArray(raw)) return [];
+    // Validate on read — a view saved by an older build must never crash the board.
+    return raw.filter((v) => v && typeof v.id === "string" && typeof v.name === "string" && v.snap && typeof v.snap === "object").slice(0, 30);
+  } catch (_) { return []; }
+}
+function pmStoreViews(slug, views) {
+  try { localStorage.setItem(pmViewsKey(slug), JSON.stringify(views)); } catch (_) { /* private mode */ }
+}
+
+// ── Right-side slide-in panel (replaced the centred popup, Carolyn 2026-08-27) ────
+// Same contract as AdmOverlay — Escape, click-outside, aria-modal, body-scroll lock —
+// but anchored to the right edge so the board stays visible beside it. The transform is
+// driven by state rather than a CSS keyframe so portal.html needs no new stylesheet
+// rule, and it is skipped entirely when the viewer asks for reduced motion.
+function PMDrawer({ onClose, labelledBy, children }) {
+  const [shown, setShown] = useState(false);
+  const [instant, setInstant] = useState(false);
+  useEffect(() => {
+    try { setInstant(window.matchMedia("(prefers-reduced-motion: reduce)").matches); } catch (_) { /* older browser */ }
+    const raf = requestAnimationFrame(() => setShown(true));
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="presentation"
+      style={{ position: "fixed", inset: 0, background: shown ? "rgba(15,23,42,0.34)" : "rgba(15,23,42,0)", transition: instant ? "none" : "background .18s ease-out", zIndex: 1200, display: "flex", justifyContent: "flex-end" }}>
+      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", width: "min(580px, 100%)", height: "100%", display: "flex", flexDirection: "column",
+          boxShadow: "-14px 0 40px rgba(15,23,42,.22)",
+          transform: shown ? "translateX(0)" : "translateX(100%)",
+          transition: instant ? "none" : "transform .18s ease-out" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ── Item panel — NOTES ONLY, in a right-side slide-in (Carolyn 2026-08-27) ────
 // "Clicking on the title/name of the item is the only time a popup should appear and it
 // should only have the title and ability to add a note/update and then under that we
 // should see the rolling list of all the notes/updates/original submission with dates
-// and timestamps."
+// and timestamps." — then, having used it: "instead of the popup, lets do a right side
+// popin or slide in. Keep the remove from board."
 //
 // So this is deliberately NOT a form: every field lives in its own cell in the table.
 // The one thing that cannot live in a row — a conversation — lives here, and the
 // client's original words sit at the bottom of it as the first entry in the thread.
-function PMItemModal({ item, canWrite, onClose, onRename, onArchive }) {
+// Header and footer are pinned; only the thread scrolls.
+function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   const [detail, setDetail] = useState(null);      // { updates, submission }
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
@@ -150,21 +218,24 @@ function PMItemModal({ item, canWrite, onClose, onRename, onArchive }) {
   );
 
   return (
-    <AdmOverlay onClose={onClose} maxWidth={660} labelledBy="pm-item-title">
-      <div style={{ padding: "16px 20px", maxHeight: "84vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-          {canWrite ? (
-            <input id="pm-item-title" style={{ ...S.input, fontSize: 16, fontWeight: 800, flex: 1 }} value={name}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => { if (name.trim() && name !== item.name) onRename(item, name.trim()); }}
-              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
-          ) : (
-            <div id="pm-item-title" style={{ fontSize: 16, fontWeight: 800, flex: 1 }}>{item.name}</div>
-          )}
-          {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
-          <button type="button" onClick={onClose} aria-label="Close"
-            style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer" }}>✕</button>
-        </div>
+    <PMDrawer onClose={onClose} labelledBy="pm-item-title">
+      {/* Header — pinned */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
+        {canWrite ? (
+          <input id="pm-item-title" style={{ ...S.input, fontSize: 15.5, fontWeight: 800, flex: 1 }} value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => { if (name.trim() && name !== item.name) onRename(item, name.trim()); }}
+            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
+        ) : (
+          <div id="pm-item-title" style={{ fontSize: 15.5, fontWeight: 800, flex: 1 }}>{item.name}</div>
+        )}
+        {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
+        <button type="button" onClick={onClose} aria-label="Close"
+          style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>✕</button>
+      </div>
+
+      {/* Thread — the only scrolling region */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 18px" }}>
         {err && <div style={S.err}>{err}</div>}
 
         {canWrite && (
@@ -223,17 +294,18 @@ function PMItemModal({ item, canWrite, onClose, onRename, onArchive }) {
           </div>
         )}
         {detail && !detail.updates.length && !sub && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No notes yet.</div>}
-
-        {canWrite && (
-          <div style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid #F1F5F9", textAlign: "right" }}>
-            <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
-              onClick={() => { if (window.confirm("Remove this item from the board? (It is archived, not destroyed.)")) { onArchive(item); onClose(); } }}>
-              Remove from board
-            </button>
-          </div>
-        )}
       </div>
-    </AdmOverlay>
+
+      {/* Footer — pinned, so Remove never hides below a long thread */}
+      {canWrite && (
+        <div style={{ padding: "10px 18px", borderTop: "1px solid #E2E8F0", textAlign: "right", flexShrink: 0 }}>
+          <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
+            onClick={() => { if (window.confirm("Remove this item from the board? (It is archived, not destroyed.)")) { onArchive(item); onClose(); } }}>
+            Remove from board
+          </button>
+        </div>
+      )}
+    </PMDrawer>
   );
 }
 
@@ -400,6 +472,7 @@ function ProjectsTab({ sub, onSub }) {
   const [whenColId, setWhenColId] = useState(null);
   const [view, setView] = useState({ sortKey: "name", sortDir: "asc", groupBy: "groups", hiddenCols: [] });
   const [colsOpen, setColsOpen] = useState(false);
+  const [savedViews, setSavedViews] = useState([]);
   const [openItemId, setOpenItemId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newBoardOpen, setNewBoardOpen] = useState(false);
@@ -424,6 +497,7 @@ function ProjectsTab({ sub, onSub }) {
     pmCall({ action: "get_board", boardId: b.id }).then((d) => {
       setData(d); setCanWrite(!!d.canWrite);
       setView(pmLoadView(b.slug, d.columns));
+      setSavedViews(pmLoadViews(b.slug));
       const dateCols = d.columns.filter((c) => c.type === "date");
       setWhenColId((cur) => (dateCols.some((c) => c.id === cur) ? cur : (dateCols[0] ? dateCols[0].id : null)));
     }).catch((e) => setErr(e.message)).finally(() => setLoading(false));
@@ -497,6 +571,58 @@ function ProjectsTab({ sub, onSub }) {
     }
   };
 
+  // ── Saved views ────────────────────────────────────────────────────────────
+  // The active chip is DERIVED by comparing the board's current state to each saved
+  // snapshot rather than remembered in state: every filter control would otherwise have
+  // to remember to clear a "currentViewId", and the one that forgot would leave a chip
+  // highlighted for a view you were no longer looking at.
+  const snapshot = useMemo(
+    () => pmSnapshot({ q, facets, whenColId, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, view }),
+    [q, facets, whenColId, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, view],
+  );
+  const activeView = useMemo(() => {
+    const here = JSON.stringify(snapshot);
+    const hit = savedViews.find((v) => JSON.stringify(v.snap) === here);
+    return hit ? hit.id : null;
+  }, [snapshot, savedViews]);
+
+  // Anything worth naming: filters OR the way the board is arranged.
+  const viewDirty = filtersOn || view.groupBy !== "groups" || view.sortKey !== "name"
+    || view.sortDir !== "asc" || (view.hiddenCols || []).length > 0;
+
+  const clearFilters = () => {
+    setQ(""); setFacets({}); setWhenCond("any"); setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN("");
+  };
+  const applyView = (v) => {
+    const s = v.snap || {};
+    setQ(s.q || "");
+    setFacets({ ...(s.facets || {}) });
+    if (s.when) {
+      setWhenColId(s.when.colId || null); setWhenCond(s.when.cond || "any");
+      setWhenA(s.when.a || ""); setWhenB(s.when.b || "");
+      setWhenMonth(s.when.month || ""); setWhenN(s.when.n || ""); setWhenUnit(s.when.unit || "days");
+    } else { setWhenCond("any"); setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN(""); }
+    setViewPart({
+      groupBy: s.groupBy || "groups",
+      sortKey: s.sortKey || "name",
+      sortDir: s.sortDir === "desc" ? "desc" : "asc",
+      hiddenCols: Array.isArray(s.hiddenCols) ? s.hiddenCols : [],
+    });
+  };
+  const saveCurrentView = () => {
+    const name = (window.prompt("Name this view", "") || "").trim().slice(0, 60);
+    if (!name || !activeBoard) return;
+    const next = [...savedViews.filter((v) => v.name !== name),
+      { id: "v_" + Math.random().toString(36).slice(2, 10), name, snap: snapshot }].slice(0, 30);
+    setSavedViews(next);
+    pmStoreViews(activeBoard.slug, next);
+  };
+  const deleteView = (v) => {
+    const next = savedViews.filter((x) => x.id !== v.id);
+    setSavedViews(next);
+    if (activeBoard) pmStoreViews(activeBoard.slug, next);
+  };
+
   // Filters compose: search → facets → WHEN. (The engine's grouping then arranges.)
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -545,16 +671,30 @@ function ProjectsTab({ sub, onSub }) {
   return (
     <div>
       <div style={S.card}>
-        {/* Board switcher */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-          {(boards || []).map((b) => (
-            <button key={b.id} type="button" style={pill(activeBoard && b.id === activeBoard.id)} onClick={() => onSub(b.slug)}>
-              {b.name}{counts[b.id] != null ? ` (${counts[b.id]})` : ""}
-            </button>
-          ))}
+        {/* Boards are real TABS (Carolyn 2026-08-27): the active one joins the panel
+            below it rather than floating as a pill, so the board you are in reads as the
+            page you are on. The strip's bottom border IS the top edge of the content. */}
+        <div role="tablist" aria-label="Boards"
+          style={{ display: "flex", gap: 2, alignItems: "flex-end", flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", margin: "-4px -4px 14px" }}>
+          {(boards || []).map((b) => {
+            const on = activeBoard && b.id === activeBoard.id;
+            return (
+              <button key={b.id} type="button" role="tab" aria-selected={on ? "true" : "false"}
+                onClick={() => onSub(b.slug)}
+                style={{ background: on ? "#FFF" : "none", border: "none", borderBottom: `3px solid ${on ? ACCENT : "transparent"}`,
+                  marginBottom: -2, padding: "9px 16px", fontSize: 13.5, fontWeight: on ? 800 : 600,
+                  color: on ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                {b.name}
+                <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: on ? ACCENT : "#94A3B8", opacity: 0.75 }}>
+                  {counts[b.id] != null ? counts[b.id] : ""}
+                </span>
+              </button>
+            );
+          })}
           {canWrite && (
             newBoardOpen ? (
-              <input autoFocus placeholder="Board name — Enter to create" style={{ ...S.input, maxWidth: 220, padding: "6px 10px", fontSize: 12.5 }}
+              <input autoFocus placeholder="Board name — Enter to create"
+                style={{ ...S.input, maxWidth: 220, padding: "5px 9px", fontSize: 12.5, margin: "0 0 4px 8px" }}
                 value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)}
                 onBlur={() => { setNewBoardOpen(false); setNewBoardName(""); }}
                 onKeyDown={(e) => {
@@ -567,12 +707,13 @@ function ProjectsTab({ sub, onSub }) {
                   if (e.key === "Escape") { setNewBoardOpen(false); setNewBoardName(""); }
                 }} />
             ) : (
-              <button type="button" style={{ ...pill(false), borderStyle: "dashed", color: "#64748B", fontWeight: 600 }} onClick={() => setNewBoardOpen(true)}>＋ New board</button>
+              <button type="button" onClick={() => setNewBoardOpen(true)} title="New board"
+                style={{ background: "none", border: "none", padding: "9px 12px", fontSize: 13, fontWeight: 700, color: "#94A3B8", cursor: "pointer", fontFamily: "inherit" }}>＋</button>
             )
           )}
-          <span style={{ marginLeft: "auto" }} />
           {canWrite && data && (
-            <button type="button" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 13px", fontSize: 12 }} onClick={() => setSettingsOpen(true)}>⚙ Board settings</button>
+            <button type="button" onClick={() => setSettingsOpen(true)}
+              style={{ marginLeft: "auto", background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
         </div>
         {err && <div style={S.err}>{err}</div>}
@@ -580,6 +721,36 @@ function ProjectsTab({ sub, onSub }) {
 
         {data && (
           <>
+            {/* Saved views sit ABOVE the filters they restore, so the row reads
+                "which view am I in" then "how is it filtered". */}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, marginRight: 2 }}>Views</span>
+              <button type="button" onClick={clearFilters}
+                style={{ ...PM_VIEW_CHIP, background: !viewDirty && !activeView ? ACCENT : "#FFF", color: !viewDirty && !activeView ? "#FFF" : "#334155", borderColor: !viewDirty && !activeView ? ACCENT : "#CBD5E1" }}>
+                All items
+              </button>
+              {savedViews.map((v) => {
+                const on = activeView === v.id;
+                return (
+                  <span key={v.id} style={{ ...PM_VIEW_CHIP, padding: 0, borderColor: on ? ACCENT : "#CBD5E1", background: on ? ACCENT : "#FFF", display: "inline-flex", alignItems: "center", overflow: "hidden" }}>
+                    <button type="button" onClick={() => applyView(v)} title={v.name}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: on ? "#FFF" : "#334155", padding: "5px 4px 5px 12px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {v.name}
+                    </button>
+                    <button type="button" title={`Delete the "${v.name}" view`}
+                      onClick={() => { if (window.confirm(`Delete the saved view "${v.name}"? (Only the view — no items are touched.)`)) deleteView(v); }}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: on ? "rgba(255,255,255,.75)" : "#94A3B8", padding: "5px 9px 5px 4px" }}>✕</button>
+                  </span>
+                );
+              })}
+              {/* Only offered when there is something to save, and never a duplicate of
+                  the view you are already looking at. */}
+              {viewDirty && !activeView && (
+                <button type="button" onClick={saveCurrentView}
+                  style={{ ...PM_VIEW_CHIP, borderStyle: "dashed", color: ACCENT, fontWeight: 700 }}>＋ Save this view</button>
+              )}
+            </div>
+
             {/* ONE neat row of same-height controls (Carolyn 2026-08-27). The shared
                 FacetSelect stacks an uppercase label ABOVE its select, which put three
                 controls at a different height and baseline from the rest of the row —
@@ -660,7 +831,7 @@ function ProjectsTab({ sub, onSub }) {
                 Showing {filtered.length} of {data.items.length}
                 {filtersOn && (
                   <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontWeight: 700, fontSize: 12, cursor: "pointer", padding: 0, fontFamily: "inherit" }}
-                    onClick={() => { setQ(""); setFacets({}); setWhenCond("any"); setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN(""); }}>
+                    onClick={clearFilters}>
                     Clear filters
                   </button>
                 )}
@@ -686,7 +857,7 @@ function ProjectsTab({ sub, onSub }) {
         /* Keyed on id ONLY — deliberately NOT the schedule's id+updated_at remount idiom.
            These fields are prop-driven (no seed-once state), and a remount on every cell
            commit would wipe a half-typed update draft (found live, 2026-08-27). */
-        <PMItemModal key={openItem.id}
+        <PMItemPanel key={openItem.id}
           item={openItem} canWrite={canWrite}
           onClose={() => setOpenItemId(null)}
           onRename={onRename} onArchive={onArchive} />
