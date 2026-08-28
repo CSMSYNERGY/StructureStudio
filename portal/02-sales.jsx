@@ -1,3 +1,99 @@
+// ── "⋯" — THE ROW ACTIONS THAT DON'T FIT ────────────────────────────────────────────────
+// Ahsan, 2026-08-28: "the pipeline view is floating off the screen from the right side. So
+// under actions just add two options, Open and PDF … I'll add three dot options, so when I
+// click the three dots, other options pop up in the more options."
+//
+// The Actions cell rendered up to seven inline buttons (Open · PDF · Quote PDF · Copy link ·
+// Resend email · Send invoice · Delete), every one `white-space: nowrap`. That column set the
+// table's minimum width, so the whole pipeline ran off the right edge of the screen and the
+// Status chips fell into the horizontal scrollbar — the table was widest exactly where the
+// information matters least.
+//
+// POSITION: FIXED, MEASURED AT OPEN — NOT ABSOLUTE. The table lives inside `overflow-x:
+// auto`, which is a clipping context: an absolutely-positioned menu is cut off at the cell
+// edge, and on the last row it would be clipped below the table too. So the menu is measured
+// off the trigger's client rect and painted in viewport coordinates, flipping ABOVE the
+// button when there is no room beneath it and pulling left when it would cross the right
+// edge. Scrolling or resizing CLOSES it rather than chasing the anchor — the same thing every
+// native menu does, and one fewer thing to keep in sync.
+//
+// `items` is a plain array of { key, label, onClick, title?, danger?, disabled?, keepOpen? },
+// and FALSY ENTRIES ARE ALLOWED so callers can write `cond && {...}` inline. With nothing to
+// show, the trigger itself does not render — a "⋯" that opens an empty box is worse than no
+// "⋯" at all.
+function RowMenu({ items, label = "More actions" }) {
+  const [pos, setPos] = useState(null); // { top, left, width } in viewport px | null = closed
+  const btnRef = useRef(null);
+  const boxRef = useRef(null);
+  const open = !!pos;
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => {
+      if (btnRef.current && btnRef.current.contains(e.target)) return; // the trigger toggles itself
+      if (boxRef.current && boxRef.current.contains(e.target)) return;
+      setPos(null);
+    };
+    const key = (e) => { if (e.key === "Escape") setPos(null); };
+    const shut = () => setPos(null);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", key);
+    // Capture phase: the scroll that matters is the TABLE's own horizontal one, and a
+    // scroll event on an inner element does not bubble to window.
+    window.addEventListener("scroll", shut, true);
+    window.addEventListener("resize", shut);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", shut, true);
+      window.removeEventListener("resize", shut);
+    };
+  }, [open]);
+  const shown = (items || []).filter(Boolean);
+  if (shown.length === 0) return null;
+  const openMenu = () => {
+    const r = btnRef.current.getBoundingClientRect();
+    const W = 186, H = shown.length * 32 + 10;
+    const left = Math.max(8, Math.min(r.right - W, window.innerWidth - W - 8));
+    const below = r.bottom + 5;
+    const top = below + H > window.innerHeight - 8 ? Math.max(8, r.top - H - 5) : below;
+    setPos({ top, left, width: W });
+  };
+  return (
+    <span style={{ display: "inline-block" }}>
+      <button ref={btnRef} type="button" aria-haspopup="menu" aria-expanded={open} aria-label={label} title={label}
+        onClick={() => (open ? setPos(null) : openMenu())}
+        style={{
+          background: open ? "#EEF2FF" : "transparent", border: "none", borderRadius: 6, padding: "1px 7px",
+          cursor: "pointer", fontFamily: "inherit", fontSize: 16, lineHeight: 1.1, fontWeight: 700,
+          color: open ? ACCENT : "#64748B",
+        }}>⋯</button>
+      {open && (
+        <div ref={boxRef} role="menu"
+          style={{
+            position: "fixed", top: pos.top, left: pos.left, width: pos.width, zIndex: 60,
+            background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5,
+            boxShadow: "0 10px 26px rgba(15,23,42,0.16)",
+          }}>
+          {shown.map((it) => (
+            <button key={it.key} type="button" role="menuitem" disabled={!!it.disabled} title={it.title || ""}
+              onClick={() => { if (!it.keepOpen) setPos(null); it.onClick(); }}
+              style={{
+                display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none",
+                borderRadius: 6, padding: "6px 8px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700,
+                color: it.disabled ? "#94A3B8" : (it.danger ? "#B91C1C" : "#334155"),
+                cursor: it.disabled ? "not-allowed" : "pointer",
+              }}
+              onMouseEnter={(e) => { if (!it.disabled) e.currentTarget.style.background = it.danger ? "#FEF2F2" : "#F1F5F9"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
@@ -376,51 +472,56 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <button type="button" onClick={() => setPdf({ url: r.image_url, title: `Floor plan — ${c.name || r.short_code}` })}
                           style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
                       )}
-                      {/* SS-issued quote (migration 122): the printable 3-sheet document plus the
-                          two hand-delivery tools — most lot customers want paper, and a design
-                          with no email address never blocks. */}
-                      {r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && (
-                        <button type="button" onClick={() => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` })}
-                          title="Open the printable quote document"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700, marginLeft: 10 }}>Quote PDF</button>
-                      )}
-                      {r.ss_quote_number && (
-                        <button type="button" onClick={() => copyCustomerLink(r.short_code)}
-                          title="Copy the customer quote-page link (they sign in with their phone)"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginLeft: 10 }}>
-                          {copiedKey === r.short_code ? "Copied ✓" : "Copy link"}
-                        </button>
-                      )}
-                      {r.ss_quote_number && (
-                        <button type="button" onClick={() => resendQuoteEmail(r)} disabled={resendBusyKey === r.short_code}
-                          title="Re-send the quote email to the customer"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginLeft: 10, opacity: resendBusyKey === r.short_code ? 0.5 : 1 }}>
-                          {resendBusyKey === r.short_code ? "Sending…" : "Resend email"}
-                        </button>
-                      )}
-                      {/* Only on an ACCEPTED design — that is the one state where an invoice
-                          is the next step, and it is what the server gates on too. Keyed on
-                          this row's own short code, so what gets invoiced is the design the
-                          button sits on. */}
-                      {isAdmin && normStatus(r.status) === "accepted" && (
-                        <button type="button" onClick={() => sendInvoice(r)} disabled={invBusyKey === r.short_code}
-                          title="Create and email the invoice for this accepted estimate"
-                          style={{ ...S.btn("#15803D", "#FFF"), marginLeft: 10, padding: "5px 12px", fontSize: 12, opacity: invBusyKey === r.short_code ? 0.6 : 1 }}>
-                          {invBusyKey === r.short_code ? "Sending…" : "Send invoice"}
-                        </button>
-                      )}
-                      {/* Owner/admin only — a team member must not be able to destroy a
-                          customer record. The server re-checks regardless (delete_design is
-                          absent from READ_ACTIONS, so the resolver requires owner/admin). */}
-                      {isAdmin && (
-                        <button type="button" onClick={() => setDelTarget(r)} title="Delete this design"
-                          aria-label={`Delete design ${r.short_code}`}
-                          style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
-                          onMouseEnter={(e) => { e.currentTarget.style.color = "#DC2626"; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.color = "#94A3B8"; }}>
-                          Delete
-                        </button>
-                      )}
+                      {/* EVERYTHING ELSE LIVES BEHIND THE "⋯" — see RowMenu at the top of this
+                          file for why (the column was pushing the table off-screen). Each entry
+                          keeps the condition, the title text and the busy label it had as an
+                          inline button; only the container changed. */}
+                      <span style={{ marginLeft: 10, verticalAlign: "middle" }}>
+                        <RowMenu label={`More actions for ${c.name || r.short_code}`} items={[
+                          // SS-issued quote (migration 122): the printable 3-sheet document plus
+                          // the two hand-delivery tools — most lot customers want paper, and a
+                          // design with no email address never blocks.
+                          r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && {
+                            key: "quote", label: "Quote PDF", title: "Open the printable quote document",
+                            onClick: () => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` }),
+                          },
+                          // keepOpen, because "Copied ✓" IS the confirmation and it is drawn on
+                          // this very item — closing the menu on click would take the only
+                          // feedback this action has away with it.
+                          r.ss_quote_number && {
+                            key: "copy", keepOpen: true,
+                            label: copiedKey === r.short_code ? "Copied ✓" : "Copy link",
+                            title: "Copy the customer quote-page link (they sign in with their phone)",
+                            onClick: () => copyCustomerLink(r.short_code),
+                          },
+                          // These two report through the invMsg banner above the table, which is
+                          // why they close: the outcome is not written on the button.
+                          r.ss_quote_number && {
+                            key: "resend", disabled: resendBusyKey === r.short_code,
+                            label: resendBusyKey === r.short_code ? "Sending…" : "Resend email",
+                            title: "Re-send the quote email to the customer",
+                            onClick: () => resendQuoteEmail(r),
+                          },
+                          // Only on an ACCEPTED design — that is the one state where an invoice
+                          // is the next step, and it is what the server gates on too. Keyed on
+                          // this row's own short code, so what gets invoiced is the design the
+                          // menu sits on.
+                          isAdmin && normStatus(r.status) === "accepted" && {
+                            key: "invoice", disabled: invBusyKey === r.short_code,
+                            label: invBusyKey === r.short_code ? "Sending invoice…" : "Send invoice",
+                            title: "Create and email the invoice for this accepted estimate",
+                            onClick: () => sendInvoice(r),
+                          },
+                          // Owner/admin only — a team member must not be able to destroy a
+                          // customer record. The server re-checks regardless (delete_design is
+                          // absent from READ_ACTIONS, so the resolver requires owner/admin).
+                          isAdmin && {
+                            key: "delete", label: "Delete design", danger: true,
+                            title: "Delete this design",
+                            onClick: () => setDelTarget(r),
+                          },
+                        ]} />
+                      </span>
                     </td>
                   </tr>
                   {isOpen && older.map((v) => {
@@ -1102,8 +1203,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // renders only inside the Email tab — these controls need their own slot, keyed by control
   // so a note error can't surface under Focus too. Every new attempt clears it first, so a
   // stale failure never outlives the action that follows it.
-  const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus", msg }
+  const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus" | "contact", msg }
   const [pdf, setPdf] = useState(null);     // { url, title } — the pop-up viewer
+  // The person editor's state. ⚠️ IT MUST BE DECLARED HERE, ABOVE the `if (err)` and
+  // `if (!data)` early returns below. A useState placed after them is skipped on the first
+  // render (data is null, the component returns early) and runs on the second — React then
+  // throws "Rendered more hooks than during the previous render" and the record page blanks
+  // the moment its data arrives. The handlers that read this state stay down with the
+  // section they serve; only the hook has to live up here.
+  const [edit, setEdit] = useState(null);              // { name, phone, email } | null — null = not editing
+  const [personOpen, setPersonOpen] = useState(false); // the Person card's drop-down, on a DEAL
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1164,7 +1273,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // fetch and no direct table access on purpose: crm_contacts RLS is scoped to
   // current_client_id(), so in operator view-as a direct write silently affects nothing (or
   // the wrong tenant). Everything goes through portal-settings, which resolves the tenant.
-  const [edit, setEdit] = useState(null);  // { name, phone, email } | null — null = not editing
+  //
+  // `edit` itself is declared with the other hooks at the top of this component — see the
+  // warning there; it cannot live at this line, below the early returns.
   const startEdit = () => setEdit({
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
@@ -1350,13 +1461,114 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       );
     }
     if (key === "person") {
-      return data.contact ? (
-        <button onClick={() => data.contact.id && onNavigate("contact", data.contact.id)}
-          style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", cursor: data.contact.id ? "pointer" : "default" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>{cname}</div>
-          <div style={{ fontSize: 11, color: "#64748B" }}>{data.contact.email || data.contact.phone || "—"}</div>
-        </button>
-      ) : <div style={{ fontSize: 12, color: "#94A3B8" }}>No contact linked.</div>;
+      if (!data.contact) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No contact linked.</div>;
+      // THE CARD OPENS; THE ARROW LEAVES. Ahsan, 2026-08-28: "if I click the card itself it
+      // shows a dropdown and in the dropdown it has its personal information, the email,
+      // contact and all of that stuff, which should be editable in here … add a small arrow
+      // on the right side of the card [that] takes me to the contact page."
+      //
+      // The whole card used to be one navigate button, so the commonest edit on this screen
+      // — fixing a typo in the customer's email before the quote goes out — cost a page
+      // change and a page change back, which is the same complaint Carolyn made about the
+      // contact side on 08-26. Both destinations survive; they are just no longer the same
+      // click. The arrow is a separate <button> rather than a corner of the card because a
+      // nested button inside a button is invalid HTML and React will not render it.
+      const cid = data.contact.id || null;
+      // Same rule as the contact-side pencil: an old design predating the 130 backfill has
+      // a SYNTHESIZED contact (id null) built from the design's jsonb blob, and there is no
+      // row to write to. The panel still opens and still shows what is on file — it just
+      // says why it cannot be edited instead of offering inputs that would 400.
+      const canEditContact = canEdit && !!cid;
+      const openPanel = () => {
+        if (personOpen) { setPersonOpen(false); setEdit(null); setOpErr(null); return; }
+        setPersonOpen(true);
+        // Opening IS starting the edit when they are allowed to edit — Ahsan asked for the
+        // fields to be editable "in here", and a second click on a pencil to reach them is
+        // the friction this change exists to remove. Nothing is written until Save.
+        if (canEditContact) startEdit();
+      };
+      const ro = (label, value) => (
+        <div style={{ marginBottom: 6 }}>
+          <span style={S.lbl}>{label}</span>
+          <div style={{ fontSize: 13, color: value ? "#1E293B" : "#94A3B8", fontWeight: 600, wordBreak: "break-word" }}>{value || "—"}</div>
+        </div>
+      );
+      return (
+        <div>
+          <div style={{ display: "flex", alignItems: "stretch", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, overflow: "hidden" }}>
+            <button type="button" onClick={openPanel} aria-expanded={personOpen}
+              title={personOpen ? "Hide this person's details" : "Show and edit this person's details"}
+              style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none", padding: "7px 9px", cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT, display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ color: "#94A3B8", fontSize: 10 }}>{personOpen ? "▾" : "▸"}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cname}</span>
+              </div>
+              <div style={{ fontSize: 11, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {data.contact.email || data.contact.phone || "—"}
+              </div>
+            </button>
+            {cid && (
+              <button type="button" onClick={() => onNavigate("contact", cid)}
+                title="Open the full contact record" aria-label={`Open the contact record for ${cname}`}
+                style={{ background: "transparent", border: "none", borderLeft: "1px solid #E2E8F0", padding: "0 11px", cursor: "pointer", color: ACCENT, fontSize: 15, fontWeight: 700, fontFamily: "inherit", lineHeight: 1 }}>
+                ›
+              </button>
+            )}
+          </div>
+          {personOpen && (
+            <div style={{ border: "1px solid #E2E8F0", borderTop: "none", borderRadius: "0 0 6px 6px", padding: "9px 9px 8px", marginTop: -1 }}>
+              {edit && canEditContact ? (
+                <div style={{ fontSize: 13 }}>
+                  <span style={S.lbl}>Name</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
+                    onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
+                  <span style={S.lbl}>Email</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
+                    onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
+                  <span style={S.lbl}>Phone</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
+                    onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+                  {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
+                  <div style={{ display: "flex", gap: 7 }}>
+                    <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
+                      disabled={busy} onClick={saveContact}>{busy ? "Saving…" : "Save"}</button>
+                    <button style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 13px", fontSize: 12.5 }}
+                      disabled={busy} onClick={() => { setEdit(null); setOpErr(null); setPersonOpen(false); }}>Cancel</button>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 7, lineHeight: 1.5 }}>
+                    This edits the customer everywhere, not just on this deal. Clearing a field empties it, and every change is recorded under Changelog.
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {ro("Name", data.contact.name)}
+                  {ro("Email", data.contact.email)}
+                  {ro("Phone", data.contact.phone)}
+                  {data.contact.first_seen_at && ro("First seen", fmtDate(data.contact.first_seen_at))}
+                  {/* Reached two ways: no permission / no contact row (the messages), or a
+                      save that just landed — `saveContact` clears `edit` and reloads, so the
+                      panel stays open showing the NEW values. That re-read is the receipt;
+                      the pencil is here so a second correction doesn't need the card closed
+                      and re-opened. */}
+                  {canEditContact ? (
+                    <button type="button" onClick={startEdit}
+                      title="Edit this contact's name, email and phone"
+                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
+                      ✎ Edit
+                    </button>
+                  ) : (
+                    <div style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.5 }}>
+                      {cid
+                        ? "You don't have permission to edit contacts."
+                        : "This design predates contact records, so there is nothing here to edit yet. It gets its own contact the next time this customer submits."}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
     }
     if (key === "overview") {
       const last = (data.feed || [])[0];
