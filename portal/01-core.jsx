@@ -788,6 +788,45 @@ const ssSafeUrl = (u) => {
   } catch { return null; }
 };
 
+// ─── ONE BODY SCROLL LOCK, COUNTED ───
+// Overlays NEST — an attachment pop-up opens on top of the Projects slide-in — and both of
+// them lock the page behind. The save-my-predecessor's-value-and-restore-it idiom each one
+// used independently breaks the moment two overlap, because the second to mount captures the
+// FIRST one's "hidden" as the value to put back:
+//
+//   drawer mounts   → prev = ""       → overflow = "hidden"
+//   pop-up mounts   → prev = "hidden" → overflow = "hidden"
+//   both unmount    → React deletes siblings FIRST-TO-LAST, so the drawer restores "" and
+//                     then the pop-up restores "hidden" over the top of it
+//
+// The page is left unscrollable with nothing open, until a reload. Found live on beta
+// 2026-08-28 and reproduced in one gesture: Projects → open an item with an attachment →
+// open the attachment → press Escape ONCE (both overlays listen for it) → `document.body`
+// still reads `overflow: hidden` with zero `[role=dialog]` on the page, and the board no
+// longer scrolls.
+//
+// A COUNTER fixes every pairing rather than the one pairing we happened to find: the first
+// lock records the page's real value, the last release restores it. Each caller gets its own
+// release function, and calling it twice is a no-op — an effect cleanup must be idempotent,
+// and a double release would drop the count below the number of open overlays and unlock the
+// page under one that is still up.
+let ssScrollLockCount = 0;
+let ssScrollLockPrev = "";
+function ssLockBodyScroll() {
+  if (ssScrollLockCount === 0) {
+    ssScrollLockPrev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  ssScrollLockCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    ssScrollLockCount = Math.max(0, ssScrollLockCount - 1);
+    if (ssScrollLockCount === 0) document.body.style.overflow = ssScrollLockPrev;
+  };
+}
+
 // ─── PDF pop-up ───
 // Carolyn, 2026-08-26 21:15: "I want PDFs to open in a pop-up always. I don't want another
 // tab to open."
@@ -814,10 +853,10 @@ function PdfModal({ url, title, onClose, image }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
-    // The page behind a modal must not scroll under it.
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+    // The page behind a modal must not scroll under it. Counted, not saved-and-restored —
+    // this modal opens on top of the Projects drawer, which locks too. See ssLockBodyScroll.
+    const unlock = ssLockBodyScroll();
+    return () => { window.removeEventListener("keydown", onKey); unlock(); };
   }, [onClose]);
   return (
     <div onClick={onClose} role="presentation"
