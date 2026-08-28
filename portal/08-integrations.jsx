@@ -2526,7 +2526,7 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, access = null, setup3d = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -2594,7 +2594,14 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         ))}
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
-      {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />}
+      {/* Real-Time Pricing renders UNDER the pricing card (Carolyn 2026-08-27: "will you
+          build another block down here … underneath here that has the real time pricing in
+          it"). The component gates itself on rtpUnlocked — not-entitled renders a compact
+          teaser with a Billing deep link, so the block is also the feature's shop window. */}
+      {sub === "structures" && (<>
+        <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
+        <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
+      </>)}
       {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not

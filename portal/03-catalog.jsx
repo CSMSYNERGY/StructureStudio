@@ -694,6 +694,27 @@ async function readXlsxMatrix(file, ExcelJS) {
   }
   return matrix;
 }
+// EVERY worksheet of an .xlsx File as [{ name, matrix }], same cell tolerance as above.
+// Exists for the Real-Time Pricing workbook, whose meaning is spread across sheets
+// (Materials + one sheet per style + Overhead) — readXlsxMatrix's first-sheet-only shape
+// silently drops all but one of them. Blank rows are KEPT here (as []), because the style
+// sheets use blank rows as block separators and dropping them would merge size blocks.
+async function readXlsxWorkbook(file, ExcelJS) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await file.arrayBuffer());
+  if (!wb.worksheets.length) throw new Error("The spreadsheet has no sheets.");
+  return wb.worksheets.map((ws) => {
+    const sv = ws.getSheetValues();
+    const matrix = [];
+    for (let r = 1; r < sv.length; r++) {
+      const row = sv[r];
+      const arr = [];
+      if (row) for (let c = 1; c < row.length; c++) arr[c - 1] = xlsxCellText(row[c]);
+      matrix.push(arr);
+    }
+    return { name: String(ws.name || ""), matrix };
+  });
+}
 
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
@@ -1832,6 +1853,593 @@ window.__ssCatalogFlight = window.__ssCatalogFlight || (function () {
     return flight;
   };
 })();
+
+// ─── Real-Time Pricing (migration 152; Carolyn 2026-08-27, the 2015 Sterling Supply workbook) ───
+// The material-cost pricing engine's settings block, rendered UNDER the pricing card in
+// Settings → Structures. One material cost list; a bill of materials per style+size,
+// grouped floor/walls/roof/interior; ordered overhead lines; the computed price lands in
+// building_sizes.base_price when the tenant flips the Go Live toggle. ALL price math lives
+// in SQL (rtp_compute_prices) — this component renders the server's numbers verbatim,
+// because three hand-synchronized estimate calculators is already the repo's ceiling.
+//
+// Paid feature (on_demand_pricing, $85/mo, pay-only): `unlocked` gates the editor, the
+// server re-checks on every action, and the not-entitled state is a compact teaser with a
+// Billing deep link — the block doubles as the feature's shop window.
+const RTP_SECTIONS = ["floor", "walls", "roof", "interior", "other"];
+const RTP_KINDS = [
+  { value: "multiplier", label: "Multiplier (×)" },
+  { value: "percent_of_price", label: "% of price (allocation)" },
+  { value: "flat", label: "Flat $" },
+];
+// Carolyn's own 2015 numbers, offered as the starting point when a tenant has no overhead
+// lines yet: price = materials × 1.8 × 1.1, with Sales/Delivery/Build shown as carve-outs.
+const RTP_CLASSIC_OVERHEAD = [
+  { label: "Mark-up", kind: "multiplier", value: 1.8, active: true },
+  { label: "Overhead", kind: "multiplier", value: 1.1, active: true },
+  { label: "Sales", kind: "percent_of_price", value: 5, active: true },
+  { label: "Delivery", kind: "percent_of_price", value: 10, active: true },
+  { label: "Build", kind: "percent_of_price", value: 10, active: true },
+];
+const rtpNum = (v) => { const n = Number(String(v == null ? "" : v).replace(/[$,\s]/g, "")); return Number.isFinite(n) ? n : NaN; };
+const rtpMoney = (v) => v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Excel refuses sheet names over 31 chars or containing []:*?/\ — sanitize rather than throw.
+const rtpSheetName = (label) => String(label || "Style").replace(/[[\]:*?/\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 31) || "Style";
+
+function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = false, canAdmin = false, onSeeBilling = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [data, setData] = useState(null);      // rtp_data payload; null = loading
+  const [cat, setCat] = useState(null);        // shared catalog payload (styles + sizes)
+  const [busy, setBusy] = useState(false);
+  const [dlBusy, setDlBusy] = useState(false);
+  const [msg, setMsg] = useState(null);        // { ok } | { err }
+  const [result, setResult] = useState(null);  // import report
+  const [fileKey, setFileKey] = useState(0);
+  // Editable copies, re-seeded whenever the server payload lands (every save reloads).
+  const [matRows, setMatRows] = useState([]);
+  const [ovhRows, setOvhRows] = useState([]);
+  const [bomStyleId, setBomStyleId] = useState("");
+  const [bomSizeId, setBomSizeId] = useState("");
+  const [bomRows, setBomRows] = useState([]);
+  const [dlStyles, setDlStyles] = useState(null);   // Set of style ids for the template; null = all
+  const [confirmToggle, setConfirmToggle] = useState(null);  // { to: boolean } | null
+
+  const load = async () => {
+    const [rtpRes, catRes] = await Promise.all([
+      sb.functions.invoke("portal-settings", { body: scoped({ action: "rtp_data" }) }),
+      window.__ssCatalogFlight(
+        () => sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) }),
+        "catalog|" + (clientId || "own"),
+      ),
+    ]);
+    const rtpErr = rtpRes.error || (rtpRes.data && rtpRes.data.error);
+    const catErr = catRes.error || (catRes.data && catRes.data.error);
+    if (rtpErr || catErr) { setMsg({ err: String((rtpRes.error && rtpRes.error.message) || rtpErr || (catRes.error && catRes.error.message) || catErr) }); return; }
+    setData(rtpRes.data); setCat(catRes.data);
+    setMatRows(((rtpRes.data && rtpRes.data.materials) || []).map((m) => ({ id: m.id, category: m.category || "", name: m.name, unitCost: String(m.unit_cost), active: m.active !== false, dirty: false })));
+    setOvhRows(((rtpRes.data && rtpRes.data.overhead) || []).map((o) => ({ label: o.label, kind: o.kind, value: String(o.value), active: o.active !== false })));
+  };
+  useEffect(() => { if (unlocked) load(); }, [unlocked]);
+
+  const styles = () => ((cat && cat.styles) || []).filter((s) => s.active);
+  const sizesFor = (styleId) => ((cat && cat.sizes) || []).filter((z) => z.style_id === styleId);
+  const sizeById = (id) => ((cat && cat.sizes) || []).find((z) => z.id === id) || null;
+  const styleById = (id) => ((cat && cat.styles) || []).find((s) => s.id === id) || null;
+  const activeMats = () => matRows.filter((m) => m.active && m.id);
+  const bomLinesFor = (sizeId) => ((data && data.bomLines) || []).filter((l) => l.size_id === sizeId);
+  const previewFor = (sizeId) => ((data && data.preview) || []).find((p) => p.size_id === sizeId) || null;
+
+  // Seed the BOM editor whenever the picked size (or fresh data) changes.
+  useEffect(() => {
+    if (!bomSizeId) { setBomRows([]); return; }
+    const lines = bomLinesFor(bomSizeId).map((l) => ({ materialId: l.material_id, section: l.section, qty: String(l.qty) }));
+    setBomRows(lines.length ? lines : [{ materialId: "", section: "floor", qty: "" }]);
+  }, [bomSizeId, data]);
+
+  const invoke = async (action, body) => {
+    setBusy(true); setMsg(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action, ...body }) });
+      if (error || (d && d.error)) {
+        let m = (error && error.message) || (d && d.error);
+        try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
+        setMsg({ err: String(m || "That didn't save.") });
+        return null;
+      }
+      return d || {};
+    } finally { setBusy(false); }
+  };
+
+  const saveMaterials = async () => {
+    const dirty = matRows.filter((m) => m.dirty);
+    if (!dirty.length) { setMsg({ ok: "Nothing to save." }); return; }
+    for (const m of dirty) {
+      const name = m.name.trim();
+      if (!name) { setMsg({ err: "Every material needs a name." }); return; }
+      const cost = rtpNum(m.unitCost);
+      if (!Number.isFinite(cost) || cost < 0) { setMsg({ err: `"${name}" has an invalid cost.` }); return; }
+      const r = await invoke("save_rtp_material", { id: m.id || undefined, name, category: m.category.trim(), unitCost: cost, active: m.active });
+      if (!r) return;   // the failed row's edits survive in the form for a retry
+    }
+    setMsg({ ok: `Saved ${dirty.length} material${dirty.length === 1 ? "" : "s"}.` });
+    await load();
+  };
+  const archiveMaterial = async (m) => {
+    if (!m.id) { setMatRows((rs) => rs.filter((x) => x !== m)); return; }
+    const r = await invoke("delete_rtp_material", { id: m.id });
+    if (r) { setMsg({ ok: `Archived "${m.name}". Buildings using it re-price without it.` }); await load(); }
+  };
+
+  const saveBom = async () => {
+    if (!bomSizeId) return;
+    const lines = bomRows
+      .map((l) => ({ materialId: l.materialId, section: l.section, qty: rtpNum(l.qty) }))
+      .filter((l) => l.materialId && Number.isFinite(l.qty) && l.qty > 0);
+    const r = await invoke("save_rtp_bom", { sizeId: bomSizeId, lines });
+    if (r) {
+      setMsg({ ok: `Saved ${r.saved} line${r.saved === 1 ? "" : "s"}${(r.skipped || []).length ? ` — skipped: ${r.skipped.join("; ")}` : ""}.` });
+      await load();
+    }
+  };
+
+  const saveOverhead = async () => {
+    const lines = ovhRows.map((o) => ({ label: o.label.trim(), kind: o.kind, value: rtpNum(o.value), active: o.active }));
+    if (lines.some((l) => !l.label || !Number.isFinite(l.value) || l.value < 0)) { setMsg({ err: "Every overhead line needs a label and a non-negative value." }); return; }
+    const r = await invoke("save_rtp_overhead", { lines });
+    if (r) { setMsg({ ok: `Saved ${r.saved} overhead line${r.saved === 1 ? "" : "s"}.` }); await load(); }
+  };
+
+  const doToggle = async (on) => {
+    setConfirmToggle(null);
+    const r = await invoke("set_rtp_enabled", { on });
+    if (r) { setMsg({ ok: on ? "Real-time pricing is LIVE — your building prices now come from your material costs." : "Real-time pricing is off — your manual prices are restored." }); await load(); }
+  };
+
+  // ── The workbook (download) ── Materials + one sheet per selected style + Overhead +
+  // a read-only Current Prices reference. Layout matches Carolyn's 2015 sheet in spirit,
+  // with structured markers ("Size:" rows, repeated section values) so a builder can sort,
+  // insert and delete rows without breaking the re-import.
+  const downloadTemplate = async () => {
+    if (!cat || !data || dlBusy) return;
+    const chosen = styles().filter((s) => !dlStyles || dlStyles.has(s.id));
+    if (!chosen.length) { setMsg({ err: "Pick at least one style for the template." }); return; }
+    const names = new Set();
+    for (const s of chosen) {
+      const n = rtpSheetName(s.label).toLowerCase();
+      if (names.has(n)) { setMsg({ err: `Two styles would share the sheet name "${rtpSheetName(s.label)}" — rename one on the pricing card above, then download again.` }); return; }
+      names.add(n);
+    }
+    setDlBusy(true); setMsg(null);
+    try {
+      const ExcelJS = await loadExcelJS();
+      const wb = new ExcelJS.Workbook();
+      const thin = { style: "thin", color: { argb: "FFCBD5E1" } };
+      const paintHdr = (ws, rowN, count) => {
+        const hr = ws.getRow(rowN); hr.height = 22;
+        for (let c = 1; c <= count; c++) {
+          const cell = hr.getCell(c);
+          cell.font = { bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF334155" } };
+          cell.alignment = { vertical: "middle", horizontal: "center" };
+          cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+        }
+      };
+      const mats = activeMats();
+      const matByIdLocal = {}; mats.forEach((m) => { matByIdLocal[m.id] = m; });
+
+      const wsM = wb.addWorksheet("Materials", { views: [{ state: "frozen", ySplit: 1 }] });
+      wsM.addRow(["Category", "Material", "Unit Cost"]);
+      paintHdr(wsM, 1, 3);
+      mats.forEach((m) => wsM.addRow([m.category, m.name, rtpNum(m.unitCost)]));
+      wsM.columns = [{ width: 18 }, { width: 30 }, { width: 12 }];
+      for (let r = 2; r <= wsM.rowCount; r++) wsM.getRow(r).getCell(3).numFmt = '$#,##0.00';
+
+      chosen.forEach((s) => {
+        const ws = wb.addWorksheet(rtpSheetName(s.label), { views: [{ state: "frozen", ySplit: 0 }] });
+        ws.columns = [{ width: 12 }, { width: 30 }, { width: 8 }];
+        sizesFor(s.id).forEach((z) => {
+          const marker = ws.addRow(["Size:", z.label]);
+          marker.getCell(1).font = { bold: true, size: 11 };
+          marker.getCell(2).font = { bold: true, size: 11 };
+          marker.eachCell((cell) => { cell.border = { top: { style: "medium", color: { argb: "FF94A3B8" } } }; });
+          const hdrRow = ws.addRow(["Section", "Material", "Qty"]);
+          hdrRow.eachCell((cell) => {
+            cell.font = { bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF64748B" } };
+            cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+          });
+          const lines = bomLinesFor(z.id);
+          if (lines.length) {
+            lines.forEach((l) => ws.addRow([l.section, (matByIdLocal[l.material_id] || {}).name || "", Number(l.qty)]));
+          } else {
+            // Writing room, grouped the way Carolyn asked (floor/walls/roof + interior).
+            // Blank material names import as nothing, so unused rows are harmless.
+            ["floor", "walls", "roof", "interior"].forEach((sec) => { for (let i = 0; i < 3; i++) ws.addRow([sec, "", ""]); });
+          }
+          ws.addRow([]);
+        });
+      });
+
+      const wsO = wb.addWorksheet("Overhead", { views: [{ state: "frozen", ySplit: 1 }] });
+      wsO.addRow(["Label", "Type", "Value"]);
+      paintHdr(wsO, 1, 3);
+      const ovh = ovhRows.length ? ovhRows.filter((o) => o.active) : RTP_CLASSIC_OVERHEAD;
+      ovh.forEach((o) => wsO.addRow([o.label, o.kind, rtpNum(o.value)]));
+      wsO.columns = [{ width: 16 }, { width: 22 }, { width: 10 }];
+      wsO.addRow([]);
+      wsO.addRow(["Types: multiplier (multiplies the running price), flat (adds dollars), percent_of_price (a reporting allocation OF the final price — does not change it)."]);
+
+      const wsP = wb.addWorksheet("Current Prices");
+      wsP.addRow(["Reference only — this sheet is not imported."]).getCell(1).font = { italic: true, color: { argb: "FF64748B" } };
+      wsP.addRow(["Style", "Size", "Current price", "Computed price"]);
+      paintHdr(wsP, 2, 4);
+      wsP.columns = [{ width: 22 }, { width: 10 }, { width: 14 }, { width: 15 }];
+      styles().forEach((s) => sizesFor(s.id).forEach((z) => {
+        const p = previewFor(z.id);
+        wsP.addRow([s.label, z.label, z.base_price == null ? "" : Number(z.base_price), p ? Number(p.computed_price) : ""]);
+      }));
+      for (let r = 3; r <= wsP.rowCount; r++) { wsP.getRow(r).getCell(3).numFmt = '$#,##0.00'; wsP.getRow(r).getCell(4).numFmt = '$#,##0.00'; }
+
+      const buf = await wb.xlsx.writeBuffer();
+      downloadBlob(`${(cat.clientId || "structure")}-real-time-pricing.xlsx`,
+        new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    } catch (e) {
+      setMsg({ err: `Could not build the workbook: ${e.message}` });
+    }
+    setDlBusy(false);
+  };
+
+  // ── The workbook (upload) ── parsed here to structured JSON; the server is the trust
+  // boundary and re-validates everything (names, sizes, sections, entitlement).
+  const onUpload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null); setResult(null);
+    try {
+      if (file.size > 5_000_000) throw new Error("File too large (max 5MB).");
+      if (!/\.xlsx$/i.test(file.name) && !file.type.includes("spreadsheetml")) throw new Error("Upload the .xlsx workbook (the template you downloaded).");
+      const sheets = await readXlsxWorkbook(file, await loadExcelJS());
+      const lcName = (n) => String(n).trim().toLowerCase();
+      const matSheet = sheets.find((s) => lcName(s.name) === "materials");
+      const ovhSheet = sheets.find((s) => lcName(s.name) === "overhead");
+      const styleSheets = sheets.filter((s) => !["materials", "overhead", "current prices"].includes(lcName(s.name)));
+      if (!matSheet && !styleSheets.length) throw new Error("This doesn't look like the Real-Time Pricing workbook — no Materials sheet and no style sheets.");
+
+      const materials = [];
+      if (matSheet) {
+        const rows = matSheet.matrix;
+        const start = rows.findIndex((r) => String(r[1] || "").trim().toLowerCase() === "material") + 1;
+        for (let i = start > 0 ? start : 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r) continue;
+          const name = String(r[1] || "").trim();
+          if (!name) continue;
+          materials.push({ category: String(r[0] || "").trim(), name, unitCost: rtpNum(r[2]) });
+        }
+      }
+
+      const bom = [];
+      styleSheets.forEach((sh) => {
+        let block = null;
+        const push = () => { if (block && block.lines.length) bom.push(block); block = null; };
+        sh.matrix.forEach((r) => {
+          const c0 = String((r && r[0]) || "").trim();
+          if (/^size:?$/i.test(c0)) {
+            push();
+            const dims = String((r && r[1]) || "").toLowerCase().replace(/[×✕]/g, "x").split("x").map((t) => rtpNum(t));
+            if (dims.length === 2 && dims.every((n) => Number.isFinite(n) && n > 0)) {
+              block = { style: sh.name, width: dims[0], length: dims[1], lines: [] };
+            }
+            return;
+          }
+          if (!block) return;
+          if (/^section$/i.test(c0)) return;   // the block's own header row
+          const material = String((r && r[1]) || "").trim();
+          if (!material) return;
+          const sec = c0.toLowerCase();
+          block.lines.push({ material, section: RTP_SECTIONS.includes(sec) ? sec : "other", qty: rtpNum(r[2]) });
+        });
+        push();
+      });
+
+      let overhead;
+      if (ovhSheet) {
+        overhead = [];
+        const rows = ovhSheet.matrix;
+        const start = rows.findIndex((r) => String(r[0] || "").trim().toLowerCase() === "label") + 1;
+        for (let i = start > 0 ? start : 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r) continue;
+          const label = String(r[0] || "").trim();
+          const rawKind = String(r[1] || "").trim().toLowerCase();
+          if (!label || !rawKind) continue;
+          const kind = /mult/.test(rawKind) ? "multiplier" : /flat/.test(rawKind) ? "flat" : /(percent|%)/.test(rawKind) ? "percent_of_price" : null;
+          if (!kind) continue;
+          overhead.push({ label, kind, value: rtpNum(r[2]) });
+        }
+      }
+
+      const r = await invoke("import_rtp_workbook", { materials, bom, overhead });
+      if (r) {
+        setResult(r);
+        setMsg({ ok: `Imported ${r.materialsSaved} material${r.materialsSaved === 1 ? "" : "s"} and ${r.sizesReplaced} building${r.sizesReplaced === 1 ? "" : "s"}.` });
+        await load();
+      }
+    } catch (e) {
+      setMsg({ err: e.message });
+    } finally {
+      setBusy(false); setFileKey((k) => k + 1);
+    }
+  };
+
+  // ── Render ──
+  if (!unlocked || (data && data.entitled === false)) {
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>⚡ Real-Time Pricing</div>
+        <p style={{ fontSize: 13, color: "#475569", margin: "0 0 10px", lineHeight: 1.6, maxWidth: 640 }}>
+          Bring your material costs into Structure Studio and build every style and size from the exact
+          materials it needs. Update your costs each quarter and every building's price recalculates on
+          its own — your current prices stay untouched while you set it up.
+        </p>
+        {canAdmin
+          ? <button onClick={onSeeBilling} style={S.btn(ACCENT, "#FFF")}>Add Real-Time Pricing — see Billing</button>
+          : <div style={{ fontSize: 12.5, color: "#94A3B8", fontWeight: 600 }}>Ask your account owner to add it under Settings → Billing.</div>}
+      </div>
+    );
+  }
+  if (!data || !cat) {
+    return <div style={S.card}><div style={S.h2}>⚡ Real-Time Pricing</div><div style={{ fontSize: 13, color: "#94A3B8" }}>{msg && msg.err ? msg.err : "Loading…"}</div></div>;
+  }
+
+  const enabled = !!data.enabled;
+  const preview = data.preview || [];
+  const previewRows = preview.map((p) => {
+    const z = sizeById(p.size_id); const s = z && styleById(z.style_id);
+    return { ...p, styleLabel: s ? s.label : "?", sizeLabel: p.size_label, current: z ? z.base_price : null };
+  }).sort((a, b) => a.styleLabel.localeCompare(b.styleLabel) || String(a.sizeLabel).localeCompare(String(b.sizeLabel)));
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>⚡ Real-Time Pricing</div>
+        <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: enabled ? "#166534" : "#92400E", background: enabled ? "#DCFCE7" : "#FEF3C7", borderRadius: 6, padding: "3px 8px" }}>{enabled ? "Live" : "Setting up"}</span>
+        <div style={{ marginLeft: "auto" }}>
+          <button onClick={() => setConfirmToggle({ to: !enabled })} disabled={busy}
+            style={S.btn(enabled ? "#FEF2F2" : "#166534", enabled ? "#DC2626" : "#FFF")}>
+            {enabled ? "Turn off — restore manual prices" : "Go live with real-time pricing"}
+          </button>
+        </div>
+      </div>
+      <div style={{ fontSize: 12.5, color: enabled ? "#166534" : "#92400E", background: enabled ? "#F0FDF4" : "#FFFBEB", border: `1px solid ${enabled ? "#BBF7D0" : "#FDE68A"}`, borderRadius: 8, padding: "9px 12px", marginBottom: 14, lineHeight: 1.55 }}>
+        {enabled
+          ? "LIVE: buildings with a bill of materials price themselves from your material costs. Buildings without one keep their manual price."
+          : "Set up while your current prices stay active — nothing changes until you press Go Live. Buildings without a bill of materials always keep their manual price."}
+      </div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {result && (result.skipped || []).length > 0 && (
+        <div style={{ ...S.err, background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E" }}>
+          Skipped: {result.skipped.slice(0, 8).join("; ")}{result.skipped.length > 8 ? ` — and ${result.skipped.length - 8} more` : ""}
+        </div>
+      )}
+
+      {/* ── Spreadsheet round-trip ── */}
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Work in a spreadsheet</div>
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.55 }}>
+          Download the workbook (a Materials sheet, one sheet per style, and your Overhead), fill in
+          quantities, and upload it back. Partial uploads are fine — only the buildings in the file change.
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {styles().map((s) => {
+            const on = !dlStyles || dlStyles.has(s.id);
+            return (
+              <button key={s.id} type="button" onClick={() => {
+                setDlStyles((cur) => {
+                  const next = new Set(cur || styles().map((x) => x.id));
+                  if (next.has(s.id)) next.delete(s.id); else next.add(s.id);
+                  return next;
+                });
+              }} style={{ ...S.btn(on ? "#DBEAFF" : "#F8FAFC", on ? "#3D3672" : "#94A3B8"), padding: "5px 10px", fontSize: 12, border: `1px solid ${on ? "#C3D9F7" : "#E2E8F0"}` }}>
+                {on ? "✓ " : ""}{s.label}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={downloadTemplate} disabled={dlBusy} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: dlBusy ? 0.6 : 1 }}>{dlBusy ? "Preparing…" : "⬇ Download workbook"}</button>
+          <label style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Working…" : "⬆ Upload filled workbook"}
+            <input key={fileKey} type="file" accept=".xlsx" disabled={busy} style={{ display: "none" }}
+              onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+          </label>
+        </div>
+      </div>
+
+      {/* ── Materials ── */}
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Material costs</div>
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.55 }}>
+          The one list you keep current. Change a cost here and every building using that material re-prices
+          {enabled ? " immediately." : " the moment you go live."}
+        </p>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 640 }}>
+            <thead><tr><th style={S.th}>Category</th><th style={S.th}>Material</th><th style={S.th}>Unit cost</th><th style={S.th}></th></tr></thead>
+            <tbody>
+              {matRows.filter((m) => m.active).map((m, i) => (
+                <tr key={m.id || "new-" + i}>
+                  <td style={{ ...S.td, padding: 4 }}><input value={m.category} onChange={(e) => setMatRows((rs) => rs.map((x) => x === m ? { ...x, category: e.target.value, dirty: true } : x))} style={{ ...S.input, width: 130 }} placeholder="Lumber" /></td>
+                  <td style={{ ...S.td, padding: 4 }}><input value={m.name} onChange={(e) => setMatRows((rs) => rs.map((x) => x === m ? { ...x, name: e.target.value, dirty: true } : x))} style={{ ...S.input, minWidth: 180 }} placeholder="White 8' 2x4" /></td>
+                  <td style={{ ...S.td, padding: 4 }}><input value={m.unitCost} onChange={(e) => setMatRows((rs) => rs.map((x) => x === m ? { ...x, unitCost: e.target.value, dirty: true } : x))} style={{ ...S.input, width: 84, textAlign: "right" }} placeholder="8.50" /></td>
+                  <td style={{ ...S.td, padding: 4 }}><button onClick={() => archiveMaterial(m)} disabled={busy} title={m.id ? "Archive — keeps history, removes it from new lists" : "Remove"} style={{ background: "none", border: "none", color: "#DC2626", cursor: "pointer", fontWeight: 700, fontFamily: "inherit" }}>✕</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button onClick={() => setMatRows((rs) => [...rs, { id: null, category: rs.length ? rs[rs.length - 1].category : "", name: "", unitCost: "", active: true, dirty: true }])} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 8, color: ACCENT, fontWeight: 700, fontSize: 12, padding: "6px 11px", cursor: "pointer", fontFamily: "inherit" }}>+ Add material</button>
+          <button onClick={saveMaterials} disabled={busy || !matRows.some((m) => m.dirty)} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !matRows.some((m) => m.dirty) ? 0.55 : 1 }}>Save materials</button>
+        </div>
+      </div>
+
+      {/* ── Bill of materials per building ── */}
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Bill of materials</div>
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.55 }}>
+          Pick a building, list what it takes to build it — floor, walls, roof, interior. Quantity × unit
+          cost is its material total.
+        </p>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <select value={bomStyleId} onChange={(e) => { setBomStyleId(e.target.value); setBomSizeId(""); }} style={{ ...S.input, width: 200 }}>
+            <option value="">Choose a style…</option>
+            {styles().map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+          <select value={bomSizeId} onChange={(e) => setBomSizeId(e.target.value)} disabled={!bomStyleId} style={{ ...S.input, width: 140 }}>
+            <option value="">Choose a size…</option>
+            {sizesFor(bomStyleId).map((z) => <option key={z.id} value={z.id}>{z.label}</option>)}
+          </select>
+        </div>
+        {bomSizeId && (<>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 640 }}>
+              <thead><tr><th style={S.th}>Section</th><th style={S.th}>Material</th><th style={S.th}>Qty</th><th style={S.th}></th></tr></thead>
+              <tbody>
+                {bomRows.map((l, i) => (
+                  <tr key={i}>
+                    <td style={{ ...S.td, padding: 4 }}>
+                      <select value={l.section} onChange={(e) => setBomRows((rs) => rs.map((x, j) => j === i ? { ...x, section: e.target.value } : x))} style={{ ...S.input, width: 110 }}>
+                        {RTP_SECTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ ...S.td, padding: 4 }}>
+                      <select value={l.materialId} onChange={(e) => setBomRows((rs) => rs.map((x, j) => j === i ? { ...x, materialId: e.target.value } : x))} style={{ ...S.input, minWidth: 200 }}>
+                        <option value="">Choose material…</option>
+                        {activeMats().map((m) => <option key={m.id} value={m.id}>{m.name} — {rtpMoney(rtpNum(m.unitCost))}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ ...S.td, padding: 4 }}><input value={l.qty} onChange={(e) => setBomRows((rs) => rs.map((x, j) => j === i ? { ...x, qty: e.target.value } : x))} style={{ ...S.input, width: 70, textAlign: "right" }} /></td>
+                    <td style={{ ...S.td, padding: 4 }}><button onClick={() => setBomRows((rs) => rs.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: "#DC2626", cursor: "pointer", fontWeight: 700, fontFamily: "inherit" }}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+            <button onClick={() => setBomRows((rs) => [...rs, { materialId: "", section: rs.length ? rs[rs.length - 1].section : "floor", qty: "" }])} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 8, color: ACCENT, fontWeight: 700, fontSize: 12, padding: "6px 11px", cursor: "pointer", fontFamily: "inherit" }}>+ Add line</button>
+            <button onClick={saveBom} disabled={busy} style={S.btn(ACCENT, "#FFF")}>Save this building</button>
+            {(() => { const p = previewFor(bomSizeId); return p ? <span style={{ fontSize: 12.5, color: "#475569" }}>Materials {rtpMoney(p.materials_total)} → price <b>{rtpMoney(p.computed_price)}</b></span> : null; })()}
+          </div>
+        </>)}
+      </div>
+
+      {/* ── Overhead & markup ── */}
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Overhead & markup</div>
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.55 }}>
+          Applied top to bottom, starting from the materials total. Multipliers and flat lines change the
+          price. <b>% of price lines don't</b> — they show where the final price goes (sales, delivery,
+          build…), and whatever's left after materials and those shares is your profit.
+        </p>
+        {ovhRows.length === 0 && (
+          <button onClick={() => setOvhRows(RTP_CLASSIC_OVERHEAD.map((o) => ({ ...o, value: String(o.value) })))} style={{ ...S.btn("#F1F5F9", "#334155"), marginBottom: 10 }}>
+            Start with the classic setup (×1.8, ×1.1, Sales 5% / Delivery 10% / Build 10%)
+          </button>
+        )}
+        {ovhRows.map((o, i) => (
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ display: "inline-flex", flexDirection: "column", gap: 1 }}>
+              <button onClick={() => i > 0 && setOvhRows((rs) => { const n = [...rs]; [n[i - 1], n[i]] = [n[i], n[i - 1]]; return n; })} disabled={i === 0} title="Move up" style={{ background: "none", border: "none", cursor: i === 0 ? "default" : "pointer", color: i === 0 ? "#E2E8F0" : "#64748B", fontSize: 10, lineHeight: 1, padding: 1 }}>▲</button>
+              <button onClick={() => i < ovhRows.length - 1 && setOvhRows((rs) => { const n = [...rs]; [n[i], n[i + 1]] = [n[i + 1], n[i]]; return n; })} disabled={i === ovhRows.length - 1} title="Move down" style={{ background: "none", border: "none", cursor: i === ovhRows.length - 1 ? "default" : "pointer", color: i === ovhRows.length - 1 ? "#E2E8F0" : "#64748B", fontSize: 10, lineHeight: 1, padding: 1 }}>▼</button>
+            </span>
+            <input value={o.label} onChange={(e) => setOvhRows((rs) => rs.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} style={{ ...S.input, width: 140 }} placeholder="Mark-up" />
+            <select value={o.kind} onChange={(e) => setOvhRows((rs) => rs.map((x, j) => j === i ? { ...x, kind: e.target.value } : x))} style={{ ...S.input, width: 190 }}>
+              {RTP_KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
+            </select>
+            <input value={o.value} onChange={(e) => setOvhRows((rs) => rs.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} style={{ ...S.input, width: 80, textAlign: "right" }} />
+            <button onClick={() => setOvhRows((rs) => rs.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: "#DC2626", cursor: "pointer", fontWeight: 700, fontFamily: "inherit" }}>✕</button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button onClick={() => setOvhRows((rs) => [...rs, { label: "", kind: "multiplier", value: "", active: true }])} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 8, color: ACCENT, fontWeight: 700, fontSize: 12, padding: "6px 11px", cursor: "pointer", fontFamily: "inherit" }}>+ Add line</button>
+          <button onClick={saveOverhead} disabled={busy} style={S.btn(ACCENT, "#FFF")}>Save overhead</button>
+        </div>
+      </div>
+
+      {/* ── Preview ── */}
+      {previewRows.length > 0 && (
+        <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Computed prices</div>
+          <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px" }}>
+            Every building with a bill of materials, priced by the engine{enabled ? " (these ARE your live prices)" : " — nothing changes until you go live"}.
+          </p>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", width: "100%" }}>
+              <thead><tr><th style={S.th}>Style</th><th style={S.th}>Size</th><th style={S.th}>Materials</th><th style={S.th}>Computed</th><th style={S.th}>Current</th><th style={S.th}>Where it goes</th></tr></thead>
+              <tbody>
+                {previewRows.map((p) => (
+                  <tr key={p.size_id}>
+                    <td style={S.td}>{p.styleLabel}</td>
+                    <td style={S.td}>{p.sizeLabel}</td>
+                    <td style={S.td}>{rtpMoney(p.materials_total)}</td>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{rtpMoney(p.computed_price)}</td>
+                    <td style={{ ...S.td, color: Number(p.current) === Number(p.computed_price) ? "#166534" : "#92400E" }}>{rtpMoney(p.current)}</td>
+                    <td style={{ ...S.td, fontSize: 12, color: "#64748B" }}>
+                      {(p.allocations || []).map((a) => `${a.label} ${rtpMoney(a.amount)}`).join(" · ")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Go-live / revert confirm ── */}
+      {confirmToggle && (
+        <div onClick={(ev) => { if (ev.target === ev.currentTarget) setConfirmToggle(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
+          <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 560, width: "100%", maxHeight: "84vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ background: confirmToggle.to ? "#166534" : "#92400E", color: "#FFF", padding: "15px 18px", fontSize: 15.5, fontWeight: 800 }}>
+              {confirmToggle.to ? "Go live with real-time pricing?" : "Turn real-time pricing off?"}
+            </div>
+            <div style={{ padding: "16px 18px" }}>
+              {confirmToggle.to ? (<>
+                <p style={{ fontSize: 13, color: "#475569", margin: "0 0 10px", lineHeight: 1.6 }}>
+                  Your current prices are backed up first, then every building below takes its computed
+                  price. Buildings without a bill of materials keep their manual price. You can turn this
+                  off any time and the backed-up prices come straight back.
+                </p>
+                <table style={{ borderCollapse: "collapse", width: "100%", marginBottom: 12 }}>
+                  <thead><tr><th style={S.th}>Building</th><th style={S.th}>Now</th><th style={S.th}>Will become</th></tr></thead>
+                  <tbody>
+                    {previewRows.map((p) => (
+                      <tr key={p.size_id}>
+                        <td style={S.td}>{p.styleLabel} {p.sizeLabel}</td>
+                        <td style={S.td}>{rtpMoney(p.current)}</td>
+                        <td style={{ ...S.td, fontWeight: 700 }}>{rtpMoney(p.computed_price)}</td>
+                      </tr>
+                    ))}
+                    {previewRows.length === 0 && <tr><td style={S.td} colSpan={3}>No buildings have a bill of materials yet — going live changes nothing until they do.</td></tr>}
+                  </tbody>
+                </table>
+              </>) : (
+                <p style={{ fontSize: 13, color: "#475569", margin: "0 0 12px", lineHeight: 1.6 }}>
+                  Every building goes back to the manual price it had before real-time pricing went live.
+                  Your materials, bills and overhead stay saved — going live again re-applies them.
+                </p>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => doToggle(confirmToggle.to)} disabled={busy} style={{ ...S.btn(confirmToggle.to ? "#166534" : "#92400E", "#FFF"), flex: 1 }}>
+                  {confirmToggle.to ? "Back up my prices and go live" : "Restore my manual prices"}
+                </button>
+                <button onClick={() => setConfirmToggle(null)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp) ───
 // Edits the DEFAULT (all-styles) price for each enabled layout item. Per-style overrides

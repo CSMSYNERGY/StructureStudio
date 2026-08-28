@@ -763,6 +763,11 @@ function Dashboard({ session }) {
   // the same way as scheduling (Carolyn 2026-08-08), and PAY-ONLY on the server, so the
   // exempt/free-period blankets don't hand it to grandfathered tenants either.
   const qboUnlocked = featureOn("quickbooks_sync");
+  // Real-Time Pricing ($85/mo, on sale since migration 124, PAY-ONLY server-side since the
+  // 2026-08-28 build): the material-cost engine's settings card. Gates the RealTimePricing
+  // block inside Settings → Structures; the server re-checks the entitlement on every
+  // rtp_* action regardless (_shared/featureCheck.ts).
+  const rtpUnlocked = featureOn("on_demand_pricing");
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -865,7 +870,11 @@ function Dashboard({ session }) {
         {ssIsBetaHost() && (<>
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
-          {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
+          {/* RealTime Pricing left this group on 2026-08-28 (Carolyn 2026-08-27: "we maybe
+              even remove real-time pricing from this here completely now, and put what is
+              here down here") — it lives inside Settings → Structures as a real feature
+              now. The /portal/on-demand-pricing route and its card stay for old deep
+              links, pointing at the settings block: the QuickBooks/3D treatment. */}
           {/* 3D Design has no nav entry any more (Carolyn 2026-08-25): it is live inside
               the Designer (view3d prop) and calibration lives in Settings → Designer, so
               the standalone tab came off the rail. The /portal/view-3d route and its
@@ -1252,19 +1261,26 @@ function Dashboard({ session }) {
                 access={viewing ? null : myAccess}
                 schedUnlocked={schedUnlocked}
                 qboUnlocked={qboUnlocked}
+                rtpUnlocked={rtpUnlocked}
                 setup3d={setup3d}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
+            {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
+                feature lives in Settings → Structures. `available` because it HAS shipped:
+                without it a sales rep reads a live feature as unbuilt (the ComingSoon
+                lesson). The cta deep-links to the settings sub-tab, billing-style. */}
             {!gateLocked && activeTab === "on-demand-pricing" && (
               <ComingSoon
                 title="RealTime Pricing"
+                available
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>}
-                blurb="Bring your lumber prices into Structure Studio and we'll build out every style and size with the exact lumber each building needs. Update your lumber costs each month or quarter and every building's price recalculates on its own — so you always know your true, current cost and profit margin."
+                blurb="Bring your material costs into Structure Studio and build out every style and size with the exact materials each building needs. Update your costs each month or quarter and every building's price recalculates on its own — so you always know your true, current cost and profit margin. Set it up under Settings → Structures."
                 bullets={[
-                  "Load your lumber prices; we map them to every style and size",
+                  "One material cost list; every building prices itself from it",
                   "Update costs monthly or quarterly — building prices refresh automatically",
                   "Know your real build cost and profit margin in real time",
                 ]}
+                cta={canAdmin ? { label: "Set it up — Settings → Structures", onClick: () => navigate("settings", "structures") } : null}
               />
             )}
             {/* Scheduling suite: live when schedUnlocked (operator, or the tenant's
