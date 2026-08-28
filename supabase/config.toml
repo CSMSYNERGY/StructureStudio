@@ -154,6 +154,21 @@ verify_jwt = true
 # Auth is the one-shot nonce stored on the tenant row, compared in constant time.
 verify_jwt = false
 
+[functions.sms-inbound]
+# A customer's reply arrives from Twilio server-to-server and cannot carry a Supabase JWT,
+# so verification stays OFF -- the email-inbound / billing-webhook pattern. Auth is a shared
+# secret in the URL (?key= <-> SMS_INBOUND_SECRET) compared in constant time, PLUS the
+# X-Twilio-Signature when TWILIO_AUTH_TOKEN is set.
+#
+# Flip this to true and every inbound text is 401'd AT THE GATEWAY, before the function
+# runs: nothing is stored, nothing is logged, and the failure is invisible from inside the
+# database. That is exactly how the billing webhook went unnoticed for weeks.
+verify_jwt = false
+
+[functions.sms-status]
+# Twilio delivery receipts, same reasoning and the same secret as sms-inbound.
+verify_jwt = false
+
 # NOTE: `github-monday-bug` and `migrate-style-images` are deployed on the project but have
 # no directory in this repo, so they are deliberately absent here — a [functions] block for
 # a function the CLI cannot find is not something to invent. `github-monday-bug` runs with

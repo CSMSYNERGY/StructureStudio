@@ -42,14 +42,24 @@ export const CRM_FEED_TYPES = {
   // Both directions under one chip: Carolyn asked to "see my emails and only emails in a
   // quick and easy way", and a conversation split across two filters is not that.
   email: ["email", "email_in"],
-  // NO SMS TYPE, DELIBERATELY. An earlier version reserved one "so SMS drops in later".
-  // Ahsan, 2026-08-25: "we are not using Twilio for conversation or campaigns. We are only
-  // using Twilio to get the code to log in. That's it. For conversation, we are using
-  // emails." Twilio's entire job in this product is the Verify code for my-quotes.
+  // SMS, BOTH DIRECTIONS, UNDER ONE "MESSAGES" CHIP — the same reasoning as `email` above:
+  // a conversation split across two filters is not a conversation.
   //
-  // A reserved seam for a feature nobody intends to build is not foresight, it is a
-  // misleading comment that survives long enough for someone to act on it. Conversations
-  // are email, and `email` above is where that grows.
+  // ⚠️ THIS REVERSES A DECISION THAT WAS TAKEN TWICE, AND THE HISTORY IS THE POINT.
+  // This slot used to hold a comment reading "NO SMS TYPE, DELIBERATELY", recording that on
+  // 2026-08-25 Ahsan removed a reserved `sms` type and a greyed WhatsApp tab: "we are not
+  // using Twilio for conversation or campaigns. We are only using Twilio to get the code to
+  // log in. That's it. For conversation, we are using emails." It argued — correctly, at the
+  // time — that a reserved seam for a feature nobody intends to build is not foresight but a
+  // misleading comment somebody eventually acts on.
+  //
+  // Then Carolyn asked for it on 2026-08-26 (27:02): "and we have calls. We probably need
+  // SMS in there, too. We will need that in there as well." Ahsan approved building it for
+  // real on 08-27. What lands now is not a reserved seam — it is a working channel with a
+  // table, a send path, an inbound webhook and per-tenant numbers behind it.
+  //
+  // WhatsApp remains not a feature, and nothing here reserves a slot for it.
+  message: ["sms", "sms_in"],
   document: ["change_order", "invoice_created", "invoice_sent"],
   deal: ["design_created", "design_version", "accepted", "quote_opened"],
   invoice: ["invoice_created", "invoice_sent"],
@@ -95,7 +105,7 @@ export async function buildCrmFeed(
 
   const q = <T>(p: Promise<T>) => p.then((r: any) => r?.data ?? []).catch(() => []);
 
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, fieldChanges] = await Promise.all([
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, fieldChanges, texts] = await Promise.all([
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
     // Email is the conversation channel, so this read has to cover BOTH scopes: document
@@ -138,6 +148,20 @@ export async function buildCrmFeed(
     // FIELD EDITS (migration 141). Contact-scoped only: a field change is a change to the
     // PERSON, and it belongs on their record whichever design you arrived from. A design
     // record with no contact linked simply has none to show.
+    // SMS, both directions. Same both-scopes `or` as the email reads: a text sent from a
+    // design record carries the code, one that is simply a reply to the person carries only
+    // the contact, and an `or` keeps the 80-row cap over the merged history rather than
+    // applying it twice.
+    (codes.length || opts.contactId)
+      ? q(admin.from("sms_messages")
+          .select("id, direction, short_code, contact_id, from_number, to_number, body, status, error_code, created_at")
+          .eq("client_id", clientId)
+          .or([
+            codes.length ? `short_code.in.(${codes.join(",")})` : null,
+            opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
+          ].filter(Boolean).join(","))
+          .order("created_at", { ascending: false }).limit(80))
+      : Promise.resolve([]),
     opts.contactId
       ? q(admin.from("crm_field_changes")
           .select("id, field, old_value, new_value, changed_by, created_at")
@@ -226,6 +250,32 @@ export async function buildCrmFeed(
   // Both values are shown. A changelog that says only "phone changed" answers none of the
   // questions someone opens a changelog to ask; the old value is the whole point when the
   // edit was a correction, and it is the only record of what the number used to be.
+  // SMS, both directions. Outbound carries its delivery state in the title when it is
+  // anything other than a clean send: a text that silently failed looks identical to one
+  // that arrived, and the builder finds out from the customer.
+  for (const t of texts as any[]) {
+    const out = t.direction === "out";
+    const num = out ? t.to_number : t.from_number;
+    const st = String(t.status ?? "");
+    // 'sent' means handed to the carrier; 'delivered' is the receipt. Neither is worth
+    // saying out loud. The other three are.
+    const suffix = out && st && st !== "sent" && st !== "delivered"
+      ? ` — ${st}${t.error_code ? ` (carrier code ${t.error_code})` : ""}`
+      : "";
+    push({
+      id: `sm:${t.id}`,
+      type: out ? "sms" : "sms_in",
+      at: iso(t.created_at),
+      title: out ? `Text to ${num}${suffix}` : `Text from ${num}`,
+      body: t.body || null,
+      // Inbound is the customer speaking, so it gets an actor and renders as their words —
+      // the same treatment email_in gets.
+      ...(out ? {} : { actor: num }),
+      code: t.short_code,
+      icon: out ? "sms" : "sms_in",
+      meta: { direction: t.direction, status: st || null },
+    });
+  }
   for (const f of fieldChanges as any[]) {
     const from = f.old_value ? `"${f.old_value}"` : "(empty)";
     const to = f.new_value ? `"${f.new_value}"` : "(empty)";

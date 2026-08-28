@@ -1081,22 +1081,42 @@ const CRM_TABS = [
   { key: "note", label: "Notes", enabled: (c) => c.canEdit, hint: "You don't have permission to add notes." },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
-  // NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE. Ahsan, 2026-08-25:
-  // "we are not using Twilio for conversation or campaigns. We are only using Twilio to get
-  // the code to log in. That's it. For conversation, we are using emails."
+  // SMS — A REAL CHANNEL NOW, REVERSING A DECISION THIS COMMENT USED TO RECORD.
   //
-  // An earlier version of this registry carried a greyed WhatsApp tab hinted "arrives when
-  // the Twilio account is connected" — a promise that was never going to be kept, sitting on
-  // a screen Carolyn shows at a trade show. A greyed tab says "next"; removing it says "not
-  // part of this product", which is the truth. Twilio's only job here is the Verify code
-  // that logs a customer into my-quotes, and that needs no phone number, no messaging
-  // service and no A2P registration.
+  // What stood here read "NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE" (Ahsan,
+  // 2026-08-25: "we are not using Twilio for conversation or campaigns. We are only using
+  // Twilio to get the code to log in"). It was written after deleting a greyed WhatsApp tab
+  // hinted "arrives when the Twilio account is connected" — a promise nobody intended to
+  // keep, sitting on a screen Carolyn shows at a trade show.
   //
-  // Conversations ARE email. That is why the Email tab is the one that grows a composer.
-  // Email IS the conversation channel (Ahsan, 2026-08-25), so this is the tab that carries
-  // a composer. Needs an address to write to — a contact with neither an email nor a design
-  // is a browsing artefact, and offering a compose box that cannot send is worse than not
-  // offering one.
+  // Carolyn asked for texting on 2026-08-26 (27:02): "and we have calls. We probably need
+  // SMS in there, too." Ahsan approved building it properly on 08-27, so this is a working
+  // channel — per-tenant Twilio numbers, a send path, an inbound webhook, an opt-out column
+  // — and not the greyed promise the old comment was right to delete.
+  //
+  // WhatsApp is still not a feature, and nothing here reserves a slot for it.
+  //
+  // THREE different things disable this tab and it names which one, for the same reason the
+  // Email tab's hint is a function: a rep without contacts:edit was once shown "this contact
+  // has no email address" while the address sat rendered directly above it. "Not available"
+  // sends somebody off editing a contact that is fine.
+  {
+    key: "sms", label: "SMS",
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone) && !!(c.sms && c.sms.ready),
+    hint: (c) => (!c.canEdit
+      ? "You don't have permission to text contacts."
+      : !(c.contact && c.contact.phone)
+        ? "This contact has no phone number on file."
+        : "Texting switches on once this account's number clears carrier registration."),
+  },
+  // Conversations were email ONLY, until the tab above. Email remains the channel that
+  // carries a document — a quote, an invoice, anything with a link — and needs an address to
+  // write to: a contact with neither an email nor a design is a browsing artefact, and
+  // offering a compose box that cannot send is worse than not offering one.
+  // The hint is a FUNCTION because two different things disable this tab, and a fixed
+  // string told the wrong story: a rep without contacts:edit was shown "this contact has no
+  // email address" while the address sat rendered directly above it. A tooltip that blames
+  // the data for a permissions problem sends someone off editing a contact that is fine.
   // The hint is a FUNCTION because two different things disable this tab, and a fixed
   // string told the wrong story: a rep without contacts:edit was shown "this contact has no
   // email address" while the address sat rendered directly above it. A tooltip that blames
@@ -1131,6 +1151,10 @@ const CRM_CHIPS = [
   // Both directions under one chip. Carolyn: "I want to be able to see my emails and only
   // emails in a quick and easy way" — a conversation split across two filters is not that.
   { key: "emails", label: "Emails", types: ["email", "email_in"] },
+  // Texts, both directions, one chip — the Emails-chip precedent, and for the same reason.
+  // Shown only once the account can actually text: a permanently empty filter teaches
+  // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
+  { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
   { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
@@ -1198,6 +1222,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
   const [mailMsg, setMailMsg] = useState(null);
+  // ⚠️ These live in the TOP hook block, not beside sendSms below. CrmRecord returns early
+  // on `!data`, so a hook declared next to its handler runs only on the renders that get
+  // past the guard — React #310, and the whole record page goes white the instant its data
+  // arrives. That shipped once (13ca37e) and was caught before release; do not move them.
+  const [text, setText] = useState("");
+  const [textMsg, setTextMsg] = useState(null);
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
   // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
   // renders only inside the Email tab — these controls need their own slot, keyed by control
@@ -1234,7 +1264,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   if (!data) return <div style={S.card}>Loading…</div>;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
-  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [] };
+  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [], sms: data.sms || null };
   const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
@@ -1325,6 +1355,31 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     const failMsg = (r && r.error) || (error ? await fnError(error) : null);
     if (failMsg) { setOpErr({ where: "activity", msg: `Activity not saved — ${failMsg}` }); return; }
     setAct({ kind: "call", subject: "", dueAt: "" }); load();
+  };
+
+  // Texting. Carolyn, 2026-08-26 27:02: "we probably need SMS in there, too."
+  //
+  // ⚠️ THE BODY CARRIES IDS, NEVER A PHONE NUMBER. The server reads the number off
+  // crm_contacts and normalizes it there. Posting a number from here would let anyone with
+  // a portal login text any handset from the tenant's registered number.
+  const sendSms = async () => {
+    const body = text.trim();
+    if (!body) return;
+    setBusy(true); setTextMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_send_sms", body,
+        contactId: (data.contact && data.contact.id) || null,
+        shortCode: kind === "design" ? recordId : null,
+      },
+    });
+    setBusy(false);
+    // Keep the draft on failure. Nothing was sent, so clearing the box would destroy the
+    // one copy of what they wrote — and "they have opted out" is a message worth reading
+    // before the words disappear.
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    if (failMsg) { setTextMsg({ err: failMsg }); return; }
+    setText(""); setTextMsg({ ok: "Sent." }); load();
   };
 
   const sendEmail = async () => {
@@ -1626,6 +1681,57 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               })}
             </div>
 
+            {tab === "sms" && canEdit && data.contact && data.contact.phone && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
+                  To <strong>{data.contact.phone}</strong>
+                  {data.sms && data.sms.from ? <> — they see <strong>{data.sms.from}</strong>, this account&rsquo;s number.</> : null}
+                </div>
+                {/* Opted out is not an error state to discover by pressing Send. STOP is a
+                    legal instruction, so the composer says so and offers no box. */}
+                {data.sms && data.sms.optedOut ? (
+                  <div style={{ ...S.err, marginBottom: 0 }}>
+                    This customer replied STOP, so we can&rsquo;t text them. They can reply START to that
+                    same number to opt back in.
+                  </div>
+                ) : (
+                  <>
+                    <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
+                      maxLength={1600}
+                      placeholder="Text this customer…"
+                      style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
+                      <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
+                        {busy ? "Sending…" : "Send text"}
+                      </button>
+                      {/* Segments, not just characters. One pasted curly quote flips the whole
+                          message to UCS-2 and roughly halves the per-segment budget, which is
+                          how a one-segment text quietly becomes three billable ones. */}
+                      {(() => {
+                        const t = text;
+                        // GSM-7 is effectively ASCII here; anything above it (a curly
+                        // quote, an emoji, an accent) forces the whole message to UCS-2,
+                        // roughly halving the per-segment budget. Written as a code scan
+                        // rather than a regex so no unicode escape can be mangled on its
+                        // way into this file.
+                        let uni = false;
+                        for (let i = 0; i < t.length; i++) { if (t.charCodeAt(i) > 127) { uni = true; break; } }
+                        const per = uni ? 70 : 160, cat = uni ? 67 : 153;
+                        const n = t.length === 0 ? 0 : (t.length <= per ? 1 : Math.ceil(t.length / cat));
+                        return (
+                          <span style={{ fontSize: 11.5, color: n > 1 ? "#92400E" : "#94A3B8" }}>
+                            {t.length} character{t.length === 1 ? "" : "s"} · {n} segment{n === 1 ? "" : "s"}
+                            {uni ? " (unicode)" : ""}
+                          </span>
+                        );
+                      })()}
+                      {textMsg && textMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{textMsg.ok}</span>}
+                    </div>
+                    {textMsg && textMsg.err && <div style={{ ...S.err, marginTop: 7, marginBottom: 0 }}>{textMsg.err}</div>}
+                  </>
+                )}
+              </div>
+            )}
             {tab === "email" && canEdit && data.contact && data.contact.email && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
@@ -1814,6 +1920,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                       </div>
                       {e.title && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{e.title}</div>}
                       {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", marginTop: 2 }}>{e.body}</div>}
+                    </div>
+                  ) : e.type === "sms_in" ? (
+                    /* An arriving TEXT is the customer speaking too, so it gets the same
+                       treatment as a reply — a different tint only so the channel is
+                       readable at a glance in a mixed conversation. */
+                    <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, padding: "7px 9px" }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#15803D", marginBottom: 2 }}>
+                        💬 {e.actor || "Customer"} texted
+                      </div>
+                      {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap" }}>{e.body}</div>}
                     </div>
                   ) : e.type === "note" ? (
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>
