@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 b94cb2f070f5)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 bddecfc33b78)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -898,7 +898,17 @@ var fixturePhotoTex=function fixturePhotoTex(it){if(it.fixtureItemId==null)retur
 var fx=fxById.get(String(it.fixtureItemId));if(!fx||!fx.imageUrl)return null;return d3FixtureTexture(THREE,fx.imageUrl);};// Cladding texture — multiplies the body color, so the customer's paint still drives
 // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
 // raster, the relief style below, and the tile scale.
-var clad=D3_CLADDING[d3NormalizeCladding(p.styleSpec&&p.styleSpec.siding)]||D3_CLADDING.panel;var wallKind=clad.tex;var wallTex=d3MakeTexture(THREE,wallKind);if(wallTex){// One tile per tileFt of WORLD FEET: wallBox rewrites every face's UVs to feet, so the
+var clad=D3_CLADDING[d3NormalizeCladding(p.styleSpec&&p.styleSpec.siding)]||D3_CLADDING.panel;// How far the cladding's proudest surface stands from the wall CENTRE-line, and the one
+// number every trim face must clear. Relief strips sit CLAD_RELIEF_OUT from the centre
+// with depth 0.1 (lap, batten) or 0.05 (rib), so their outer face lands at 0.23 / 0.205;
+// panel has no proud geometry, so its reach is the bare wall face (T/2). Corner boards
+// and opening casings take their size from trimFace rather than their own constants,
+// because two constants that must agree and live apart WILL drift: lap strips reached
+// 0.23 while the corner post's face sat at 0.22, so every course line cut through the
+// board — Carolyn 2026-08-27, circling it: "that piece of trim should just go straight
+// down… it should be over the top." On panel, trimFace resolves to exactly the old
+// numbers, so flat-clad styles render byte-identical to before.
+var CLAD_RELIEF_OUT=T/2+0.03;var cladReach=clad.relief?CLAD_RELIEF_OUT+(clad.relief==="rib"?0.025:0.05):T/2;var trimFace=cladReach+0.03;var wallKind=clad.tex;var wallTex=d3MakeTexture(THREE,wallKind);if(wallTex){// One tile per tileFt of WORLD FEET: wallBox rewrites every face's UVs to feet, so the
 // repeat is a constant unit conversion, not a per-building guess. (The first cut set a
 // building-averaged repeat against 0..1 face UVs, which anchored nothing -- every face
 // still stretched its tiles to its own length; audit 2026-08-19.)
@@ -1003,13 +1013,20 @@ var wg=new THREE.Group();wg.userData={wall:wname};var cursor=0;ranges.forEach(fu
 //   rib     proud vertical metal RIBS (Panel-Loc): narrower and shallower than a batten
 //   null    panel siding has its grooves cut INTO the face, so it gets NO proud strips.
 //           The old code gave it battens, which is the opposite of the real product.
-if(clad.relief){var relief=function relief(b0,b1){if(b1-b0<0.3)return;if(clad.relief==="batten"||clad.relief==="rib"){var bs=clad.stepFt;var halfW=clad.relief==="rib"?0.05:0.07;var depth=clad.relief==="rib"?0.05:0.1;var reliefMat=clad.reliefTrim?battenMat:wallMat;for(var a=Math.ceil((b0+0.2)/bs)*bs;a<b1-0.2;a+=bs){wg.add(wallBox(reliefMat,wf,a-halfW,a+halfW,0,H,T/2+0.03,depth));}}else{for(var y=clad.stepFt;y<H-0.15;y+=clad.stepFt){wg.add(wallBox(wallMat,wf,b0+0.03,b1-0.03,y-0.04,y+0.04,T/2+0.03,0.1));}}};var bc=0;ranges.forEach(function(rg){if(rg.a0>bc+0.01)relief(bc,rg.a0);bc=rg.a1;});if(bc<wf.len-0.01)relief(bc,wf.len);}var ogs=[];// Frames + fills per opening (trim-colored casing; doors get panels,
+if(clad.relief){var relief=function relief(b0,b1){if(b1-b0<0.3)return;if(clad.relief==="batten"||clad.relief==="rib"){var bs=clad.stepFt;var halfW=clad.relief==="rib"?0.05:0.07;var depth=clad.relief==="rib"?0.05:0.1;var reliefMat=clad.reliefTrim?battenMat:wallMat;for(var a=Math.ceil((b0+0.2)/bs)*bs;a<b1-0.2;a+=bs){wg.add(wallBox(reliefMat,wf,a-halfW,a+halfW,0,H,CLAD_RELIEF_OUT,depth));}}else{// Courses DIE INTO the corner boards instead of running to the wall's end — the
+// clamp bites only when b0/b1 ARE the wall's own ends (interior spans between
+// openings sit far from 0 / wf.len), so this is a corner rule, not a gap rule.
+var s0=Math.max(b0+0.03,trimFace);var s1=Math.min(b1-0.03,wf.len-trimFace);if(s1-s0<0.1)return;for(var y=clad.stepFt;y<H-0.15;y+=clad.stepFt){wg.add(wallBox(wallMat,wf,s0,s1,y-0.04,y+0.04,CLAD_RELIEF_OUT,0.1));}}};var bc=0;ranges.forEach(function(rg){if(rg.a0>bc+0.01)relief(bc,rg.a0);bc=rg.a1;});if(bc<wf.len-0.01)relief(bc,wf.len);}var ogs=[];// Frames + fills per opening (trim-colored casing; doors get panels,
 // windows get glass + muntins, rough openings stay empty). Each opening's
 // meshes live in their own tagged group so the 3D drag can raycast-pick
 // the item they belong to.
 ops.forEach(function(o){var f=0.17;var og=new THREE.Group();og.userData={itemId:o.it.id,wallItem:true,wall:wname};// A two-tone catalog door's chosen TRIM color drives its own casing; everything
 // else keeps the building trim (windows deliberately so — their color is the sash).
-var casingMat=o.it.type==="fixtureDoor"&&o.it.trimColorHex?mat(o.it.trimColorHex):trimMat;og.add(wallBox(casingMat,wf,o.a0-f,o.a0,o.y0,o.y1+f,0,T+0.06));og.add(wallBox(casingMat,wf,o.a1,o.a1+f,o.y0,o.y1+f,0,T+0.06));og.add(wallBox(casingMat,wf,o.a0-f,o.a1+f,o.y1,o.y1+f,0,T+0.06));// A catalog fixture's own photo is masked onto the opening when the builder
+var casingMat=o.it.type==="fixtureDoor"&&o.it.trimColorHex?mat(o.it.trimColorHex):trimMat;// Casing sits ON TOP of the cladding, so its faces must clear the relief strips —
+// the same inversion the corner boards had: lap courses at 0.23 stood 0.05 proud of
+// a casing face at 0.18 and read as siding drawn through the trim. On panel this
+// resolves to exactly the old T + 0.06.
+var casingDepth=Math.max(T+0.06,trimFace*2);og.add(wallBox(casingMat,wf,o.a0-f,o.a0,o.y0,o.y1+f,0,casingDepth));og.add(wallBox(casingMat,wf,o.a1,o.a1+f,o.y0,o.y1+f,0,casingDepth));og.add(wallBox(casingMat,wf,o.a0-f,o.a1+f,o.y1,o.y1+f,0,casingDepth));// A catalog fixture's own photo is masked onto the opening when the builder
 // uploaded one — but it is LAYERED IN FRONT of the parametric door/glass, never
 // instead of it, for two reasons that both bit us:
 //   · builders upload background-REMOVED cut-outs (every photo in production is an
@@ -1029,7 +1046,7 @@ var pm=new THREE.MeshBasicMaterial({map:entry.tex,transparent:true,alphaTest:0.0
 // over-darkens — acceptable; the color choice must show somewhere.
 if(tintHex){try{pm.color.set(tintHex);}catch(_e){/* bad hex: leave untinted */}}var mesh=wallBox(pm,wf,a0,a1,y0,y1,0.02,depth);// 0.02 ft proud: no z-fight
 mesh.visible=Boolean(entry.tex);// hidden until the photo has decoded
-d3BindFixturePhoto(entry,pm,mesh);og.add(mesh);};if(o.it.type==="window"){og.add(wallBox(trimMat,wf,o.a0-f,o.a1+f,o.y0-f,o.y0,0,T+0.06));// Sill nose: a slightly wider, deeper board under the casing — the one
+d3BindFixturePhoto(entry,pm,mesh);og.add(mesh);};if(o.it.type==="window"){og.add(wallBox(trimMat,wf,o.a0-f,o.a1+f,o.y0-f,o.y0,0,casingDepth));// Sill nose: a slightly wider, deeper board under the casing — the one
 // horizontal shadow line that makes the window read as installed.
 og.add(wallBox(trimMat,wf,o.a0-f-0.03,o.a1+f+0.03,o.y0-0.06,o.y0+0.02,T/2+0.04,0.16));// Sash: a slim dark inner ring set INTO the opening. The depth step
 // between casing → sash → glass is what turns the old flat decal into
@@ -1278,7 +1295,11 @@ put(trimMat,vW+F*2,F,0.10,0,-(vH+F)/2,0.20);// sill
 put(trimMat,F,vH+F*2,0.10,-(vW+F)/2,0,0.20);// left jamb
 put(trimMat,F,vH+F*2,0.10,(vW+F)/2,0,0.20);// right jamb
 });}}if(uAxisIsX){rg.position.z=-L/2;}else{rg.rotation.y=-Math.PI/2;rg.position.x=L/2;}roofGroup.add(rg);// Corner trim boards live in roofGroup so "look inside" hides them with the roof.
-[[-bldgW/2,-bldgH/2],[bldgW/2,-bldgH/2],[-bldgW/2,bldgH/2],[bldgW/2,bldgH/2]].forEach(function(c){var post=box(trimMat,T+0.14,H,T+0.14);post.position.set(c[0],H/2,c[1]);roofGroup.add(post);});// ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
+// Half-extent from trimFace, not a constant of its own: the post must reach past the
+// cladding's proudest surface or the siding renders through it — the 2026-08-27 lap bug,
+// where this face sat at 0.22 against strips reaching 0.23. On panel this is the old
+// T/2 + 0.07 exactly.
+[[-bldgW/2,-bldgH/2],[bldgW/2,-bldgH/2],[-bldgW/2,bldgH/2],[bldgW/2,bldgH/2]].forEach(function(c){var half=Math.max(T/2+0.07,trimFace);var post=box(trimMat,half*2,H,half*2);post.position.set(c[0],H/2,c[1]);roofGroup.add(post);});// ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
 // Same isolation as buildOneWall: rebuildInterior repopulates this group
 // alone when a loft/workbench/ramp moves during a live drag.
 var interiorGroup=new THREE.Group();var buildInterior=function buildInterior(itemsNow){return itemsNow.forEach(function(it){var c=itemTypes[it.type];if(!c)return;// Plan annotations, one more view of them: the note's text as a plaque
