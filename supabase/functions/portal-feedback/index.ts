@@ -222,9 +222,12 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
       }
       return;
     }
-    const { data: groups } = await admin.from("pm_groups").select("id")
-      .eq("board_id", board.id).order("position").limit(1);
-    const group = groups && groups[0];
+    // The board's INTAKE group (migration 150), not "whichever sits first" — the Monday
+    // import left two similarly-named intake groups per board, so first-by-position sent
+    // submissions to a group nobody was triaging.
+    const { data: groups } = await admin.from("pm_groups").select("id, intake")
+      .eq("board_id", board.id).order("position");
+    const group = (groups || []).find((g: { intake: boolean }) => g.intake) || (groups || [])[0];
     if (!group) return;
     const { data: cols } = await admin.from("pm_columns").select("*").eq("board_id", board.id);
     const values: Record<string, unknown> = {};

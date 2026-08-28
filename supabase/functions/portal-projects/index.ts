@@ -322,10 +322,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     const idea = byWord("idea") || labels[0];
     const planned = byWord("planned") || idea;
 
-    const { data: groups } = await admin.from("pm_groups").select("id, name")
+    const { data: groups } = await admin.from("pm_groups").select("id, name, intake")
       .eq("board_id", board.id).order("position");
-    // Prefer a group actually called Roadmap; fall back to the first one.
-    const group = (groups || []).find((g: { name: string }) => g.name.toLowerCase().includes("roadmap")) || (groups || [])[0];
+    // The board's chosen intake group wins; then one actually called Roadmap; then first.
+    const group = (groups || []).find((g: { intake: boolean }) => g.intake)
+      || (groups || []).find((g: { name: string }) => g.name.toLowerCase().includes("roadmap"))
+      || (groups || [])[0];
     if (!group) return 0;
 
     const { data: maxRow } = await admin.from("pm_items").select("position")
@@ -631,9 +633,19 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
 
       case "update_group": {
         const id = str(payload.id, 40);
+        const { data: g } = await admin.from("pm_groups").select("board_id").eq("id", id).maybeSingle();
+        if (!g) return json({ error: "Group not found." }, 404);
         const patch: Record<string, unknown> = {};
         if (payload.name !== undefined) patch.name = str(payload.name, 80) || "Group";
         if (payload.color !== undefined) patch.color = cssColor(payload.color) || null;
+        if (payload.intake === true) {
+          // A radio, not a checkbox: clear the board's current intake first, or the
+          // partial unique index refuses the write and the click looks broken.
+          const { error: cErr } = await admin.from("pm_groups")
+            .update({ intake: false }).eq("board_id", g.board_id).eq("intake", true);
+          if (cErr) throw cErr;
+          patch.intake = true;
+        }
         const { error } = await admin.from("pm_groups").update(patch).eq("id", id);
         if (error) throw error;
         return json({ ok: true });
