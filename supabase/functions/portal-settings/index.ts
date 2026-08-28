@@ -9,7 +9,7 @@ import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inv
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
   rsCreateDomain, rsDeleteDomain, rsGetDomain, rsVerifyDomain, rsDomainVerified,
-  rsInboundRecords, rsReceivingEnabled,
+  rsInboundRecords, rsReceivingEnabled, rsInboundReady,
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -4357,11 +4357,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return rsFail(req, clientId, "check your reply address", e);
     }
 
-    // BOTH conditions, and they are genuinely different questions: `status` is Resend's
-    // verdict on the records, `capabilities.receiving` is whether the domain is switched on
-    // for mail at all. A domain can be verified and still not receiving, and calling that
-    // 'active' would advertise a mailbox that does not exist.
-    const ok = rsDomainVerified(d) && rsReceivingEnabled(d);
+    // ⚠️ rsInboundReady, NOT rsDomainVerified. The domain-level status only turns "verified"
+    // once every record passes, including DKIM/SPF rows a receiving-only subdomain has no
+    // reason to hold — so gating on it would strand a tenant whose inbound MX resolves
+    // perfectly on "pending" forever, staring at a correct DNS table. Ask instead whether
+    // receiving is switched on and the receiving record itself has been seen.
+    const ok = rsInboundReady(d);
     const mx = rsInboundRecords(d);
     const { error: upErr } = await admin.from("client_settings").update({
       inbound_status: ok ? "active" : "pending",
