@@ -38,10 +38,10 @@ function PMChips({ items, value, onChange, allLabel }) {
 
 const pmStatusLabel = (col, id) => (col.settings?.labels || []).find((l) => l.id === id) || null;
 const pmOption = (col, id) => (col.settings?.options || []).find((o) => o.id === id) || null;
-// A person reads as their NAME once one is set on the roster (migration 147); the email
-// prefix is the fallback, which is all there was before.
-const pmPersonName = (o) => (o && (o.display_name || (o.email || "").split("@")[0])) || "?";
-const pmPeopleNames = (ids, ctx) => (Array.isArray(ids) ? ids : []).map((id) => pmPersonName(ctx.operatorsById[id]));
+// Assignable people are pm_people (migration 148) — a roster of names, separate from who
+// holds operator access. A person always has a name; the email is optional.
+const pmPersonName = (o) => (o && (o.name || (o.email || "").split("@")[0])) || "?";
+const pmPeopleNames = (ids, ctx) => (Array.isArray(ids) ? ids : []).map((id) => pmPersonName(ctx.peopleById[id]));
 const pmInitials = (o) => pmPersonName(o).slice(0, 2).toUpperCase();
 const PM_AVATAR_COLORS = ["#3D3672", "#1B7895", "#0E9F6E", "#B45309", "#BE185D", "#4338CA"];
 const pmAvatarColor = (id) => PM_AVATAR_COLORS[Math.abs(String(id).split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % PM_AVATAR_COLORS.length];
@@ -77,15 +77,15 @@ const PM_TYPES = {
       if (!ids.length) return <span style={{ color: "#94A3B8" }}>—</span>;
       return (
         <span style={{ whiteSpace: "nowrap" }}>
-          {ids.map((id) => { const o = ctx.operatorsById[id]; return (
-            <span key={id} title={o ? o.email : id} style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center", marginRight: -5, border: "2px solid #FFF", verticalAlign: "middle" }}>{pmInitials(o)}</span>
+          {ids.map((id) => { const o = ctx.peopleById[id]; return (
+            <span key={id} title={o ? (o.email || o.name) : id} style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center", marginRight: -5, border: "2px solid #FFF", verticalAlign: "middle" }}>{pmInitials(o)}</span>
           ); })}
           <span style={{ marginLeft: 10, fontSize: 12 }}>{pmPeopleNames(ids, ctx).join(", ")}</span>
         </span>
       );
     },
     sortVal: (v, col, ctx) => pmPeopleNames(v, ctx).join(",").toLowerCase(),
-    groupsFor: (col, ctx) => ctx.operators.map((o, i) => ({ key: o.user_id, label: pmPersonName(o), rank: i, color: pmAvatarColor(o.user_id) })),
+    groupsFor: (col, ctx) => ctx.people.map((o, i) => ({ key: o.id, label: pmPersonName(o), rank: i, color: pmAvatarColor(o.id) })),
     groupKeyOf: (v) => (Array.isArray(v) && v.length ? v[0] : null),
     facet: true,
   },
@@ -160,7 +160,7 @@ function PMChoiceMenu({ col, value, ctx, onCommit, onClose }) {
     (col.settings?.options || []).forEach((o) => rows.push({ key: o.id, label: o.label, color: o.color, on: cur.includes(o.id) }));
   } else {
     const cur = Array.isArray(value) ? value : [];
-    ctx.operators.forEach((o) => rows.push({ key: o.user_id, label: pmPersonName(o), color: pmAvatarColor(o.user_id), on: cur.includes(o.user_id) }));
+    ctx.people.forEach((o) => rows.push({ key: o.id, label: pmPersonName(o), color: pmAvatarColor(o.id), on: cur.includes(o.id) }));
   }
 
   const pick = (key) => {
@@ -255,7 +255,7 @@ function pmComputeGroups(mode, rows, boardGroups, columns, ctx) {
 
 // ── The table ─────────────────────────────────────────────────────────────────
 // Props:
-//   columns / rows / boardGroups / ctx ({operators, operatorsById})
+//   columns / rows / boardGroups / ctx ({people, peopleById})
 //   groupBy: "groups" | <columnId>    hiddenCols: Set of column ids
 //   sortKey ("name" | columnId) / sortDir / onSort
 //   canEdit + onCellCommit(item, col, value) + onDropToGroup(item, group) +

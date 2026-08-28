@@ -22,8 +22,9 @@ import { withErrorLog } from "../_shared/logError.ts";
 //     Changing a linked item's status to such a label updates the tenant-facing mirror
 //     row; labels without one are pure-internal and touch nothing tenant-side.
 //   * Saved views (pm_views) are per BOARD and shared by the whole operator team.
-//   * The Assignee roster IS app_operators — a PRIVILEGE table. See the roster
-//     actions below before touching them.
+//   * ASSIGNABLE PEOPLE (pm_people) and OPERATOR ACCESS (app_operators) are two
+//     different things since migration 148, joined by pm_people.user_id so one profile
+//     can hold both. Assigning work grants nothing; operator access grants everything.
 //   * An update marked client_visible is COPIED into feedback_comments (author
 //     "CSM Synergy", monday_update_id NULL — both Monday reconcile paths delete only
 //     by monday_update_id, so copies survive a Monday refresh). Editing/deleting the
@@ -114,9 +115,9 @@ function sanitizeSettings(type: string, raw: any): Record<string, unknown> {
 
 // Rebuild an item's values against the board's real columns. Unknown keys are dropped;
 // each value is coerced to its column type's shape or omitted. `operatorIds` guards the
-// people type — an assignee must be a real operator.
+// people type — an assignee must be a real person on the roster.
 // deno-lint-ignore no-explicit-any
-function sanitizeValues(columns: any[], raw: any, operatorIds: Set<string>): Record<string, unknown> {
+function sanitizeValues(columns: any[], raw: any, personIds: Set<string>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!raw || typeof raw !== "object") return out;
   for (const col of columns) {
@@ -145,7 +146,7 @@ function sanitizeValues(columns: any[], raw: any, operatorIds: Set<string>): Rec
         break;
       }
       case "people": {
-        const arr = (Array.isArray(v) ? v : [v]).map((x) => str(x, 40)).filter((x) => operatorIds.has(x));
+        const arr = (Array.isArray(v) ? v : [v]).map((x) => str(x, 40)).filter((x) => personIds.has(x));
         out[col.id] = arr.slice(0, 10);
         break;
       }
@@ -266,10 +267,13 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (error) throw error;
     return data || [];
   };
-  const operatorIdSet = async (): Promise<Set<string>> => {
-    const { data, error } = await admin.from("app_operators").select("user_id");
+  // Assignable people (pm_people, migration 148) — NOT the operator roster. Someone can
+  // be assigned work without any access to builders' accounts, which is the whole point
+  // of the split; the two are joined only by pm_people.user_id.
+  const personIdSet = async (): Promise<Set<string>> => {
+    const { data, error } = await admin.from("pm_people").select("id").eq("active", true);
     if (error) throw error;
-    return new Set((data || []).map((r: { user_id: string }) => r.user_id));
+    return new Set((data || []).map((r: { id: string }) => r.id));
   };
   // deno-lint-ignore no-explicit-any
   const getItem = async (id: string): Promise<any> => {
@@ -330,7 +334,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           admin.from("pm_groups").select("*").eq("board_id", boardId).order("position"),
           admin.from("pm_items").select("*").eq("board_id", boardId).is("archived_at", null)
             .order("position").limit(2000),
-          admin.from("app_operators").select("user_id, email, display_name, can_write"),
+          admin.from("pm_people").select("id, name, email, user_id, active").eq("active", true).order("position"),
           admin.from("pm_views").select("*").eq("board_id", boardId).order("position"),
         ]);
         if (groupsRes.error) throw groupsRes.error;
@@ -339,7 +343,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (viewsRes.error) throw viewsRes.error;
         return json({
           board, columns, groups: groupsRes.data, items: itemsRes.data,
-          operators: opsRes.data, views: viewsRes.data, canWrite: !!op.can_write,
+          people: opsRes.data, views: viewsRes.data, canWrite: !!op.can_write,
         });
       }
 
@@ -601,7 +605,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (!name) return json({ error: "Item name is required." }, 400);
         const { data: group } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
         if (!group || group.board_id !== boardId) return json({ error: "Group is not on this board." }, 400);
-        const [columns, opIds] = await Promise.all([boardColumns(boardId), operatorIdSet()]);
+        const [columns, opIds] = await Promise.all([boardColumns(boardId), personIdSet()]);
         const values = sanitizeValues(columns, payload.values, opIds);
         const { data: maxRow } = await admin.from("pm_items").select("position")
           .eq("group_id", groupId).order("position", { ascending: false }).limit(1).maybeSingle();
@@ -618,7 +622,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
 
       case "update_item": {
         const item = await getItem(payload.id);
-        const [columns, opIds] = await Promise.all([boardColumns(item.board_id), operatorIdSet()]);
+        const [columns, opIds] = await Promise.all([boardColumns(item.board_id), personIdSet()]);
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
         if (payload.name !== undefined) {
           const name = str(payload.name, 200);
@@ -741,77 +745,151 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ ok: true });
       }
 
-      // ── Assignee roster (app_operators) ───────────────────────────────────
-      // ⚠️ PRIVILEGE TABLE. A row here is not just "can be assigned work" — it grants
-      // operator access to EVERY builder's account (051). So: only people who already
-      // have a StructureStudio login can be added (no account creation from here, no
-      // passwords), every change is written to admin_audit with the actor, and nobody can
-      // remove themselves — locking the last operator out of the console is not something
-      // a click should be able to do.
-      case "list_operators": {
-        const { data, error } = await admin.from("app_operators")
-          .select("user_id, email, display_name, can_write, can_bill").order("email");
+      // ── People, and (separately) operator access ──────────────────────────
+      // TWO THINGS, deliberately not one (Carolyn 2026-08-27):
+      //   * pm_people   — who can be ASSIGNED work. A name is enough.
+      //   * app_operators — who can OPEN ANY BUILDER'S ACCOUNT. A privilege.
+      // One profile can hold both: a person with a login can be granted operator access
+      // from the same row. Granting it stays as loud and as audited as it was when the
+      // two were the same list — that was the whole risk of merging them.
+      case "list_people": {
+        const { data: people, error } = await admin.from("pm_people")
+          .select("id, name, email, user_id, active").order("position");
         if (error) throw error;
-        return json({ operators: data, me: user.id });
+        const { data: ops, error: oErr } = await admin.from("app_operators")
+          .select("user_id, can_write, can_bill");
+        if (oErr) throw oErr;
+        const byUser = new Map((ops || []).map((o) => [o.user_id, o]));
+        return json({
+          people: (people || []).map((pp) => {
+            const o = pp.user_id ? byUser.get(pp.user_id) : null;
+            return { ...pp, isOperator: !!o, canWrite: !!(o && o.can_write) };
+          }),
+          me: user.id,
+        });
       }
 
-      case "save_operator": {
-        const userId = str(payload.userId, 40);
-        const { data: row } = await admin.from("app_operators").select("user_id, email, can_write").eq("user_id", userId).maybeSingle();
-        if (!row) return json({ error: "That person is not on the team." }, 404);
-        const patch: Record<string, unknown> = {};
-        if (payload.displayName !== undefined) patch.display_name = str(payload.displayName, 80) || null;
-        if (payload.canWrite !== undefined) patch.can_write = payload.canWrite === true;
-        if (!Object.keys(patch).length) return json({ ok: true });
-        const { error } = await admin.from("app_operators").update(patch).eq("user_id", userId);
+      case "add_person": {
+        const name = str(payload.name, 80);
+        if (!name) return json({ error: "Give this person a name." }, 400);
+        const email = str(payload.email, 200).toLowerCase();
+        if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          return json({ error: "That does not look like an email address." }, 400);
+        }
+        // An email that matches a real login links the profile to it, which is what makes
+        // operator access grantable later. No email, or no matching login, is fine — they
+        // are still assignable.
+        let userId: string | null = null;
+        if (email) {
+          const { data: found, error: fErr } = await admin.rpc("pm_find_user_by_email", { p_email: email });
+          if (fErr) throw fErr;
+          const hit = Array.isArray(found) ? found[0] : found;
+          if (hit) {
+            const { data: taken } = await admin.from("pm_people").select("id").eq("user_id", hit.id).maybeSingle();
+            if (taken) return json({ error: "Someone with that login is already on the list." }, 409);
+            userId = hit.id;
+          }
+        }
+        const { data: maxRow } = await admin.from("pm_people").select("position")
+          .order("position", { ascending: false }).limit(1).maybeSingle();
+        const { data: person, error } = await admin.from("pm_people").insert({
+          name, email: email || null, user_id: userId,
+          position: (maxRow?.position || 0) + 1024,
+        }).select().single();
         if (error) throw error;
-        if (patch.can_write !== undefined && patch.can_write !== row.can_write) {
-          const { error: aErr } = await admin.from("admin_audit").insert({
-            action: "operator_can_write", target_client_id: null, row_count: null,
-            note: `operator:${actorEmail} set can_write=${patch.can_write} for ${row.email}`,
-          });
-          if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
+        return json({ person, linked: !!userId });
+      }
+
+      case "save_person": {
+        const id = str(payload.id, 40);
+        const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
+        if (!row) return json({ error: "That person is not on the list." }, 404);
+        const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+        if (payload.name !== undefined) {
+          const name = str(payload.name, 80);
+          if (!name) return json({ error: "A person needs a name." }, 400);
+          patch.name = name;
+        }
+        if (payload.active !== undefined) patch.active = payload.active === true;
+        if (payload.email !== undefined) {
+          const email = str(payload.email, 200).toLowerCase();
+          patch.email = email || null;
+          // A late-arriving email can still link an unlinked profile to its login.
+          if (email && !row.user_id) {
+            const { data: found } = await admin.rpc("pm_find_user_by_email", { p_email: email });
+            const hit = Array.isArray(found) ? found[0] : found;
+            if (hit) {
+              const { data: taken } = await admin.from("pm_people").select("id").eq("user_id", hit.id).maybeSingle();
+              if (!taken) patch.user_id = hit.id;
+            }
+          }
+        }
+        const { error } = await admin.from("pm_people").update(patch).eq("id", id);
+        if (error) throw error;
+        // Keep the operator roster's own display name in step, so other operator screens
+        // do not show a stale name for the same human.
+        if (patch.name && row.user_id) {
+          await admin.from("app_operators").update({ display_name: patch.name }).eq("user_id", row.user_id);
         }
         return json({ ok: true });
       }
 
-      case "add_operator": {
-        const email = str(payload.email, 200).toLowerCase();
-        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: "That does not look like an email address." }, 400);
-        const { data: found, error: fErr } = await admin.rpc("pm_find_user_by_email", { p_email: email });
-        if (fErr) throw fErr;
-        const hit = Array.isArray(found) ? found[0] : found;
-        if (!hit) {
-          return json({ error: `No StructureStudio login for ${email} yet. They need an account before they can be added to the team.` }, 404);
-        }
-        const { data: exists } = await admin.from("app_operators").select("user_id").eq("user_id", hit.id).maybeSingle();
-        if (exists) return json({ error: "They are already on the team." }, 409);
-        // New operators start READ-ONLY. Being able to see the boards is the small grant;
-        // being able to change other people's tenants is the one someone should choose.
-        const { error } = await admin.from("app_operators").insert({
-          user_id: hit.id, email: hit.email,
-          display_name: str(payload.displayName, 80) || null,
-          can_write: false, can_bill: false,
-        });
+      case "remove_person": {
+        const id = str(payload.id, 40);
+        const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
+        if (!row) return json({ ok: true });
+        // Deactivate rather than delete: they leave every picker, but the work they were
+        // already assigned keeps showing their name instead of a bare id.
+        const { error } = await admin.from("pm_people")
+          .update({ active: false, updated_at: new Date().toISOString() }).eq("id", id);
         if (error) throw error;
+        return json({ ok: true, note: "Removing someone here does not touch their access to builders' accounts." });
+      }
+
+      case "set_operator_access": {
+        const id = str(payload.id, 40);
+        const enabled = payload.enabled === true;
+        const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
+        if (!row) return json({ error: "That person is not on the list." }, 404);
+        if (!row.user_id) {
+          return json({ error: `${row.name} does not have a StructureStudio login yet, so there is nothing to grant access to. Add their email once they have an account.` }, 400);
+        }
+        if (!enabled && row.user_id === user.id) {
+          return json({ error: "You cannot remove your own access." }, 400);
+        }
+        if (enabled) {
+          const { data: has } = await admin.from("app_operators").select("user_id").eq("user_id", row.user_id).maybeSingle();
+          if (!has) {
+            // New access starts READ-ONLY. Seeing builders' accounts is the small grant;
+            // changing them is the one someone should choose deliberately.
+            const { error } = await admin.from("app_operators").insert({
+              user_id: row.user_id, email: row.email || "", display_name: row.name,
+              can_write: false, can_bill: false,
+            });
+            if (error) throw error;
+          }
+        } else {
+          const { error } = await admin.from("app_operators").delete().eq("user_id", row.user_id);
+          if (error) throw error;
+        }
         const { error: aErr } = await admin.from("admin_audit").insert({
-          action: "operator_added", target_client_id: null, row_count: null,
-          note: `operator:${actorEmail} added ${hit.email} to app_operators (read-only)`,
+          action: enabled ? "operator_added" : "operator_removed", target_client_id: null, row_count: null,
+          note: `operator:${actorEmail} ${enabled ? "granted" : "revoked"} operator access for ${row.email || row.name}`,
         });
         if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
         return json({ ok: true });
       }
 
-      case "remove_operator": {
-        const userId = str(payload.userId, 40);
-        if (userId === user.id) return json({ error: "You cannot remove your own access." }, 400);
-        const { data: row } = await admin.from("app_operators").select("email").eq("user_id", userId).maybeSingle();
-        if (!row) return json({ ok: true });
-        const { error } = await admin.from("app_operators").delete().eq("user_id", userId);
+      case "set_operator_write": {
+        const id = str(payload.id, 40);
+        const canWrite = payload.canWrite === true;
+        const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
+        if (!row || !row.user_id) return json({ error: "That person does not have operator access." }, 400);
+        const { error } = await admin.from("app_operators").update({ can_write: canWrite }).eq("user_id", row.user_id);
         if (error) throw error;
         const { error: aErr } = await admin.from("admin_audit").insert({
-          action: "operator_removed", target_client_id: null, row_count: null,
-          note: `operator:${actorEmail} removed ${row.email} from app_operators`,
+          action: "operator_can_write", target_client_id: null, row_count: null,
+          note: `operator:${actorEmail} set can_write=${canWrite} for ${row.email || row.name}`,
         });
         if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
         return json({ ok: true });
