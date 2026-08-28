@@ -120,7 +120,18 @@ export async function buildCrmFeed(
 
   const q = <T>(p: Promise<T>) => p.then((r: any) => r?.data ?? []).catch(() => []);
 
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, fieldChanges, texts, custFiles] = await Promise.all([
+  // ⚠️ POSITIONAL DESTRUCTURE — each name means the query at the SAME index below, and
+  // nothing checks that. This has now gone wrong TWICE: `texts` was appended to the end of
+  // the list while its query went in at slot 11, so `fieldChanges` held sms_messages rows
+  // and `f.field` threw a TypeError on every record page that had ever seen a text; then
+  // `custFiles` was appended while `crm_files` went in at slot 11, which would have put
+  // file rows in `fieldChanges` the same way. Insert the NAME where you insert the PROMISE,
+  // and count both lists before you commit.
+  //   1 designs        2 design_versions  3 email_sends   4 design_acceptances
+  //   5 change_orders  6 invoice_sends    7 captured_leads 8 crm_notes
+  //   9 crm_activities 10 email_inbound   11 crm_files    12 sms_messages
+  //  13 crm_field_changes
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges] = await Promise.all([
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
     // Email is the conversation channel, so this read has to cover BOTH scopes: document
@@ -185,6 +196,9 @@ export async function buildCrmFeed(
           ].filter(Boolean).join(","))
           .order("created_at", { ascending: false }).limit(80))
       : Promise.resolve([]),
+    // FIELD EDITS (migration 141). Contact-scoped only: a field change is a change to the
+    // PERSON, and it belongs on their record whichever design you arrived from. A design
+    // record with no contact linked simply has none to show.
     opts.contactId
       ? q(admin.from("crm_field_changes")
           .select("id, field, old_value, new_value, changed_by, created_at")
@@ -314,12 +328,6 @@ export async function buildCrmFeed(
   for (const a of acts as any[]) {
     push({ id: `a:${a.id}`, type: "activity", at: iso(a.done ? (a.done_at || a.created_at) : a.created_at), title: `${labelActivity(a.kind)}: ${a.subject}`, body: a.done ? "Completed" : (a.due_at ? `Due ${a.due_at}` : "No due date"), code: a.short_code, meta: { kind: a.kind, done: !!a.done, dueAt: a.due_at, id: a.id }, icon: a.kind });
   }
-  // FIELD EDITS — the half of "everything that they did with that lead was logged" that had
-  // nothing to log until there was an editor (migration 141).
-  //
-  // Both values are shown. A changelog that says only "phone changed" answers none of the
-  // questions someone opens a changelog to ask; the old value is the whole point when the
-  // edit was a correction, and it is the only record of what the number used to be.
   // SMS, both directions. Outbound carries its delivery state in the title when it is
   // anything other than a clean send: a text that silently failed looks identical to one
   // that arrived, and the builder finds out from the customer.
@@ -346,6 +354,12 @@ export async function buildCrmFeed(
       meta: { direction: t.direction, status: st || null },
     });
   }
+  // FIELD EDITS — the half of "everything that they did with that lead was logged" that had
+  // nothing to log until there was an editor (migration 141).
+  //
+  // Both values are shown. A changelog that says only "phone changed" answers none of the
+  // questions someone opens a changelog to ask; the old value is the whole point when the
+  // edit was a correction, and it is the only record of what the number used to be.
   for (const f of fieldChanges as any[]) {
     const from = f.old_value ? `"${f.old_value}"` : "(empty)";
     const to = f.new_value ? `"${f.new_value}"` : "(empty)";

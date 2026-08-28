@@ -234,9 +234,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
     // SS mode completes the invoice even when the email couldn't go out (paper-first) —
     // say which half happened rather than claiming "sent" for an email that never left.
+    //
+    // And say where the DESIGN stands, which is not the same answer on both branches.
+    // `issuedBy` is the server naming the branch it actually took, and the SS one
+    // deliberately leaves the status Accepted (migration 136 — the customer's signature is
+    // the only writer of 'invoiced' now). "is now Invoiced" was false there every time: the
+    // load() below repaints the row as Accepted under a green banner saying otherwise, and
+    // the owner then finds the build board empty, because portal-schedule create_job takes
+    // only 'invoiced'/'delivered'. Same words the Orders tab uses for this state.
+    const outcome = data && data.issuedBy === "structurestudio"
+      ? `${est} is awaiting the customer's signature`
+      : `${est} is now Invoiced`;
     setInvMsg(data && data.sent === false
-      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${est} is Invoiced, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
-      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${est} is now Invoiced.` });
+      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${outcome}, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${outcome}.` });
     load();
   };
 
@@ -684,7 +695,15 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // having, but it would not have fixed this: the wait was one round-trip, not 30 rows.
     const paint = (rowsIn, browsingIn) => {
       // Group by person: normalized phone, else email, else name (fallback: short_code).
-      const normPhone = (p) => String(p || "").replace(/\D/g, "");
+      // normPhone is migration 132's crm_phone_key, in JS: an 11-digit string starting with
+      // 1 is a US/Canada number written with its country code, so take the last 10. A bare
+      // digit filter is NOT a phone normalizer — it split one customer who typed
+      // "+1 707-362-5667" once and "707-362-5667" the next time into two rows, each showing
+      // half his designs and half his history, while both linked to the SAME crm_contacts
+      // record (the server resolves through crm_phone_key) and opened the same page. The
+      // list contradicted the record it links to. Nothing else is guessed at, for 132's
+      // reason: collapsing international formats would fuse two genuinely different people.
+      const normPhone = (p) => { const d = String(p || "").replace(/\D/g, ""); return d.length === 11 && d[0] === "1" ? d.slice(1) : d; };
       const groups = new Map();
       rowsIn.forEach((r) => { // newest-first
         const c = r.contact || {};
@@ -722,7 +741,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
       browsingIn.forEach((l) => {
         const em = String(l.email || "").trim().toLowerCase();
-        if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
+        // captured_leads.phone_digits is the raw digit filter (capture-lead), so it has to
+        // go through the same key or a lead captured as "+1 …" survives as a third row for
+        // a person who has already submitted designs.
+        if (groups.has(normPhone(l.phone_digits)) || (em && groupEmails.has(em))) return;
         groups.set("lead-" + l.id, {
           key: "lead-" + l.id, browsing: true, source: l.source,
           name: l.name || "", email: l.email || "", phone: l.phone || "",
@@ -1096,18 +1118,27 @@ const CRM_TABS = [
   //
   // WhatsApp is still not a feature, and nothing here reserves a slot for it.
   //
-  // THREE different things disable this tab and it names which one, for the same reason the
+  // FOUR different things disable this tab and it names which one, for the same reason the
   // Email tab's hint is a function: a rep without contacts:edit was once shown "this contact
   // has no email address" while the address sat rendered directly above it. "Not available"
   // sends somebody off editing a contact that is fine.
+  //
+  // The fourth is the contact with no ROW behind it: a design whose crm_ensure_contact call
+  // was swallowed by 133's exception guard carries contact_id null, and the server hands us
+  // a contact synthesized from the design's jsonb blob (id null). Texting is the one action
+  // in this group that cannot fall back to the short code, so sendSms posted contactId null
+  // and the server answered "A text has to be addressed to a contact." — printed underneath
+  // the phone number this very tab renders. Same rule, same words as the Person panel.
   {
     key: "sms", label: "SMS",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone) && !!(c.sms && c.sms.ready),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready),
     hint: (c) => (!c.canEdit
       ? "You don't have permission to text contacts."
       : !(c.contact && c.contact.phone)
         ? "This contact has no phone number on file."
-        : "Texting switches on once this account's number clears carrier registration."),
+        : !(c.contact && c.contact.id)
+          ? "This design predates contact records, so there is no contact to text yet. It gets its own contact the next time this customer submits."
+          : "Texting switches on once this account's number clears carrier registration."),
   },
   // Conversations were email ONLY, until the tab above. Email remains the channel that
   // carries a document — a quote, an invoice, anything with a link — and needs an address to

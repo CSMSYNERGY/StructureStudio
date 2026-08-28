@@ -914,7 +914,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         g.qty++; rg.set(key, g);
       }
       for (const g of rg.values()) {
-        const inc = g.fixtureItemId ? (includedMap.get(String(g.fixtureItemId)) || 0) : 0;
+        // The SHARED pool (takeFxIncluded), not a per-group read of includedMap — the same
+        // rule the fixture doors and windows follow. The ramp group key is name|price and the
+        // name comes from the body, so one fixture id can span several groups (two ramps of
+        // one style under different names, or a catalog style renamed between placements) and
+        // a per-group read handed every group the whole inclusion: a $400 ramp given away per
+        // duplicate, while the designer's preview netted it once (audit 2026-08-28).
+        const inc = takeFxIncluded(g.fixtureItemId ? String(g.fixtureItemId) : null, g.qty);
         const chargeable = Math.max(0, g.qty - inc);
         const included = inc > 0 && chargeable <= 0;
         const im = g.fixtureItemId ? rImg.get(String(g.fixtureItemId)) : null;
@@ -1014,12 +1020,20 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Rough openings — priced from this tenant's layout_item_pricing "roughOpening" rate (each
   // owner can charge their own price; no hardcoded amount). One line per placed RO at that
   // rate, with the dimensions in the description. If no rate is configured, the line is $0.
+  //
+  // qty is CLAMPED to a whole positive count (audit 2026-08-28). It was the last body-supplied
+  // multiplier on this endpoint still taken verbatim — doors/windows are counted server-side
+  // from their arrays, customOptions runs Math.abs, discounts/deliveryFee are staff-gated by
+  // 2c — so an anon caller could POST qty:-100 and turn this line into a $15,000 CREDIT that
+  // dragged a $12,000 quote to $0.00 on the PDF, the customer email, the GHL opportunity and
+  // the estimate_lines snapshot QuickBooks invoices verbatim. The designer only ever sends 1.
   if (Array.isArray(roughOpenings)) {
     const roRate = layoutRates.get("roughOpening")?.rate || 0;
+    const roQty = (v: unknown): number => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? n : 1; };
     roughOpenings.forEach((ro: any) => {
       targetItems.push(tagLine({
         name: ro.name || "Rough Opening",
-        qty: ro.qty || 1,
+        qty: roQty(ro.qty),
         amount: roRate,
         priceId: "",
         productId: "",
@@ -1527,6 +1541,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // pending design_edit CO per design, updated in place on every further resubmit so the
     // customer always sees the CUMULATIVE change against what they signed. An identical
     // resubmit (null diff) is not a change order.
+    //
+    // KNOWN BUG — audit finding 16, fix reverted 2026-08-28, left for dedicated work. A
+    // SECOND resubmit diffs against designs.estimate_lines, which the FIRST resubmit already
+    // overwrote, so the pending CO's baseline moves to the unacknowledged revision and the
+    // customer signs against a "previous total" they never agreed to. Two fixes were tried and
+    // each broke something worse: stamping snapshot_before re-points portal-settings'
+    // void_change_order at a restore covering only 3 of the 9 columns a designer resubmit
+    // rewrites; carrying total_before_cents forward off the CO row collides with the order
+    // screen's own baseline write to that same row (stage_order_attribute_change).
     let changeOrder: { coNo: number | null; description: string } | null = null;
     if (existingDesign.accepted_at) {
       const coDescription = changeOrderDescription(existingDesign.estimate_lines, estimateLines);

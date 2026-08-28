@@ -1563,6 +1563,28 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
         const dupHdrs = [...new Set(header.filter((h, idx) => colKey[idx] && keyCount[colKey[idx]] > 1))];
         if (dupHdrs.length) throw new Error(`Import stopped — the sheet has more than one column for: ${dupHdrs.join(", ")}. Keep one column per option and re-upload.`);
       }
+      // The style column is the same story, and it moves PRICES. The server resolves each
+      // cell against every style's label OR key — hidden styles included, last writer wins —
+      // and nothing makes a label unique: create_style only uniquifies the derived key, and
+      // update_style doesn't check at all. So hide "Barn", add a fresh "Barn", and a whole
+      // sheet of new prices can be written onto the hidden one while the banner reports them
+      // imported; the live style keeps quoting last year's numbers. A name only ONE style
+      // answers to resolves to that style deterministically — refuse the rest by name, since
+      // the sheet carries nothing else that could say which "Barn" the builder meant.
+      {
+        const claims = new Map();   // lowercased label/key -> ids of the styles answering to it
+        allStyles().forEach((s) => [s.label, s.key].forEach((tok) => {
+          const t = String(tok == null ? "" : tok).trim().toLowerCase();
+          if (!t) return;
+          const ids = claims.get(t) || [];
+          if (!ids.includes(s.id)) ids.push(s.id);   // a style's own label and key are one claim
+          claims.set(t, ids);
+        }));
+        const dupStyles = [...new Set(matrix.slice(1)
+          .map((cols) => String(cols[iStyle] == null ? "" : cols[iStyle]).trim())
+          .filter((n) => n && (claims.get(n.toLowerCase()) || []).length > 1))];
+        if (dupStyles.length) throw new Error(`Import stopped — more than one building style answers to: ${dupStyles.join(", ")}. A hidden style counts, and its prices are the ones that would be overwritten. Rename one of them in Building styles above, then upload again.`);
+      }
       const rows = matrix.slice(1).map((cols) => {
         const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
         return { style: cols[iStyle], width: cols[iWidth], length: cols[iLength], price: cols[iPrice], active: iActive >= 0 ? cols[iActive] : "", inclusions };
@@ -2117,7 +2139,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [edit, setEdit] = useState(null);            // { idx, draft } — idx -1 = adding a new item
+  const [edit, setEdit] = useState(null);            // { id, draft } — id null = adding a new item
   const [pendingDelete, setPendingDelete] = useState(null);
   const [dragIdx, setDragIdx] = useState(null);
   const [imgBusy, setImgBusy] = useState(false);
@@ -2200,10 +2222,19 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_fixture", ...toPayload(edit.draft) }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       const saved = { ...edit.draft, id: edit.draft.id || (data && data.id) || null };
-      setRows((rs) => edit.idx < 0 ? [...rs, saved] : rs.map((r, j) => j === edit.idx ? saved : r));
+      const adding = edit.id == null;
+      // The row is found by id INSIDE the updater, against the array as it stands right now —
+      // a reload can have replaced and re-sorted it since the panel opened (see dropFromEdit).
+      // Not there at all means the list moved on under a save the server accepted, so the
+      // saved line is put back rather than dropped on the floor.
+      setRows((rs) => {
+        if (adding) return [...rs, saved];
+        const at = rs.findIndex((r) => r.id === edit.id);
+        return at < 0 ? [...rs, saved] : rs.map((r, j) => j === at ? saved : r);
+      });
       // A new line is APPENDED, so with paging on it lands on the last page. Follow it there,
       // or a builder on page 1 of a long catalog saves a door and watches it vanish.
-      if (edit.idx < 0) setPage(Math.max(1, Math.ceil((rows.length + 1) / pageSize)));
+      if (adding) setPage(Math.max(1, Math.ceil((rows.length + 1) / pageSize)));
       setEdit(null);
       setMsg({ ok: `Saved “${saved.name}”.` });
     } catch (e) { setMsg({ err: e.message }); }
@@ -2224,20 +2255,19 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     setBusy(false);
   };
 
-  // `edit.idx` is a FULL-ARRAY index and every delete shifts the array under it. Unmaintained,
-  // it addresses a different row than the one on screen: saveLine does
-  // `rs.map((r, j) => j === edit.idx ? saved : r)`, so an edit opened on index 5 with index 0
-  // then deleted writes the saved values over what used to be row 6 — old row 5 appears twice
-  // and old row 6 vanishes, with no error, because the SERVER write is keyed on draft.id and
-  // succeeds. Past the end of the array the same map matches nothing at all and Save reports
-  // success over a list it never changed. Both are silent, so the index is maintained here.
-  const dropFromEdit = (removedIdx) => {
-    if (removedIdx < 0) return;
-    setEdit((e) => {
-      if (!e || e.idx < 0) return e;            // the add-new panel has no row to follow
-      if (e.idx === removedIdx) return null;    // editing the row that just went — close it
-      return e.idx > removedIdx ? { ...e, idx: e.idx - 1 } : e;
-    });
+  // The open panel holds the row's ID, never its position, because nothing can keep a
+  // positional index in step with this array: a delete shifts every row under it, and a
+  // wholesale reload replaces the lot re-sorted live-before-archived — load() runs on the
+  // refreshKey a sibling editor bumps (WindowsView, after saving window colors) and after an
+  // import, both reachable with the panel open. One position of drift and saveLine writes the
+  // draft over a DIFFERENT line: the edited row appears twice, its neighbour vanishes from the
+  // list while still existing, and nothing errors, because the SERVER write is keyed on
+  // draft.id and succeeds. Past the end of the array the same map matches nothing at all and
+  // Save reports success over a list it never changed. Both are silent. An id survives every
+  // one of those, so the only thing left to follow is the edited row being deleted outright.
+  const dropFromEdit = (row) => {
+    if (!row) return;
+    setEdit((e) => (e && e.id != null && e.id === row.id ? null : e));
   };
   const confirmDelete = async () => {
     const row = pendingDelete; if (!row) return;
@@ -2245,7 +2275,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // server to delete nothing — that round trip could only ever come back as an error, and
     // it left the builder unable to clear a row they could see.
     if (!row.id) {
-      dropFromEdit(rows.indexOf(row));
+      dropFromEdit(row);
       setRows((rs) => rs.filter((r) => r !== row));
       setPendingDelete(null);
       setMsg({ ok: "Removed the unsaved line." });
@@ -2255,7 +2285,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delete_fixture", id: row.id }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      dropFromEdit(rows.indexOf(row));
+      dropFromEdit(row);
       setRows((rs) => rs.filter((r) => r !== row));
       setPendingDelete(null);
       setMsg({ ok: `Deleted “${row.name}”.` });
@@ -2530,7 +2560,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
 
   const editPanel = () => (
     <div style={{ border: `2px solid ${ACCENT}`, background: "#FAFAFF", borderRadius: 10, padding: "14px 16px", marginBottom: 8 }}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: ACCENT, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>{edit.idx < 0 ? `New ${noun}` : `Editing — ${edit.draft.name || noun}`}</div>
+      <div style={{ fontSize: 12, fontWeight: 800, color: ACCENT, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>{edit.id == null ? `New ${noun}` : `Editing — ${edit.draft.name || noun}`}</div>
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
         <div style={{ flex: "2 1 220px", minWidth: 200 }}>
           <div style={fldLbl}>Style name</div>
@@ -2650,7 +2680,14 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
             <div>
               <div style={fldLbl}>Height off floor</div>
-              <input value={edit.draft.sill_in || ""} onChange={(e) => setDraft({ sill_in: e.target.value })}
+              {/* Spaces stripped as they are typed, exactly like Width and Height above:
+                  parseFtIn returns NaN on any internal whitespace and ftInToInches turns that
+                  into "", which is the wire form of BLANK — so `6' 6"` saved as "use the
+                  standard 3'6"", green banner and all, and the window sat at 3'6" in 3D on
+                  every customer's building. A null sill is legal, so nothing downstream could
+                  catch it; width and height only survive the same typo because the server
+                  rejects a null width. */}
+              <input value={edit.draft.sill_in || ""} onChange={(e) => setDraft({ sill_in: e.target.value.replace(/\s/g, "") })}
                 placeholder={`standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
             </div>
             <div>
@@ -2705,7 +2742,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       {!r.active && chip("Hidden", "#F1F5F9", "#64748B", "Active is off — not offered in the designer")}
       {r.internalOnly && chip("Internal", "#E2E8F0", "#475569", "Internal Designer only — customers can't add it")}
       {r.archived && chip("Archived", "#FEF3C7", "#B45309", "Retired from new builds; still shows on existing designs")}
-      <button onClick={() => setEdit({ idx: i, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
+      <button onClick={() => setEdit({ id: r.id, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
       <button onClick={() => quickSave(i, { archived: !r.archived })} disabled={busy}
         title={r.archived ? "Restore to active" : "Archive: retire from new builds, keep on existing designs"}
         style={S.btn(r.archived ? "#FEF3C7" : "#F1F5F9", r.archived ? "#B45309" : "#64748B")}>{r.archived ? "Unarchive" : "Archive"}</button>
@@ -2716,6 +2753,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // Clamped rather than reset: deleting the last row on the last page should fall back a
   // page, not leave the builder staring at an empty list with no way to tell why.
   const curPage = Math.min(page, Math.max(1, Math.ceil(rows.length / pageSize)));
+  // Where the open panel's row sits RIGHT NOW — derived every render from the id, never
+  // stored, so a delete or a reload that re-sorts the list can't leave it aimed at a
+  // neighbour (see dropFromEdit). -1 = the add-new panel, or a row the list no longer holds.
+  const editIdx = (edit && edit.id != null) ? rows.findIndex((r) => r.id === edit.id) : -1;
 
   return (
     <>
@@ -2769,7 +2810,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
             </label>
           </div>
           {rows.length === 0 && !edit && <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Nothing here yet — click <b>+ {addLabel}</b> below to create your first one.</div>}
-          {/* ⚠️ `edit.idx`, `dragIdx` and `moveRow(from,to)` are FULL-ARRAY indices, and
+          {/* ⚠️ `editIdx`, `dragIdx` and `moveRow(from,to)` are FULL-ARRAY indices, and
               persistOrder posts the whole ordered id list to reorder_fixtures — so every
               handler is still handed the GLOBAL index `i`, never the page-local `j`. Passing
               the page-local one would reorder the wrong rows and silently persist that.
@@ -2777,7 +2818,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
               row to drop onto) — a real limit of paging this list, not something to paper over. */}
           {rows.slice((curPage - 1) * pageSize, curPage * pageSize).map((r, j) => {
             const i = (curPage - 1) * pageSize + j;
-            return (edit && edit.idx === i) ? <React.Fragment key={r.id || `edit-${i}`}>{editPanel()}</React.Fragment> : line(r, i);
+            return (editIdx === i) ? <React.Fragment key={r.id || `edit-${i}`}>{editPanel()}</React.Fragment> : line(r, i);
           })}
           {/* Shown once the list is longer than the SMALLEST offered size, not longer than the
               current one: gated on `> pageSize`, a builder who picked 100 for their 40 windows
@@ -2798,10 +2839,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
               is rendered by neither branch. `curPage * pageSize` alone put the panel back in the
               exact lockout this comment describes, with no paging involved at all — a two-row
               catalog, Edit the second row, delete the first. */}
-          {edit && (edit.idx < 0
-            || edit.idx < (curPage - 1) * pageSize
-            || edit.idx >= Math.min(curPage * pageSize, rows.length)) && editPanel()}
-          <button onClick={() => setEdit({ idx: -1, draft: blank() })} disabled={busy || !!edit} style={{ ...S.btn("#1E293B", "#FFF"), opacity: (busy || !!edit) ? 0.55 : 1 }}>+ {addLabel}</button>
+          {edit && (editIdx < 0
+            || editIdx < (curPage - 1) * pageSize
+            || editIdx >= Math.min(curPage * pageSize, rows.length)) && editPanel()}
+          <button onClick={() => setEdit({ id: null, draft: blank() })} disabled={busy || !!edit} style={{ ...S.btn("#1E293B", "#FFF"), opacity: (busy || !!edit) ? 0.55 : 1 }}>+ {addLabel}</button>
         </>
       )}
       {msg && msg.skipped && msg.skipped.length > 0 && (

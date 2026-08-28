@@ -780,9 +780,19 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const weekOrderedRows = (g) =>
     [...g.rows].sort((a, b) => String(schedBuildDate(a) || "").localeCompare(String(schedBuildDate(b) || "")));
   const weekInsertDate = (g, insertBeforeId, draggedId) => {
+    const ordered = weekOrderedRows(g);
+    // A drop that does not MOVE the row must write nothing — released back on itself, or onto
+    // the end strip while already last. Both mean "insert where I already am", but the dragged
+    // row is filtered out below, so the neighbours are OTHER jobs' dates and the build silently
+    // jumped: the Friday job of a Mon/Wed/Fri week landed on the Monday, and a week holding
+    // only that job landed on `g.key`, the Sunday. The insertion line deliberately stays dark
+    // for a self-drop (insHot), so the gesture promises the same non-event as dropping a card
+    // on itself; returning null is how the caller keeps that promise.
+    if (draggedId != null && (insertBeforeId === draggedId
+      || (insertBeforeId == null && ordered.length > 0 && ordered[ordered.length - 1].id === draggedId))) return null;
     // Neighbours are computed WITHOUT the dragged row — otherwise dropping a job just below
     // itself would read itself as its own neighbour.
-    const rows = weekOrderedRows(g).filter((j) => j.id !== draggedId);
+    const rows = ordered.filter((j) => j.id !== draggedId);
     const at = insertBeforeId == null ? rows.length
       : Math.max(0, rows.findIndex((j) => j.id === insertBeforeId));
     const dPrev = at > 0 ? schedBuildDate(rows[at - 1]) : null;
@@ -791,7 +801,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
       const gapDays = Math.round((schedLocalDate(dNext) - schedLocalDate(dPrev)) / 86400000);
       return gapDays > 1 ? schedShiftIso(dPrev, 1, "days") : dPrev;
     }
-    return dPrev || dNext || g.key;   // empty week can only be the dragged row's own — Sunday
+    return dPrev || dNext || g.key;   // no dated neighbour left to copy — the week's Sunday
   };
   // Drop props for a spot in a week's order. `insertBeforeId` null = the end-of-week strip.
   const weekSpotDropProps = (g, insertBeforeId) => {
@@ -1897,7 +1907,24 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
   useEffect(() => {
     if (!selectedId && repairs.length) setSelectedId(repairs[0].id);
   }, [repairs.length]);
-  // Editable detail copy + photos, refreshed whenever the selection changes.
+  // Editable detail copy + photos, re-seeded when the selection changes, when the row appears or
+  // disappears, and when the repair ROW ITSELF actually moved. Deliberately NOT keyed on `data` —
+  // same reason as the load picker below. "Build →" and "Delivery →" end in load(), which always
+  // hands back a fresh `data` object, and a data-keyed re-seed threw away the Repair $, address and
+  // notes the user had typed but not yet saved (Save then wrote the stored figures straight back).
+  // create_job and add_stop never write the repairs row, so `updated_at` does not move there and
+  // the typed values still survive both.
+  //
+  // `updated_at` IS in the key, though, and only update_repair moves it (089_repairs has no touch
+  // trigger; photo upload/delete touch storage only, so those still leave `photos` alone). Without
+  // it, ↻ Refresh repainted the header from the reloaded row while the Status select and Repair $
+  // input kept rendering the pre-refresh copy — and Save posts status/quote/notes/address from that
+  // stale copy, so a second person's saved figure (900 → 1850) was silently written back to 900
+  // under a green "Saved." with no conflict signal. THE TRADE, stated plainly: re-seeding discards
+  // YOUR unsaved keystrokes when the row really changed under you. That is the lesser harm — your
+  // keystrokes are on screen and retypeable, someone else's saved money figure is not recoverable
+  // once overwritten. Same discipline as the job card near line 726, which remounts on updated_at
+  // for exactly this staleness. Cost: a save of this repair also re-fetches its photos.
   useEffect(() => {
     if (!selected) { setDetail(null); setPhotos(null); return; }
     setDetail({ status: selected.status, quote: selected.quote_cents == null ? "" : String(selected.quote_cents / 100), notes: selected.notes || "",
@@ -1909,7 +1936,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
       if (!dead) setPhotos((d && d.photos) || []);
     })();
     return () => { dead = true; };
-  }, [selectedId, data]);
+  }, [selectedId, !!selected, selected && selected.updated_at]);
   // The load picker resets when the SELECTION changes — a picker left open would apply to
   // the wrong repair. Deliberately NOT keyed on `data`: every write here ends in load(), so
   // a data-keyed reset closed the picker the moment "Both →" opened it (the build-job write

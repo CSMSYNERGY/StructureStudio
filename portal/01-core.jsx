@@ -62,6 +62,21 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
 const SS_ERR_SOURCE = "portal";
+// The tenant every row is filed under. This read `window.__SS_CLIENT_ID__`, which nothing in
+// the repo has ever assigned, and the portal's own URLs carry `?view=`, never `?client=` — so
+// every row this page wrote landed with client_id NULL. The ones with a server-side twin
+// survive that (logEdgeError files those under the tenant the function resolved); the
+// browser-only ones do not, and they are exactly the ones that need it: the 4xx refusals the
+// invoke wrapper logs, session_reconnecting, window.onerror. Support could not scope
+// app_errors to the builder who was on the phone. Latched further down from the tenant
+// portal-settings reports it resolved — the one tenant id this page is handed as fact rather
+// than as a request — EXCEPT during operator view-as, where the tenant on screen is the
+// armed view-as target and no status call is made to echo anything (see the latch in the
+// invoke wrapper and the stamp in 11-shell.jsx). Declared above ssLogError because the boot
+// guard below calls it during module evaluation, and a TDZ throw there would swallow the
+// row entirely. (Same reason ssLogError does NOT read ssTargetClientId directly: that one is
+// declared below the boot-guard call, so a read here would TDZ-throw and lose the row.)
+let ssResolvedClientId = null;
 // `severity` is optional and defaults to "error", so every existing call site keeps its
 // current meaning. Pass "info" for a REFUSAL — the product correctly declining something
 // ("send the invoice first", "that width isn't valid"). Those still get a row, because a
@@ -77,7 +92,7 @@ function ssLogError(source, message, code, context, severity) {
         p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
         p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
         p_code: code == null ? null : String(code).slice(0, 100),
-        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_client_id: ssResolvedClientId || params.get("client") || null,
         p_url: location.href.slice(0, 600),
         p_context: context || null,
         p_severity: severity || "error",
@@ -152,6 +167,14 @@ __ssFunctions.invoke = async (name, opts) => {
   // the tripwire below only fires when the server disagrees with `injected`, and here it
   // agrees. Mid-flight view-as already poisoned a call once (audit 2026-08-20). Capture the
   // value synchronously; the session guard runs after.
+  //
+  // Captured in the same tick and for the same reason: which view-as target — if any — was
+  // armed when this call was ISSUED. The attribution stamp at the bottom compares it against
+  // the target armed when the response LANDS, and declines the server's echo when they
+  // differ. `injected` cannot stand in for it: 03-catalog.jsx's `scoped()` puts
+  // targetClientId on the body itself while viewing, and an explicit value skips the
+  // injection below, so a call can be scoped to the viewed tenant with `injected` still null.
+  const armedAtIssue = ssTargetClientId;
   let injected = null;
   if (
     ssTargetClientId &&
@@ -257,6 +280,52 @@ __ssFunctions.invoke = async (name, opts) => {
     ssLogError(SS_ERR_SOURCE, "operator view: server resolved a different tenant", null,
       { fn: name, asked: injected, got: res.data.clientId });
     return { data: null, error: new Error("This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists.") };
+  }
+  // Same echo, put to a second use: it is what gives ssLogError a tenant. Read only from the
+  // tenant-scoped list, because admin-catalog also answers with a `clientId` and that one is
+  // the builder an operator is CREATING or deleting, not the portal on screen. Set AFTER the
+  // tripwire so a response we just refused never becomes the tenant later rows are filed
+  // under.
+  //
+  // ⛔ THE ECHO DOES NOT FOLLOW VIEW-AS ON ITS OWN — an earlier version of this comment said
+  // it did ("the next status call restamps it") and that was false in both directions.
+  // 11-shell.jsx SKIPS its portal-settings `status` call for the whole duration of a view-as
+  // session, deliberately (see its own comment), so there is no next status call; and three
+  // of the five tenant-scoped functions — portal-billing, sync-design-status,
+  // portal-schedule — echo no clientId at all, so most responses inside a viewed portal
+  // cannot restamp anything either. Left to the echo alone, every row written while an
+  // operator has builder B open stays filed under whoever was latched last: the operator's
+  // own tenant, or builder A from the previous view-as. That is WORSE than the NULL this
+  // latch replaced — a wrong attribution is BELIEVED, and `where client_id = 'junior-barns'`
+  // then serves another tenant's rows as fact. (Not a leak: the payload is the operator's
+  // own activity and the `url` carries ?view=. It is triage that breaks.)
+  //
+  // So the armed view-as target wins outright, and it is read HERE rather than with
+  // `injected` at the top on purpose: attribution must describe the portal on screen when
+  // the row is written, not the tenant the call was issued for. 11-shell.jsx stamps the
+  // same value the moment `viewing` changes (in the tick, beside the ssTargetClientId
+  // lockstep), which covers the gap before the first response of a view-as session lands
+  // and the reverse gap on the way out; this keeps it right for anything still in flight.
+  //
+  // ⛔ AND THE ECHO IS REFUSED OUTRIGHT WHEN THE VIEW-AS SESSION MOVED UNDER IT. 11-shell.jsx
+  // stamping the operator's own tenant on exit does NOT close the way out on its own, because
+  // a call issued while builder B was on screen can still be in flight when the operator
+  // leaves. Its response echoes B — correctly, the server did resolve B — and the second
+  // branch below then re-stamps B onto a portal that is now the operator's own, so an error
+  // row written seconds AFTER the operator left is filed under the tenant they were viewing.
+  // That is the same believed-wrong-attribution this latch exists to avoid, arriving by the
+  // back door. So the second branch runs only when the target armed at issue is still the
+  // target armed now: nothing armed then, nothing armed now.
+  //
+  // A generation counter on the view-as session would also close it, and this is smaller —
+  // no counter, no bump in openAccount/exitAccount/onPop, nothing for a fourth entry point
+  // added later to remember. It is not weaker either: the one case an equality check cannot
+  // tell apart from "never left" is leaving B and re-entering B, and there the first branch
+  // stamps B, which is the right answer because B is what is on screen.
+  if (ssTargetClientId) {
+    ssResolvedClientId = String(ssTargetClientId);
+  } else if (armedAtIssue === ssTargetClientId && SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 && res && res.data && res.data.clientId) {
+    ssResolvedClientId = String(res.data.clientId);
   }
   return res;
 };

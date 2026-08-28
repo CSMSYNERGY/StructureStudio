@@ -1021,7 +1021,17 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   const [sel, setSel] = useState("");             // the administered client — NOT `viewing`
   const [subState, setSubState] = useState("clients");
   const setSub = onSub || setSubState;
-  const sub = (onSub ? subProp : subState) || ADM_TABS[0][0];
+  // The LAST REAL sub-tab, not ADM_TABS[0], is the fallback when the prop is null — and the
+  // prop goes null constantly: 11-shell passes `sub={activeTab === "admin" ? sub : null}` and
+  // its navigate() nulls `sub` on every plain nav click. Collapsing to "clients" there flips
+  // `needsClient` false, which unmounts AdminClientPanes and bins exactly the staged work the
+  // console is kept mounted to protect — 12 ticked items under a "12 unsaved changes" banner,
+  // gone because the operator stepped over to Pipeline for ten seconds. Holding the sub keeps
+  // the panes mounted while another tab is on screen, and lands the operator back where they
+  // left off on the way in (audit 2026-08-28).
+  const lastSub = useRef(ADM_TABS[0][0]);
+  const sub = (onSub ? subProp : subState) || lastSub.current;
+  useEffect(() => { lastSub.current = sub; }, [sub]);
   const [msg, setMsg] = useState(null);           // { ok } | { err }
   const [pickerOpen, setPickerOpen] = useState(false);
   const [bootErr, setBootErr] = useState(null);
@@ -1296,11 +1306,24 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
 
   const create = async () => {
     if (!canCreate) return;
+    // A discount is money, so it is REFUSED, not coerced. `Number(discount) || 0` read a
+    // typed "50%" as 0, and at 0 with no exemption admin-catalog writes no client_settings
+    // row at all — so the founding-customer rate the operator believed they had just set
+    // simply did not exist, under a flash that said Created. Same check and same wording as
+    // the Account tab's saveBilling, which has validated this all along; only the create
+    // path was coercing. Skipped when exempt: the account is non-billable, the field is
+    // greyed out beside the checkbox that says so, and the value below is forced to 0
+    // (audit 2026-08-28).
+    const pctNum = Math.round(Number(discount));
+    if (!exempt && (!Number.isFinite(pctNum) || pctNum < 0 || pctNum > 100)) {
+      onFlash({ err: "Discount must be a whole number from 0 to 100." });
+      return;
+    }
     // Same guard as the Account tab's saveBilling: the server stores an EMPTY
     // discountFeatures list as null = the discount applies to EVERY feature (admin-catalog,
     // create_client/set_billing). So "only the ones I pick" with nothing picked would not
     // create no discount — it would silently create an all-features one.
-    if (!exempt && (Number(discount) || 0) > 0 && !allFeat && picked.length === 0) {
+    if (!exempt && pctNum > 0 && !allFeat && picked.length === 0) {
       onFlash({ err: "Choose which features the discount applies to, or select “Every feature”." });
       return;
     }
@@ -1308,7 +1331,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
     try {
       await adminApi("create_client", {
         clientId: slug, companyName: company.trim(), templateClientId: tpl,
-        billingExempt: exempt, discountPercent: exempt ? 0 : (Number(discount) || 0),
+        billingExempt: exempt, discountPercent: exempt ? 0 : pctNum,
         discountFeatures: allFeat ? [] : picked,
       });
       await onReload();
@@ -1552,9 +1575,16 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
   // must read as off here too (audit 2026-08-19).
   const rowGrantLive = (g) => !g.expiresAt || Date.parse(g.expiresAt) > Date.now();
   const [grantPick, setGrantPick] = useState(rowGrants.filter(rowGrantLive).map((g) => g.feature));
+  // Read back through LOCAL date parts, the exact inverse of saveGrants' endOfDay below.
+  // expires_at is a timestamptz and comes back as UTC, so slicing the first 10 characters
+  // showed the day AFTER the one that was typed everywhere west of Greenwich (Sep 30 stored
+  // as 2026-10-01T03:59Z redisplayed as "2026-10-01") — and because `dateEdited` compares
+  // against this value, the next feature ticked on top of it was then written with a day of
+  // free access nobody granted. Same date-only rule the schedule tab settled on: never slice
+  // an instant, build the day from local components (audit 2026-08-28).
   const initialUntil = (() => {
     const withDate = rowGrants.filter(rowGrantLive).find((g) => g.expiresAt);
-    return withDate ? String(withDate.expiresAt).slice(0, 10) : "";
+    return withDate ? ssLocalIso(new Date(withDate.expiresAt)) : "";
   })();
   const [grantUntil, setGrantUntil] = useState(initialUntil);
   const [grantBusy, setGrantBusy] = useState(false);

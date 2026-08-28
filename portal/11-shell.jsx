@@ -63,7 +63,14 @@ function Dashboard({ session }) {
   // MUST live up here with the other hooks — Dashboard has conditional early returns
   // below (tenant loading/none), and a hook after them changes the hook count between
   // renders (React error #310, blank screen). Keyed on raw `tab`, not the derived
-  // activeTab: "designer" is in NONADMIN_TABS so the clamp never rewrites it.
+  // activeTab, so the lazy mount latches on the click itself and the host below decides
+  // visibility. ⚠️ The old reason given here — "designer is in NONADMIN_TABS so the clamp
+  // never rewrites it" — is FALSE and was the excuse behind the dead Open buttons: that
+  // holds only on ssCanSeeTab's `!access` branch, and since migration 100 the status call
+  // ships a resolved map, so the clamp takes the TAB_AREA.designer branch and DOES rewrite
+  // this tab for a title without that area. openInDesigner refuses before navigating now,
+  // which is what keeps `tab` off "designer" for those people; a hand-typed /portal/designer
+  // still latches this and mounts the host hidden, which costs a fetch and shows nothing.
   useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
   useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
@@ -90,7 +97,18 @@ function Dashboard({ session }) {
   const [isOperator, setIsOperator] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    sb.rpc("is_operator").then(({ data }) => { if (!cancelled) setIsOperator(!!data); }).catch(() => {});
+    // ⚠️ A FAILED rpc IS NOT AN ANSWER OF `false`. supabase-js RESOLVES `{data, error}`
+    // rather than rejecting, so the old `({ data })` destructure read a 403 or a 5xx as a
+    // plain "not an operator" — and since this effect re-runs on every auth event (see the
+    // entitlement comment below: onAuthStateChange mints a new session object each time),
+    // one bad answer mid-session unmounted AdminShell at the render below and binned the
+    // staged work the keep-mounted comment there exists to protect, then remounted it blank
+    // on its default sub with nothing recorded anywhere. The 403 is reachable: 051 revoked
+    // EXECUTE from anon, and the anon-key refresh window (01-core's invoke wrapper) sends
+    // exactly that key. Keep the last known answer on a non-success and let the next auth
+    // event ask again — the same "never lock someone out because a call failed" posture as
+    // the entitlement fetch. Still fails CLOSED on a cold load, where false is the initial.
+    sb.rpc("is_operator").then(({ data, error }) => { if (!cancelled && !error) setIsOperator(!!data); }).catch(() => {});
     return () => { cancelled = true; };
   }, [session]);
   // viewing = { clientId, companyName } while an operator has another tenant's portal
@@ -240,8 +258,28 @@ function Dashboard({ session }) {
   // catalog, BillingView status all fire on their own mount) hit the operator's own tenant
   // — the exact bug this whole change exists to fix, only harder to see.
   ssTargetClientId = viewing ? viewing.clientId : null;
-  // Sign-out / unmount must not leave a tenant override armed for the next mount.
-  useEffect(() => () => { ssTargetClientId = null; }, []);
+  // app_errors rows follow the portal ON SCREEN, in the same tick and for the same reason.
+  // ssResolvedClientId (01-core.jsx) is otherwise latched only from a portal-settings /
+  // qbo-oauth-connect response, and the `status` effect below deliberately does not run
+  // during view-as — so without this line every row an operator generates inside a builder's
+  // portal is filed under the operator's own tenant, or under the builder they viewed
+  // before, and reads as fact in triage. Assigned here rather than in
+  // openAccount/exitAccount/onPop because this is the one place already guaranteed to be in
+  // lockstep with `viewing` for all three of them plus the ?view= deep link. `tenant` is the
+  // caller's own client_users mapping, so the else branch is what makes EXITING a view-as
+  // synchronous too instead of waiting a round trip for the status echo.
+  if (viewing) ssResolvedClientId = viewing.clientId;
+  else if (tenant && tenant !== "none" && tenant.clientId) ssResolvedClientId = tenant.clientId;
+  // Sign-out / unmount must not leave a tenant override armed for the next mount — nor the
+  // attribution that override produced. Both globals live in 01-core.jsx, which is module
+  // scope shared by the whole page and outlives this component; clearing only the override
+  // left ssResolvedClientId holding the tenant that just signed out, so every row written
+  // from then on — the login screen's own window.onerror, and whatever the next person to
+  // use this browser generates before their own tenant latches — was filed under it. NULL is
+  // the honest answer for a page with no tenant on screen: ssLogError falls back to ?client=
+  // and then to null, and a null client_id is a gap in triage where a confident wrong one is
+  // a lie. The render above re-stamps both on the next mount.
+  useEffect(() => () => { ssTargetClientId = null; ssResolvedClientId = null; }, []);
 
   useEffect(() => {
     // `tenant` describes the operator's OWN account, but the `status` call below is
@@ -293,9 +331,53 @@ function Dashboard({ session }) {
       // client_users.access — that column holds only the deviations from the title preset,
       // and resolving it here would mean a second copy of PRESETS in the browser that
       // drifts the day an area is added. `status` is the "open" bootstrap action precisely
-      // so every role can make this call. On failure `access` stays undefined and
-      // ssCanSeeTab falls back to the old role behaviour: a nav that is too generous, never
-      // one that is too strict, and the server refuses the action either way.
+      // so every role can make this call. On failure `access` stays null and ssCanSeeTab
+      // falls back to the old role behaviour: a nav that is too generous, never one that is
+      // too strict, so a blip can never lock a crew out of their own portal.
+      //
+      // ⚠️ THAT FALLBACK IS NOT HARMLESS, AND THE OLD SENTENCE HERE ("the server refuses
+      // the action either way") IS FALSE FOR THE LISTS IT MATTERS MOST FOR. Pipeline,
+      // Contacts and Inventory are not edge-function actions: DesignsTable and LeadsTable
+      // read `designs` / `design_versions` / `captured_leads` straight from PostgREST
+      // (02-sales.jsx:147, :165, :776) and the inventory picker reads `inventory_units`
+      // (02-sales.jsx:115).
+      //
+      // ⛔ UNENFORCED ON THE SERVER, AND STILL UNENFORCED AFTER THE RETRY BELOW. This needs
+      // SQL and cannot be fixed from this file; do not read the retry as having closed it.
+      //   WHAT IS UNENFORCED: per-area gating of those reads. Every policy on those four
+      //   tables is `client_id = public.current_client_id()` and nothing else
+      //   (001_tenancy.sql:35, 031_design_versions.sql:33, 062_captured_leads.sql:37,
+      //   075_inventory.sql:101; crm_contacts is the same shape at 130_crm_contacts.sql:78).
+      //   Migration 100 added client_users.title + client_users.access and created NO
+      //   policy, so the per-area map has no SQL representation whatsoever. Consequence,
+      //   independent of anything this file does: a signed-in team member whose Designs and
+      //   Contacts switches are 'none' opens devtools, runs sb.from('designs').select('*'),
+      //   and RLS hands back every design, contact, phone number and quote figure in the
+      //   tenant. _shared/access.ts:12-14 already states the rule ("the UI hiding a tab is a
+      //   courtesy, not a control") — for these lists there is simply no control behind it.
+      //   WHAT WOULD ENFORCE IT: a RESTRICTIVE policy per table, keyed on the caller's
+      //   per-area map and ANDed with the tenant policy. That needs a SECURITY DEFINER
+      //   resolver in SQL — say public.current_area_level(area text) — computing the same
+      //   two inputs effectiveAccess() does in _shared/access.ts:132 (PRESETS[title] merged
+      //   with the client_users.access deviations, owners absolute), then e.g.
+      //     create policy designs_area_select on public.designs as restrictive
+      //       for select to authenticated
+      //       using (public.current_area_level('designs') <> 'none');
+      //   one per table with its own area key ('designs' for designs/design_versions,
+      //   'contacts' for captured_leads/crm_contacts, 'inventory' for inventory_units).
+      //   RESTRICTIVE is load-bearing: a second PERMISSIVE policy ORs in and would WIDEN
+      //   access instead of narrowing it. Until that ships, the browser is the only gate for
+      //   these lists and this nav is a courtesy, not a boundary.
+      //
+      // What the retry below fixes is the other, in-app half — and only that half. It is
+      // NARROWED, NOT CLOSED: a transient portal-settings failure on a real session no
+      // longer leaves `access` null and hands a driver the generous NONADMIN_TABS nav, but
+      // the no-session / anon-key return still resolves to `{data:null}` with no map and
+      // still falls through to that nav, self-healing only when a token lands (this effect
+      // is keyed on session.access_token). The fallback stays GENEROUS on purpose — the
+      // file's principle is a nav that is too generous, never one that is too strict, so a
+      // blip can never lock a crew out of their own portal — which is exactly why the
+      // server-side hole above has to be closed rather than compensated for here.
       let access = null;
       try {
         // The status invoke sits two awaited reads deep, so view-as opened mid-flight can
@@ -305,6 +387,22 @@ function Dashboard({ session }) {
         if (!ssTargetClientId) {
           const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
           if (st && st.access) access = st.access;
+          // No map back is a FAILED call, never "this tenant has none": `status` is the open
+          // bootstrap action and resolveTenant fills every area for every title. The invoke
+          // wrapper RETURNS `{data:null}` rather than throwing — the no-session guard does so
+          // explicitly — so the anon-key refresh window reads identically to "pre-migration-100
+          // shape" and quietly buys the generous nav above. Same second-answer rule as the
+          // client_users read: prove a token exists, then ask once more and believe that. Both
+          // failing is rare and self-heals on the next token, but one blip should not be
+          // enough. ssTargetClientId is re-read because the await above is another chance for
+          // view-as to arm.
+          if (!access) {
+            const { data: accSess } = await sb.auth.getSession();
+            if (accSess && accSess.session && !ssTargetClientId) {
+              const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+              if (again.data && again.data.access) access = again.data.access;
+            }
+          }
         }
       } catch (_e) { /* keep the fallback */ }
       setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access });
@@ -520,6 +618,21 @@ function Dashboard({ session }) {
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
   // there would corrupt the very activity Contacts reports.
   const openInDesigner = (code, version = null, extra = null) => {
+    // ⛔ REFUSE OUT LOUD WHEN THE CLAMP WOULD REFUSE THE TAB. TAB_AREA routes "designer"
+    // through `designer`, an area neither shipped staff preset carries (crew_leader and
+    // driver, _shared/access.ts) — yet every caller of this is ungated: Pipeline "Open",
+    // CrmRecord "Open in designer", Inventory "Open" / "Send estimate", and the build-job
+    // editor's "Open design", which a Crew Leader is meant to use. Without this the click
+    // set `tab` to "designer", the clamp held activeTab on their fallback page, the URL
+    // effect quietly put the address bar back, and the button was dead FOREVER — a second
+    // click sets the same `tab` and bails out of React entirely. Tested through ssClampTab
+    // rather than a hand-rolled check so the two can never disagree; a null map still
+    // passes (NONADMIN_TABS holds "designer"), so nothing changes for owners, admins,
+    // operators or a tenant predating migration 100.
+    if (ssClampTab("designer", isOperator, canAdmin, myAccess) !== "designer") {
+      window.alert("Opening a design in the Designer isn't part of your access. Ask an owner or admin to turn it on under Settings → Team.");
+      return;
+    }
     // `blank: true` (from "+ New inventory building") carries no code — the designer
     // resets to an empty canvas instead of keeping the previously opened design, which
     // could otherwise be another unit's master with an "Update" button waiting.
@@ -927,7 +1040,22 @@ function Dashboard({ session }) {
                 /* Back goes to the list this record belongs to, which after the split is a
                    whole tab rather than a sub-view. */
                 onBack={() => navigate(sub.charAt(0) === "c" ? "leads" : "designs")}
-                onNavigate={(k, id) => navigate(k === "contact" ? "leads" : "designs", (k === "contact" ? "c-" : "d-") + id)}
+                /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). The
+                   record shell above serves EITHER kind under EITHER tab, so the tab here is
+                   cosmetic — which nav item highlights — and switching to one the clamp
+                   refuses costs the reader the record entirely: the URL-normalising effect
+                   nulls a refused tab's sub and dumps them on a list with no message. That is
+                   the hazard the header comment names for legacy record URLs, and a crew
+                   leader (designs:view, contacts none) hit it on every click through to a
+                   customer. Stay on the tab we are already on when the record's own is
+                   refused; the server serves the record either way (crm_record's gate is
+                   `any: [contacts view, designs view]`). Asked through ssClampTab so this
+                   can never drift from what the router will actually do. */
+                onNavigate={(k, id) => {
+                  const kindTab = k === "contact" ? "leads" : "designs";
+                  const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess) === kindTab ? kindTab : activeTab;
+                  navigate(dest, (k === "contact" ? "c-" : "d-") + id);
+                }}
                 onOpenDesign={(code) => openInDesigner(code)}
               />
             ) : null}
