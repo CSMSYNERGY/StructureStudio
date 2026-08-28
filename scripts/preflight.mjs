@@ -149,6 +149,27 @@ function run(files) {
     errors.push(...lint(f, files[f]));
   }
 
+  // ── Git conflict markers ─────────────────────────────────────────────────
+  // 2026-08-28: portal.html was pushed mid-rebase with a conflict hunk still in it — the
+  // markers replaced the two compiled-artifact <script> tags, so every visitor got the
+  // "Couldn't load the portal" screen (and the raw `<<<<<<< HEAD` text) until the next
+  // push. Nothing here caught it: the pages are checked structurally, not parsed, so
+  // markers sail through where a .jsx source would at least fail the lint. This rule
+  // closes that class for EVERY file in the map. A file is flagged only when it carries
+  // BOTH an opening `<<<<<<< ` line and a closing `>>>>>>> ` line — git always writes the
+  // pair, and requiring both keeps a lone `=======` (markdown underlines, comment rules)
+  // or a `<<<<<<<` inside a string from tripping it.
+  for (const [f, text] of Object.entries(files)) {
+    const open = text.match(/^<{7} .+$/m);
+    const close = text.match(/^>{7} .+$/m);
+    if (open && close) {
+      const line = text.slice(0, text.indexOf(open[0])).split("\n").length;
+      errors.push(`${f}:${line}  git conflict markers — this file still contains an unresolved `
+        + `merge/rebase hunk ("${open[0].slice(0, 30)}…"). Resolve the conflict, run `
+        + "`npm run compile` if a page or source changed, and commit the clean file.");
+    }
+  }
+
   // No going back to in-browser compilation. A text/babel tag on a page would
   // load-bearing-ly do NOTHING now (babel-standalone is not served), and a
   // babel-standalone tag would hand every visitor a 2.85MB compiler again —
@@ -733,6 +754,29 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: Intuit API hosts are refused in browser files, help links are not");
+
+  // ── The conflict-marker rule ───────────────────────────────────────────────
+  // Fixture = the 2026-08-28 incident itself: portal.html pushed mid-rebase with the hunk
+  // around its two <script> tags, visitors served "<<<<<<< HEAD" as page text. Prove it
+  // fires on that exact shape, and prove the two lookalikes that must NOT fire don't: a
+  // lone `=======` (comment rules, markdown underlines) and an unpaired `<<<<<<<` inside
+  // a string — half a marker never comes out of git, and a rule that cries wolf on
+  // legitimate text gets deleted by the next person it annoys.
+  const withConflict = load();
+  withConflict["portal.html"] = withConflict["portal.html"].replace("</body>",
+    '<<<<<<< HEAD\n<script defer src="/a.js?v=1"></script>\n=======\n<script defer src="/a.js?v=2"></script>\n>>>>>>> 4389eec (Projects: name the intake group)\n</body>');
+  if (!run(withConflict).some((e) => e.includes("git conflict markers"))) {
+    console.error("self-test FAILED: an unresolved conflict hunk in portal.html was not caught");
+    process.exit(1);
+  }
+  const withLookalikes = load();
+  withLookalikes["portal.html"] = withLookalikes["portal.html"].replace("</body>",
+    "<!--\n=======\na heading underline, and a stray <<<<<<< inside prose\n-->\n</body>");
+  if (run(withLookalikes).some((e) => e.includes("git conflict markers"))) {
+    console.error("self-test FAILED: a lone ======= / unpaired <<<<<<< tripped the conflict-marker rule");
+    process.exit(1);
+  }
+  console.log("self-test passed: unresolved conflict hunks are refused, marker lookalikes are not");
 
   // ── The boot-guard lock ────────────────────────────────────────────────────
   // Two regexes that never match are indistinguishable from three healthy pages, and this rule
