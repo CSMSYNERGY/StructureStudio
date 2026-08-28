@@ -8,7 +8,8 @@
 // Boards, groups and columns are user-defined (Carolyn's "Monday but better"): the table
 // itself is the generic engine in 09-table-engine.jsx; this file owns data loading, the
 // toolbar (search · facets · WHEN date filter · group-by · column visibility), the item
-// modal (fields + updates thread + client publishing + activity), and board configuration
+// modal (notes/updates thread + client publishing ONLY - fields are edited in their
+// cells), and board configuration
 // (groups, columns, status labels with their client-status mapping).
 
 // The 8 tenant-facing states a status label may map onto (migration 054's ladder), with
@@ -24,6 +25,30 @@ const PM_COL_TYPES = [
   ["status", "Status"], ["people", "People"], ["date", "Date"], ["dropdown", "Dropdown"],
   ["number", "Number"], ["text", "Text"], ["long_text", "Long text"], ["checkbox", "Checkbox"], ["link", "Link"],
 ];
+
+// One uniform toolbar control: a 32px pill with its label INSIDE, so search, the three
+// facets, the date condition, Group by and Columns all share a height and a baseline.
+const PM_CTL = { display: "inline-flex", alignItems: "center", height: 32, boxSizing: "border-box",
+  border: "1px solid #CBD5E1", borderRadius: 8, background: "#FFF", fontSize: 12.5, whiteSpace: "nowrap" };
+const PM_CTL_SEL = { border: "none", outline: "none", background: "none", fontSize: 12.5, fontWeight: 700,
+  color: "#1E293B", fontFamily: "inherit", cursor: "pointer", maxWidth: 170 };
+function PMCtl({ label, children }) {
+  return (
+    <span style={{ ...PM_CTL, padding: "0 8px", gap: 5 }}>
+      {label && <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</span>}
+      {children}
+    </span>
+  );
+}
+// Notes carry a real timestamp, not just a date - a thread of same-day updates is
+// unreadable without one (Carolyn 2026-08-27).
+function pmStamp(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString("en-US",
+      { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  } catch (_) { return String(iso); }
+}
 
 async function pmCall(body) {
   const { data, error } = await sb.functions.invoke("portal-projects", { body });
@@ -68,9 +93,17 @@ function PMSwatches({ value, onPick }) {
   );
 }
 
-// ── Item modal — the ONE detail surface (decision 25's pattern) ──────────────
-function PMItemModal({ item, columns, ctx, canWrite, onClose, onCellCommit, onRename, onArchive, onChanged }) {
-  const [detail, setDetail] = useState(null);      // { updates, activity, submission }
+// ── Item modal — NOTES ONLY (Carolyn 2026-08-27) ─────────────────────────────
+// "Clicking on the title/name of the item is the only time a popup should appear and it
+// should only have the title and ability to add a note/update and then under that we
+// should see the rolling list of all the notes/updates/original submission with dates
+// and timestamps."
+//
+// So this is deliberately NOT a form: every field lives in its own cell in the table.
+// The one thing that cannot live in a row — a conversation — lives here, and the
+// client's original words sit at the bottom of it as the first entry in the thread.
+function PMItemModal({ item, canWrite, onClose, onRename, onArchive }) {
+  const [detail, setDetail] = useState(null);      // { updates, submission }
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
   const [compose, setCompose] = useState("");
@@ -106,18 +139,20 @@ function PMItemModal({ item, columns, ctx, canWrite, onClose, onCellCommit, onRe
     catch (e) { setErr(e.message); }
   };
   const deleteUpdate = async (u) => {
-    const warn = u.client_visible ? "Delete this update? The copy the client sees will be removed too." : "Delete this update?";
+    const warn = u.client_visible ? "Delete this note? The copy the client sees will be removed too." : "Delete this note?";
     if (!window.confirm(warn)) return;
     try { await pmCall({ action: "delete_update", id: u.id }); loadDetail(); }
     catch (e) { setErr(e.message); }
   };
 
-  const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4, display: "block" };
+  const tag = (bg, fg, text) => (
+    <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, borderRadius: 4, padding: "1px 6px", background: bg, color: fg, whiteSpace: "nowrap" }}>{text}</span>
+  );
 
   return (
-    <AdmOverlay onClose={onClose} maxWidth={880} labelledBy="pm-item-title">
-      <div style={{ padding: "16px 20px", maxHeight: "82vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+    <AdmOverlay onClose={onClose} maxWidth={660} labelledBy="pm-item-title">
+      <div style={{ padding: "16px 20px", maxHeight: "84vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
           {canWrite ? (
             <input id="pm-item-title" style={{ ...S.input, fontSize: 16, fontWeight: 800, flex: 1 }} value={name}
               onChange={(e) => setName(e.target.value)}
@@ -126,159 +161,80 @@ function PMItemModal({ item, columns, ctx, canWrite, onClose, onCellCommit, onRe
           ) : (
             <div id="pm-item-title" style={{ fontSize: 16, fontWeight: 800, flex: 1 }}>{item.name}</div>
           )}
-          {item.feedback_submission_id && (
-            <span style={{ fontSize: 9.5, fontWeight: 800, color: "#1B7895", background: "#E6F7FA", border: "1px solid #BEE9F1", borderRadius: 4, padding: "2px 6px", letterSpacing: 0.4 }}>CLIENT</span>
-          )}
+          {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
           <button type="button" onClick={onClose} aria-label="Close"
             style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer" }}>✕</button>
         </div>
         {err && <div style={S.err}>{err}</div>}
 
-        <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 18 }}>
-          <div style={{ minWidth: 0 }}>
-            {/* Field grid — every column, always-editable controls (modal = full editors,
-                including link and long_text which the table cells defer here). */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-              {columns.map((col) => (
-                <div key={col.id} style={{ minWidth: 0, gridColumn: (col.type === "long_text" || col.type === "link") ? "1 / -1" : undefined }}>
-                  <span style={flabel}>{col.name}</span>
-                  {canWrite
-                    ? <PMFieldEditor col={col} value={item.values ? item.values[col.id] : null} ctx={ctx}
-                        onCommit={(v) => onCellCommit(item, col, v)} />
-                    : <div style={{ fontSize: 13 }}>{pmType(col).renderCell(item.values ? item.values[col.id] : null, col, ctx)}</div>}
-                </div>
-              ))}
+        {canWrite && (
+          <div style={{ border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
+            <textarea rows={3} placeholder="Add a note or update…" style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
+              value={compose} onChange={(e) => setCompose(e.target.value)} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: item.feedback_submission_id ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
+                title={item.feedback_submission_id ? "Publishes this one note to the client's My Submissions feed" : "This item isn't linked to a client submission"}>
+                <input type="checkbox" checked={toClient} disabled={!item.feedback_submission_id}
+                  onChange={(e) => setToClient(e.target.checked)} />
+                Visible to client
+              </label>
+              <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 16px", fontSize: 12, opacity: busy || !compose.trim() ? 0.6 : 1 }}
+                disabled={busy || !compose.trim()} onClick={post}>Post</button>
             </div>
+          </div>
+        )}
 
-            <span style={flabel}>Updates</span>
-            {canWrite && (
-              <div style={{ border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
-                <textarea rows={2} placeholder="Write an update…" style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
-                  value={compose} onChange={(e) => setCompose(e.target.value)} />
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: item.feedback_submission_id ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
-                    title={item.feedback_submission_id ? "Publishes this one update to the client's My Submissions feed" : "This item isn't linked to a client submission"}>
-                    <input type="checkbox" checked={toClient} disabled={!item.feedback_submission_id}
-                      onChange={(e) => setToClient(e.target.checked)} />
-                    Visible to client
-                  </label>
-                  <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 14px", fontSize: 12, opacity: busy || !compose.trim() ? 0.6 : 1 }}
-                    disabled={busy || !compose.trim()} onClick={post}>Post</button>
-                </div>
-              </div>
-            )}
-            {!detail && !err && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
-            {detail && !detail.updates.length && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No updates yet.</div>}
-            {detail && detail.updates.map((u) => (
-              <div key={u.id} style={{ border: "1px solid", borderColor: u.client_visible ? "#8ED8CF" : "#E2E8F0", background: u.client_visible ? "#F2FBFA" : "#FFF", borderRadius: 10, padding: "9px 12px", marginBottom: 8, fontSize: 12.8 }}>
-                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#64748B", marginBottom: 3, display: "flex", gap: 6, alignItems: "center" }}>
-                  {(u.author_email || "?").split("@")[0]} · {fmtDate(u.created_at)}
-                  <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, borderRadius: 4, padding: "1px 6px", background: u.client_visible ? "#CCF1EC" : "#F1F5F9", color: u.client_visible ? "#0F766E" : "#64748B" }}>
-                    {u.client_visible ? "VISIBLE TO CLIENT ✓" : "INTERNAL"}
-                  </span>
-                  {canWrite && !u.client_visible && item.feedback_submission_id && (
-                    <button type="button" style={{ background: "none", border: "none", color: "#1B7895", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }}
-                      onClick={() => publishExisting(u)}>Publish to client…</button>
-                  )}
-                  {canWrite && (
-                    <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, marginLeft: "auto" }}
-                      onClick={() => deleteUpdate(u)}>Delete</button>
-                  )}
-                </div>
-                <div style={{ whiteSpace: "pre-wrap" }}>{u.body}</div>
-                {(u.attachments || []).map((a) => a.url && (
-                  <a key={a.path} href={a.url} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: "#1B7895", fontWeight: 600 }}>📎 {a.name || "attachment"}</a>
-                ))}
-              </div>
+        {!detail && !err && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
+        {detail && detail.updates.map((u) => (
+          <div key={u.id} style={{ borderLeft: `3px solid ${u.client_visible ? "#8ED8CF" : "#E2E8F0"}`, background: u.client_visible ? "#F2FBFA" : "#FFF", borderRadius: 6, padding: "8px 12px", marginBottom: 8, fontSize: 12.8 }}>
+            <div style={{ display: "flex", gap: 7, alignItems: "center", marginBottom: 3, flexWrap: "wrap" }}>
+              <b style={{ fontSize: 11.5, color: "#334155" }}>{(u.author_email || "?").split("@")[0]}</b>
+              <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{pmStamp(u.created_at)}{u.edited_at ? " · edited" : ""}</span>
+              {u.client_visible ? tag("#CCF1EC", "#0F766E", "VISIBLE TO CLIENT ✓") : tag("#F1F5F9", "#64748B", "INTERNAL")}
+              {canWrite && !u.client_visible && item.feedback_submission_id && (
+                <button type="button" style={{ background: "none", border: "none", color: "#1B7895", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }}
+                  onClick={() => publishExisting(u)}>Publish to client…</button>
+              )}
+              {canWrite && (
+                <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, marginLeft: "auto" }}
+                  onClick={() => deleteUpdate(u)}>Delete</button>
+              )}
+            </div>
+            <div style={{ whiteSpace: "pre-wrap" }}>{u.body}</div>
+            {(u.attachments || []).map((a) => a.url && (
+              <a key={a.path} href={a.url} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: "#1B7895", fontWeight: 600 }}>📎 {a.name || "attachment"}</a>
             ))}
           </div>
+        ))}
 
-          <div style={{ minWidth: 0 }}>
-            {sub && (
-              <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px", marginBottom: 12, fontSize: 12.5 }}>
-                <span style={flabel}>Client submission</span>
-                <b>{sub.client_id}</b> · {sub.kind === "bug" ? "Issue" : "Feature request"}<br />
-                Submitted by {sub.submitter_name || "?"} · {fmtDate(sub.created_at)}<br />
-                {sub.severity && <>Their importance: {sub.severity}<br /></>}
-                {sub.detail && <div style={{ color: "#64748B", margin: "6px 0", whiteSpace: "pre-wrap" }}>“{sub.detail.slice(0, 400)}{sub.detail.length > 400 ? "…" : ""}”</div>}
-                {sub.attachmentUrl && <a href={sub.attachmentUrl} target="_blank" rel="noreferrer" style={{ color: "#1B7895", fontWeight: 600 }}>📎 Their attachment</a>}
-                <div style={{ marginTop: 6 }}>
-                  Client currently sees: <b>{PM_CLIENT_STATUS[sub.status] || sub.status}</b>
-                </div>
-              </div>
-            )}
-            <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
-              <span style={flabel}>Activity</span>
-              {detail && detail.activity.length
-                ? detail.activity.slice(0, 12).map((a) => (
-                  <div key={a.id} style={{ fontSize: 11.5, color: "#64748B", padding: "3px 0", borderBottom: "1px dashed #EEF1F6" }}>
-                    {(a.actor_email || "?").split("@")[0]} · {a.action.replace(/_/g, " ")}{a.detail && a.detail.label ? ` → ${a.detail.label}` : ""} · {fmtDate(a.created_at)}
-                  </div>
-                ))
-                : <div style={{ fontSize: 11.5, color: "#94A3B8" }}>—</div>}
+        {/* The original submission is the FIRST entry in the thread — oldest, so last. */}
+        {sub && (
+          <div style={{ borderLeft: "3px solid #1B7895", background: "#F8FAFC", borderRadius: 6, padding: "8px 12px", fontSize: 12.8 }}>
+            <div style={{ display: "flex", gap: 7, alignItems: "center", marginBottom: 3, flexWrap: "wrap" }}>
+              <b style={{ fontSize: 11.5, color: "#334155" }}>{sub.submitter_name || "?"}</b>
+              <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{pmStamp(sub.created_at)}</span>
+              {tag("#E6F7FA", "#1B7895", "ORIGINAL REQUEST · " + (sub.client_id || ""))}
             </div>
-            {canWrite && (
-              <button type="button" style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA", width: "100%" }}
-                onClick={() => { if (window.confirm("Remove this item from the board? (It is archived, not destroyed.)")) { onArchive(item); onClose(); } }}>
-                Remove from board
-              </button>
-            )}
+            <div style={{ whiteSpace: "pre-wrap" }}>{sub.detail || sub.title}</div>
+            <div style={{ marginTop: 5, fontSize: 11.5, color: "#64748B" }}>
+              {sub.severity ? `Their importance: ${sub.severity} · ` : ""}They currently see: <b>{PM_CLIENT_STATUS[sub.status] || sub.status}</b>
+            </div>
+            {sub.attachmentUrl && <a href={sub.attachmentUrl} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: "#1B7895", fontWeight: 600 }}>📎 Their attachment</a>}
           </div>
-        </div>
+        )}
+        {detail && !detail.updates.length && !sub && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No notes yet.</div>}
+
+        {canWrite && (
+          <div style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid #F1F5F9", textAlign: "right" }}>
+            <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
+              onClick={() => { if (window.confirm("Remove this item from the board? (It is archived, not destroyed.)")) { onArchive(item); onClose(); } }}>
+              Remove from board
+            </button>
+          </div>
+        )}
       </div>
     </AdmOverlay>
   );
-}
-
-// Always-visible field editor for the modal (the table's cells swap editors in on click;
-// the modal just shows the control). Commits on change/blur like the cell editors.
-function PMFieldEditor({ col, value, ctx, onCommit }) {
-  const [text, setText] = useState(value == null ? "" : (typeof value === "object" ? "" : String(value)));
-  const [linkUrl, setLinkUrl] = useState((value && value.url) || "");
-  const [linkText, setLinkText] = useState((value && value.text) || "");
-  useEffect(() => {
-    setText(value == null ? "" : (typeof value === "object" ? "" : String(value)));
-    setLinkUrl((value && value.url) || ""); setLinkText((value && value.text) || "");
-  }, [value]);
-  const sel = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
-  if (col.type === "status" || col.type === "dropdown") {
-    const opts = col.type === "status" ? (col.settings?.labels || []) : (col.settings?.options || []);
-    const cur = col.type === "dropdown" ? ((Array.isArray(value) ? value : [])[0] || "") : (value || "");
-    return (
-      <select style={sel} value={cur} onChange={(e) => { const v = e.target.value || null; onCommit(col.type === "dropdown" ? (v ? [v] : []) : v); }}>
-        <option value="">—</option>
-        {opts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-      </select>
-    );
-  }
-  if (col.type === "people") {
-    const cur = (Array.isArray(value) && value[0]) || "";
-    return (
-      <select style={sel} value={cur} onChange={(e) => { const v = e.target.value; onCommit(v ? [v] : []); }}>
-        <option value="">Unassigned</option>
-        {ctx.operators.map((o) => <option key={o.user_id} value={o.user_id}>{(o.email || "").split("@")[0]}</option>)}
-      </select>
-    );
-  }
-  if (col.type === "date") return <input type="date" style={sel} value={value || ""} onChange={(e) => onCommit(e.target.value || null)} />;
-  if (col.type === "checkbox") return <input type="checkbox" checked={value === true} onChange={(e) => onCommit(e.target.checked)} />;
-  if (col.type === "long_text") {
-    return <textarea rows={3} style={{ ...sel, resize: "vertical", fontWeight: 500 }} value={text}
-      onChange={(e) => setText(e.target.value)} onBlur={() => { if (text !== String(value || "")) onCommit(text); }} />;
-  }
-  if (col.type === "link") {
-    const commit = () => { if (linkUrl.trim()) onCommit({ url: linkUrl.trim(), text: linkText.trim() }); else onCommit(null); };
-    return (
-      <span style={{ display: "flex", gap: 6 }}>
-        <input placeholder="https://…" style={{ ...sel, flex: 2 }} value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} onBlur={commit} />
-        <input placeholder="Label" style={{ ...sel, flex: 1 }} value={linkText} onChange={(e) => setLinkText(e.target.value)} onBlur={commit} />
-      </span>
-    );
-  }
-  const commit = () => { const v = col.type === "number" ? (text === "" ? null : Number(text)) : text; onCommit(v); };
-  return <input type={col.type === "number" ? "number" : "text"} style={sel} value={text}
-    onChange={(e) => setText(e.target.value)} onBlur={() => { if (text !== String(value == null ? "" : value)) commit(); }}
-    onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />;
 }
 
 // ── Board settings modal: name · groups · columns (incl. status labels ↔ client map) ──
@@ -624,49 +580,69 @@ function ProjectsTab({ sub, onSub }) {
 
         {data && (
           <>
-            {/* Toolbar: search · facets · WHEN · group-by · columns */}
+            {/* ONE neat row of same-height controls (Carolyn 2026-08-27). The shared
+                FacetSelect stacks an uppercase label ABOVE its select, which put three
+                controls at a different height and baseline from the rest of the row —
+                so the filters are built here from PMCtl instead. (It also passed "all"
+                as the all-value while the filter treats "" as all, so choosing All
+                after a filter emptied the board.) */}
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-              <div style={{ minWidth: 200 }}><SearchInput value={q} onChange={setQ} placeholder="Search items…" /></div>
+              <span style={{ ...PM_CTL, padding: "0 10px", gap: 6, minWidth: 190 }}>
+                <span style={{ color: "#94A3B8" }}>⌕</span>
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search items…"
+                  style={{ border: "none", outline: "none", background: "none", fontSize: 12.5, fontWeight: 600, color: "#1E293B", flex: 1, minWidth: 0, fontFamily: "inherit", height: "100%" }} />
+                {q && <button type="button" onClick={() => setQ("")} title="Clear"
+                  style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 13, padding: 0 }}>✕</button>}
+              </span>
+
               {facetCols.map((c) => (
-                <FacetSelect key={c.id} label={c.name} value={facets[c.id] || ""} allLabel={"All"}
-                  onChange={(v) => setFacets((f) => ({ ...f, [c.id]: v || null }))}
-                  options={(pmType(c).groupsFor(c, ctx) || []).map((g) => ({ value: g.key, label: g.label }))} />
+                <PMCtl key={c.id} label={c.name}>
+                  <select value={facets[c.id] || ""} onChange={(e) => setFacets((f) => ({ ...f, [c.id]: e.target.value || null }))}
+                    style={PM_CTL_SEL}>
+                    <option value="">All</option>
+                    {(pmType(c).groupsFor(c, ctx) || []).map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
+                  </select>
+                </PMCtl>
               ))}
+
               {dateCols.length > 0 && (
-                <span style={{ display: "inline-flex", gap: 5, alignItems: "center", fontSize: 12, fontWeight: 700, color: "#334155" }}>
-                  {dateCols.length > 1 ? (
-                    <select style={{ ...S.input, width: "auto", padding: "5px 7px", fontSize: 12 }} value={whenColId || ""} onChange={(e) => setWhenColId(e.target.value || null)}>
+                <PMCtl label={dateCols.length > 1 ? null : dateCols[0].name}>
+                  {dateCols.length > 1 && (
+                    <select value={whenColId || ""} onChange={(e) => setWhenColId(e.target.value || null)} style={PM_CTL_SEL}>
                       {dateCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select>
-                  ) : dateCols[0].name + ":"}
-                  <select style={{ ...S.input, width: "auto", padding: "5px 7px", fontSize: 12, fontWeight: 700 }} value={whenCond} onChange={(e) => setWhenCond(e.target.value)}>
+                  )}
+                  <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} style={PM_CTL_SEL}>
                     {SS_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
                   </select>
-                  {SS_WHEN_PARAM[whenCond] === "date" && <input type="date" style={{ ...S.input, width: "auto", padding: "4px 6px", fontSize: 12 }} value={whenA} onChange={(e) => setWhenA(e.target.value)} />}
+                  {SS_WHEN_PARAM[whenCond] === "date" && <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_CTL_SEL} />}
                   {SS_WHEN_PARAM[whenCond] === "date2" && (<>
-                    <input type="date" style={{ ...S.input, width: "auto", padding: "4px 6px", fontSize: 12 }} value={whenA} onChange={(e) => setWhenA(e.target.value)} />
+                    <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_CTL_SEL} />
                     <span style={{ color: "#94A3B8" }}>–</span>
-                    <input type="date" style={{ ...S.input, width: "auto", padding: "4px 6px", fontSize: 12 }} value={whenB} onChange={(e) => setWhenB(e.target.value)} />
+                    <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} style={PM_CTL_SEL} />
                   </>)}
-                  {SS_WHEN_PARAM[whenCond] === "month" && <input type="month" style={{ ...S.input, width: "auto", padding: "4px 6px", fontSize: 12 }} value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} />}
+                  {SS_WHEN_PARAM[whenCond] === "month" && <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} style={PM_CTL_SEL} />}
                   {SS_WHEN_PARAM[whenCond] === "count" && (<>
-                    <input type="number" min="1" style={{ ...S.input, width: 64, padding: "4px 6px", fontSize: 12 }} value={whenN} onChange={(e) => setWhenN(e.target.value)} />
-                    <select style={{ ...S.input, width: "auto", padding: "4px 6px", fontSize: 12 }} value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)}>
+                    <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} style={{ ...PM_CTL_SEL, width: 52 }} />
+                    <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} style={PM_CTL_SEL}>
                       <option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option>
                     </select>
                   </>)}
-                </span>
+                </PMCtl>
               )}
-              <label style={{ fontSize: 12, fontWeight: 700, color: "#334155", display: "inline-flex", gap: 5, alignItems: "center" }}>
-                Group by
-                <select style={{ ...S.input, width: "auto", padding: "5px 7px", fontSize: 12, fontWeight: 700 }} value={view.groupBy}
-                  onChange={(e) => setViewPart({ groupBy: e.target.value })}>
+
+              <PMCtl label="Group by">
+                <select value={view.groupBy} onChange={(e) => setViewPart({ groupBy: e.target.value })} style={PM_CTL_SEL}>
                   <option value="groups">Groups</option>
                   {groupables.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
-              </label>
-              <span style={{ position: "relative" }}>
-                <button type="button" style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "6px 12px", fontSize: 12 }} onClick={() => setColsOpen((o) => !o)}>Columns ▾</button>
+              </PMCtl>
+
+              <span style={{ position: "relative", display: "inline-flex" }}>
+                <button type="button" onClick={() => setColsOpen((o) => !o)}
+                  style={{ ...PM_CTL, padding: "0 12px", cursor: "pointer", fontWeight: 700, color: "#334155", fontFamily: "inherit" }}>
+                  Columns ▾
+                </button>
                 {colsOpen && (
                   <div style={{ position: "absolute", top: "110%", left: 0, zIndex: 60, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 10, boxShadow: "0 12px 30px rgba(20,24,40,.15)", padding: "8px 12px", minWidth: 170 }}>
                     {data.columns.map((c) => (
@@ -679,15 +655,16 @@ function ProjectsTab({ sub, onSub }) {
                   </div>
                 )}
               </span>
-              <span style={{ marginLeft: "auto", fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap" }}>
+
+              <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap" }}>
                 Showing {filtered.length} of {data.items.length}
                 {filtersOn && (
-                  <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                  <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontWeight: 700, fontSize: 12, cursor: "pointer", padding: 0, fontFamily: "inherit" }}
                     onClick={() => { setQ(""); setFacets({}); setWhenCond("any"); setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN(""); }}>
                     Clear filters
                   </button>
                 )}
-                <button type="button" title="Refresh" style={{ background: "none", border: "none", color: "#64748B", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: loading ? 0.4 : 1 }}
+                <button type="button" title="Refresh" style={{ background: "none", border: "none", color: "#64748B", fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, opacity: loading ? 0.4 : 1 }}
                   disabled={loading} onClick={reload}>↻</button>
               </span>
             </div>
@@ -710,10 +687,9 @@ function ProjectsTab({ sub, onSub }) {
            These fields are prop-driven (no seed-once state), and a remount on every cell
            commit would wipe a half-typed update draft (found live, 2026-08-27). */
         <PMItemModal key={openItem.id}
-          item={openItem} columns={data.columns} ctx={ctx} canWrite={canWrite}
+          item={openItem} canWrite={canWrite}
           onClose={() => setOpenItemId(null)}
-          onCellCommit={onCellCommit} onRename={onRename} onArchive={onArchive}
-          onChanged={reload} />
+          onRename={onRename} onArchive={onArchive} />
       )}
       {settingsOpen && data && (
         <PMBoardSettings board={data.board} columns={data.columns} groups={data.groups}

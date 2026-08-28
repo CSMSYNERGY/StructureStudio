@@ -130,50 +130,98 @@ const PM_TYPES = {
 const pmType = (col) => PM_TYPES[col.type] || PM_TYPES.text;
 const pmGroupable = (col, ctx) => pmType(col).groupsFor(col, ctx) != null;
 
-// ── Inline cell editor ────────────────────────────────────────────────────────
-// Swapped into the cell while a cell is "open". Commits through onCommit(newValue) and
-// closes on blur/Escape via onClose. Text/number keep local state until Enter/blur so a
-// half-typed value never round-trips.
-function PMCellEditor({ col, value, ctx, onCommit, onClose }) {
-  const [text, setText] = useState(value == null ? "" : (col.type === "link" ? "" : String(value)));
-  const sel = { ...S.input, padding: "4px 6px", fontSize: 12.5, width: "auto", minWidth: 110 };
-  if (col.type === "status" || col.type === "dropdown") {
-    const opts = col.type === "status" ? (col.settings?.labels || []) : (col.settings?.options || []);
-    const cur = col.type === "dropdown" ? ((Array.isArray(value) ? value : [])[0] || "") : (value || "");
-    return (
-      <select autoFocus style={sel} value={cur}
-        onChange={(e) => { const v = e.target.value || null; onCommit(col.type === "dropdown" ? (v ? [v] : []) : v); onClose(); }}
-        onBlur={onClose} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
-        <option value="">—</option>
-        {opts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-      </select>
-    );
+// ── Inline cell editing ──────────────────────────────────────────────────
+// EVERY field is edited in its own cell (Carolyn 2026-08-27: "like in Monday and excel").
+// The item modal owns notes only — it is never a form, and nothing here opens it.
+//
+// Two shapes, both one click to open and one click (or blur) to save:
+//   * choice fields (status / dropdown / people) → PMChoiceMenu, a small anchored list.
+//     A native <select> needed THREE clicks (open the editor, open the select, pick) and
+//     showed raw text instead of the colours the board is read by.
+//   * typed fields (text / long text / number / date / link) → PMCellInput, committed on
+//     Enter or blur, abandoned on Escape. Checkbox commits straight from the cell click.
+
+function PMChoiceMenu({ col, value, ctx, onCommit, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    // Deferred: the very click that opened this menu is still travelling to document.
+    const t = setTimeout(() => document.addEventListener("mousedown", onDoc), 0);
+    window.addEventListener("keydown", onKey);
+    return () => { clearTimeout(t); document.removeEventListener("mousedown", onDoc); window.removeEventListener("keydown", onKey); };
+  }, [onClose]);
+
+  const rows = [];
+  if (col.type === "status") {
+    (col.settings?.labels || []).forEach((l) => rows.push({ key: l.id, label: l.label, color: l.color, on: value === l.id }));
+  } else if (col.type === "dropdown") {
+    const cur = Array.isArray(value) ? value : (value ? [value] : []);
+    (col.settings?.options || []).forEach((o) => rows.push({ key: o.id, label: o.label, color: o.color, on: cur.includes(o.id) }));
+  } else {
+    const cur = Array.isArray(value) ? value : [];
+    ctx.operators.forEach((o) => rows.push({ key: o.user_id, label: (o.email || "").split("@")[0], color: pmAvatarColor(o.user_id), on: cur.includes(o.user_id) }));
   }
-  if (col.type === "people") {
-    const cur = (Array.isArray(value) && value[0]) || "";
-    return (
-      <select autoFocus style={sel} value={cur}
-        onChange={(e) => { const v = e.target.value; onCommit(v ? [v] : []); onClose(); }}
-        onBlur={onClose} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
-        <option value="">Unassigned</option>
-        {ctx.operators.map((o) => <option key={o.user_id} value={o.user_id}>{(o.email || "").split("@")[0]}</option>)}
-      </select>
-    );
-  }
-  if (col.type === "date") {
-    return (
-      <input autoFocus type="date" style={sel} value={value || ""}
-        onChange={(e) => { onCommit(e.target.value || null); }}
-        onBlur={onClose} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }} />
-    );
-  }
-  // text / number / long_text (short edit) — commit on Enter or blur.
-  const commit = () => { onCommit(col.type === "number" ? (text === "" ? null : Number(text)) : text); onClose(); };
+
+  const pick = (key) => {
+    if (col.type === "status") { onCommit(value === key ? null : key); onClose(); return; }
+    const cur = Array.isArray(value) ? value.slice() : (value ? [value] : []);
+    const multi = col.type === "people" || col.settings?.multi === true;
+    if (!multi) { onCommit(cur[0] === key ? [] : [key]); onClose(); return; }
+    // Multi-select stays open so several can be ticked in one visit.
+    const i = cur.indexOf(key);
+    if (i === -1) cur.push(key); else cur.splice(i, 1);
+    onCommit(cur);
+  };
+
   return (
-    <input autoFocus type={col.type === "number" ? "number" : "text"} style={{ ...sel, minWidth: 140 }}
-      value={text} onChange={(e) => setText(e.target.value)} onBlur={commit}
-      onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") onClose(); }} />
+    <div ref={ref} onClick={(e) => e.stopPropagation()}
+      style={{ position: "absolute", top: "100%", left: 4, zIndex: 70, minWidth: 170, maxHeight: 260, overflowY: "auto",
+        background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 10, boxShadow: "0 12px 30px rgba(20,24,40,.18)", padding: 5 }}>
+      <button type="button" onClick={() => { onCommit(col.type === "status" ? null : []); onClose(); }}
+        style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", cursor: "pointer",
+          fontSize: 12, fontWeight: 600, color: "#94A3B8", padding: "5px 8px", borderRadius: 6, fontFamily: "inherit" }}>
+        {col.type === "people" ? "Unassigned" : "— none"}
+      </button>
+      {rows.map((r) => (
+        <button key={r.key} type="button" onClick={() => pick(r.key)}
+          style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", textAlign: "left", cursor: "pointer",
+            background: r.on ? "#EEF2FF" : "none", border: "none", borderRadius: 6, padding: "5px 8px",
+            fontSize: 12.5, fontWeight: r.on ? 800 : 600, color: "#334155", fontFamily: "inherit" }}>
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: r.color || "#CBD5E1", flexShrink: 0 }} />
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
+          {r.on && <span style={{ color: ACCENT, fontWeight: 800 }}>✓</span>}
+        </button>
+      ))}
+    </div>
   );
+}
+
+function PMCellInput({ col, value, onCommit, onClose }) {
+  const isLink = col.type === "link";
+  const [text, setText] = useState(isLink ? ((value && value.url) || "") : (value == null ? "" : String(value)));
+  const base = { ...S.input, padding: "4px 6px", fontSize: 12.5 };
+  const commit = () => {
+    if (col.type === "number") onCommit(text.trim() === "" ? null : Number(text));
+    else if (isLink) onCommit(text.trim() ? { url: text.trim(), text: (value && value.text) || "" } : null);
+    else onCommit(text);
+    onClose();
+  };
+  if (col.type === "date") {
+    return <input autoFocus type="date" style={{ ...base, minWidth: 130 }} value={value || ""}
+      onChange={(e) => { onCommit(e.target.value || null); onClose(); }}
+      onBlur={onClose} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }} />;
+  }
+  if (col.type === "long_text") {
+    return <textarea autoFocus rows={3} style={{ ...base, width: "100%", minWidth: 220, resize: "vertical", fontWeight: 500 }}
+      value={text} onChange={(e) => setText(e.target.value)} onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) commit(); }} />;
+  }
+  return <input autoFocus type={col.type === "number" ? "number" : "text"}
+    placeholder={isLink ? "https://…" : undefined}
+    style={{ ...base, minWidth: isLink ? 200 : 130, width: "100%" }}
+    value={text} onChange={(e) => setText(e.target.value)} onBlur={commit}
+    onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") onClose(); }} />;
 }
 
 // ── Group computation ─────────────────────────────────────────────────────────
@@ -260,25 +308,34 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
     },
   });
 
+  // A cell is its own editor. The whole <td> is the hit target (clicking the padding
+  // beside a chip used to fall through to the row and open the item) and NOTHING here
+  // opens the modal — only the item name does.
+  const CHOICE = new Set(["status", "dropdown", "people"]);
   const cellFor = (r, col) => {
     const key = r.id + ":" + col.id;
     const v = r.values ? r.values[col.id] : null;
-    if (editCell === key && canEdit) {
-      return <PMCellEditor col={col} value={v} ctx={ctx}
-        onCommit={(nv) => onCellCommit(r, col, nv)} onClose={() => setEditCell(null)} />;
+    const open = editCell === key && canEdit;
+    const commit = (nv) => onCellCommit(r, col, nv);
+    if (open && !CHOICE.has(col.type)) {
+      return <PMCellInput col={col} value={v} onCommit={commit} onClose={() => setEditCell(null)} />;
     }
-    const editableHere = canEdit && col.type !== "link" && col.type !== "long_text";
     return (
-      <span style={{ cursor: editableHere ? "pointer" : "default", display: "inline-block", minWidth: 24, minHeight: 16 }}
-        onClick={(e) => {
-          if (!editableHere) return;
-          e.stopPropagation();
-          if (col.type === "checkbox") { onCellCommit(r, col, !(v === true)); return; }
-          setEditCell(key);
-        }}>
+      <>
         {pmType(col).renderCell(v, col, ctx)}
-      </span>
+        {open && CHOICE.has(col.type) && (
+          <PMChoiceMenu col={col} value={v} ctx={ctx} onCommit={commit} onClose={() => setEditCell(null)} />
+        )}
+      </>
     );
+  };
+  const cellClick = (r, col) => (e) => {
+    if (!canEdit) return;
+    e.stopPropagation();
+    const v = r.values ? r.values[col.id] : null;
+    // Checkbox needs no editor at all — one click IS the change.
+    if (col.type === "checkbox") { onCellCommit(r, col, !(v === true)); return; }
+    setEditCell(r.id + ":" + col.id);
   };
 
   return (
@@ -310,20 +367,24 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                   onDragStart={(e) => { setDragId(r.id); e.dataTransfer.effectAllowed = "move"; }}
                   onDragEnd={() => { setDragId(null); setDropTarget(null); }}
                   {...rowDropProps(r)}
-                  onClick={() => onRowOpen(r)}
                   style={{
-                    cursor: "pointer",
                     background: r.id === activeItemId ? "#F5F3FF" : (dropTarget === "row:" + r.id ? "#EEF2FF" : "#FFF"),
                     outline: r.id === activeItemId ? `2px solid ${ACCENT}` : "none", outlineOffset: -2,
                   }}>
                   <td style={{ ...S.td, color: "#CBD5E1", cursor: canEdit ? "grab" : "default", fontSize: 13 }} onClick={(e) => e.stopPropagation()}>⠿</td>
-                  <td style={{ ...S.td, fontWeight: 700 }}>
-                    {r.name}
+                  <td style={{ ...S.td, fontWeight: 700, cursor: "pointer" }} onClick={() => onRowOpen(r)}
+                    title="Open notes and updates">
+                    <span style={{ borderBottom: "1px dashed #CBD5E1" }}>{r.name}</span>
                     {r.feedback_submission_id && (
                       <span title="From a client's portal" style={{ fontSize: 9, fontWeight: 800, color: "#1B7895", background: "#E6F7FA", border: "1px solid #BEE9F1", borderRadius: 4, padding: "1px 5px", marginLeft: 7, verticalAlign: 1, letterSpacing: 0.4 }}>CLIENT</span>
                     )}
                   </td>
-                  {visCols.map((c) => <td key={c.id} style={{ ...S.td, verticalAlign: "middle" }}>{cellFor(r, c)}</td>)}
+                  {visCols.map((c) => (
+                    <td key={c.id} onClick={cellClick(r, c)}
+                      style={{ ...S.td, verticalAlign: "middle", position: "relative", cursor: canEdit ? "pointer" : "default" }}>
+                      {cellFor(r, c)}
+                    </td>
+                  ))}
                 </tr>
               ))}
               {canEdit && g.isRealGroup && (
@@ -354,7 +415,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
         </tbody>
       </table>
       {canEdit
-        ? <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>Drag a row onto a group heading to move it there; drop onto another row to reorder. Click a cell to edit it in place; click the item name for the full card.</div>
+        ? <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>Click any cell to change it right there — it saves as soon as you pick. Click the item name to open its notes. Drag a row onto a group heading to move it, or onto another row to reorder.</div>
         : <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>Read-only — your operator account can view but not edit.</div>}
     </div>
   );
