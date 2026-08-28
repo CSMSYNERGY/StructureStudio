@@ -227,6 +227,19 @@ __ssFunctions.invoke = async (name, opts) => {
   // real reason was never even looked at: the builder got "non-2xx", and so did app_errors.
   // That is how seven fixture failures on 2026-08-05 recorded nothing anyone could act on.
   // Reading it once, here, fixes the message for every action and every call site at once.
+  // ⚠️ THE STATUS IS READ FIRST, AND UNCONDITIONALLY. It used to be set only inside the
+  // block below — i.e. only when supabase-js had produced its generic "non-2xx" wording AND
+  // the body parsed as JSON AND that JSON carried an `error`/`message` field. Every 4xx that
+  // missed any of those three fell through with `ssStatus` undefined and was filed as a
+  // FAULT by the severity split further down, which keys on it. Two real cases:
+  //   • the GATEWAY's own 401 ("Invalid JWT"), answered before our function runs — its
+  //     message never says "non-2xx", so the block was skipped entirely;
+  //   • any refusal whose body is not our JSON shape (an HTML error page from the edge).
+  // Both are refusals, and the split is meant to key on the STATUS, never on the wording of
+  // a client library's message. Read it once, here, and let the block below own the message.
+  if (res && res.error && res.error.context && typeof res.error.context.status === "number") {
+    res.error.ssStatus = res.error.context.status;
+  }
   if (res && res.error && res.error.context && typeof res.error.context.json === "function"
       && /non-2xx/i.test(res.error.message || "")) {
     try {
@@ -235,7 +248,6 @@ __ssFunctions.invoke = async (name, opts) => {
       if (serverMsg) {
         const status = res.error.context.status;
         res.error.message = String(serverMsg);
-        res.error.ssStatus = status;
         // resolveTenant now classifies WHY a 401 happened ("missing" | "anon_key" |
         // "rejected"). Carry it into the log context below — that enum is the difference
         // between "this tab's session had gone" and "a real token was refused", which the

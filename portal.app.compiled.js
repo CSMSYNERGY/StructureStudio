@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 9ee8ab5d4e04)
+// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 3df05ceb0877)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -138,12 +138,29 @@ try{// info, not error: this is a COUNTER for a transient condition the app then
 // recovers from by itself, and filing it as a fault would put it straight back in
 // the queue the severity split exists to keep clean. It shipped as an error for
 // one afternoon and promptly became the top row there.
-ssLogError(SS_ERR_SOURCE,"call skipped: no session on the wire","session_reconnecting",{fn:name,action:opts&&opts.body&&opts.body.action,target:injected,status:null},"info");}catch(_l){/* logging must never break the guard */}err=new Error("Your session is reconnecting — try that again in a moment.");err.ssNoSession=true;return _context.abrupt("return",{data:null,error:err});case 13:_context.next=17;break;case 15:_context.prev=15;_context.t0=_context["catch"](3);case 17:_context.next=19;return __ssInvoke(name,opts);case 19:res=_context.sent;if(!(res&&res.error&&res.error.context&&typeof res.error.context.json==="function"&&/non-2xx/i.test(res.error.message||""))){_context.next=31;break;}_context.prev=21;_context.next=24;return res.error.context.clone().json();case 24:body=_context.sent;serverMsg=body&&(body.error||body.message);if(serverMsg){status=res.error.context.status;res.error.message=String(serverMsg);res.error.ssStatus=status;// resolveTenant now classifies WHY a 401 happened ("missing" | "anon_key" |
+ssLogError(SS_ERR_SOURCE,"call skipped: no session on the wire","session_reconnecting",{fn:name,action:opts&&opts.body&&opts.body.action,target:injected,status:null},"info");}catch(_l){/* logging must never break the guard */}err=new Error("Your session is reconnecting — try that again in a moment.");err.ssNoSession=true;return _context.abrupt("return",{data:null,error:err});case 13:_context.next=17;break;case 15:_context.prev=15;_context.t0=_context["catch"](3);case 17:_context.next=19;return __ssInvoke(name,opts);case 19:res=_context.sent;// Recover the SERVER'S message on a non-2xx. supabase-js reports every 4xx/5xx as
+// FunctionsHttpError("Edge Function returned a non-2xx status code") and leaves the JSON
+// body — which holds the actual reason — unread on error.context. Every call site here
+// does `throw new Error(error.message || data.error)`, and because `error` is truthy the
+// real reason was never even looked at: the builder got "non-2xx", and so did app_errors.
+// That is how seven fixture failures on 2026-08-05 recorded nothing anyone could act on.
+// Reading it once, here, fixes the message for every action and every call site at once.
+// ⚠️ THE STATUS IS READ FIRST, AND UNCONDITIONALLY. It used to be set only inside the
+// block below — i.e. only when supabase-js had produced its generic "non-2xx" wording AND
+// the body parsed as JSON AND that JSON carried an `error`/`message` field. Every 4xx that
+// missed any of those three fell through with `ssStatus` undefined and was filed as a
+// FAULT by the severity split further down, which keys on it. Two real cases:
+//   • the GATEWAY's own 401 ("Invalid JWT"), answered before our function runs — its
+//     message never says "non-2xx", so the block was skipped entirely;
+//   • any refusal whose body is not our JSON shape (an HTML error page from the edge).
+// Both are refusals, and the split is meant to key on the STATUS, never on the wording of
+// a client library's message. Read it once, here, and let the block below own the message.
+if(res&&res.error&&res.error.context&&typeof res.error.context.status==="number"){res.error.ssStatus=res.error.context.status;}if(!(res&&res.error&&res.error.context&&typeof res.error.context.json==="function"&&/non-2xx/i.test(res.error.message||""))){_context.next=32;break;}_context.prev=22;_context.next=25;return res.error.context.clone().json();case 25:body=_context.sent;serverMsg=body&&(body.error||body.message);if(serverMsg){status=res.error.context.status;res.error.message=String(serverMsg);// resolveTenant now classifies WHY a 401 happened ("missing" | "anon_key" |
 // "rejected"). Carry it into the log context below — that enum is the difference
 // between "this tab's session had gone" and "a real token was refused", which the
 // previous four weeks of rows could not tell apart. Never shown to the user.
 if(body.reason)res.error.ssReason=String(body.reason);// 401/403 are the two a builder can act on themselves, so say what to do.
-if(status===401)res.error.message+=" — sign out and back in.";else if(status===403)res.error.message+=" — ask an owner or admin to do this.";}_context.next=31;break;case 29:_context.prev=29;_context.t1=_context["catch"](21);case 31:try{if(res&&(res.error||res.data&&res.data.error)){// A 4xx is the SERVER REFUSING this request, and every one of ours answers with a
+if(status===401)res.error.message+=" — sign out and back in.";else if(status===403)res.error.message+=" — ask an owner or admin to do this.";}_context.next=32;break;case 30:_context.prev=30;_context.t1=_context["catch"](22);case 32:try{if(res&&(res.error||res.data&&res.data.error)){// A 4xx is the SERVER REFUSING this request, and every one of ours answers with a
 // sentence written for the person reading it ("send the invoice first", "that width
 // isn't valid", "ask an owner or admin to do this"). That is the product working, so
 // it is logged as info, not as a fault. 5xx, a network failure and an unreadable
@@ -161,7 +178,7 @@ st=res.error&&res.error.ssStatus||null;ssLogError(SS_ERR_SOURCE,res.error&&res.e
 // operator's OWN tenant — so refuse the response instead of rendering someone else's
 // data under this client's name. This is what makes the deploy order (backend first)
 // enforce itself rather than depending on anyone remembering it.
-if(!(injected&&res&&res.data&&res.data.clientId&&res.data.clientId!==injected)){_context.next=35;break;}ssLogError(SS_ERR_SOURCE,"operator view: server resolved a different tenant",null,{fn:name,asked:injected,got:res.data.clientId});return _context.abrupt("return",{data:null,error:new Error("This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists.")});case 35:// Same echo, put to a second use: it is what gives ssLogError a tenant. Read only from the
+if(!(injected&&res&&res.data&&res.data.clientId&&res.data.clientId!==injected)){_context.next=36;break;}ssLogError(SS_ERR_SOURCE,"operator view: server resolved a different tenant",null,{fn:name,asked:injected,got:res.data.clientId});return _context.abrupt("return",{data:null,error:new Error("This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists.")});case 36:// Same echo, put to a second use: it is what gives ssLogError a tenant. Read only from the
 // tenant-scoped list, because admin-catalog also answers with a `clientId` and that one is
 // the builder an operator is CREATING or deleting, not the portal on screen. Set AFTER the
 // tripwire so a response we just refused never becomes the tenant later rows are filed
@@ -202,7 +219,7 @@ if(!(injected&&res&&res.data&&res.data.clientId&&res.data.clientId!==injected)){
 // added later to remember. It is not weaker either: the one case an equality check cannot
 // tell apart from "never left" is leaving B and re-entering B, and there the first branch
 // stamps B, which is the right answer because B is what is on screen.
-if(ssTargetClientId){ssResolvedClientId=String(ssTargetClientId);}else if(armedAtIssue===ssTargetClientId&&SS_TENANT_SCOPED_FNS.indexOf(name)!==-1&&res&&res.data&&res.data.clientId){ssResolvedClientId=String(res.data.clientId);}return _context.abrupt("return",res);case 37:case"end":return _context.stop();}},_callee,null,[[3,15],[21,29]]);}));return function(_x2,_x3){return _ref.apply(this,arguments);};}();// Pin the wrapped instance. An own data property shadows the class getter, so every
+if(ssTargetClientId){ssResolvedClientId=String(ssTargetClientId);}else if(armedAtIssue===ssTargetClientId&&SS_TENANT_SCOPED_FNS.indexOf(name)!==-1&&res&&res.data&&res.data.clientId){ssResolvedClientId=String(res.data.clientId);}return _context.abrupt("return",res);case 38:case"end":return _context.stop();}},_callee,null,[[3,15],[22,30]]);}));return function(_x2,_x3){return _ref.apply(this,arguments);};}();// Pin the wrapped instance. An own data property shadows the class getter, so every
 // later `sb.functions` access returns THIS client instead of minting an unwrapped one.
 Object.defineProperty(sb,"functions",{value:__ssFunctions,configurable:true});// (ADMIN_URL is gone — the Admin tab no longer iframes /admin. admin.html and its /admin
 // redirect both REMAIN on disk as the break-glass route: if this portal will not load,
