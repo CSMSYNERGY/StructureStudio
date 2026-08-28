@@ -282,6 +282,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   );
 
   return (
+    <>
     <PMDrawer onClose={onClose} labelledBy="pm-item-title">
       {/* Header — pinned */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
@@ -394,15 +395,20 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
           </button>
         </div>
       )}
-
-      {/* Attachments open ON THE PAGE (Carolyn 2026-08-27), reusing the same pop-up the
-          quotes and invoices use — it already guards the URL, traps Escape and offers the
-          new-tab escape hatch when a browser refuses to render a PDF inline. */}
-      {viewing && (
-        <PdfModal url={viewing.url} title={viewing.name || "Attachment"}
-          image={pmIsImage(viewing)} onClose={() => setViewing(null)} />
-      )}
     </PMDrawer>
+
+    {/* Attachments open ON THE PAGE (Carolyn 2026-08-27), reusing the same pop-up the
+        quotes and invoices use — it already guards the URL, traps Escape and offers the
+        new-tab escape hatch when a browser refuses to render a PDF inline.
+        ⚠️ Rendered as a SIBLING of the drawer, never inside it: PMDrawer's panel is
+        `transform`ed, and a transformed ancestor becomes the containing block for
+        `position: fixed`, which laid this out inside the 580px drawer instead of over
+        the whole page. */}
+    {viewing && (
+      <PdfModal url={viewing.url} title={viewing.name || "Attachment"}
+        image={pmIsImage(viewing)} onClose={() => setViewing(null)} />
+    )}
+    </>
   );
 }
 
