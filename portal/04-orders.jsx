@@ -2402,6 +2402,15 @@ function InventoryTable({
     // So this re-loads afterwards rather than patching statuses locally — a sale it just
     // persisted, the buyer's name and the recomputed stage all have to come from the server
     // to agree. Additive: any failure just leaves what we already rendered.
+    //
+    // There is no paint() closure here the way LeadsTable has one, and none is needed: every
+    // derivation on this tab (bucketOf, counts, filtered, statusCell) runs in render off
+    // `rows`, so the setRows below IS the repaint. What matters is that the setRows above
+    // already sits IN FRONT of this leg — do not "tidy" the ordering by awaiting the sync
+    // first. sync-design-status is the same eight-second call that held Contacts on
+    // "Loading…" for eight of its 9.7 seconds; on Inventory it was never in front of the
+    // paint, so the only thing that ever made this tab feel slow was the word "Loading"
+    // standing in for a table while the (much cheaper) list_inventory read was in flight.
     const codes = units.flatMap((u) => (u.estimates || []).map((e) => e.shortCode)).filter(Boolean);
     if (codes.length) {
       try {
@@ -2444,6 +2453,18 @@ function InventoryTable({
       ...(u.estimates || []).map((e) => (e.name || "") + " " + (e.estimateNumber ? "EST-" + e.estimateNumber : ""))].join(" ").toLowerCase();
     return hay.includes(q);
   });
+
+  // Paging is the LAST step, over the already-filtered list, so the CardHead count, the four
+  // bucket chips and the per-stage counts still read `rows`/`filtered` and still describe the
+  // whole lot — "12 of 340" stays true. There is no SortTh on this tab, so `filtered` is still
+  // in list_inventory's created_at DESC order and the slice preserves it. `expanded` is keyed
+  // by unit id, so a drawer left open on page 2 is still open when you come back to it.
+  const [pageSize, setPageSize] = usePageSize("inventory");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [query, filt.bucket, filt.stage, filt.sale, locFilter]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = filtered.slice((curPage - 1) * pageSize, curPage * pageSize);
 
   const invoke = async (body, okMsg) => {
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
@@ -2590,7 +2611,26 @@ function InventoryTable({
       {msg && msg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{msg.ok}</div>}
       {msg && msg.err && <div style={{ ...S.err, marginBottom: 10 }}>{msg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
-      {rows === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* Grey blocks in the real column shape, not the word "Loading" on an empty card — see
+          SkelRows. The header row, the ten columns and the location select used to arrive all
+          at once when list_inventory landed; the read is no faster, but the tab stops reading
+          as broken while it is in flight. `!error` mirrors LeadsTable: a failed read must show
+          S.err above, not a skeleton that never resolves. The card head, search box and bucket
+          chips deliberately stay put rather than being swapped out the way OrdersView replaces
+          its whole card — they already render during the load, and hiding them would introduce
+          exactly the jump this skeleton exists to prevent. */}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              {["Serial #", "Building", "Roof", "Colors", "Location", "Asking price", "Estimates", "Added", "Status", "Actions"].map((h) => (
+                <th key={h} style={S.th}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody><SkelRows cols={10} rows={6} widths={["38%", "70%", "58%", "64%", "60%", "44%", "52%", "46%", "56%", "60%"]} /></tbody>
+          </table>
+        </div>
+      )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           Nothing on the lot yet. Design a building in the <strong>Designer</strong> tab and click <strong>Request this build</strong> — it takes the next serial number automatically and lands here. Put it on the <strong>Build Schedule</strong> when you're ready to make it.
@@ -2611,7 +2651,7 @@ function InventoryTable({
               ))}
             </tr></thead>
             <tbody>
-              {filtered.map((u) => {
+              {paged.map((u) => {
                 const sold = invSold(u);
                 const ests = u.estimates || [];
                 const isOpen = !!expanded[u.id];
@@ -2703,6 +2743,7 @@ function InventoryTable({
               })}
             </tbody>
           </table>
+          <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={filtered.length} noun="building" />
         </div>
       )}
     </div>

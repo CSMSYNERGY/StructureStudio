@@ -98,6 +98,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   const [msg, setMsg] = useState(null);         // { ok } | { err } one-shot banner
   // Mapping grid state
   const [grid, setGrid] = useState(null);       // list_item_map response
+  const [gridLoading, setGridLoading] = useState(false); // list_item_map in flight (drives Card 2's skeleton)
   const [qboItems, setQboItems] = useState(null); // null = not loaded, [] = loaded empty
   const [itemsErr, setItemsErr] = useState(null);
   const [itemsTruncated, setItemsTruncated] = useState(false); // hit the server's page cap
@@ -139,8 +140,15 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
       setMsg((m) => (m && m.err === QBO_REASONS.state ? null : m));  // never clobber a newer message
     }
     if (d && d.connected && !d.broken) {
+      // The connection card above is already painted by now — qbo_status was the only thing it
+      // waited on. This second call fills Card 2, so the flag lets that card draw its shape
+      // meanwhile instead of leaving a heading over blank space. Cleared either way: a
+      // list_item_map that FAILS must fall back to today's behaviour, not leave a skeleton
+      // claiming to still be loading something nobody is fetching any more.
+      setGridLoading(true);
       const g = await sb.functions.invoke("portal-settings", { body: { action: "list_item_map" } });
       if (!g.error && g.data && !g.data.error) setGrid(g.data);
+      setGridLoading(false);
     }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -273,7 +281,40 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   // nothing remounts.
   const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings };
 
-  if (status === null) return <div style={{ padding: 24, color: "#64748B", fontSize: 13 }}>Loading QuickBooks…</div>;
+  // The two cards in the shape they will occupy while qbo_status is out, rather than the word
+  // "Loading" on an empty page — the SkelBar rationale in 01-core.jsx applies here verbatim.
+  // The connection card's contents differ by state (Connect button vs. company + Test /
+  // Disconnect), so the bars describe the FRAME both share — a status dot, two lines of text,
+  // a button pair — and never commit to a connection state the server has not reported yet.
+  if (status === null) return (
+    <div>
+      <div style={S.card}>
+        <SkelBar w={178} h={14} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
+          <SkelBar w={10} h={10} style={{ borderRadius: 5, flexShrink: 0 }} />
+          <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+            <SkelBar w="44%" h={13} />
+            <SkelBar w="66%" h={9} style={{ marginTop: 7 }} />
+          </div>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <SkelBar w={54} h={31} /><SkelBar w={92} h={31} />
+          </div>
+        </div>
+      </div>
+      <div style={S.card}>
+        <SkelBar w={192} h={14} />
+        <SkelBar w="88%" h={9} style={{ marginTop: 13 }} />
+        <SkelBar w="61%" h={9} style={{ marginTop: 6 }} />
+        {[0, 1, 2, 3, 4].map((i) => (
+          <div key={i} style={{ padding: "12px 0", borderBottom: "1px solid #F1F5F9" }}>
+            <SkelBar w={128} h={12} style={{ opacity: 1 - i * 0.11 }} />
+            <SkelBar w={196} h={8} style={{ marginTop: 7, opacity: 1 - i * 0.11 }} />
+            <SkelBar w={262} h={30} style={{ marginTop: 8, opacity: 1 - i * 0.11 }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
   const connected = !!status.connected;
   const broken = !!status.broken;
@@ -402,6 +443,22 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
           along on each invoice line's description.
         </p>
         {!connected && <p style={{ fontSize: 13, color: "#64748B" }}>Connect QuickBooks above to set up mappings.</p>}
+        {/* `grid` arrives on a SECOND call (list_item_map), fired only after qbo_status has
+            already unblocked the card above — so for the length of that round trip this
+            heading and its blurb sat over NOTHING: no message, no rows, no skeleton. That is
+            Carolyn's "the page opens and there's nothing there", happening inside a card that
+            has already painted. Label/control pairs in the shape the grid will take. */}
+        {connected && !broken && !grid && gridLoading && (
+          <div>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} style={{ padding: "12px 0", borderBottom: "1px solid #F1F5F9" }}>
+                <SkelBar w={128} h={12} style={{ opacity: 1 - i * 0.11 }} />
+                <SkelBar w={196} h={8} style={{ marginTop: 7, opacity: 1 - i * 0.11 }} />
+                <SkelBar w={262} h={30} style={{ marginTop: 8, opacity: 1 - i * 0.11 }} />
+              </div>
+            ))}
+          </div>
+        )}
         {connected && !broken && grid && (
           <div>
             {itemsErr && <div style={S.err}>{itemsErr}</div>}
@@ -604,7 +661,32 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     };
   };
 
-  if (status === null) return <div style={{ padding: 24, color: "#64748B", fontSize: 13 }}>Loading email sending…</div>;
+  // ONE honest card frame, not a guess at which panel is coming. `status.domainStatus` chooses
+  // between the connect form, the DNS-records table and the verified panel, and painting the
+  // wrong one for a beat would tell a tenant something false about their own sending setup —
+  // "add these DNS records" to someone already verified, or a connect form to someone who is
+  // halfway through. All three share this frame: heading, a line of explanation, a status line,
+  // then label/field pairs. Nothing is reordered above: email_status is genuinely one cheap
+  // call (an indexed client_settings row plus ten capped email_sends rows, and deliberately no
+  // vendor round trip) and its result IS the screen, so there is no slow leg to defer.
+  if (status === null) return (
+    <div style={S.card}>
+      <SkelBar w={214} h={14} />
+      <SkelBar w="90%" h={9} style={{ marginTop: 13 }} />
+      <SkelBar w="72%" h={9} style={{ marginTop: 6 }} />
+      <SkelBar w={168} h={11} style={{ marginTop: 18 }} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12, marginTop: 14 }}>
+        {[0, 1, 2].map((i) => (
+          <div key={i}>
+            <SkelBar w={86} h={8} />
+            <SkelBar w="100%" h={34} style={{ marginTop: 7 }} />
+            <SkelBar w="78%" h={8} style={{ marginTop: 7 }} />
+          </div>
+        ))}
+      </div>
+      <SkelBar w={146} h={34} style={{ marginTop: 20 }} />
+    </div>
+  );
 
   const platformReady = status.platformReady !== false;
   const st = status.domainStatus || "not_configured";
@@ -1223,7 +1305,37 @@ function CommissionStructure({ clientId }) {
   );
   const lab = (t) => <span style={{ ...S.lbl, display: "block", marginBottom: 7 }}>{t}</span>;
 
-  if (loading || !s) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commission structure…</div>;
+  // This screen is not slow — one indexed single-row select, no fan-out, no edge function. Its
+  // whole problem was saying "Loading" on an empty card, which reads as broken rather than as
+  // coming. So: skeleton only, and load() is untouched.
+  //
+  // ⚠️ It must stay a SKELETON and never a greyed-out copy of the form. The session re-check
+  // above deliberately leaves `s` null and returns, so this branch is also the guard's safe
+  // state — and a disabled form would render the hard-coded DEFAULTS ("disabled", "biweekly",
+  // "pre-tax subtotal"). A tenant glimpsing their live commission terms as "disabled" is a lie
+  // about their own configuration, told by the very branch that exists to stop us writing that
+  // lie into their row. Grey bars claim nothing.
+  if (loading || !s) return (
+    <div style={{ ...S.card, maxWidth: 720 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <SkelBar w={186} h={15} />
+        <SkelBar w={72} h={15} style={{ borderRadius: 999 }} />
+      </div>
+      <SkelBar w="94%" h={9} />
+      <SkelBar w="66%" h={9} style={{ marginTop: 6 }} />
+      <SkelBar w={252} h={14} style={{ marginTop: 20 }} />
+      {/* Five label+control pairs, matching the five blocks the real form lays out below the
+          on/off checkbox: the who-earns note (the tall one), then base, earned-on, cadence and
+          clawback — so the form lands into its own outline instead of pushing the page around. */}
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} style={{ marginTop: 18 }}>
+          <SkelBar w={i % 2 ? 214 : 168} h={8} style={{ opacity: 1 - i * 0.09 }} />
+          <SkelBar w={i === 0 ? "100%" : 318} h={i === 0 ? 46 : 34} style={{ marginTop: 8, opacity: 1 - i * 0.09 }} />
+        </div>
+      ))}
+      <SkelBar w={204} h={36} style={{ marginTop: 24 }} />
+    </div>
+  );
 
   return (
     <div style={{ ...S.card, maxWidth: 720 }}>
@@ -1595,6 +1707,11 @@ function CommissionTeamInner() {
   const [edits, setEdits] = useState({});       // userId -> in-progress rate string
   const [removing, setRemoving] = useState(null); // member awaiting unlink/deactivate choice
   const [invite, setInvite] = useState(null);   // { email, link, emailSent } after an add
+  // Declared up here, not beside the table, because every early return below this point would
+  // otherwise skip a hook. No page-reset effect: this list has no filters, and PageBar's own
+  // clamp already walks you back when a removal shortens the team under you.
+  const [pageSize, setPageSize] = usePageSize("team");
+  const [page, setPage] = useState(1);
 
   const call = async (body) => {
     const { data: r, error } = await sb.functions.invoke("portal-commissions", { body });
@@ -1667,10 +1784,50 @@ function CommissionTeamInner() {
   };
   const sw = (on) => <span style={{ display: "inline-block", width: 34, height: 20, borderRadius: 20, background: on ? ACCENT : "#CBD5E1", position: "relative", verticalAlign: "middle", transition: "background .12s" }}><span style={{ position: "absolute", top: 2, [on ? "right" : "left"]: 2, width: 16, height: 16, borderRadius: "50%", background: "#FFF" }} /></span>;
 
-  if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading team…</div>;
+  // NO TWO-PHASE PAINT HERE, AND THAT IS THE FINDING, NOT AN OMISSION.
+  //
+  // The slow leg is inside the one `list` call and cannot be split off from the browser: the
+  // server loops `auth.admin.getUserById` once per member, sequentially, so a 20-person builder
+  // waits on 20 GoTrue round trips inside a single request. Shortening that is server work.
+  //
+  // And there is nothing safe to paint ahead of it. `canSeeRates` decides whether the
+  // Commission % column exists at all, and `isOwner` gates the two grant switches — both ride
+  // the SAME response as the rows they hide. Painting rows early would mean either rendering
+  // the rate column before the server has said this caller may see it, or guessing at a
+  // permission in the browser. Neither is worth a second of load time, so this tab gets the
+  // skeleton and the page control only.
+  //
+  // FIVE columns: Name / Title / Access / Last active / Actions is the minimum view — Commission
+  // %, Sees all payouts and Full access are all conditional. Under-showing is the safe
+  // direction; the table can only GAIN columns when the response lands, and a grey bar carries
+  // no data either way.
+  if (data === null) return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <SkelBar w={62} h={15} />
+        <SkelBar w={26} h={15} style={{ borderRadius: 999 }} />
+      </div>
+      <SkelBar w="92%" h={9} />
+      <SkelBar w="58%" h={9} style={{ marginTop: 6, marginBottom: 16 }} />
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            {["Name", "Title", "Access", "Last active", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+          </tr></thead>
+          <tbody><SkelRows cols={5} rows={6} /></tbody>
+        </table>
+      </div>
+    </div>
+  );
   const isOwner = !!data.isOwner;
   const canSeeRates = !!data.canSeeRates;
   const members = data.members || [];
+  // Page the ROWS only. The count chip above still reads `members.length` — the whole team, not
+  // the page — the same convention Contacts uses, and the "No one here yet" row below still
+  // keys off the full list so an out-of-range page can never claim an empty team.
+  const memberPages = Math.max(1, Math.ceil(members.length / pageSize));
+  const memberPage = Math.min(page, memberPages);
+  const pagedMembers = members.slice((memberPage - 1) * pageSize, memberPage * pageSize);
   // Areas, titles and presets all come from the server (accessMetadata) — see AccessGrid.
   const meta = data.meta || { areas: [], titles: [], presets: {} };
   const canManageTeam = !!data.canManageTeam;
@@ -1751,7 +1908,7 @@ function CommissionTeamInner() {
             <th style={{ ...th, textAlign: "right" }}>Actions</th>
           </tr></thead>
           <tbody>
-            {members.map((m) => {
+            {pagedMembers.map((m) => {
               const nCustom = Object.keys(m.access || {}).length;
               return (
               <tr key={m.userId} style={editingAccess === m.userId ? { background: "#F8FAFC" } : undefined}>
@@ -1833,7 +1990,12 @@ function CommissionTeamInner() {
           </tbody>
         </table>
       </div>
+      {/* noun is "team member", not "person": PageBar pluralises by appending an "s", and this
+          bar sits under a table of named colleagues where "12 persons" reads as a form. */}
+      {members.length > 0 && <PageBar size={pageSize} onSize={setPageSize} page={memberPage} onPage={setPage} total={members.length} noun="team member" />}
 
+      {/* `editing` is resolved against the FULL members array, so the access panel still opens
+          for someone who is not on the visible page. That is correct — leave it. */}
       {editing && canManageTeam && (
         <AccessGrid key={editing.userId} member={editing} meta={meta} myAccess={data.myAccess} isOwner={isOwner}
           busy={busy} onCancel={() => setEditingAccess(null)} onSave={(next) => saveAccess(editing, next)} />
@@ -1870,6 +2032,13 @@ function CommissionsReport() {
   const [fTo, setFTo] = useState("");          // earned-on <= (YYYY-MM-DD)
   const [sortBy, setSortBy] = useState("");    // "" = default period order; else date|amount|order|customer|rep
   const [sortDir, setSortDir] = useState("desc");
+  // Paging state lives up here because every early return below would otherwise skip a hook.
+  // The slicing itself is the LAST step of the render — see the comment at the slice.
+  const [pageSize, setPageSize] = usePageSize("commissions");
+  const [page, setPage] = useState(1);
+  // Staying on page 7 of a filter that now returns four lines shows an empty report and reads
+  // as broken, so any change to WHAT is being listed goes back to page 1.
+  useEffect(() => { setPage(1); }, [q, fRep, fPeriod, fStatus, fFrom, fTo, sortBy, sortDir]);
 
   const call = async (body) => {
     const { data: r, error } = await sb.functions.invoke("portal-commissions", { body });
@@ -1877,17 +2046,52 @@ function CommissionsReport() {
     if (r && r.error) throw new Error(r.error);
     return r;
   };
-  const load = useCallback(async () => {
-    setErr(null);
-    // Owner / full-access: refresh the ledger from GHL first (best-effort); a rep's compute 403s
-    // and is ignored, they just read their own rows.
-    try { await call({ action: "compute" }); } catch (_e) { /* non-owner or transient */ }
-    try { setData(await call({ action: "list_entries" })); }
-    catch (e) { setErr(e.message); setData({ entries: [] }); }
+  // Guards against two computes from THIS mount (a double Refresh click, StrictMode's double
+  // effect). It cannot cover a remount or a second browser tab — see the note below.
+  const inflight = useRef(null);
+  // ⛔ THE LEDGER IS NOT PAINTED BEFORE `compute` FINISHES, AND THAT IS DELIBERATE — this is the
+  // one list in the portal that keeps the old compute→read order while every other slow tab was
+  // moved to paint-first. FOUR attempts at painting it early were each rejected in review, and
+  // they failed for the same underlying reason rather than four different ones:
+  //
+  //   Painting early means CONTROLS EXIST while compute runs. compute is not a read — it reads
+  //   commission_entries ONCE (portal-commissions/index.ts:599) and then bare-INSERTs a line for
+  //   any order it did not find (:648). There is no upsert, no advisory lock, and migration 078
+  //   puts no unique constraint on (client_id, order_id). Any second overlapping compute inserts
+  //   the same orders again: the period double-counts, and because mark_paid freezes a paid row
+  //   forever (`if (ex.some(e => e.status === 'paid'…)) continue`), approving and paying that
+  //   period pays the rep TWICE with nothing flagging it.
+  //
+  //   Every client-side guard tried was an approximation of a server invariant that does not
+  //   exist. A re-entrancy ref covers one mount, not the tab being left and re-entered (09-shell
+  //   unmounts this component), nor a second browser tab, nor a reload. A timeout re-armed the
+  //   writers while the server was still inserting; not re-arming them turned a slow tenant into
+  //   a locked-out one whose only escape — reload — starts the very second compute at issue.
+  //
+  // So the speed work here stops at PRESENTATION: the skeleton below replaces the bare word
+  // "Loading", and the table pages at 30. Both are free. The 8-second wait stays until the
+  // server can promise one compute at a time — a partial unique index on
+  // commission_entries(client_id, order_id) where kind='commission', or an advisory lock around
+  // the compute branch. NOTE a plain unique index would break SPLITS, which deliberately create
+  // several commission rows per order, so it needs the narrower predicate or the lock.
+  const load = useCallback(() => {
+    if (inflight.current) return inflight.current;
+    const run = (async () => {
+      setErr(null);
+      // Owner / full-access: refresh the ledger from GHL (best-effort); a rep's compute 403s
+      // and is ignored, they just read their own rows.
+      try { await call({ action: "compute" }); } catch (_e) { /* non-owner or transient */ }
+      try { setData(await call({ action: "list_entries" })); }
+      catch (e) { setErr(e.message); setData({ entries: [] }); }
+    })().finally(() => { inflight.current = null; });
+    inflight.current = run;
+    return run;
   }, []);
   useEffect(() => { load(); }, [load]);
 
   const money = (c) => c == null ? "—" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+
 
   const assignEarner = async (entryId, userId) => {
     setBusy(true); setMsg(null); setAssign(null);
@@ -1950,7 +2154,44 @@ function CommissionsReport() {
   const approvePeriod = (periodKey) => act({ action: "approve_period", periodKey }, "Period approved — ready to pay.");
   const unapprovePeriod = (periodKey) => act({ action: "unapprove_period", periodKey });
 
-  if (data === null) return <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>Loading commissions…</div>;
+  // The report's own shape while the first list_entries is out: heading, the filter card, and
+  // one pay-period card whose rows are bars. SIX columns deliberately —
+  // Order/Customer/Building/Base/Commission/Status is the minimum (rep) view; Rep and Rate exist
+  // only for someone the server says may see them, so the table can only GAIN columns when the
+  // response lands, never lose them, and a grey bar leaks nothing either way.
+  const skelPeriodCard = (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <SkelBar w={172} h={14} /><SkelBar w={128} h={10} />
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            {["Order", "Customer", "Building", "Base", "Commission", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+          </tr></thead>
+          <tbody><SkelRows cols={6} rows={6} /></tbody>
+        </table>
+      </div>
+    </div>
+  );
+  if (data === null) return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <SkelBar w={148} h={16} /><SkelBar w={84} h={28} />
+      </div>
+      <div style={{ ...S.card, marginBottom: 14, padding: "12px 14px" }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          {[210, 132, 132, 132, 132, 132].map((w, i) => (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <SkelBar w={Math.round(w * 0.4)} h={8} />
+              <SkelBar w={w} h={30} />
+            </div>
+          ))}
+        </div>
+      </div>
+      {skelPeriodCard}
+    </div>
+  );
   const entries = data.entries || [];
   const isOwner = !!data.isOwner, seesAll = !!data.seesAll, canSeeRates = !!data.canSeeRates;
   const team = data.team || [];
@@ -2017,6 +2258,23 @@ function CommissionsReport() {
   for (const e of entries) { const k = e.periodKey || "unscheduled"; (periodAll[k] = periodAll[k] || []).push(e); }
   const orderedKeys = Object.keys(groups).sort().reverse();
 
+  // PAGING IS THE LAST STEP, and it pages the REPORT rather than each card: flatten the rows in
+  // the exact order they render (period by period, sorted inside each), slice once, then let
+  // each card draw only the lines that fell on this page. A page boundary can therefore land
+  // mid-period and the next page picks it up, which is what makes "31–60 of 214" true.
+  //
+  // CRITICAL: `groups` and `periodAll` above stay computed from the FULL filtered / full entry
+  // sets, so every period header total and every Approve / Mark-paid count keeps describing the
+  // WHOLE period. Those actions are whole-period by design (mark_paid takes a period_key, not a
+  // row list) and must never start meaning "the part of it you can currently see" — the same
+  // reason Contacts pages last, so its counts keep describing the whole tenant.
+  const pageRowsByKey = {};
+  let flatRows = [];
+  for (const k of orderedKeys) { const rs = sortRows(groups[k].rows); pageRowsByKey[k] = rs; flatRows = flatRows.concat(rs); }
+  const commPages = Math.max(1, Math.ceil(flatRows.length / pageSize));
+  const commPage = Math.min(page, commPages);
+  const onPageIds = new Set(flatRows.slice((commPage - 1) * pageSize, commPage * pageSize).map((e) => e.id));
+
   const ctrlWrap = { display: "flex", flexDirection: "column", gap: 3 };
   const ctrlSel = { ...S.input, padding: "6px 8px", minWidth: 130 };
 
@@ -2036,7 +2294,7 @@ function CommissionsReport() {
         <button onClick={load} disabled={busy} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
       </div>
 
-      {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
+            {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
 
       {entries.length > 0 && (
         <div style={{ ...S.card, marginBottom: 14, padding: "12px 14px" }}>
@@ -2089,6 +2347,10 @@ function CommissionsReport() {
 
       {orderedKeys.map((k) => {
         const g = groups[k];
+        // Only this page's slice of the period. A period with nothing on this page draws no
+        // card at all — an empty period card would read as a period that pays nothing.
+        const pageRows = pageRowsByKey[k].filter((e) => onPageIds.has(e.id));
+        if (pageRows.length === 0) return null;
         // The header total reads as "what this period pays out", so excluded lines (still listed
         // below for the audit trail) stay OUT of it and are surfaced as their own labeled sum.
         const total = g.rows.reduce((s, e) => s + (e.status === "excluded" ? 0 : (e.amountCents || 0)), 0);
@@ -2128,7 +2390,7 @@ function CommissionsReport() {
                   {canSeeRates && <th style={th}></th>}
                 </tr></thead>
                 <tbody>
-                  {sortRows(g.rows).map((e) => (
+                  {pageRows.map((e) => (
                     <tr key={e.id}>
                       <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>{e.orderNo ? "#" + e.orderNo : "—"}</td>
                       <td style={td}>{e.customer}</td>
@@ -2141,7 +2403,7 @@ function CommissionsReport() {
                                     <option value="" disabled>Assign rep…</option>
                                     {team.map((t) => <option key={t.userId} value={t.userId}>{t.name}</option>)}
                                   </select>
-                                : <button onClick={() => setAssign(e.id)} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 6, color: "#3D3672", fontWeight: 700, fontSize: 11.5, padding: "4px 9px", cursor: "pointer", fontFamily: "inherit" }}>Assign rep</button>)
+                                : <button onClick={() => setAssign(e.id)} disabled={busy} style={{ background: "none", border: "1px dashed #CBD5E1", borderRadius: 6, color: "#3D3672", fontWeight: 700, fontSize: 11.5, padding: "4px 9px", cursor: "pointer", fontFamily: "inherit" }}>Assign rep</button>)
                             : <span style={{ color: "#94A3B8" }}>Unassigned</span>)}
                         </td>
                       )}
@@ -2179,6 +2441,10 @@ function CommissionsReport() {
           </div>
         );
       })}
+
+      {flatRows.length > 0 && (
+        <PageBar size={pageSize} onSize={setPageSize} page={commPage} onPage={setPage} total={flatRows.length} noun="commission" />
+      )}
 
       {splitFor && (
         <div onClick={(ev) => { if (ev.target === ev.currentTarget) setSplitFor(null); }}

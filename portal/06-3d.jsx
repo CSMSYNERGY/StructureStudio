@@ -306,7 +306,35 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
         Photos you upload for a door or window are shown on that door in 3D, so it looks like the one you actually sell.
         Give each building style its own 3D look below and the shape matches your real buildings too.
       </p>
-      {state.loading && <div style={{ fontSize: 13, color: "#64748B" }}>Loading your styles…</div>}
+      {/* Grey blocks in the shape of the answer, not the word "Loading your styles…" over an
+          empty page. Getting to that answer costs TWO serial round-trips and neither is
+          short: this component only mounts once `view3dUnlocked` resolves, which is an
+          await on portal-billing action:"status" (09-shell.jsx), and only THEN does the
+          catalog fetch above start — one edge call that fans out ten table reads plus a
+          second wallet round-trip, of which this component reads `data.styles` and nothing
+          else. The heading and the explainer already paint immediately; this stops the part
+          that actually answers the question from reading as broken while it arrives.
+          Card grid, not SkelRows — there is no table here. The widths and the card's own
+          background/border/padding mirror the real row below, so nothing shifts on arrival.
+          Admin-gated to match the fetch's own guard at the top of the effect: a sales rep
+          never starts that request, so they must never be shown a list coming that isn't. */}
+      {state.loading && canAdmin && (
+        <>
+          <SkelBar w={190} h={10} style={{ marginBottom: 8 }} />
+          <div style={{ display: "grid", gap: 8 }}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px" }}>
+                <SkelBar w={48} h={36} style={{ borderRadius: 6, flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <SkelBar w="38%" h={12} />
+                  <SkelBar w="60%" h={10} style={{ marginTop: 7 }} />
+                </div>
+                <SkelBar w={86} h={28} style={{ borderRadius: 8, flexShrink: 0 }} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       {state.err && <div style={{ fontSize: 13, color: "#DC2626", fontWeight: 600 }}>{state.err}</div>}
       {!canAdmin && !state.loading && (
         <div style={{ fontSize: 13, color: "#64748B" }}>

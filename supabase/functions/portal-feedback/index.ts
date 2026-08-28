@@ -4,11 +4,15 @@ import { withErrorLog } from "../_shared/logError.ts";
 
 // Portal-facing bug / feature-request intake for portal.html.
 //
-// Monday stays the team's system of record — this function does NOT replace it, it
-// mirrors it. A submission is written to `feedback_submissions` FIRST (so the tenant
-// sees it in "My Submissions" even if Monday is down or the token is stale), then
-// pushed into the matching Monday board. A failed push is recorded in `monday_error`
-// and the row is still returned as submitted; `action:"retry_push"` re-attempts it.
+// PARALLEL-RUN since 2026-08-27: the team is trialling the in-product Projects module
+// as Monday's replacement. A submission is written to `feedback_submissions` FIRST (so
+// the tenant sees it in "My Submissions" even if everything else is down), then mirrored
+// into the internal Projects board (`mirrorToProjects`, best-effort), then pushed into
+// the matching Monday board. A failed Monday push is recorded in `monday_error` and the
+// row is still returned as submitted; `action:"retry_push"` re-attempts it. The cutover
+// switch is the MONDAY_PUSH_DISABLED=1 secret — it stops the Monday leg (no error
+// recorded) without a redeploy. See mirrorToProjects' comment for the documented
+// trial-period divergence between Monday statuses and Projects statuses.
 //
 // Auth model: identical to portal-settings. verify_jwt alone is NOT auth (the public
 // anon key passes the gateway), so we resolve a real user via auth.getUser() and map
@@ -190,6 +194,73 @@ function statusAfterPush(kind: "bug" | "feature"): string {
   return STATUS_BY_TEXT[BOARDS[kind].initialStatus] ?? "submitted";
 }
 
+// ── Parallel-run mirror into the internal Projects boards (2026-08-27) ────────
+// While the team trials the in-product Projects module (pm_* tables, migration 144,
+// portal-projects fn), every new submission ALSO becomes a pm_item on the matching
+// board, linked 1:1 through feedback_submission_id. Fully best-effort: a Projects
+// failure must never fail the tenant's submission (same posture as the Monday push).
+//
+// Divergence during the trial, documented deliberately: the Monday webhook keeps
+// updating ONLY the tenant mirror (feedback_submissions); it never touches pm_items.
+// A status dragged in Monday therefore updates what the tenant sees but not the
+// Projects board, and a later Projects status change overwrites the mirror — last
+// writer wins. The team works in Projects; cutover (MONDAY_PUSH_DISABLED=1, then
+// stripping the Monday code) ends the divergence.
+// deno-lint-ignore no-explicit-any
+async function mirrorToProjects(admin: any, row: any): Promise<void> {
+  try {
+    const { data: board } = await admin.from("pm_boards").select("id")
+      .eq("slug", row.kind === "feature" ? "features" : "bugs").maybeSingle();
+    if (!board) return;
+    const { data: exists } = await admin.from("pm_items").select("id, monday_item_id")
+      .eq("feedback_submission_id", row.id).maybeSingle();
+    if (exists) {
+      // Second call for the same submission (retry_push, or the post-push pass):
+      // just backfill the Monday id so the import script can dedupe on it.
+      if (row.monday_item_id && !exists.monday_item_id) {
+        await admin.from("pm_items").update({ monday_item_id: row.monday_item_id }).eq("id", exists.id);
+      }
+      return;
+    }
+    const { data: groups } = await admin.from("pm_groups").select("id")
+      .eq("board_id", board.id).order("position").limit(1);
+    const group = groups && groups[0];
+    if (!group) return;
+    const { data: cols } = await admin.from("pm_columns").select("*").eq("board_id", board.id);
+    const values: Record<string, unknown> = {};
+    for (const c of cols || []) {
+      // Lookups by column NAME and label `intake`/text — never by uuid (seed ids are
+      // per-environment) and never by editable label ids from this side.
+      if (c.type === "status") {
+        const labels = c.settings?.labels || [];
+        // deno-lint-ignore no-explicit-any
+        const intake = labels.find((l: any) => l.intake === true) || labels[0];
+        if (intake) values[c.id] = intake.id;
+      } else if (c.type === "text" && c.name === "Client") {
+        values[c.id] = row.client_id;
+      } else if (c.type === "date" && c.name === "Date") {
+        values[c.id] = new Date().toISOString().slice(0, 10);
+      } else if (c.type === "dropdown" && c.name === "Priority" && row.severity) {
+        // deno-lint-ignore no-explicit-any
+        const opt = (c.settings?.options || []).find((o: any) => o.label === row.severity);
+        if (opt) values[c.id] = [opt.id];
+      }
+    }
+    const { data: maxRow } = await admin.from("pm_items").select("position")
+      .eq("group_id", group.id).order("position", { ascending: false }).limit(1).maybeSingle();
+    await admin.from("pm_items").insert({
+      board_id: board.id, group_id: group.id,
+      name: String(row.title || "").slice(0, 200), values,
+      position: (maxRow?.position || 0) + 1024,
+      feedback_submission_id: row.id,
+      monday_item_id: row.monday_item_id || null,
+      created_by: row.submitted_by || null, created_by_email: row.submitter_email || null,
+    });
+  } catch (e) {
+    console.error("Projects mirror failed for submission", row.id, e instanceof Error ? e.message : String(e));
+  }
+}
+
 // Creates the Monday item for an already-persisted submission row and returns its id.
 async function pushToMonday(admin: any, token: string, row: any, businessName: string): Promise<string> {
   const cfg = BOARDS[row.kind as keyof typeof BOARDS];
@@ -267,6 +338,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (!mapping) return json({ error: "No business is linked to this account." }, 403);
   const clientId: string = mapping.client_id;
 
+  // deno-lint-ignore no-explicit-any
   let body: any = {};
   try { body = await req.json(); } catch { /* empty body → invalid action below */ }
   const action = body?.action;
@@ -305,6 +377,17 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
     if (ins.error) return json({ error: ins.error.message }, 500);
     const row = ins.data;
 
+    // Mirror into the internal Projects board FIRST (best-effort, never throws) —
+    // before the Monday push, so an unexpected push crash cannot lose the pm_item.
+    await mirrorToProjects(admin, row);
+
+    // Cutover switch: MONDAY_PUSH_DISABLED=1 stops the Monday leg without a redeploy.
+    // Deliberately NOT an error state — no monday_error is recorded — because the
+    // submission's real home (mirror row + Projects item) is already written.
+    if (Deno.env.get("MONDAY_PUSH_DISABLED") === "1") {
+      return json({ ok: true, submission: row, pushed: false });
+    }
+
     if (!token) {
       await admin.from("feedback_submissions")
         .update({ monday_error: "MONDAY_API_TOKEN not configured" }).eq("id", row.id);
@@ -320,6 +403,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       const upd = await admin.from("feedback_submissions")
         .update({ monday_item_id: itemId, monday_error: null, status: statusAfterPush(kind), updated_at: new Date().toISOString() })
         .eq("id", row.id).select().single();
+      await mirrorToProjects(admin, { ...row, monday_item_id: itemId });  // backfill the Monday id
       return json({ ok: true, submission: upd.data ?? row, pushed: true });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -332,10 +416,14 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
 
   // ── retry_push ────────────────────────────────────────────────────────────
   if (action === "retry_push") {
-    if (!token) return json({ error: "Monday is not configured." }, 500);
     const { data: row } = await admin.from("feedback_submissions")
       .select("*").eq("id", String(body.id ?? "")).eq("client_id", clientId).maybeSingle();
     if (!row) return json({ error: "Submission not found." }, 404);
+    await mirrorToProjects(admin, row);  // a failed first push may also have raced the mirror
+    if (Deno.env.get("MONDAY_PUSH_DISABLED") === "1") {
+      return json({ ok: true, submission: row, pushed: false });
+    }
+    if (!token) return json({ error: "Monday is not configured." }, 500);
     if (row.monday_item_id) return json({ ok: true, submission: row, pushed: true });
     const { data: settings } = await admin
       .from("client_settings").select("business_name").eq("client_id", clientId).maybeSingle();
@@ -344,6 +432,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       const upd = await admin.from("feedback_submissions")
         .update({ monday_item_id: itemId, monday_error: null, status: statusAfterPush(row.kind), updated_at: new Date().toISOString() })
         .eq("id", row.id).select().single();
+      await mirrorToProjects(admin, { ...row, monday_item_id: itemId });  // backfill the Monday id
       return json({ ok: true, submission: upd.data, pushed: true });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -363,9 +452,11 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       .not("monday_item_id", "is", null)
       .order("created_at", { ascending: false })
       .limit(40);
+    // deno-lint-ignore no-explicit-any
     const ids = (rows ?? []).map((r: any) => r.monday_item_id);
     if (!ids.length) return json({ ok: true, refreshed: 0 });
 
+    // deno-lint-ignore no-explicit-any
     const byItem = new Map((rows ?? []).map((r: any) => [String(r.monday_item_id), r]));
     // board { id } + value.index: label ids collide across boards, and `text` is only
     // a display name the team can rename out from under us.
@@ -377,6 +468,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
         updates (limit: 50) { id text_body created_at creator { name } }
       }
     }`;
+    // deno-lint-ignore no-explicit-any
     let items: any[] = [];
     try {
       const data = await mondayQuery(token, q, { ids });
@@ -391,6 +483,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       if (!row) continue;
       const itemBoard = String(it.board?.id ?? "");
       const statusCell = (it.column_values ?? []).find(
+        // deno-lint-ignore no-explicit-any
         (c: any) => c.id === BOARDS.bug.colStatus || c.id === BOARDS.feature.colStatus,
       );
       let cellIndex: unknown = null;
