@@ -152,24 +152,26 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     : [];
   if (shortCodes.length === 0) return json({ ok: true, statuses: {}, synced: false });
 
-  // 3. Load the tenant's designs for these codes (service role, tenant-scoped).
-  const { data: designs, error: dErr } = await admin
-    .from("designs")
-    .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
-    .eq("client_id", clientId)
-    .in("short_code", shortCodes);
+  // 3+4. The tenant's designs for these codes, and the tenant's GHL creds. Neither needs the
+  // other, and this function sits on the critical path of three tabs, so they go together.
+  const [designsRes, settingsRes] = await Promise.all([
+    admin.from("designs")
+      .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
+      .eq("client_id", clientId)
+      .in("short_code", shortCodes),
+    admin.from("client_settings")
+      .select("ghl_location_id, ghl_api_key, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id")
+      .eq("client_id", clientId)
+      .maybeSingle(),
+  ]);
+  const { data: designs, error: dErr } = designsRes;
   if (dErr) return json({ error: dErr.message }, 500);
 
   // Cached statuses to return if we can't reach GHL (portal falls back to these anyway).
   const cached: Record<string, string> = {};
   for (const d of designs ?? []) cached[d.short_code] = d.status || "sent";
 
-  // 4. Tenant GHL creds.
-  const { data: settings } = await admin
-    .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id")
-    .eq("client_id", clientId)
-    .maybeSingle();
+  const settings = settingsRes.data;
   const locationId = settings?.ghl_location_id || null;
   const apiKey = settings?.ghl_api_key || null;
   const acceptedStageId = settings?.ghl_stage_accepted_id || null;
@@ -193,7 +195,16 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   };
 
   // 5. Bounded GHL reads. Opportunities only matter if any pipeline-stage is mapped.
-  const estRes = await listEstimates(locationId, ghlHeaders);
+  //
+  // The two walks are independent, so they run together — this is the single biggest cost in
+  // the function and it used to pay for both in series. Two concurrent requests is well
+  // inside GHL's limits. ⛔ Do NOT parallelise the PAGES inside either walk: each one stops
+  // when it sees a short page, and guessing offsets ahead of that both hammers the API and
+  // breaks the `complete` flag that the promote-only fence below depends on.
+  const [estRes, oppRes] = await Promise.all([
+    listEstimates(locationId, ghlHeaders),
+    stageIdToStatus.size > 0 ? listOpportunities(locationId, ghlHeaders) : null,
+  ]);
   const estimates = estRes.rows;
   const estStatusById = new Map<string, string>();
   for (const e of estimates) {
@@ -205,8 +216,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
 
   const oppStageById = new Map<string, string>();
   let oppsComplete = true;   // never read == nothing missing
-  if (stageIdToStatus.size > 0) {
-    const oppRes = await listOpportunities(locationId, ghlHeaders);
+  if (oppRes) {
     oppsComplete = oppRes.complete;
     for (const o of oppRes.rows) {
       const id = String(o?.id ?? o?._id ?? "");
@@ -300,7 +310,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     const codes = (designs ?? []).map((d) => d.short_code);
     if (codes.length) {
       const { data: orders } = await admin
-        .from("orders").select("id, short_code, total_source").eq("client_id", clientId).in("short_code", codes);
+        .from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", codes);
       if (orders && orders.length) {
         const estTotalById = new Map<string, number>();
         for (const e of estimates) {
@@ -313,8 +323,13 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
           if (o.total_source === "manual") continue;
           const t = estTotalById.get(String(estIdByCode.get(o.short_code) ?? ""));
           if (t == null) continue;
+          // Only write when the number actually moved. This function runs on every Designs,
+          // Contacts and Inventory load, and it used to re-stamp an unchanged total for
+          // every order on every one of them — one serial UPDATE each, all of them no-ops.
+          const cents = Math.round(t * 100);
+          if (o.total_cents === cents && o.total_source === "ghl") continue;
           const { error: tErr } = await admin
-            .from("orders").update({ total_cents: Math.round(t * 100), total_source: "ghl", updated_at: new Date().toISOString() })
+            .from("orders").update({ total_cents: cents, total_source: "ghl", updated_at: new Date().toISOString() })
             .eq("id", o.id).eq("client_id", clientId);
           if (tErr) console.warn(`order total update failed for ${o.short_code}:`, tErr.message);
         }

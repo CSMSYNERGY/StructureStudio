@@ -184,6 +184,19 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ──────────────────────────────────────────────────────────────
+  // The portal pings this at sign-in so the first click into a schedule tab does not pay
+  // this function's cold start. Three properties are deliberate and load-bearing:
+  //   • it answers BEFORE resolveTenant, so it costs no auth round trip and cannot log a
+  //     refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and resolveTenant's fail-closed
+  //     handling of unknown actions is untouched;
+  //   • it never reads the request BODY — resolveTenant owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const admin = createClient(supabaseUrl, serviceKey);
@@ -420,17 +433,107 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     // ═══════════════ READS ═══════════════
 
     if (action === "build_board") {
+      // ⏱ THIS BRANCH IS ROUND-TRIP BOUND, SO IT IS ORGANISED IN WAVES — keep it that way.
+      // It used to issue thirteen PostgREST calls one after another and the tab waited for
+      // the sum of them; none of these tables is big enough for the query itself to matter
+      // (the cost is the trip, not the scan), so the fix is to stop waiting between calls.
+      // Everything below runs in the fewest waves its data dependencies allow: independent
+      // reads share a Promise.all, and a read only waits when it genuinely needs a previous
+      // result. If you add a read here, put it in the earliest wave that has its inputs
+      // rather than appending an await at the end.
+      //
+      // getStages() stays ALONE and FIRST on purpose: it is the one call here that can
+      // WRITE (it seeds DEFAULT_STAGES for a tenant that has none), and a write belongs
+      // outside a fan-out of reads.
       const stages = await getStages();
-      const { data: jobs, error } = await admin
-        .from("build_jobs").select("*").eq("client_id", clientId).order("position");
-      if (error) throw error;
+
+      // ── Wave A: everything that needs nothing but the tenant ──
+      const [
+        jobsRes,
+        soldDesignsRes,
+        unitsRes,
+        openRepairsRes,
+        team,
+        crews,
+      ] = await Promise.all([
+        admin.from("build_jobs").select("*").eq("client_id", clientId).order("position"),
+        // `.is("inventory_unit_id", null)` is the ROUTING RULE, not a tidy-up: an estimate
+        // quoted from a lot building must never appear here as a new build to schedule. The
+        // building already exists (or is already being built as a spec unit), so a second job
+        // would have the shop make it twice. create_job enforces the same rule server-side.
+        // SOLD = INVOICED (Carolyn 2026-08-08) — an accepted quote is not a sale yet, and
+        // the shop never starts a build before the invoice exists. Widening this back to
+        // include "accepted" puts unsold buildings in the tray.
+        admin.from("designs").select("short_code, contact, selections, status")
+          .eq("client_id", clientId).eq("status", "invoiced").is("inventory_unit_id", null)
+          .limit(500),
+        // EVERY unit without a build job belongs in the tray — it IS the approval step
+        // (migration 105). There is no accepted_at flag any more: a requested building sits
+        // in the tray, and dragging it onto the board is the one human decision that moves it
+        // to In Queue. Sale state is deliberately NOT filtered either: a building can be sold
+        // before it is built, and selling it does not build it — dropping sold units out of
+        // the tray would quietly stop them being made.
+        admin.from("inventory_units").select("id, serial, design_short_code, sale_state, sold_first_name")
+          .eq("client_id", clientId).limit(500),
+        admin.from("repairs").select("id, repair_no, customer_name, description, serial, status")
+          .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500),
+        getTeam(),
+        getCrews(),
+      ]);
+      // build_jobs is the only read here whose failure is fatal — the board is meaningless
+      // without it. The tray reads keep their original forgiving handling: a tray that comes
+      // back short is better than a board that refuses to open.
+      if (jobsRes.error) throw jobsRes.error;
+      const jobs = jobsRes.data;
+      const soldDesigns = soldDesignsRes.data;
+      const units = unitsRes.data;
+      const openRepairs = openRepairsRes.data;
+
       const jobIds = (jobs ?? []).map((j) => j.id);
+      // Tray items read building-first like the cards, so inventory units need their
+      // master design's style+size label.
+      const masterCodes = [...new Set((units ?? []).map((u) => u.design_short_code).filter(Boolean))];
+      const orderCodes = [...new Set((jobs ?? [])
+        .filter((j) => j.source === "order" && j.design_short_code)
+        .map((j) => j.design_short_code as string))];
+      const jobUnitIds = [...new Set((jobs ?? [])
+        .filter((j) => j.inventory_unit_id).map((j) => j.inventory_unit_id as string))];
+      const repairIds = [...new Set((jobs ?? [])
+        .filter((j) => j.repair_id).map((j) => j.repair_id as string))];
+
+      // ── Wave B: reads keyed by Wave A's ids ──
+      const [stopsRes, ordsRes, unitRowsRes, repairRowsRes, mastersRes] = await Promise.all([
+        jobIds.length
+          ? admin.from("delivery_stops").select("build_job_id, load_id, delivered_at")
+              .eq("client_id", clientId).in("build_job_id", jobIds)
+          : Promise.resolve({ data: [] }),
+        orderCodes.length
+          ? admin.from("orders").select("short_code, total_cents")
+              .eq("client_id", clientId).in("short_code", orderCodes)
+          : Promise.resolve({ data: [] }),
+        jobUnitIds.length
+          ? admin.from("inventory_units").select("id, asking_price_cents")
+              .eq("client_id", clientId).in("id", jobUnitIds)
+          : Promise.resolve({ data: [] }),
+        repairIds.length
+          ? admin.from("repairs").select("id, quote_cents")
+              .eq("client_id", clientId).in("id", repairIds)
+          : Promise.resolve({ data: [] }),
+        masterCodes.length
+          ? admin.from("designs").select("short_code, selections")
+              .eq("client_id", clientId).in("short_code", masterCodes)
+          : Promise.resolve({ data: [] }),
+      ]);
+      const stops = stopsRes.data;
+      const ords = ordsRes.data;
+      const unitRows = unitRowsRes.data;
+      const repairRows = repairRowsRes.data;
+      const masters = mastersRes.data;
+
+      // ── Wave C: the one read that needs Wave B (which loads those stops ride) ──
       // Which load each building rides (the cross-link chip on build cards).
       let stopByJob: Record<string, unknown> = {};
       if (jobIds.length) {
-        const { data: stops } = await admin
-          .from("delivery_stops").select("build_job_id, load_id, delivered_at")
-          .eq("client_id", clientId).in("build_job_id", jobIds);
         const loadIds = [...new Set((stops ?? []).map((s) => s.load_id))];
         const { data: loads } = loadIds.length
           ? await admin.from("delivery_loads").select("id, load_no, load_date, status").in("id", loadIds)
@@ -451,31 +554,12 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // value and never will, which is not the same thing as a missing one.
       const valueByJob: Record<string, number | null> = {};
       {
-        const orderCodes = [...new Set((jobs ?? [])
-          .filter((j) => j.source === "order" && j.design_short_code)
-          .map((j) => j.design_short_code as string))];
-        const { data: ords } = orderCodes.length
-          ? await admin.from("orders").select("short_code, total_cents")
-              .eq("client_id", clientId).in("short_code", orderCodes)
-          : { data: [] };
         const orderTotal: Record<string, number | null> = {};
         for (const o of ords ?? []) orderTotal[String(o.short_code)] = o.total_cents ?? null;
 
-        const unitIds = [...new Set((jobs ?? [])
-          .filter((j) => j.inventory_unit_id).map((j) => j.inventory_unit_id as string))];
-        const { data: unitRows } = unitIds.length
-          ? await admin.from("inventory_units").select("id, asking_price_cents")
-              .eq("client_id", clientId).in("id", unitIds)
-          : { data: [] };
         const unitPrice: Record<string, number | null> = {};
         for (const u of unitRows ?? []) unitPrice[String(u.id)] = u.asking_price_cents ?? null;
 
-        const repairIds = [...new Set((jobs ?? [])
-          .filter((j) => j.repair_id).map((j) => j.repair_id as string))];
-        const { data: repairRows } = repairIds.length
-          ? await admin.from("repairs").select("id, quote_cents")
-              .eq("client_id", clientId).in("id", repairIds)
-          : { data: [] };
         const repairQuote: Record<string, number | null> = {};
         for (const rq of repairRows ?? []) repairQuote[String(rq.id)] = rq.quote_cents ?? null;
 
@@ -492,36 +576,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const haveDesign = new Set((jobs ?? []).map((j) => j.design_short_code).filter(Boolean));
       const haveUnit = new Set((jobs ?? []).map((j) => j.inventory_unit_id).filter(Boolean));
       const haveRepair = new Set((jobs ?? []).map((j) => j.repair_id).filter(Boolean));
-      // `.is("inventory_unit_id", null)` is the ROUTING RULE, not a tidy-up: an estimate
-      // quoted from a lot building must never appear here as a new build to schedule. The
-      // building already exists (or is already being built as a spec unit), so a second job
-      // would have the shop make it twice. create_job enforces the same rule server-side.
-      const { data: soldDesigns } = await admin
-        .from("designs").select("short_code, contact, selections, status")
-        // SOLD = INVOICED (Carolyn 2026-08-08) — an accepted quote is not a sale yet, and
-        // the shop never starts a build before the invoice exists. Widening this back to
-        // include "accepted" puts unsold buildings in the tray.
-        .eq("client_id", clientId).eq("status", "invoiced").is("inventory_unit_id", null)
-        .limit(500);
-      // EVERY unit without a build job belongs here — this tray IS the approval step
-      // (migration 105). There is no accepted_at flag any more: a requested building sits in
-      // this tray, and dragging it onto the board is the one human decision that moves it to
-      // In Queue. Sale state is deliberately NOT filtered either: a building can be sold
-      // before it is built, and selling it does not build it — dropping sold units out of the
-      // tray would quietly stop them being made.
-      const { data: units } = await admin
-        .from("inventory_units").select("id, serial, design_short_code, sale_state, sold_first_name")
-        .eq("client_id", clientId).limit(500);
-      // Tray items read building-first like the cards, so inventory units need their
-      // master design's style+size label.
-      const masterCodes = [...new Set((units ?? []).map((u) => u.design_short_code).filter(Boolean))];
-      const { data: masters } = masterCodes.length
-        ? await admin.from("designs").select("short_code, selections").eq("client_id", clientId).in("short_code", masterCodes)
-        : { data: [] };
       const masterLabel = Object.fromEntries((masters ?? []).map((m) => [m.short_code, buildingLabelFrom(m.selections as Record<string, unknown>)]));
-      const { data: openRepairs } = await admin
-        .from("repairs").select("id, repair_no, customer_name, description, serial, status")
-        .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500);
       const tray = {
         orders: (soldDesigns ?? []).filter((d) => !haveDesign.has(d.short_code)).map((d) => ({
           designShortCode: d.short_code,
@@ -542,24 +597,46 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         })),
       };
       const jobsOut = (jobs ?? []).map((j) => ({ ...j, valueCents: valueByJob[String(j.id)] ?? null }));
-      return json({ stages, jobs: jobsOut, stopByJob, tray, team: await getTeam(), crews: await getCrews() });
+      // team/crews were fetched in Wave A — do NOT await them here. Awaiting inside the
+      // response literal is what made them two extra serial trips at the very end of the
+      // request, after every other read had already finished.
+      return json({ stages, jobs: jobsOut, stopByJob, tray, team, crews });
     }
 
     if (action === "loads") {
-      const { data: loads, error } = await admin
-        .from("delivery_loads").select("*").eq("client_id", clientId)
-        .order("load_date", { ascending: true, nullsFirst: false }).limit(500);
-      if (error) throw error;
+      // Waves, for the reason documented on build_board: the delivery board was waiting on
+      // ~9 round trips in single file, and drivers/territories/team were three of them —
+      // awaited inside the response literal, so they only started once everything else had
+      // finished. They depend on nothing; they go first, alongside the loads read.
+      const [loadsRes, drivers, territories, team] = await Promise.all([
+        admin.from("delivery_loads").select("*").eq("client_id", clientId)
+          .order("load_date", { ascending: true, nullsFirst: false }).limit(500),
+        getDrivers(),
+        getTerritories(),
+        getTeam(),
+      ]);
+      if (loadsRes.error) throw loadsRes.error;
+      const loads = loadsRes.data;
       const loadIds = (loads ?? []).map((l) => l.id);
       const { data: stops } = loadIds.length
         ? await admin.from("delivery_stops").select("*").eq("client_id", clientId)
           .in("load_id", loadIds).order("stop_order")
         : { data: [] };
-      // Build status per stop (for the cross-link chips), one round trip.
+      // Build status per stop (for the cross-link chips), and where each unit sits on the
+      // ladder — independent of each other, so one wave rather than two.
       const jobIds = [...new Set((stops ?? []).map((s) => s.build_job_id).filter(Boolean))];
-      const { data: jobs } = jobIds.length
-        ? await admin.from("build_jobs").select("id, stage_id, due_date, completed_at").in("id", jobIds)
-        : { data: [] };
+      // Where each inventory unit on these loads actually IS. The board used to hard-code
+      // "On lot — ready" for every inventory stop, which was a guess: it is true for a sold
+      // building being collected from the lot and false for one that has not been built yet.
+      // A stop whose unit is below `built` must not look ready to load.
+      const unitIds = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
+      const [jobsRes, unitLifecycle] = await Promise.all([
+        jobIds.length
+          ? admin.from("build_jobs").select("id, stage_id, due_date, completed_at").in("id", jobIds)
+          : Promise.resolve({ data: [] }),
+        unitIds.length ? lifecycleByUnit(unitIds as string[]) : Promise.resolve({}),
+      ]);
+      const jobs = jobsRes.data;
       const stageIds = [...new Set((jobs ?? []).map((j) => j.stage_id))];
       const { data: stages } = stageIds.length
         ? await admin.from("schedule_stages").select("id, name, kind").in("id", stageIds)
@@ -571,22 +648,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         dueDate: j.due_date,
         completedAt: j.completed_at,
       }]));
-      // Where each inventory unit on these loads actually IS. The board used to hard-code
-      // "On lot — ready" for every inventory stop, which was a guess: it is true for a sold
-      // building being collected from the lot and false for one that has not been built yet.
-      // A stop whose unit is below `built` must not look ready to load.
-      const unitIds = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
-      const unitLifecycle = unitIds.length
-        ? await lifecycleByUnit(unitIds as string[])
-        : {};
       return json({
         loads: loads ?? [],
         stops: stops ?? [],
         buildByJob,
         unitLifecycle,
-        drivers: await getDrivers(),
-        territories: await getTerritories(),
-        team: await getTeam(),
+        drivers,
+        territories,
+        team,
       });
     }
 
@@ -599,9 +668,37 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // Plus: sold units without their SALE delivery (a unit legitimately rides twice —
       // shop → lot while available, lot → customer once sold; the sale stop is the one
       // carrying the buyer's design code), and open repairs without a stop.
-      const { data: stops } = await admin
-        .from("delivery_stops").select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip")
-        .eq("client_id", clientId);
+      //
+      // ⏱ Waves, for the reason documented on build_board — this was the heaviest read in
+      // the portal at ~12 round trips in single file. Note the stops read below is
+      // deliberately UNBOUNDED: the full stop history is what the exclusion sets are built
+      // from, and a truncated list silently re-offers buildings that are already scheduled.
+      // Do not add a .limit() to it.
+      const stagesAll = await getStages();
+      const stageById = Object.fromEntries(stagesAll.map((s) => [s.id, s]));
+
+      // ── Wave A: everything keyed only by the tenant ──
+      const [stopsRes, jobsAllRes, soldRes, locsRes, openRepairsRes, territories, drivers] =
+        await Promise.all([
+          admin.from("delivery_stops")
+            .select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip")
+            .eq("client_id", clientId),
+          admin.from("build_jobs").select("*").eq("client_id", clientId).neq("source", "repair").limit(500),
+          admin.from("inventory_units")
+            .select("id, serial, design_short_code, sold_design_short_code, sold_first_name, location_id, sale_state")
+            .eq("client_id", clientId).eq("sale_state", "sold").limit(500),
+          admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
+          admin.from("repairs").select("id, repair_no, customer_name, description, serial, status")
+            .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500),
+          getTerritories(),
+          getDrivers(),
+        ]);
+      const stops = stopsRes.data;
+      const jobsAll = jobsAllRes.data;
+      const sold = soldRes.data;
+      const locs = locsRes.data;
+      const openRepairs = openRepairsRes.data;
+
       const stopJob = new Set((stops ?? []).map((s) => s.build_job_id).filter(Boolean));
       const stopRepair = new Set((stops ?? []).map((s) => s.repair_id).filter(Boolean));
       // ALSO exclude by design code. `delivery_stops_one_per_design` is a unique index, so
@@ -624,17 +721,27 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         if (c && !terrByCity[c]) terrByCity[c] = s.territory_id;
       }
 
-      const stagesAll = await getStages();
-      const stageById = Object.fromEntries(stagesAll.map((s) => [s.id, s]));
-      const { data: jobsAll } = await admin
-        .from("build_jobs").select("*").eq("client_id", clientId).neq("source", "repair").limit(500);
       const poolJobRows = (jobsAll ?? []).filter((j) =>
         !stopJob.has(j.id) && !(j.design_short_code && stopDesign.has(j.design_short_code)));
       // One query for every destination, not one per row.
       const poolCodes = [...new Set(poolJobRows.map((j) => j.design_short_code).filter(Boolean))];
-      const { data: poolDesigns } = poolCodes.length
-        ? await admin.from("designs").select("short_code, contact").eq("client_id", clientId).in("short_code", poolCodes)
-        : { data: [] };
+      // The pool row used to label every sold unit "Sold lot building" — the same generic
+      // string for every building on the list. Read the real style+size off the unit's master
+      // design, the way the build tray already does.
+      const soldMasterCodes = [...new Set((sold ?? []).map((u) => u.design_short_code).filter(Boolean))];
+
+      // ── Wave B: the two design lookups, keyed by Wave A's rows and independent of each other ──
+      const [poolDesignsRes, soldMastersRes] = await Promise.all([
+        poolCodes.length
+          ? admin.from("designs").select("short_code, contact").eq("client_id", clientId).in("short_code", poolCodes)
+          : Promise.resolve({ data: [] }),
+        soldMasterCodes.length
+          ? admin.from("designs").select("short_code, selections")
+              .eq("client_id", clientId).in("short_code", soldMasterCodes)
+          : Promise.resolve({ data: [] }),
+      ]);
+      const poolDesigns = poolDesignsRes.data;
+      const soldMasters = soldMastersRes.data;
       const contactByCode = Object.fromEntries((poolDesigns ?? []).map((d) => [d.short_code, d.contact]));
       const jobs = poolJobRows.map((j) => {
         const addr = addressFrom(contactByCode[j.design_short_code ?? ""]);
@@ -658,21 +765,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // sorted it. Undated rows last — they cannot be planned around.
       jobs.sort((a, b) => String(a.readyDate ?? "9999-12-31").localeCompare(String(b.readyDate ?? "9999-12-31")));
 
-      const { data: sold } = await admin
-        .from("inventory_units")
-        .select("id, serial, design_short_code, sold_design_short_code, sold_first_name, location_id, sale_state")
-        .eq("client_id", clientId).eq("sale_state", "sold").limit(500);
-      const { data: locs } = await admin
-        .from("builder_locations").select("id, name, city").eq("client_id", clientId);
       const locById = Object.fromEntries((locs ?? []).map((l) => [l.id, l]));
-      // The pool row used to label every sold unit "Sold lot building" — the same generic
-      // string for every building on the list. Read the real style+size off the unit's master
-      // design, the way the build tray already does.
-      const soldMasterCodes = [...new Set((sold ?? []).map((u) => u.design_short_code).filter(Boolean))];
-      const { data: soldMasters } = soldMasterCodes.length
-        ? await admin.from("designs").select("short_code, selections")
-          .eq("client_id", clientId).in("short_code", soldMasterCodes)
-        : { data: [] };
       const masterLabel = Object.fromEntries(
         (soldMasters ?? []).map((m) => [m.short_code, buildingLabelFrom(m.selections as Record<string, unknown>)]),
       );
@@ -695,9 +788,6 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         location: locById[u.location_id ?? ""] ?? null,
       }));
 
-      const { data: openRepairs } = await admin
-        .from("repairs").select("id, repair_no, customer_name, description, serial, status")
-        .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500);
       const repairs = (openRepairs ?? []).filter((rp) => !stopRepair.has(rp.id));
 
       // Whether each pooled building is actually ready to haul. A sold unit's row used to
@@ -710,12 +800,17 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         ]),
       ] as string[];
 
+      // ── Wave C: the lifecycle projection, which needs the pooled ids computed above ──
+      // territories/drivers came from Wave A; awaiting them here (as this literal used to)
+      // put two more trips after every other read had finished.
+      const unitLifecycle = await lifecycleByUnit(poolUnitIds);
+
       // `orders` kept as an alias of `jobs` for one deploy cycle (the page may be older
       // than this function); remove after the next beta→main promotion.
       return json({
         jobs, orders: jobs, inventory, repairs,
-        unitLifecycle: await lifecycleByUnit(poolUnitIds),
-        territories: await getTerritories(), drivers: await getDrivers(),
+        unitLifecycle,
+        territories, drivers,
       });
     }
 
@@ -749,12 +844,27 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     }
 
     if (action === "schedule_links") {
-      const { data: jobs, error } = await admin
-        .from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
-        .eq("client_id", clientId).limit(2000);
-      if (error) throw error;
+      // This one rides the ORDERS page load, so its four independent reads are worth the
+      // same wave treatment as the schedule boards. getStages stays out of the fan-out —
+      // it can seed rows, and writes do not belong in a read wave.
       const stages = await getStages();
       const stageById = Object.fromEntries(stages.map((s) => [s.id, s]));
+      const [jobsRes, stopsRes, soldUnitsRes] = await Promise.all([
+        admin.from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
+          .eq("client_id", clientId).limit(2000),
+        // Which units already ride a load, so a row offers "Schedule delivery" only when
+        // there isn't one open already (add_stop would 409).
+        admin.from("delivery_stops").select("inventory_unit_id")
+          .eq("client_id", clientId).is("delivered_at", null),
+        // A LOT SALE looks like any other order on the Orders page — it has its own sale
+        // design and its own orders row — but the building already exists, so it goes
+        // straight to delivery and must never be offered a build. This map is how Orders
+        // tells the two apart: sale design code -> the unit being sold.
+        admin.from("inventory_units").select("id, serial, sold_design_short_code")
+          .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null).limit(2000),
+      ]);
+      if (jobsRes.error) throw jobsRes.error;
+      const jobs = jobsRes.data;
       const byDesign: Record<string, unknown> = {};
       const byUnit: Record<string, unknown> = {};
       for (const j of jobs ?? []) {
@@ -767,18 +877,8 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         if (j.design_short_code) byDesign[j.design_short_code] = chip;
         if (j.inventory_unit_id) byUnit[j.inventory_unit_id] = chip;
       }
-      // Which units already ride a load, so a row offers "Schedule delivery" only when
-      // there isn't one open already (add_stop would 409).
-      const { data: stops } = await admin
-        .from("delivery_stops").select("inventory_unit_id").eq("client_id", clientId).is("delivered_at", null);
-      const onLoad = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
-      // A LOT SALE looks like any other order on the Orders page — it has its own sale
-      // design and its own orders row — but the building already exists, so it goes
-      // straight to delivery and must never be offered a build. This map is how Orders
-      // tells the two apart: sale design code -> the unit being sold.
-      const { data: soldUnits } = await admin
-        .from("inventory_units").select("id, serial, sold_design_short_code")
-        .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null).limit(2000);
+      const onLoad = [...new Set((stopsRes.data ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
+      const soldUnits = soldUnitsRes.data;
       const saleDesigns: Record<string, unknown> = {};
       for (const u of soldUnits ?? []) {
         saleDesigns[u.sold_design_short_code] = { unitId: u.id, serial: u.serial, onLoad: onLoad.includes(u.id) };
@@ -795,13 +895,16 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .from("repairs").select("*").eq("client_id", clientId).order("requested_at", { ascending: false }).limit(1000);
       if (error) throw error;
       const ids = (repairs ?? []).map((rp) => rp.id);
-      const { data: jobs } = ids.length
-        ? await admin.from("build_jobs").select("id, repair_id, stage_id").eq("client_id", clientId).in("repair_id", ids)
-        : { data: [] };
-      const { data: stops } = ids.length
-        ? await admin.from("delivery_stops").select("id, repair_id, load_id, delivered_at").eq("client_id", clientId).in("repair_id", ids)
-        : { data: [] };
-      return json({ repairs: repairs ?? [], jobs: jobs ?? [], stops: stops ?? [] });
+      // The job and stop lookups need the same ids and nothing from each other.
+      const [jobsRes, stopsRes] = await Promise.all([
+        ids.length
+          ? admin.from("build_jobs").select("id, repair_id, stage_id").eq("client_id", clientId).in("repair_id", ids)
+          : Promise.resolve({ data: [] }),
+        ids.length
+          ? admin.from("delivery_stops").select("id, repair_id, load_id, delivered_at").eq("client_id", clientId).in("repair_id", ids)
+          : Promise.resolve({ data: [] }),
+      ]);
+      return json({ repairs: repairs ?? [], jobs: jobsRes.data ?? [], stops: stopsRes.data ?? [] });
     }
 
     if (action === "repair_photos") {
