@@ -836,7 +836,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Mirrors portal-billing's set. Kept here as well rather than imported, because the
         // two functions are deployed separately and a comp that the reader refuses to honour
         // is confusing, while a comp this writer refuses is self-explanatory.
-        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync"]);
+        // on_demand_pricing joined 2026-08-28 with the Real-Time Pricing build — pay-only
+        // from the start, so no comp can hand out a feature whose whole point is the upcharge.
+        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing"]);
 
         const wanted = Array.isArray(p.grants) ? p.grants : [];
         if (wanted.length > 50) throw new Error("Too many grants in one request.");

@@ -30,6 +30,7 @@ import {
 } from "../_shared/attributeLines.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
+import { hasPaidFeature } from "../_shared/featureCheck.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -59,6 +60,20 @@ const GATES: GateTable = {
   // is the cleaner fix and belongs with the Team screen, not here.
   catalog: { any: [{ area: "settings_structures", level: "view" }, { area: "settings_options", level: "view" }] },
   import_pricing_csv:        { area: "settings_structures", level: "edit" },
+
+  // ── Real-Time Pricing (migration 152) ────────────────────────────────────
+  // Same area as the price book they feed: whoever may edit structures may edit the
+  // material-cost engine that writes structure prices. Every branch ALSO checks the
+  // on_demand_pricing entitlement server-side (hasPaidFeature) — these gates answer
+  // "may this person touch settings", the entitlement answers "did this tenant buy it".
+  rtp_data:                  { area: "settings_structures", level: "view" },
+  save_rtp_material:         { area: "settings_structures", level: "edit" },
+  delete_rtp_material:       { area: "settings_structures", level: "edit" },
+  reorder_rtp_materials:     { area: "settings_structures", level: "edit" },
+  save_rtp_bom:              { area: "settings_structures", level: "edit" },
+  save_rtp_overhead:         { area: "settings_structures", level: "edit" },
+  import_rtp_workbook:       { area: "settings_structures", level: "edit" },
+  set_rtp_enabled:           { area: "settings_structures", level: "edit" },
   create_style:              { area: "settings_structures", level: "edit" },
   update_style:              { area: "settings_structures", level: "edit" },
   delete_style:              { area: "settings_structures", level: "edit" },
@@ -1106,6 +1121,287 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const r = await importPricingRows(admin, clientId, payload.rows);
       return json({ ok: true, ...r });
     } catch (e) { return dbFail(req, clientId, "import that pricing sheet", e); }
+  }
+
+  // ══ Real-Time Pricing (migration 152) ══════════════════════════════════════════════
+  // Carolyn 2026-08-27, handing over the 2015 Sterling Supply workbook: material costs in
+  // one place, a bill of materials per size, ordered overhead lines, and the computed
+  // price lands in building_sizes.base_price — the ONE live column every estimate reader
+  // already consumes. All math lives in SQL (rtp_compute_prices); these branches only
+  // move rows and re-apply. See the migration header for the model.
+  //
+  // ENTITLEMENT, server-side. on_demand_pricing is PAY-ONLY (portal-billing) and has been
+  // on sale since migration 124, so a direct POST from a tenant who never bought it must
+  // 403 here regardless of what the browser hides. Operators pass: they set the feature
+  // up FOR tenants (the same isOperator bypass featureOn() has). Errors reading billing
+  // fail CLOSED — a paid gate that fails open is no gate (the wallet's posture).
+  const RTP_ACTIONS = new Set(["rtp_data", "save_rtp_material", "delete_rtp_material", "reorder_rtp_materials", "save_rtp_bom", "save_rtp_overhead", "import_rtp_workbook", "set_rtp_enabled"]);
+  if (RTP_ACTIONS.has(action) && !operator) {
+    let paid = false;
+    try { paid = await hasPaidFeature(admin, clientId, "on_demand_pricing"); }
+    catch (e) { return dbFail(req, clientId, "check your Real-Time Pricing subscription", e); }
+    if (!paid) {
+      // rtp_data answers softly so the settings card can render its teaser state from the
+      // same call it would otherwise load data with; the write actions refuse loudly.
+      if (action === "rtp_data") return json({ ok: true, entitled: false });
+      return json({ error: "Real-Time Pricing is not part of your subscription — add it under Settings → Billing." }, 403);
+    }
+  }
+  // Re-apply after any RTP mutation: the SQL function no-ops unless the toggle is ON, and
+  // recompute over a tenant's sizes is trivial, so the choke point that already gates the
+  // write is also where prices stay current. Fails soft — the edit succeeded; a re-price
+  // hiccup must not report it as failed. The next mutation (or toggle) re-applies.
+  const rtpApply = async (): Promise<number> => {
+    try {
+      const { data, error } = await admin.rpc("rtp_apply", { p_client_id: clientId });
+      if (error) throw error;
+      return Number(data) || 0;
+    } catch (e) {
+      await logEdgeError({ fn: "portal-settings", req, clientId, code: "rtp_apply_failed", message: (e as Error)?.message ?? "" });
+      return 0;
+    }
+  };
+
+  if (action === "rtp_data") {
+    const [mats, bom, ovh, cs, prev] = await Promise.all([
+      admin.from("rtp_materials").select("id, category, name, unit_cost, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
+      admin.from("rtp_bom_lines").select("id, size_id, material_id, section, qty, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("rtp_overhead_lines").select("id, label, kind, value, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
+      admin.from("client_settings").select("rtp_enabled").eq("client_id", clientId).maybeSingle(),
+      admin.rpc("rtp_compute_prices", { p_client_id: clientId }),
+    ]);
+    for (const r of [mats, bom, ovh, cs, prev]) if (r.error) return dbFail(req, clientId, "load your real-time pricing", r.error);
+    return json({
+      ok: true, entitled: true,
+      enabled: Boolean(cs.data?.rtp_enabled),
+      materials: mats.data ?? [], bomLines: bom.data ?? [], overhead: ovh.data ?? [],
+      preview: prev.data ?? [],
+    });
+  }
+
+  if (action === "save_rtp_material") {
+    const name = String(payload.name ?? "").trim();
+    const category = String(payload.category ?? "").trim();
+    const unitCost = Number(payload.unitCost);
+    if (!name) return json({ error: "Material name is required." }, 400);
+    if (!Number.isFinite(unitCost) || unitCost < 0) return json({ error: `Invalid cost "${payload.unitCost}".` }, 400);
+    const patch: Record<string, unknown> = { category, name, unit_cost: unitCost, updated_at: new Date().toISOString() };
+    if (payload.sortOrder != null && Number.isFinite(Number(payload.sortOrder))) patch.sort_order = Number(payload.sortOrder);
+    if (typeof payload.active === "boolean") patch.active = payload.active;
+    const res = payload.id
+      ? await admin.from("rtp_materials").update(patch).eq("id", String(payload.id)).eq("client_id", clientId).select("id").maybeSingle()
+      : await admin.from("rtp_materials").insert({ client_id: clientId, ...patch }).select("id").maybeSingle();
+    if (res.error) {
+      // The one expected failure: unique (client_id, name). Name it rather than 500ing.
+      if ((res.error as { code?: string }).code === "23505") return json({ error: `You already have a material named "${name}".` }, 400);
+      return dbFail(req, clientId, "save that material", res.error);
+    }
+    const applied = await rtpApply();
+    return json({ ok: true, id: res.data?.id ?? payload.id, applied });
+  }
+
+  if (action === "delete_rtp_material") {
+    // Archive, never delete: BOM lines reference materials (on delete restrict), and a
+    // vanished material would silently change every price that summed it.
+    if (!payload.id) return json({ error: "id required" }, 400);
+    const res = await admin.from("rtp_materials").update({ active: false, updated_at: new Date().toISOString() })
+      .eq("id", String(payload.id)).eq("client_id", clientId);
+    if (res.error) return dbFail(req, clientId, "archive that material", res.error);
+    const applied = await rtpApply();
+    return json({ ok: true, applied });
+  }
+
+  if (action === "reorder_rtp_materials") {
+    if (!Array.isArray(payload.ids)) return json({ error: "ids[] required" }, 400);
+    { const e = tooMany(payload.ids, "ids"); if (e) return json({ error: e }, 400); }
+    for (let i = 0; i < payload.ids.length; i++) {
+      const res = await admin.from("rtp_materials").update({ sort_order: i })
+        .eq("id", String(payload.ids[i])).eq("client_id", clientId);
+      if (res.error) return dbFail(req, clientId, "reorder your materials", res.error);
+    }
+    return json({ ok: true });
+  }
+
+  if (action === "save_rtp_bom") {
+    // FULL REPLACE of one size's bill of materials — the editor always shows and saves the
+    // whole list for the size it has open, so a partial write has nothing to express.
+    const sizeId = String(payload.sizeId ?? "");
+    if (!sizeId) return json({ error: "sizeId required" }, 400);
+    if (!Array.isArray(payload.lines)) return json({ error: "lines[] required" }, 400);
+    { const e = tooMany(payload.lines, "lines"); if (e) return json({ error: e }, 400); }
+    const sz = await admin.from("building_sizes").select("id").eq("id", sizeId).eq("client_id", clientId).maybeSingle();
+    if (sz.error) return dbFail(req, clientId, "check that size", sz.error);
+    if (!sz.data) return json({ error: "That size does not exist in your catalog." }, 400);
+    const matsRes = await admin.from("rtp_materials").select("id").eq("client_id", clientId);
+    if (matsRes.error) return dbFail(req, clientId, "load your materials", matsRes.error);
+    const validMat = new Set((matsRes.data ?? []).map((m: { id: string }) => m.id));
+    const SECTIONS = new Set(["floor", "walls", "roof", "interior", "other"]);
+    const rows: Record<string, unknown>[] = []; const skipped: string[] = [];
+    const seen = new Set<string>();
+    for (const [i, ln] of (payload.lines as unknown[]).entries()) {
+      const l = ln as { materialId?: unknown; section?: unknown; qty?: unknown };
+      const materialId = String(l.materialId ?? "");
+      const section = String(l.section ?? "other");
+      const qty = Number(l.qty);
+      if (!validMat.has(materialId)) { skipped.push(`line ${i + 1}: unknown material`); continue; }
+      if (!SECTIONS.has(section)) { skipped.push(`line ${i + 1}: unknown section "${section}"`); continue; }
+      if (!Number.isFinite(qty) || qty < 0) { skipped.push(`line ${i + 1}: invalid quantity "${l.qty}"`); continue; }
+      if (qty === 0) continue; // a zero-quantity line is a deletion, exactly like the inclusions import
+      const key = `${materialId}|${section}`;
+      if (seen.has(key)) { skipped.push(`line ${i + 1}: duplicate material+section`); continue; }
+      seen.add(key);
+      rows.push({ client_id: clientId, size_id: sizeId, material_id: materialId, section, qty, sort_order: i });
+    }
+    const del = await admin.from("rtp_bom_lines").delete().eq("size_id", sizeId).eq("client_id", clientId);
+    if (del.error) return dbFail(req, clientId, "replace that bill of materials", del.error);
+    if (rows.length) {
+      const ins = await admin.from("rtp_bom_lines").insert(rows);
+      if (ins.error) return dbFail(req, clientId, "save that bill of materials", ins.error);
+    }
+    const applied = await rtpApply();
+    return json({ ok: true, saved: rows.length, skipped, applied });
+  }
+
+  if (action === "save_rtp_overhead") {
+    // FULL REPLACE, ordered — the order IS the formula (multipliers apply in sequence).
+    if (!Array.isArray(payload.lines)) return json({ error: "lines[] required" }, 400);
+    { const e = tooMany(payload.lines, "lines"); if (e) return json({ error: e }, 400); }
+    const KINDS = new Set(["multiplier", "percent_of_price", "flat"]);
+    const rows: Record<string, unknown>[] = []; const skipped: string[] = [];
+    for (const [i, ln] of (payload.lines as unknown[]).entries()) {
+      const l = ln as { label?: unknown; kind?: unknown; value?: unknown; active?: unknown };
+      const label = String(l.label ?? "").trim();
+      const kind = String(l.kind ?? "");
+      const value = Number(l.value);
+      if (!label) { skipped.push(`line ${i + 1}: label required`); continue; }
+      if (!KINDS.has(kind)) { skipped.push(`line ${i + 1}: unknown kind "${l.kind}"`); continue; }
+      if (!Number.isFinite(value) || value < 0) { skipped.push(`line ${i + 1}: invalid value "${l.value}"`); continue; }
+      rows.push({ client_id: clientId, label, kind, value, sort_order: i, active: l.active !== false });
+    }
+    const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
+    if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
+    if (rows.length) {
+      const ins = await admin.from("rtp_overhead_lines").insert(rows);
+      if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+    }
+    const applied = await rtpApply();
+    return json({ ok: true, saved: rows.length, skipped, applied });
+  }
+
+  if (action === "import_rtp_workbook") {
+    // The browser parses the workbook into structured JSON; THIS is the trust boundary.
+    // Materials upsert by name (new names auto-create — a quarterly cost update arrives as
+    // the same sheet with new numbers). BOM blocks replace per size PRESENT IN THE UPLOAD
+    // (a partial workbook touches only what it carries). Sizes resolve against the
+    // existing catalog by style + width x length and are NEVER created here — size
+    // lifecycle belongs to the pricing sheet (importPricingRows), one lifecycle per thing.
+    const materials = Array.isArray(payload.materials) ? payload.materials : [];
+    const bom = Array.isArray(payload.bom) ? payload.bom : [];
+    const overhead = Array.isArray(payload.overhead) ? payload.overhead : null;
+    { const e = tooMany(materials, "materials") ?? tooMany(bom, "bom"); if (e) return json({ error: e }, 400); }
+    const skipped: string[] = [];
+    let matsSaved = 0, sizesReplaced = 0;
+
+    // ── Materials: upsert by (client_id, name) ──
+    const exMats = await admin.from("rtp_materials").select("id, name").eq("client_id", clientId);
+    if (exMats.error) return dbFail(req, clientId, "load your materials", exMats.error);
+    const idByName = new Map<string, string>((exMats.data ?? []).map((m: { id: string; name: string }) => [m.name.toLowerCase(), m.id]));
+    for (const raw of materials) {
+      const m = raw as { category?: unknown; name?: unknown; unitCost?: unknown };
+      const name = String(m.name ?? "").trim();
+      const category = String(m.category ?? "").trim();
+      const unitCost = Number(m.unitCost);
+      if (!name) continue;
+      if (!Number.isFinite(unitCost) || unitCost < 0) { skipped.push(`material "${name}": invalid cost "${m.unitCost}"`); continue; }
+      const existingId = idByName.get(name.toLowerCase());
+      const res = existingId
+        ? await admin.from("rtp_materials").update({ category, unit_cost: unitCost, active: true, updated_at: new Date().toISOString() }).eq("id", existingId).select("id").maybeSingle()
+        : await admin.from("rtp_materials").insert({ client_id: clientId, category, name, unit_cost: unitCost, sort_order: idByName.size + matsSaved }).select("id").maybeSingle();
+      if (res.error) { skipped.push(`material "${name}": ${res.error.message}`); continue; }
+      if (!existingId && res.data?.id) idByName.set(name.toLowerCase(), res.data.id);
+      matsSaved++;
+    }
+
+    // ── Sizes: resolve style by label OR key (importPricingRows' matching), then dims ──
+    const [stylesRes, sizesRes] = await Promise.all([
+      admin.from("building_styles").select("id, key, label").eq("client_id", clientId),
+      admin.from("building_sizes").select("id, style_id, width_ft, length_ft").eq("client_id", clientId),
+    ]);
+    if (stylesRes.error) return dbFail(req, clientId, "load your styles", stylesRes.error);
+    if (sizesRes.error) return dbFail(req, clientId, "load your sizes", sizesRes.error);
+    const styleByName = new Map<string, string>();
+    for (const s of stylesRes.data ?? []) { styleByName.set(s.label.toLowerCase(), s.id); styleByName.set(s.key.toLowerCase(), s.id); }
+    const sizeByDims = new Map<string, string>((sizesRes.data ?? []).map((z: { id: string; style_id: string; width_ft: number; length_ft: number }) => [`${z.style_id}|${Number(z.width_ft)}|${Number(z.length_ft)}`, z.id]));
+    const SECTIONS = new Set(["floor", "walls", "roof", "interior", "other"]);
+
+    for (const raw of bom) {
+      const b = raw as { style?: unknown; width?: unknown; length?: unknown; lines?: unknown };
+      const styleName = String(b.style ?? "").trim();
+      const width = Number(b.width), length = Number(b.length);
+      const styleId = styleByName.get(styleName.toLowerCase());
+      if (!styleId) { skipped.push(`${styleName} ${b.width}x${b.length}: unknown style`); continue; }
+      const sizeId = sizeByDims.get(`${styleId}|${width}|${length}`);
+      if (!sizeId) { skipped.push(`${styleName} ${width}x${length}: no such size in your catalog — add it on the pricing sheet first`); continue; }
+      const lines = Array.isArray(b.lines) ? b.lines : [];
+      { const e = tooMany(lines, "lines"); if (e) { skipped.push(`${styleName} ${width}x${length}: ${e}`); continue; } }
+      const rows: Record<string, unknown>[] = [];
+      const seen = new Set<string>();
+      for (const [i, ln] of (lines as unknown[]).entries()) {
+        const l = ln as { material?: unknown; section?: unknown; qty?: unknown };
+        const matName = String(l.material ?? "").trim();
+        const section = SECTIONS.has(String(l.section ?? "")) ? String(l.section) : "other";
+        const qty = Number(l.qty);
+        const materialId = idByName.get(matName.toLowerCase());
+        if (!materialId) { if (matName) skipped.push(`${styleName} ${width}x${length}: material "${matName}" is not on the Materials sheet`); continue; }
+        if (!Number.isFinite(qty) || qty <= 0) continue; // blank/zero qty = not used on this building
+        const key = `${materialId}|${section}`;
+        if (seen.has(key)) { skipped.push(`${styleName} ${width}x${length}: "${matName}" listed twice under ${section}`); continue; }
+        seen.add(key);
+        rows.push({ client_id: clientId, size_id: sizeId, material_id: materialId, section, qty, sort_order: i });
+      }
+      const del = await admin.from("rtp_bom_lines").delete().eq("size_id", sizeId).eq("client_id", clientId);
+      if (del.error) { skipped.push(`${styleName} ${width}x${length}: ${del.error.message}`); continue; }
+      if (rows.length) {
+        const ins = await admin.from("rtp_bom_lines").insert(rows);
+        if (ins.error) { skipped.push(`${styleName} ${width}x${length}: ${ins.error.message}`); continue; }
+      }
+      sizesReplaced++;
+    }
+
+    // ── Overhead: replace only when the sheet is present in the upload ──
+    if (overhead) {
+      const KINDS = new Set(["multiplier", "percent_of_price", "flat"]);
+      const rows: Record<string, unknown>[] = [];
+      for (const [i, ln] of (overhead as unknown[]).entries()) {
+        const l = ln as { label?: unknown; kind?: unknown; value?: unknown };
+        const label = String(l.label ?? "").trim();
+        const kind = String(l.kind ?? "");
+        const value = Number(l.value);
+        if (!label || !KINDS.has(kind) || !Number.isFinite(value) || value < 0) { skipped.push(`overhead line ${i + 1}: invalid`); continue; }
+        rows.push({ client_id: clientId, label, kind, value, sort_order: i, active: true });
+      }
+      const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
+      if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
+      if (rows.length) {
+        const ins = await admin.from("rtp_overhead_lines").insert(rows);
+        if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+      }
+    }
+
+    const applied = await rtpApply();
+    return json({ ok: true, materialsSaved: matsSaved, sizesReplaced, skipped, applied });
+  }
+
+  if (action === "set_rtp_enabled") {
+    // The atomic swap — backs up manual prices on the way ON, restores them on the way
+    // OFF, applies computed prices in between. All inside one SQL function so no failure
+    // can leave half a price book. Durable audit row: this is a mass rewrite of the
+    // tenant's price book, exactly the kind of event someone asks about a month later.
+    const on = Boolean(payload.on);
+    const { error } = await admin.rpc("rtp_set_enabled", { p_client_id: clientId, p_on: on });
+    if (error) return dbFail(req, clientId, on ? "turn real-time pricing on" : "turn real-time pricing off", error);
+    await auditStrict("portal_rtp_toggle", 1, `rtp_enabled=${on}`);
+    return json({ ok: true, enabled: on });
   }
 
   // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
