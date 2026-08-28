@@ -16,7 +16,7 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import {
@@ -4736,6 +4736,28 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         if (dErr) return dbFail(req, clientId, "find that design", dErr);
         if (!d) return json({ error: "Design not found." }, 404);
         if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
+
+        // AMENDMENTS (2026-08-27). A manual change order moves the TOTAL without touching
+        // estimate_lines, so a document built from the snapshot alone bills the pre-change
+        // amount — see amendedInvoiceDocument's header for the case that proved it. Both
+        // the PDF below and the email-retry branch just under here read from this, so a
+        // re-send can never name a different number than the document it links to.
+        // A missing change_orders table is tolerated exactly as the pending check does.
+        const loadAmendments = async (): Promise<{ acked: any[]; orderTotalCents: number | null }> => {
+          const [coRes, ordRes] = await Promise.all([
+            admin.from("change_orders").select("co_no, description, total_before_cents, total_after_cents")
+              .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
+            admin.from("orders").select("total_cents")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+          ]);
+          return {
+            acked: coRes.error ? [] : (coRes.data ?? []),
+            orderTotalCents: ordRes.error || ordRes.data?.total_cents == null
+              ? null
+              : Number(ordRes.data.total_cents),
+          };
+        };
+
         const dStatus = String(d.status || "");
         if (dStatus === "invoiced" || dStatus === "delivered") {
           // The invoice may have completed on paper (the email does not gate it — see
@@ -4754,13 +4776,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
             const { data: cs2 } = await admin.from("client_settings")
               .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
               .eq("client_id", clientId).maybeSingle();
+            const amend2 = await loadAmendments();
             const out2 = await sendTenantEmail(admin, clientId, {
               kind: "invoice", shortCode, to: to2,
               ...invoiceEmail({
                 businessName: String(cs2?.business_name ?? "").trim() || clientId,
                 logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
                 invoiceNumber: String(prior.invoice_number),
-                total: totalFromSnapshot(d.estimate_lines) ?? "",
+                total: amountOwed(d.estimate_lines, amend2.acked, amend2.orderTotalCents) ?? "",
                 invoiceUrl: prior.invoice_pdf_url, quoteTerms: cs2?.quote_terms,
                 signUrl: myQuotesUrl(clientId, req),
               }),
@@ -4867,13 +4890,17 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         // Best-effort — a PDF failure records honestly and the invoice still sends, the
         // same contract as the quote path.
         let invoicePdfUrl = recoveredPdfUrl;
-        const totalNum = totalFromSnapshot(d.estimate_lines);
+        // The bill is the ORDER's total, not the quote snapshot's: acknowledged change
+        // orders become real lines so the document both foots and explains itself.
+        const amend = await loadAmendments();
+        const amended = amendedInvoiceDocument(d.estimate_lines, amend.acked, amend.orderTotalCents);
+        const totalNum = amountOwed(d.estimate_lines, amend.acked, amend.orderTotalCents);
         if (!invoicePdfUrl) {
           try {
             const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
             const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
             const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
-            const snapLines = Array.isArray(d.estimate_lines?.lines) ? d.estimate_lines.lines : [];
+            const snapLines = amended.lines;
             const pdfBytes = await buildQuotePdf({
               docKind: "invoice",
               business: {
@@ -4886,7 +4913,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
               dateIso: nowIso(),
               // deno-lint-ignore no-explicit-any
               lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
-              discount: Number(d.estimate_lines?.discount) || 0,
+              discount: amended.discount,
               quoteTerms: cur0?.quote_terms ?? null,
               planPdfUrl: planUrl,
             });

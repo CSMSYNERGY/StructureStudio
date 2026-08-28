@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amountOwed, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -346,7 +346,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     // is no longer the amount owed. Both are the builder's to clear, so both say so.
     const { data: cos } = await admin
       .from("change_orders")
-      .select("status, acknowledged_at")
+      .select("status, acknowledged_at, co_no, description, total_before_cents, total_after_cents")
       .eq("client_id", identity.clientId)
       .eq("short_code", code);
     for (const c of cos ?? []) {
@@ -363,7 +363,18 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     }
 
     const invNumber = String(inv.invoice_number || "");
-    const total = totalFromSnapshot(d.estimate_lines);
+    // The amount they are committing to is the ORDER's, not the quote snapshot's: an
+    // acknowledged change order moves the total without touching estimate_lines, and the
+    // sentence they sign has to name the same number the invoice prints. (2026-08-27 —
+    // see amendedInvoiceDocument for the case where those two disagreed by $250.)
+    const { data: ordRow } = await admin
+      .from("orders").select("total_cents")
+      .eq("client_id", identity.clientId).eq("short_code", code).maybeSingle();
+    const total = amountOwed(
+      d.estimate_lines,
+      (cos ?? []).filter((c) => c.status === "acknowledged"),
+      ordRow?.total_cents == null ? null : Number(ordRow.total_cents),
+    );
     const totalDisplay = total == null ? null : fmtMoney(total);
     const consentText = consentSentenceInvoice(invNumber, totalDisplay);
     const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || null;
