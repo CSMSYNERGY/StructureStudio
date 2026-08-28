@@ -917,6 +917,17 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const id = str(payload.id, 40);
         const { data: u } = await admin.from("pm_updates").select("*").eq("id", id).maybeSingle();
         if (!u) return json({ ok: true });
+        // Take the FILES with the note. Without this every deleted note left its uploads
+        // in the bucket forever, unreferenced and unreachable — a private bucket quietly
+        // filling with screenshots nobody can see or remove.
+        const paths = (Array.isArray(u.attachments) ? u.attachments : [])
+          .map((a: { path?: string }) => str(a?.path, 300)).filter(Boolean);
+        if (paths.length) {
+          const { error: sErr } = await admin.storage.from("pm-attachments").remove(paths);
+          // A storage failure must not strand the row: the note is what the person asked
+          // to delete, and an orphan file is recoverable where a stuck note is confusing.
+          if (sErr) console.error("attachment cleanup failed for update", id, sErr.message);
+        }
         if (u.feedback_comment_id) {
           const { error: cErr } = await admin.from("feedback_comments").delete().eq("id", u.feedback_comment_id);
           if (cErr) throw cErr;
