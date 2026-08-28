@@ -116,16 +116,40 @@ function pmSnapshot({ q, facets, whenColId, whenCond, whenA, whenB, whenMonth, w
     hiddenCols: (view.hiddenCols || []).slice().sort(),
   };
 }
-function pmLoadViews(slug) {
-  try {
-    const raw = JSON.parse(localStorage.getItem(pmViewsKey(slug)) || "[]");
-    if (!Array.isArray(raw)) return [];
-    // Validate on read — a view saved by an older build must never crash the board.
-    return raw.filter((v) => v && typeof v.id === "string" && typeof v.name === "string" && v.snap && typeof v.snap === "object").slice(0, 30);
-  } catch (_) { return []; }
+// The server rebuilds every snapshot it stores (sanitizeSnap), so a saved view read back
+// can differ from the one just sent — an absent `q` becomes "", a dropped column
+// disappears from hiddenCols. Compare through the same normaliser or the active-view chip
+// never lights for the view you are looking at.
+function pmNormSnap(raw) {
+  const s = raw || {};
+  const f = {};
+  Object.keys(s.facets || {}).sort().forEach((k) => { if (s.facets[k] != null && s.facets[k] !== "") f[k] = s.facets[k]; });
+  return JSON.stringify({
+    q: (s.q || "").trim(),
+    facets: f,
+    when: s.when && s.when.cond && s.when.cond !== "any"
+      ? { colId: s.when.colId || null, cond: s.when.cond, a: s.when.a || "", b: s.when.b || "", month: s.when.month || "", n: s.when.n || "", unit: s.when.unit || "days" }
+      : null,
+    groupBy: s.groupBy || "groups", sortKey: s.sortKey || "name",
+    sortDir: s.sortDir === "desc" ? "desc" : "asc",
+    hiddenCols: (s.hiddenCols || []).slice().sort(),
+  });
 }
-function pmStoreViews(slug, views) {
-  try { localStorage.setItem(pmViewsKey(slug), JSON.stringify(views)); } catch (_) { /* private mode */ }
+// ONE-TIME LIFT: saved views were per-browser localStorage for a few hours on 2026-08-27
+// before Carolyn asked for them to be shared. Anything a browser still holds is pushed up
+// once and the key dropped, so nobody loses a view they named. Safe to delete this (and
+// pmViewsKey) once every operator browser has loaded the board at least once.
+async function pmLiftLocalViews(board) {
+  let local = [];
+  try { local = JSON.parse(localStorage.getItem(pmViewsKey(board.slug)) || "[]"); } catch (_) { return false; }
+  if (!Array.isArray(local) || !local.length) return false;
+  for (const v of local) {
+    if (!v || typeof v.name !== "string" || !v.snap) continue;
+    try { await pmCall({ action: "save_view", boardId: board.id, name: v.name, snap: v.snap }); }
+    catch (_) { /* a failed lift must not block the board */ }
+  }
+  try { localStorage.removeItem(pmViewsKey(board.slug)); } catch (_) { /* private mode */ }
+  return true;
 }
 
 // ── Right-side slide-in panel (replaced the centred popup, Carolyn 2026-08-27) ────
@@ -497,7 +521,11 @@ function ProjectsTab({ sub, onSub }) {
     pmCall({ action: "get_board", boardId: b.id }).then((d) => {
       setData(d); setCanWrite(!!d.canWrite);
       setView(pmLoadView(b.slug, d.columns));
-      setSavedViews(pmLoadViews(b.slug));
+      setSavedViews(d.views || []);
+      // If this browser still holds pre-sharing local views, push them up and re-read.
+      pmLiftLocalViews(b).then((lifted) => {
+        if (lifted) pmCall({ action: "get_board", boardId: b.id }).then((d2) => setSavedViews(d2.views || [])).catch(() => {});
+      });
       const dateCols = d.columns.filter((c) => c.type === "date");
       setWhenColId((cur) => (dateCols.some((c) => c.id === cur) ? cur : (dateCols[0] ? dateCols[0].id : null)));
     }).catch((e) => setErr(e.message)).finally(() => setLoading(false));
@@ -581,8 +609,8 @@ function ProjectsTab({ sub, onSub }) {
     [q, facets, whenColId, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, view],
   );
   const activeView = useMemo(() => {
-    const here = JSON.stringify(snapshot);
-    const hit = savedViews.find((v) => JSON.stringify(v.snap) === here);
+    const here = pmNormSnap(snapshot);
+    const hit = savedViews.find((v) => pmNormSnap(v.snap) === here);
     return hit ? hit.id : null;
   }, [snapshot, savedViews]);
 
@@ -616,18 +644,19 @@ function ProjectsTab({ sub, onSub }) {
       hiddenCols: Array.isArray(s.hiddenCols) ? s.hiddenCols : [],
     });
   };
+  // Views are SHARED (pm_views, migration 146): saved for the whole operator team, so
+  // the server owns them and the response is what lands in state.
   const saveCurrentView = () => {
-    const name = (window.prompt("Name this view", "") || "").trim().slice(0, 60);
+    const name = (window.prompt("Name this view — everyone on the team will see it", "") || "").trim().slice(0, 60);
     if (!name || !activeBoard) return;
-    const next = [...savedViews.filter((v) => v.name !== name),
-      { id: "v_" + Math.random().toString(36).slice(2, 10), name, snap: snapshot }].slice(0, 30);
-    setSavedViews(next);
-    pmStoreViews(activeBoard.slug, next);
+    pmCall({ action: "save_view", boardId: activeBoard.id, name, snap: snapshot })
+      .then((d) => setSavedViews((cur) => [...cur.filter((v) => v.id !== d.view.id && v.name !== d.view.name), d.view]))
+      .catch((e) => setErr(e.message));
   };
   const deleteView = (v) => {
-    const next = savedViews.filter((x) => x.id !== v.id);
-    setSavedViews(next);
-    if (activeBoard) pmStoreViews(activeBoard.slug, next);
+    pmCall({ action: "delete_view", id: v.id })
+      .then(() => setSavedViews((cur) => cur.filter((x) => x.id !== v.id)))
+      .catch((e) => setErr(e.message));
   };
 
   // Filters compose: search → facets → WHEN. (The engine's grouping then arranges.)
@@ -740,12 +769,13 @@ function ProjectsTab({ sub, onSub }) {
                 const on = activeView === v.id;
                 return (
                   <span key={v.id} style={{ ...PM_VIEW_CHIP, padding: 0, borderColor: on ? ACCENT : "#CBD5E1", background: on ? ACCENT : "#FFF", display: "inline-flex", alignItems: "center", overflow: "hidden" }}>
-                    <button type="button" onClick={() => applyView(v)} title={v.name}
+                    <button type="button" onClick={() => applyView(v)}
+                      title={v.created_by_email ? `${v.name} — saved by ${String(v.created_by_email).split("@")[0]}` : v.name}
                       style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: on ? "#FFF" : "#334155", padding: "5px 4px 5px 12px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {v.name}
                     </button>
                     <button type="button" title={`Delete the "${v.name}" view`}
-                      onClick={() => { if (window.confirm(`Delete the saved view "${v.name}"? (Only the view — no items are touched.)`)) deleteView(v); }}
+                      onClick={() => { if (window.confirm(`Delete the saved view "${v.name}" for everyone? (Only the view — no items are touched.)`)) deleteView(v); }}
                       style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: on ? "rgba(255,255,255,.75)" : "#94A3B8", padding: "5px 9px 5px 4px" }}>✕</button>
                   </span>
                 );

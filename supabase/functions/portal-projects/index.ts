@@ -21,6 +21,7 @@ import { withErrorLog } from "../_shared/logError.ts";
 //   * A status label may carry `client_status` (one of feedback_submissions' 8 states).
 //     Changing a linked item's status to such a label updates the tenant-facing mirror
 //     row; labels without one are pure-internal and touch nothing tenant-side.
+//   * Saved views (pm_views) are per BOARD and shared by the whole operator team.
 //   * An update marked client_visible is COPIED into feedback_comments (author
 //     "CSM Synergy", monday_update_id NULL — both Monday reconcile paths delete only
 //     by monday_update_id, so copies survive a Monday refresh). Editing/deleting the
@@ -161,6 +162,43 @@ function sanitizeValues(columns: any[], raw: any, operatorIds: Set<string>): Rec
   return out;
 }
 
+// Rebuild a saved view's snapshot. Shared by the whole operator team, so it is
+// whitelist-rebuilt exactly like column settings and item values: unknown keys dropped,
+// every string capped, and the column ids it names checked against this board. A view
+// referencing a since-deleted column simply loses that part rather than 500ing the board.
+// deno-lint-ignore no-explicit-any
+function sanitizeSnap(raw: any, columnIds: Set<string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  out.q = str(raw?.q, 200);
+  const facets: Record<string, string> = {};
+  if (raw?.facets && typeof raw.facets === "object") {
+    for (const k of Object.keys(raw.facets).slice(0, 40)) {
+      if (!columnIds.has(k)) continue;
+      const v = str(raw.facets[k], 60);
+      if (v) facets[k] = v;
+    }
+  }
+  out.facets = facets;
+  if (raw?.when && typeof raw.when === "object" && str(raw.when.cond, 30)) {
+    const colId = str(raw.when.colId, 40);
+    out.when = {
+      colId: columnIds.has(colId) ? colId : null,
+      cond: str(raw.when.cond, 30),
+      a: str(raw.when.a, 10), b: str(raw.when.b, 10),
+      month: str(raw.when.month, 7), n: str(raw.when.n, 6),
+      unit: ["days", "weeks", "months"].includes(raw.when.unit) ? raw.when.unit : "days",
+    };
+  } else out.when = null;
+  const groupBy = str(raw?.groupBy, 40);
+  out.groupBy = groupBy === "groups" || columnIds.has(groupBy) ? groupBy : "groups";
+  const sortKey = str(raw?.sortKey, 40);
+  out.sortKey = sortKey === "name" || columnIds.has(sortKey) ? sortKey : "name";
+  out.sortDir = raw?.sortDir === "desc" ? "desc" : "asc";
+  out.hiddenCols = (Array.isArray(raw?.hiddenCols) ? raw.hiddenCols : [])
+    .map((x: unknown) => str(x, 40)).filter((x: string) => columnIds.has(x)).slice(0, 40);
+  return out;
+}
+
 // Fractional ordering: new position between neighbours; caller renumbers on collapse.
 function midpoint(before: number | null, after: number | null): number {
   if (before === null && after === null) return 1024;
@@ -285,19 +323,21 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .eq("id", boardId).maybeSingle();
         if (bErr) throw bErr;
         if (!board) return json({ error: "Board not found." }, 404);
-        const [columns, groupsRes, itemsRes, opsRes] = await Promise.all([
+        const [columns, groupsRes, itemsRes, opsRes, viewsRes] = await Promise.all([
           boardColumns(boardId),
           admin.from("pm_groups").select("*").eq("board_id", boardId).order("position"),
           admin.from("pm_items").select("*").eq("board_id", boardId).is("archived_at", null)
             .order("position").limit(2000),
           admin.from("app_operators").select("user_id, email"),
+          admin.from("pm_views").select("*").eq("board_id", boardId).order("position"),
         ]);
         if (groupsRes.error) throw groupsRes.error;
         if (itemsRes.error) throw itemsRes.error;
         if (opsRes.error) throw opsRes.error;
+        if (viewsRes.error) throw viewsRes.error;
         return json({
           board, columns, groups: groupsRes.data, items: itemsRes.data,
-          operators: opsRes.data, canWrite: !!op.can_write,
+          operators: opsRes.data, views: viewsRes.data, canWrite: !!op.can_write,
         });
       }
 
@@ -664,6 +704,38 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const id = str(payload.id, 40);
         const { error } = await admin.from("pm_items").update({ archived_at: null }).eq("id", id);
         if (error) throw error;
+        return json({ ok: true });
+      }
+
+      // ── Saved views (shared by the operator team) ─────────────────────────
+      case "save_view": {
+        const boardId = str(payload.boardId, 40);
+        const name = str(payload.name, 60);
+        if (!name) return json({ error: "Give this view a name." }, 400);
+        const columns = await boardColumns(boardId);
+        if (!columns.length) return json({ error: "Board not found." }, 404);
+        const snap = sanitizeSnap(payload.snap, new Set(columns.map((c) => c.id)));
+        const { data: maxRow } = await admin.from("pm_views").select("position")
+          .eq("board_id", boardId).order("position", { ascending: false }).limit(1).maybeSingle();
+        // Upsert on (board_id, name): saving over a name replaces that view, which is what
+        // re-using a name means - and it keeps two people from making rival "Mine" chips.
+        const { data: view, error } = await admin.from("pm_views").upsert({
+          board_id: boardId, name, snap,
+          position: (maxRow?.position || 0) + 1024,
+          created_by: user.id, created_by_email: actorEmail,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "board_id,name" }).select().single();
+        if (error) throw error;
+        await act(boardId, null, "save_view", { name });
+        return json({ view });
+      }
+
+      case "delete_view": {
+        const id = str(payload.id, 40);
+        const { data: v } = await admin.from("pm_views").select("board_id, name").eq("id", id).maybeSingle();
+        const { error } = await admin.from("pm_views").delete().eq("id", id);
+        if (error) throw error;
+        await act(v?.board_id || null, null, "delete_view", { name: v?.name });
         return json({ ok: true });
       }
 
