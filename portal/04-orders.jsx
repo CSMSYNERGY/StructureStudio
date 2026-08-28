@@ -1598,21 +1598,27 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   // DESIGNER-raised revision voids the CO but leaves the design carrying it
   // (void_change_order restores only from a snapshot_before, which that path never
   // writes), so the snapshot prices out away from the signed total on its own.
-  // So the test is the MONEY, not which kind of CO came last: `preview.totalBefore` is the
-  // exact baseline the server will stamp on the CO (dryRun runs the same code path), and
-  // if it isn't the order's current total, staging would move the total off the agreed
-  // figure. That test fires only when something is actually at stake, it is not fooled by
+  // So the test is the MONEY, not which kind of CO came last — and the design-side figure to
+  // test is what the design ITSELF prices out at right now, because that is what signing
+  // writes onto the order: total_after_cents is totalFromSnapshot of the design's own lines
+  // with the staged attribute delta applied.
+  // ⚠️ NOT `preview.totalBefore`. Until migration 153 those were the same number and this
+  // read it; they are not the same number any more. The server's baseline is now
+  // designs.accepted_snapshot — the design as of the customer's last AGREEMENT — and for a
+  // DISCARDED designer revision that is precisely the order's total, so a drift measured
+  // against it is structurally zero for the second case above, the one this guard was
+  // written for. The design's own price still sees it (it is carrying the revision), and it
+  // still sees hand-moved money too (there the design prices at the agreed figure and the
+  // order does not). It fires only when something is actually at stake, it is not fooled by
   // voiding the manual CO (voiding does not put orders.total_cents back), and it clears as
   // soon as the design carries the amount again — a designer resubmit that prices it in —
   // instead of shutting the dropdowns off for the life of the order.
-  // The `!pendingCo` term is the one exception, and the DESIGNER-raised revision is what
-  // it is really for: those COs carry no snapshot_before, so the server prices from the
-  // design AS IT STANDS — already revised — while the order still holds the signed total,
-  // and that gap reads as drift when it is only the pending revision. (A revision staged
-  // from this document does stamp snapshot_before, so there the server prices from the
-  // signed baseline and no false gap appears.) Blocking would not save hand-moved money
-  // in either case anyway, since signing that pending CO overwrites the order total with
-  // its own figure regardless.
+  // The `!pendingCo` term is the one exception: while a design_edit CO is pending, the design
+  // has ALREADY been revised (both writers apply the change to the row at staging time, and
+  // the customer acknowledges after), so it prices away from the still-signed order total by
+  // the pending amount and EVERY pending CO would otherwise read as drift. Blocking would not
+  // save hand-moved money there anyway, since signing that pending CO overwrites the order
+  // total with its own figure regardless.
   // ⚠️ TRADE-OFF, deliberate: the real fix is server-side (stage_order_attribute_change
   // deriving totalBefore from orders.total_cents, or carrying the manual delta forward).
   // Until that lands, an order whose total and design have parted company genuinely cannot
@@ -1621,12 +1627,14 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   // roof/cladding/paint they already carry. The message says so rather than implying the
   // two paths are equivalent, and the banner shows it as soon as the price preview lands,
   // not at the final click.
-  const stagedBaselineCents = preview && preview.totalBefore != null ? Math.round(preview.totalBefore * 100) : null;
-  const baselineDriftCents = (design.accepted_at && !pendingCo && stagedBaselineCents != null && o.total_cents != null && o.total_cents !== stagedBaselineCents)
-    ? o.total_cents - stagedBaselineCents
+  // No priced lines at all is not a $0 design — the server refuses to stage against one, so
+  // make no claim about it rather than reading it as the order being the whole total adrift.
+  const designPricedCents = lines.length ? Math.round(ssSnapTotals(snap).total * 100) : null;
+  const baselineDriftCents = (design.accepted_at && !pendingCo && designPricedCents != null && o.total_cents != null && o.total_cents !== designPricedCents)
+    ? o.total_cents - designPricedCents
     : 0;
   const baselineDriftMsg = baselineDriftCents === 0 ? null
-    : `This order's total (${money(o.total_cents)}) isn't what the design prices out at (${money(stagedBaselineCents)}) — the order is ${money(Math.abs(baselineDriftCents))} ${baselineDriftCents > 0 ? "above" : "below"} the design's figure. Either the money was moved on the order alone (a manual change order, or a total typed in below), or a designer revision was discarded — discarding one leaves the design priced at a revision the customer never signed. Either way the order total is the book of record and the design is the side that is out of step. A change staged from this document is priced from the design, so signing it would overwrite the order total with the design's figure and the agreed amount would leave the record. Record this change under Change orders → + New change order below — that amends the total only, so the roof, cladding and paint you just picked will not reach the design, its PDFs or the build paperwork — or have the designer resubmit the design priced at ${money(o.total_cents)}, after which staging from this document works again.`;
+    : `This order's total (${money(o.total_cents)}) isn't what the design currently prices out at (${money(designPricedCents)}) — the order is ${money(Math.abs(baselineDriftCents))} ${baselineDriftCents > 0 ? "above" : "below"} the design's figure. Either the money was moved on the order alone (a manual change order, or a total typed in below), or a designer revision was discarded — discarding one leaves the design priced at a revision the customer never signed. Either way the order total is the book of record and the design is the side that is out of step. A change staged from this document is priced from the design, so signing it would overwrite the order total with the design's figure and the agreed amount would leave the record. Record this change under Change orders → + New change order below — that amends the total only, so the roof, cladding and paint you just picked will not reach the design, its PDFs or the build paperwork — or have the designer resubmit the design priced at ${money(o.total_cents)}, after which staging from this document works again.`;
 
   const stage = async () => {
     if (baselineDriftMsg) { onMsg({ err: baselineDriftMsg }); return; }

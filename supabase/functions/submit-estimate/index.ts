@@ -8,7 +8,7 @@ import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
-import { changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -169,7 +169,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    browser right before calling us, so it must exist here.
   const { data: existingDesign, error: designErr } = await supabase
     .from("designs")
-    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines")
+    // accepted_snapshot (153) is the change-order baseline. It MUST be selected here: this
+    // handler overwrites estimate_lines below, so estimate_lines cannot be that baseline.
+    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -1539,23 +1541,81 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // two snapshots (what the customer signed vs what was just built), never typed: a rep
     // summarising their own change is how the acknowledgment drifts from reality. One
     // pending design_edit CO per design, updated in place on every further resubmit so the
-    // customer always sees the CUMULATIVE change against what they signed. An identical
-    // resubmit (null diff) is not a change order.
+    // customer always sees the CUMULATIVE change against what they signed. A resubmit that
+    // matches the agreed design (null diff) is not a change order — and it VOIDS a pending
+    // designer-raised one, because there is nothing left to acknowledge and an orphan
+    // pending CO blocks invoicing forever.
     //
-    // KNOWN BUG — audit finding 16, fix reverted 2026-08-28, left for dedicated work. A
-    // SECOND resubmit diffs against designs.estimate_lines, which the FIRST resubmit already
-    // overwrote, so the pending CO's baseline moves to the unacknowledged revision and the
-    // customer signs against a "previous total" they never agreed to. Two fixes were tried and
-    // each broke something worse: stamping snapshot_before re-points portal-settings'
-    // void_change_order at a restore covering only 3 of the 9 columns a designer resubmit
-    // rewrites; carrying total_before_cents forward off the CO row collides with the order
-    // screen's own baseline write to that same row (stage_order_attribute_change).
-    let changeOrder: { coNo: number | null; description: string } | null = null;
+    // THE BASELINE IS `accepted_snapshot`, NOT `estimate_lines` (migration 153; audit finding
+    // 16 closed). Everything above and below this block rewrites designs.estimate_lines a few
+    // dozen lines from here, so that column can never be "what the customer signed" — read
+    // back on the SECOND resubmit it is the FIRST resubmit's unacknowledged revision, and the
+    // customer signs a "previous total" they never agreed to while the description shows only
+    // the latest increment. `agreedBaseline()` reads the design as of the customer's last
+    // ACT OF AGREEMENT: stamped at signing by customer-accept, re-stamped by the
+    // change_orders_stamp_agreed trigger on every acknowledged design_edit CO. The diff is
+    // therefore genuinely CUMULATIVE — re-derived from the agreed snapshot on every write,
+    // which is the only way to get a cumulative description.
+    //
+    // Four earlier attempts, and why none of them is what this is:
+    //   * stamping snapshot_before here — that column is void_change_order's UNDO CONTRACT,
+    //     and its restore rewrites 3 of the 9 columns a designer resubmit touches. Nothing
+    //     here writes it, so discard behaviour is byte-identical to today's.
+    //   * carrying total_before_cents forward off the CO row — the order screen recomputes
+    //     that column unconditionally and clobbered whatever we carried. It now computes from
+    //     the same agreedBaseline() on the same immutable input, so both writers write the
+    //     same number and there is nothing left to collide.
+    //   * appending to the description — repeats every sentence whose line changed twice, on
+    //     text the customer legally signs. Still generated wholesale, never concatenated.
+    //   * treating the pending CO's own baseline as "signed" — after a void there IS no
+    //     pending CO, and the next resubmit read the live revision. The baseline is now a
+    //     property of the design's agreement, so a void changes nothing about it.
+    let changeOrder: { coNo: number | null; description: string; totalBefore: number | null } | null = null;
     if (existingDesign.accepted_at) {
-      const coDescription = changeOrderDescription(existingDesign.estimate_lines, estimateLines);
-      if (coDescription) {
-        const oldTotal = totalFromSnapshot(existingDesign.estimate_lines);
-        const newTotal = totalFromSnapshot(estimateLines);
+      // THE REVISION GOES ONTO THE DESIGN BEFORE THE CO EXISTS. 153's stamp trigger reads
+      // designs.estimate_lines at ACKNOWLEDGMENT, so "what the customer just agreed to" is
+      // whatever the row holds by then — and this handler's one persist of that column sits
+      // below the change-order block AND below the email, with an anticipated failure path
+      // (ss_quote_persist_failed, which still returns ok). A failed persist would therefore
+      // leave a signable CO whose total prices lines the design never received, and the
+      // trigger would freeze the OLD lines as the agreement. portal-settings' writer has
+      // always updated the design first; this makes the invariant true here too.
+      //
+      // Only on the post-acceptance path, because that is the only place a CO can be raised,
+      // and it is a re-write of the same value the persist below sends — idempotent, so a
+      // failure here changes nothing that the persist below does not already report durably.
+      const { error: preCoErr } = await supabase.from("designs")
+        .update({ estimate_lines: estimateLines, updated_at: new Date().toISOString() })
+        .eq("short_code", designId);
+      if (preCoErr) console.warn("pre-change-order estimate_lines persist failed:", preCoErr.message);
+      // Hoisted above the diff: the null-diff arm needs it too.
+      const { data: existingCo } = await supabase.from("change_orders")
+        .select("id, co_no, version_before, snapshot_before")
+        .eq("client_id", clientId).eq("short_code", designId)
+        .eq("status", "pending_ack").eq("source", "design_edit")
+        .limit(1).maybeSingle();
+      const base = agreedBaseline(existingDesign);
+      const coDescription = changeOrderDescription(base.lines, estimateLines);
+      const oldTotal = totalFromSnapshot(base.lines);
+      const newTotal = totalFromSnapshot(estimateLines);
+      if (!coDescription) {
+        // Resubmitted back to exactly what the customer approved. Under the old baseline this
+        // was unreachable (the diff was against the previous revision, so it never came back
+        // to nothing); under the agreed baseline it is the ordinary "undo the change" case.
+        // Leaving the CO pending would block invoicing forever (portal-settings' send_invoice
+        // 409s on a pending CO) while describing a change the design no longer carries.
+        // Void only a PURE designer CO: one the order screen has staged onto carries a rep's
+        // attribute change that is not ours to discard.
+        if (existingCo && !existingCo.snapshot_before) {
+          const { error: voidErr } = await supabase.from("change_orders")
+            .update({
+              status: "void",
+              void_reason: "The design was resubmitted back to what the customer approved — nothing left to acknowledge.",
+            })
+            .eq("id", existingCo.id).eq("status", "pending_ack");
+          if (voidErr) console.warn("change order auto-void failed:", voidErr.message);
+        }
+      } else {
         // The baseline the customer signed: the latest acceptance's design_version. The
         // "after" is the version the browser just saved (save_design runs before us).
         const [{ data: lastAcc }, { data: maxVer }] = await Promise.all([
@@ -1572,24 +1632,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           version_before: lastAcc?.design_version ?? null,
           version_after: maxVer?.version ?? null,
         };
-        const { data: existingCo } = await supabase.from("change_orders")
-          .select("id, co_no, version_before")
-          .eq("client_id", clientId).eq("short_code", designId)
-          .eq("status", "pending_ack").eq("source", "design_edit")
-          .limit(1).maybeSingle();
         if (existingCo) {
           // Keep the SIGNED baseline (version_before) — the customer acknowledges the total
           // change since their signature, not since the previous unacknowledged revision.
           const { error: coErr } = await supabase.from("change_orders")
             .update({ ...coFields, version_before: existingCo.version_before ?? coFields.version_before })
             .eq("id", existingCo.id);
-          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription };
+          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription, totalBefore: oldTotal };
           else console.warn("change order update failed:", coErr.message);
         } else {
           const { data: coRow, error: coErr } = await supabase.from("change_orders")
             .insert({ client_id: clientId, short_code: designId, source: "design_edit", ...coFields })
             .select("co_no").maybeSingle();
-          if (!coErr) changeOrder = { coNo: coRow?.co_no ?? null, description: coDescription };
+          if (!coErr) changeOrder = { coNo: coRow?.co_no ?? null, description: coDescription, totalBefore: oldTotal };
           else console.warn("change order insert failed:", coErr.message);
         }
       }
@@ -1620,7 +1675,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           quoteNumber: ssQuoteNumber,
           coNo: changeOrder.coNo ?? 0,
           description: changeOrder.description,
-          totalBefore: totalFromSnapshot(existingDesign.estimate_lines),
+          // The figure stamped on the CO, carried on `changeOrder` — NOT recomputed from
+          // designs.estimate_lines. Recomputing prints the drifted total in the email while
+          // the CO and the customer's quote page show the agreed one (153).
+          totalBefore: changeOrder.totalBefore,
           totalAfter: oppValue,
           reviewUrl: myQuotesUrl(clientId, req),
           quoteTerms: quoteTerms || null,

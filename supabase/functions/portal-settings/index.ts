@@ -18,6 +18,11 @@ import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_sh
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { amendedInvoiceDocument, amountOwed, deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+// The change-order baseline, shared with submit-estimate so the two design_edit writers
+// cannot disagree about it (migration 153). changeOrderDescription comes with it: the money
+// line spans the whole baseline-to-now gap, so the words have to as well. Second importer of
+// this module — deploy both.
+import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import {
@@ -4875,9 +4880,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // signed order can't absorb unrelated catalog drift, and never a GHL side effect.
   //
   // Applies at STAGING (the same semantics as the designer-resubmit CO): the design row
-  // updates now, the customer acknowledges after. snapshot_before (127) preserves the
-  // as-signed state so void_change_order can restore it, and re-stages diff against it so
-  // the customer always signs the CUMULATIVE change since their signature.
+  // updates now, the customer acknowledges after.
+  //
+  // TWO DIFFERENT COLUMNS, deliberately (migration 153 — do not re-conflate them):
+  //   * the MONEY/DIFF BASELINE is designs.accepted_snapshot, via agreedBaseline() — the
+  //     design as of the customer's last AGREEMENT, the same helper and the same input
+  //     submit-estimate uses, so both design_edit writers stamp the identical
+  //     total_before_cents instead of overwriting each other with different numbers.
+  //   * change_orders.snapshot_before (127) is THIS SCREEN'S UNDO POINT — the pre-stage
+  //     design, revisions included, which is what void_change_order restores. It is NOT
+  //     "the design as the customer signed it": on a CO adopted from a designer resubmit it
+  //     holds that unacknowledged revision. Written exactly where it was before and read by
+  //     nothing else, so discard behaviour is unchanged.
   if (action === "stage_order_attribute_change") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
@@ -4889,7 +4903,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     }
 
     const { data: d, error: dErr } = await admin.from("designs")
-      .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, selections, paint_colors, contact, custom_options, ro_dimensions, items, bldg_w, bldg_h, inventory_unit_id")
+      .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, accepted_snapshot, selections, paint_colors, contact, custom_options, ro_dimensions, items, bldg_w, bldg_h, inventory_unit_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (dErr) return dbFail(req, clientId, "find that design", dErr);
     if (!d) return json({ error: "Design not found." }, 404);
@@ -4979,47 +4993,80 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       newSnap.lines.push({ kind: "roof", itemKey: "", name: "Roof", desc: roof.desc, qty: 1, amount: roof.amount, nonTaxable: false });
     }
 
-    // Baseline for the CUMULATIVE description: what the customer signed (snapshot_before
-    // when a staged CO already exists), else the current snapshot.
+    // The pending CO, if any. snapshot_before is still read — but ONLY for the adoption
+    // stamp further down, never as a baseline (see the header: it is the undo point).
     const { data: existingCo } = await admin.from("change_orders")
       .select("id, co_no, version_before, snapshot_before")
       .eq("client_id", clientId).eq("short_code", shortCode)
       .eq("status", "pending_ack").eq("source", "design_edit")
       .limit(1).maybeSingle();
-    // deno-lint-ignore no-explicit-any
-    const baseSnapshot: any = existingCo?.snapshot_before ?? null;
-    const baseLines = baseSnapshot?.estimateLines ?? snap;
-    const baseSel = (baseSnapshot?.selections ?? sel) as Record<string, unknown>;
-    const basePc = (baseSnapshot?.paintColors ?? pc) as Record<string, unknown>;
+    // The baseline is what the customer AGREED to (153). It used to be
+    // `snapshot_before ?? the live design`, and on a CO adopted from a designer resubmit
+    // that fell through to the already-revised design AND then stamped that revision into
+    // snapshot_before — permanently recording an unacknowledged revision as the signed
+    // state, which is how a customer came to sign against a total they never approved.
+    const base = agreedBaseline(d);
+    const baseLines = base.lines;
+    const baseSel = base.selections as Record<string, unknown>;
+    const basePc = base.paintColors as Record<string, unknown>;
 
     const totalBefore = totalFromSnapshot(baseLines);
     const totalAfter = totalFromSnapshot(newSnap);
 
     // The description the customer signs: explicit attribute sentences (cladding is
     // invisible to the line diff, and "options updated" is too vague to sign) + the money.
-    const sentences: string[] = [];
-    const say = (label: string, from: string, to: string) => {
-      if (attrNorm(from) !== attrNorm(to)) sentences.push(`${label}: ${from || "—"} → ${to || "—"}`);
-    };
-    const basePaintStatus = (baseSel.paint && String(baseSel.paint).toLowerCase() === "painted") ? "Painted" : "Unpainted";
+    // Built by re-diffing against a snapshot, wholesale, on every write — never appended to
+    // the previous one, which would repeat every sentence whose attribute moved twice.
     const nextPaintStatus = next.paintStatus === "Paint" ? "Painted" : "Unpainted";
-    say("Roof type", String(baseSel.roofType ?? ""), next.roofType);
-    say("Roof color", String(baseSel.roofColor ?? ""), next.roofColor);
-    say("Cladding", claddingLabel(baseSel.cladding), claddingLabel(next.cladding));
-    say("Paint", basePaintStatus, nextPaintStatus);
-    if (next.paintStatus === "Paint") {
-      say("Paint body", String(basePc.body ?? ""), next.paintBody);
-      say("Paint trim", String(basePc.trim ?? ""), next.paintTrim);
+    const describeFrom = (fromSel: Record<string, unknown>, fromPc: Record<string, unknown>): string[] => {
+      const out: string[] = [];
+      const say = (label: string, from: string, to: string) => {
+        if (attrNorm(from) !== attrNorm(to)) out.push(`${label}: ${from || "—"} → ${to || "—"}`);
+      };
+      const fromPaintStatus = (fromSel.paint && String(fromSel.paint).toLowerCase() === "painted") ? "Painted" : "Unpainted";
+      say("Roof type", String(fromSel.roofType ?? ""), next.roofType);
+      say("Roof color", String(fromSel.roofColor ?? ""), next.roofColor);
+      say("Cladding", claddingLabel(fromSel.cladding), claddingLabel(next.cladding));
+      say("Paint", fromPaintStatus, nextPaintStatus);
+      if (next.paintStatus === "Paint") {
+        say("Paint body", String(fromPc.body ?? ""), next.paintBody);
+        say("Paint trim", String(fromPc.trim ?? ""), next.paintTrim);
+      }
+      return out;
+    };
+    // THE NO-OP TEST IS AGAINST THE CURRENT DESIGN, not the baseline. A designer revision can
+    // have moved an attribute since the customer agreed; putting it BACK is a real change to
+    // the design (and to the money) even though, measured against the agreement, it looks
+    // like nothing happened. Testing the baseline here would refuse that request outright.
+    const vsCurrent = describeFrom(sel, pc);
+    if (vsCurrent.length === 0) {
+      return json({ error: "That matches what the design already carries." }, 400);
     }
-    if (sentences.length === 0) {
-      return json({ error: "That matches what the customer already signed — nothing to change." }, 400);
-    }
+    // Normally the cumulative sentences, against what the customer agreed to. When the
+    // request lands exactly back on the agreed values those come out empty, so fall back to
+    // the current-design sentences — REPLACING the list, never concatenating the two.
+    let sentences = describeFrom(baseSel, basePc);
+    if (sentences.length === 0) sentences = vsCurrent;
     const fmtM = (n: number) => {
       const v = Math.round(n * 100) / 100;
       const [int, frac] = Math.abs(v).toFixed(2).split(".");
       return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
     };
-    if (totalBefore != null && totalAfter != null) {
+    // THE WORDS MUST COVER EVERYTHING THE TOTAL LINE SPANS. describeFrom() knows only roof,
+    // cladding and paint — it has no line-level diff. Since 153 the Total runs from the AGREED
+    // design, so when the live row ALSO carries a designer revision the money moves by lines
+    // no sentence mentions: a $700 increase described purely as a roof colour change, the
+    // added $500 window invisible. Worse, this description then OVERWRITES the designer CO's
+    // own line-diff text on the pending row, so the only place that named the window is gone.
+    // So the line diff over the very same two snapshots the Total is computed from rides
+    // along — and it brings its own Total sentence (identical numbers, identical formatting
+    // to fmtM), which is why nothing is pushed after it.
+    const lineDiff = changeOrderDescription(baseLines, newSnap);
+    if (lineDiff) {
+      sentences = sentences.concat(lineDiff.split("\n"));
+    } else if (totalBefore != null && totalAfter != null) {
+      // Nothing moved in the lines or the money — a change of spec at no cost. State the
+      // total anyway: the customer is signing a document that has to say what they will owe.
       sentences.push(`Total: ${fmtM(totalBefore)} → ${fmtM(totalAfter)}`);
     }
     const description = sentences.join("\n");
@@ -5073,8 +5120,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         const { error: coErr } = await admin.from("change_orders")
           .update({
             ...coFields,
-            // First staging over a designer-raised CO adopts it: stamp the baseline so a
-            // discard can restore, keeping the CO's original version_before.
+            // First staging over a designer-raised CO adopts it: stamp the UNDO POINT (the
+            // design as it stood before this staging — the designer's revision included, so
+            // it is not "as signed") so a discard can restore, keeping version_before.
+            // Deliberately still the only writer of snapshot_before: void_change_order reads
+            // nothing else, so its behaviour is byte-identical to before 153.
             ...(existingCo.snapshot_before ? {} : { snapshot_before: { estimateLines: snap, selections: sel, paintColors: pc } }),
           })
           .eq("id", existingCo.id).eq("status", "pending_ack");
