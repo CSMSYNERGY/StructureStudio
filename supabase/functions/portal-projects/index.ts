@@ -22,6 +22,8 @@ import { withErrorLog } from "../_shared/logError.ts";
 //     Changing a linked item's status to such a label updates the tenant-facing mirror
 //     row; labels without one are pure-internal and touch nothing tenant-side.
 //   * Saved views (pm_views) are per BOARD and shared by the whole operator team.
+//   * The Assignee roster IS app_operators — a PRIVILEGE table. See the roster
+//     actions below before touching them.
 //   * An update marked client_visible is COPIED into feedback_comments (author
 //     "CSM Synergy", monday_update_id NULL — both Monday reconcile paths delete only
 //     by monday_update_id, so copies survive a Monday refresh). Editing/deleting the
@@ -328,7 +330,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           admin.from("pm_groups").select("*").eq("board_id", boardId).order("position"),
           admin.from("pm_items").select("*").eq("board_id", boardId).is("archived_at", null)
             .order("position").limit(2000),
-          admin.from("app_operators").select("user_id, email"),
+          admin.from("app_operators").select("user_id, email, display_name, can_write"),
           admin.from("pm_views").select("*").eq("board_id", boardId).order("position"),
         ]);
         if (groupsRes.error) throw groupsRes.error;
@@ -736,6 +738,82 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const { error } = await admin.from("pm_views").delete().eq("id", id);
         if (error) throw error;
         await act(v?.board_id || null, null, "delete_view", { name: v?.name });
+        return json({ ok: true });
+      }
+
+      // ── Assignee roster (app_operators) ───────────────────────────────────
+      // ⚠️ PRIVILEGE TABLE. A row here is not just "can be assigned work" — it grants
+      // operator access to EVERY builder's account (051). So: only people who already
+      // have a StructureStudio login can be added (no account creation from here, no
+      // passwords), every change is written to admin_audit with the actor, and nobody can
+      // remove themselves — locking the last operator out of the console is not something
+      // a click should be able to do.
+      case "list_operators": {
+        const { data, error } = await admin.from("app_operators")
+          .select("user_id, email, display_name, can_write, can_bill").order("email");
+        if (error) throw error;
+        return json({ operators: data, me: user.id });
+      }
+
+      case "save_operator": {
+        const userId = str(payload.userId, 40);
+        const { data: row } = await admin.from("app_operators").select("user_id, email, can_write").eq("user_id", userId).maybeSingle();
+        if (!row) return json({ error: "That person is not on the team." }, 404);
+        const patch: Record<string, unknown> = {};
+        if (payload.displayName !== undefined) patch.display_name = str(payload.displayName, 80) || null;
+        if (payload.canWrite !== undefined) patch.can_write = payload.canWrite === true;
+        if (!Object.keys(patch).length) return json({ ok: true });
+        const { error } = await admin.from("app_operators").update(patch).eq("user_id", userId);
+        if (error) throw error;
+        if (patch.can_write !== undefined && patch.can_write !== row.can_write) {
+          const { error: aErr } = await admin.from("admin_audit").insert({
+            action: "operator_can_write", target_client_id: null, row_count: null,
+            note: `operator:${actorEmail} set can_write=${patch.can_write} for ${row.email}`,
+          });
+          if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
+        }
+        return json({ ok: true });
+      }
+
+      case "add_operator": {
+        const email = str(payload.email, 200).toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: "That does not look like an email address." }, 400);
+        const { data: found, error: fErr } = await admin.rpc("pm_find_user_by_email", { p_email: email });
+        if (fErr) throw fErr;
+        const hit = Array.isArray(found) ? found[0] : found;
+        if (!hit) {
+          return json({ error: `No StructureStudio login for ${email} yet. They need an account before they can be added to the team.` }, 404);
+        }
+        const { data: exists } = await admin.from("app_operators").select("user_id").eq("user_id", hit.id).maybeSingle();
+        if (exists) return json({ error: "They are already on the team." }, 409);
+        // New operators start READ-ONLY. Being able to see the boards is the small grant;
+        // being able to change other people's tenants is the one someone should choose.
+        const { error } = await admin.from("app_operators").insert({
+          user_id: hit.id, email: hit.email,
+          display_name: str(payload.displayName, 80) || null,
+          can_write: false, can_bill: false,
+        });
+        if (error) throw error;
+        const { error: aErr } = await admin.from("admin_audit").insert({
+          action: "operator_added", target_client_id: null, row_count: null,
+          note: `operator:${actorEmail} added ${hit.email} to app_operators (read-only)`,
+        });
+        if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
+        return json({ ok: true });
+      }
+
+      case "remove_operator": {
+        const userId = str(payload.userId, 40);
+        if (userId === user.id) return json({ error: "You cannot remove your own access." }, 400);
+        const { data: row } = await admin.from("app_operators").select("email").eq("user_id", userId).maybeSingle();
+        if (!row) return json({ ok: true });
+        const { error } = await admin.from("app_operators").delete().eq("user_id", userId);
+        if (error) throw error;
+        const { error: aErr } = await admin.from("admin_audit").insert({
+          action: "operator_removed", target_client_id: null, row_count: null,
+          note: `operator:${actorEmail} removed ${row.email} from app_operators`,
+        });
+        if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
         return json({ ok: true });
       }
 

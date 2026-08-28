@@ -806,7 +806,10 @@ const ssSafeUrl = (u) => {
 // The "Open in a new tab" link stays, deliberately. Some browsers and enterprise policies
 // refuse to render PDFs inline, and a viewer that silently shows a grey rectangle with no
 // way out is worse than the tab we just took away. It is the escape hatch, not the default.
-function PdfModal({ url, title, onClose }) {
+// `image: true` renders the file as an <img> instead of framing it. Screenshots are the
+// common attachment on a bug report, and an iframe shows them tiny in the corner of a
+// grey page — same modal, same guards, right presentation for the thing being opened.
+function PdfModal({ url, title, onClose, image }) {
   const safe = ssSafeUrl(url);
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -833,7 +836,13 @@ function PdfModal({ url, title, onClose }) {
             style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 12px", fontSize: 12 }}>Close</button>
         </div>
         {safe ? (
-          <iframe src={safe} title={title || "Document"} style={{ flex: 1, width: "100%", border: "none" }} />
+          image ? (
+            <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#0F172A", padding: 12 }}>
+              <img src={safe} alt={title || "Attachment"} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+            </div>
+          ) : (
+            <iframe src={safe} title={title || "Document"} style={{ flex: 1, width: "100%", border: "none" }} />
+          )
         ) : (
           <div style={{ padding: 20, fontSize: 13, color: "#B91C1C" }}>
             This document's address is not one we can open safely, so it has not been loaded.

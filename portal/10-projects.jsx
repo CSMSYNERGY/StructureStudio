@@ -158,6 +158,32 @@ async function pmLiftLocalViews(board) {
   return true;
 }
 
+// What the pm-attachments bucket accepts (migration 144) — checked here so a rejected
+// file says so before it is uploaded, rather than after a 25MB round trip.
+const PM_FILE_MIME = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", pdf: "application/pdf",
+};
+const PM_MAX_FILE = 25 * 1024 * 1024;
+const pmExt = (name) => String(name || "").split(".").pop().toLowerCase();
+const pmIsImage = (a) => String(a.mime || "").startsWith("image/") || ["png", "jpg", "jpeg", "gif", "webp"].includes(pmExt(a.name || a.path));
+const pmFileIcon = (a) => (pmIsImage(a) ? "🖼️" : (pmExt(a.name || a.path) === "pdf" ? "📄" : "📎"));
+
+// Upload one file to an item and record it on an update. The signed upload URL comes from
+// portal-projects (the bucket has no browser policies at all), the bytes go straight to
+// storage, and attach_meta writes the row — so a large screenshot never travels through
+// the edge function.
+async function pmUploadTo(itemId, updateId, file) {
+  const ext = pmExt(file.name);
+  const mime = PM_FILE_MIME[ext];
+  if (!mime) throw new Error(`"${file.name}" is not a kind of file we can attach (images, video or PDF).`);
+  if (file.size > PM_MAX_FILE) throw new Error(`"${file.name}" is larger than 25 MB.`);
+  const signed = await pmCall({ action: "upload_attachment", itemId, name: file.name });
+  const up = await sb.storage.from("pm-attachments").uploadToSignedUrl(signed.path, signed.token, file, { contentType: mime });
+  if (up.error) throw new Error(up.error.message);
+  await pmCall({ action: "attach_meta", updateId, path: signed.path, name: file.name, size: file.size, mime });
+}
+
 // ── Right-side slide-in panel (replaced the centred popup, Carolyn 2026-08-27) ────
 // Same contract as AdmOverlay — Escape, click-outside, aria-modal, body-scroll lock —
 // but anchored to the right edge so the board stays visible beside it. The transform is
@@ -207,6 +233,9 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   const [compose, setCompose] = useState("");
   const [toClient, setToClient] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [files, setFiles] = useState([]);          // staged for the next post
+  const [viewing, setViewing] = useState(null);    // attachment opened in the popup
+  const fileRef = useRef(null);
 
   const loadDetail = useCallback(() => {
     pmCall({ action: "get_item", id: item.id })
@@ -225,9 +254,14 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
     }
     setBusy(true); setErr("");
     try {
-      await pmCall({ action: "add_update", itemId: item.id, body, clientVisible: toClient });
-      setCompose(""); setToClient(false); loadDetail();
-    } catch (e) { setErr(e.message); }
+      const d = await pmCall({ action: "add_update", itemId: item.id, body, clientVisible: toClient });
+      // Files attach to the update that was just created, so a failed upload leaves the
+      // note itself intact and says which file did not make it.
+      for (const f of files) await pmUploadTo(item.id, d.update.id, f);
+      setCompose(""); setToClient(false); setFiles([]);
+      if (fileRef.current) fileRef.current.value = "";
+      loadDetail();
+    } catch (e) { setErr(e.message); loadDetail(); }
     setBusy(false);
   };
   const publishExisting = async (u) => {
@@ -279,9 +313,26 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
                   onChange={(e) => setToClient(e.target.checked)} />
                 Visible to client
               </label>
+              <button type="button" onClick={() => fileRef.current && fileRef.current.click()}
+                style={{ background: "none", border: "none", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                📎 Attach
+              </button>
+              <input ref={fileRef} type="file" multiple accept="image/*,video/*,.pdf" style={{ display: "none" }}
+                onChange={(e) => { setFiles(Array.from(e.target.files || []).slice(0, 10)); }} />
               <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 16px", fontSize: 12, opacity: busy || !compose.trim() ? 0.6 : 1 }}
-                disabled={busy || !compose.trim()} onClick={post}>Post</button>
+                disabled={busy || !compose.trim()} onClick={post}>{busy ? "Posting…" : "Post"}</button>
             </div>
+            {files.length > 0 && (
+              <div style={{ marginTop: 7, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {files.map((f, i) => (
+                  <span key={f.name + i} style={{ fontSize: 11.5, fontWeight: 600, color: "#334155", background: "#F1F5F9", borderRadius: 6, padding: "3px 8px" }}>
+                    {pmFileIcon({ name: f.name })} {f.name}
+                    <button type="button" title="Remove" onClick={() => setFiles(files.filter((_, j) => j !== i))}
+                      style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11, padding: "0 0 0 6px" }}>✕</button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -303,7 +354,10 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
             </div>
             <div style={{ whiteSpace: "pre-wrap" }}>{u.body}</div>
             {(u.attachments || []).map((a) => a.url && (
-              <a key={a.path} href={a.url} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: "#1B7895", fontWeight: 600 }}>📎 {a.name || "attachment"}</a>
+              <button key={a.path} type="button" onClick={() => setViewing(a)}
+                style={{ display: "inline-block", marginTop: 4, marginRight: 8, fontSize: 12, color: "#1B7895", fontWeight: 600, background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", textUnderlineOffset: 2 }}>
+                {pmFileIcon(a)} {a.name || "attachment"}
+              </button>
             ))}
           </div>
         ))}
@@ -320,7 +374,12 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
             <div style={{ marginTop: 5, fontSize: 11.5, color: "#64748B" }}>
               {sub.severity ? `Their importance: ${sub.severity} · ` : ""}They currently see: <b>{PM_CLIENT_STATUS[sub.status] || sub.status}</b>
             </div>
-            {sub.attachmentUrl && <a href={sub.attachmentUrl} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: "#1B7895", fontWeight: 600 }}>📎 Their attachment</a>}
+            {sub.attachmentUrl && (
+              <button type="button" onClick={() => setViewing({ url: sub.attachmentUrl, name: sub.attachment_path || "Their attachment", path: sub.attachment_path })}
+                style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: "#1B7895", fontWeight: 600, background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", textUnderlineOffset: 2 }}>
+                {pmFileIcon({ name: sub.attachment_path || "" })} Their attachment
+              </button>
+            )}
           </div>
         )}
         {detail && !detail.updates.length && !sub && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No notes yet.</div>}
@@ -334,6 +393,14 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
             Remove from board
           </button>
         </div>
+      )}
+
+      {/* Attachments open ON THE PAGE (Carolyn 2026-08-27), reusing the same pop-up the
+          quotes and invoices use — it already guards the URL, traps Escape and offers the
+          new-tab escape hatch when a browser refuses to render a PDF inline. */}
+      {viewing && (
+        <PdfModal url={viewing.url} title={viewing.name || "Attachment"}
+          image={pmIsImage(viewing)} onClose={() => setViewing(null)} />
       )}
     </PMDrawer>
   );
@@ -402,16 +469,20 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
               <input style={{ ...S.input, width: 160, padding: "4px 8px", fontSize: 12.5 }} defaultValue={col.name}
                 onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== col.name) run({ action: "update_column", id: col.id, name: v }); }} />
               <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700, width: 70 }}>{(PM_COL_TYPES.find(([t]) => t === col.type) || [col.type, col.type])[1]}</span>
-              {(col.type === "status" || col.type === "dropdown") && (
+              {(col.type === "status" || col.type === "dropdown" || col.type === "people") && (
                 <button type="button" style={{ background: "none", border: "none", color: "#1B7895", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
                   onClick={() => setLabelCol(labelCol === col.id ? null : col.id)}>
-                  {labelCol === col.id ? "Hide labels" : "Edit labels"}
+                  {labelCol === col.id
+                    ? (col.type === "people" ? "Hide people" : "Hide labels")
+                    : (col.type === "people" ? "Add / edit people" : "Edit labels")}
                 </button>
               )}
               <button type="button" style={{ marginLeft: "auto", background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
                 onClick={() => { if (window.confirm(`Delete the "${col.name}" column? Its values are removed from every item.`)) run({ action: "delete_column", id: col.id }); }}>Delete</button>
             </div>
-            {labelCol === col.id && <PMLabelEditor col={col} run={run} />}
+            {labelCol === col.id && (col.type === "people"
+              ? <PMPeopleEditor onChanged={onChanged} />
+              : <PMLabelEditor col={col} run={run} />)}
           </div>
         ))}
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -482,6 +553,76 @@ function PMLabelEditor({ col, run }) {
       ))}
       <button type="button" style={{ background: "none", border: "none", color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "6px 0 2px" }}
         onClick={() => commit([...rows, { label: isStatus ? "New label" : "New option", color: "#64748B" }])}>＋ Add {isStatus ? "label" : "option"}</button>
+    </div>
+  );
+}
+
+// The people behind the Assignee column (Carolyn 2026-08-27). This IS app_operators, so
+// the copy says what a row really means rather than calling them "users": everyone here
+// can be assigned work AND can open any builder's account. Adding is deliberately limited
+// to people who already have a login — this screen never creates accounts or handles
+// passwords — and new people arrive read-only.
+function PMPeopleEditor({ onChanged }) {
+  const [rows, setRows] = useState(null);
+  const [me, setMe] = useState(null);
+  const [email, setEmail] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    pmCall({ action: "list_operators" })
+      .then((d) => { setRows(d.operators || []); setMe(d.me); })
+      .catch((e) => setErr(e.message));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (body, after) => {
+    setBusy(true); setErr("");
+    try { await pmCall(body); load(); if (after) after(); if (onChanged) onChanged(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", margin: "4px 0 8px" }}>
+      {err && <div style={S.err}>{err}</div>}
+      {!rows && !err && <div style={{ fontSize: 12, color: "#94A3B8" }}>Loading the team…</div>}
+      {(rows || []).map((o) => (
+        <div key={o.user_id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.5, flexWrap: "wrap" }}>
+          <span style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(o.user_id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center" }}>
+            {pmInitials(o)}
+          </span>
+          <input defaultValue={o.display_name || ""} placeholder={(o.email || "").split("@")[0]}
+            style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
+            onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.display_name || "")) run({ action: "save_operator", userId: o.user_id, displayName: v }); }} />
+          <span style={{ color: "#64748B", fontSize: 11.5, minWidth: 160 }}>{o.email}</span>
+          <label style={{ fontSize: 11.5, fontWeight: 600, color: "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
+            title="Off means they can see the boards but not change anything, anywhere.">
+            <input type="checkbox" checked={!!o.can_write} disabled={busy}
+              onChange={(e) => run({ action: "save_operator", userId: o.user_id, canWrite: e.target.checked })} />
+            can edit
+          </label>
+          {o.user_id === me
+            ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>
+            : (
+              <button type="button" disabled={busy}
+                onClick={() => { if (window.confirm(`Remove ${o.display_name || o.email} from the team? They lose access to the Projects boards AND to every builder's account. Their login itself is untouched.`)) run({ action: "remove_operator", userId: o.user_id }); }}
+                style={{ marginLeft: "auto", background: "none", border: "none", color: "#DC2626", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Remove</button>
+            )}
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+        <input placeholder="their@email.com" value={email} onChange={(e) => setEmail(e.target.value)}
+          style={{ ...S.input, maxWidth: 220, padding: "5px 8px", fontSize: 12.5 }} />
+        <button type="button" style={S.btn("#EEF2FF", ACCENT)} disabled={!email.trim() || busy}
+          onClick={() => { if (window.confirm(`Add ${email.trim()} to the team? They will be able to be assigned work, see every board, and open any builder's account (read-only until you tick "can edit").`)) run({ action: "add_operator", email: email.trim() }, () => setEmail("")); }}>
+          ＋ Add person
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6, lineHeight: 1.45 }}>
+        Everyone here can be assigned work — and can open any builder's account, so keep the list to your own team.
+        People must already have a StructureStudio login before they can be added.
+      </div>
     </div>
   );
 }
