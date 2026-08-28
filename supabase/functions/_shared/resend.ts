@@ -311,18 +311,39 @@ export function rsReceivingEnabled(d: RsDomain): boolean {
 /**
  * The ONE meaning of "replies are actually working".
  *
- * ⚠️ DELIBERATELY NOT rsDomainVerified. That reports the DOMAIN-level status, which only
- * turns "verified" once EVERY record passes — including the DKIM and SPF rows a
- * receiving-only subdomain has no reason to publish. Gating on it would leave a tenant whose
- * inbound MX resolves perfectly stuck on "pending" forever, with a correct DNS table in
- * front of them and no way to proceed.
+ * ⚠️ THIS FUNCTION FAILED OPEN ONCE. An earlier version asked only "is receiving enabled and
+ * is the receiving record verified", and on 2026-08-28 it returned TRUE for
+ * reply.csmsynergy.com — a domain that had received exactly ZERO messages. Two sends to it
+ * reported `delivered` (which per Resend's own KB means only that the receiving MTA returned
+ * 250, and "the server can then... even discard it") while the inbound store stayed empty.
+ * Its records read:
  *
- * So ask the narrower question the feature actually depends on: is receiving switched on,
- * and has the receiving record itself been seen in DNS? Requires at least one record, so an
- * empty set can never read as ready.
+ *   DOMAIN: pending    Receiving MX: verified    DKIM: pending    SPF: pending
+ *
+ * A gate that says "ready" over a mailbox nothing has ever arrived at is worse than one that
+ * says "not yet": `active` is what makes sendTenantEmail start advertising the reply address
+ * to real customers, and a reply to a dead address bounces back at the CUSTOMER while the
+ * builder learns nothing.
+ *
+ * ⚠️ BUT DO NOT "FIX" THIS TO rsDomainVerified EITHER. Resend defines domain-level
+ * `verified` as verified FOR SENDING, so that check permanently blocks a receiving-only
+ * subdomain — the exact shape our own portal creates. That was the previous bug, in the
+ * other direction. Both failure modes are silent.
+ *
+ * So: receiving switched on, the receiving record actually seen in DNS, AND the domain not
+ * still in a wholly-unverified state. `partially_verified` is Resend's own documented status
+ * for "one capability verified while the other is pending", which is precisely a
+ * receiving-only domain that has passed.
+ *
+ * ⚠️ STILL NOT PROOF OF DELIVERY. No status string can be — the only honest test is a
+ * message that actually arrived. When the inbound webhook is live, earn `active` from a
+ * received canary rather than from this function.
  */
+const INBOUND_OK_DOMAIN_STATUS = new Set(["verified", "partially_verified", "partially_failed"]);
+
 export function rsInboundReady(d: RsDomain): boolean {
   if (!rsReceivingEnabled(d)) return false;
+  if (!INBOUND_OK_DOMAIN_STATUS.has(String(d.status ?? ""))) return false;
   const inbound = rsInboundRecords(d);
   return inbound.length > 0 && inbound.every((r) => r.verified);
 }

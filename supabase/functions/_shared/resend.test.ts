@@ -463,23 +463,39 @@ Deno.test("rsInboundRecords picks the RECEIVING MX, not the return-path MX", () 
     "a lone return-path MX is not an inbound record");
 });
 
-Deno.test("rsInboundReady asks the narrow question, not the domain-level one", () => {
+Deno.test("rsInboundReady fails neither OPEN on a pending domain nor CLOSED on a receiving-only one", () => {
   const caps = { sending: "disabled", receiving: "enabled" };
   const withReceiving = (verified: boolean, status = "not_started"): RsDomain => ({
     id: DOMAIN_ID, status, capabilities: caps,
     records: [{ ...BOTH_CAPS_RECORDS[3], verified }],
   });
 
-  // THE CASE THAT MATTERS. A receiving-only subdomain never publishes DKIM/SPF, so the
-  // DOMAIN status can sit at not_started forever while the inbound MX resolves fine.
-  // Gating on rsDomainVerified would strand that tenant on "pending" permanently, staring
-  // at a DNS table that is already correct.
-  assertEquals(rsInboundReady(withReceiving(true)), true);
-  assertEquals(rsDomainVerified(withReceiving(true)), false, "domain status disagrees, correctly");
+  // ⚠️ THE REGRESSION THIS PINS, from live data 2026-08-28. reply.csmsynergy.com looked
+  // exactly like this while its inbound store had received ZERO messages — two sends to it
+  // reported "delivered" (which per Resend's KB only means the MTA returned 250) and nothing
+  // arrived. The first rsInboundReady returned TRUE here, which would flip a tenant to
+  // 'active' and start advertising a reply address that swallows every customer reply.
+  assertEquals(rsInboundReady({
+    id: DOMAIN_ID, status: "pending",
+    capabilities: { sending: "enabled", receiving: "enabled" },
+    records: [BOTH_CAPS_RECORDS[0], BOTH_CAPS_RECORDS[1], BOTH_CAPS_RECORDS[2],
+      { ...BOTH_CAPS_RECORDS[3], verified: true }],
+  }), false, "a verified receiving record over a wholly-pending domain is NOT proof of delivery");
 
-  assertEquals(rsInboundReady(withReceiving(false)), false, "record not seen in DNS yet");
+  // ⚠️ THE OPPOSITE FAILURE, equally silent. Resend's domain-level "verified" means verified
+  // FOR SENDING, so gating on rsDomainVerified alone would permanently block the
+  // receiving-only subdomain our own portal creates. partially_verified is Resend's
+  // documented status for "one capability verified while the other is pending".
+  assertEquals(rsInboundReady(withReceiving(true, "verified")), true);
+  assertEquals(rsInboundReady(withReceiving(true, "partially_verified")), true);
+  assertEquals(rsInboundReady(withReceiving(true, "partially_failed")), true,
+    "the OTHER capability failing is not our problem");
+  assertEquals(rsInboundReady(withReceiving(true, "pending")), false);
+  assertEquals(rsInboundReady(withReceiving(true)), false, "not_started is never ready");
+
+  assertEquals(rsInboundReady(withReceiving(false, "verified")), false, "record not seen in DNS yet");
   // Receiving switched off is never ready, however green the record looks.
-  assertEquals(rsInboundReady({ ...withReceiving(true), capabilities: { receiving: "disabled" } }), false);
+  assertEquals(rsInboundReady({ ...withReceiving(true, "verified"), capabilities: { receiving: "disabled" } }), false);
   // No receiving record at all must never read as ready.
   assertEquals(rsInboundReady({ id: DOMAIN_ID, status: "verified", capabilities: caps, records: [] }), false);
   // A verified return-path MX must not satisfy it either.
