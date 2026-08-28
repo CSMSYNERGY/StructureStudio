@@ -856,9 +856,17 @@ function computeSelectionRows(sel, paintColors, C, items) {
       default: return rate;
     }
   };
-  const pick = (label, pred) => {
-    const v = String(label || "").trim(); if (!v) return null;
+  // `blankCustom`: an empty label is the "Custom" pick before the customer has typed the exact
+  // shade. PAINT is still committed to the tenant's allow-custom rate there — submit-estimate
+  // sends the blank through as "TBD" and resolves it to the Custom row (submit-estimate's
+  // resolve(), index.ts:690) — so this preview has to charge it too; without the flag Details
+  // read $0 for paint while the emailed estimate billed the custom rate. ROOF is deliberately
+  // the opposite (the edge skips a blank/"TBD" roof color), so the roof call below leaves the
+  // flag off and a blank roof color stays null on both sides.
+  const pick = (label, pred, blankCustom) => {
+    const v = String(label || "").trim();
     const list = colors.filter(pred);
+    if (!v) return blankCustom ? (list.find((c) => c.allowCustom) || null) : null;
     return list.find((c) => c.label === v) || list.find((c) => c.allowCustom) || null;
   };
   const styleLabel = (((C && C.buildingStyles) || []).find((s) => s.value === styleKey) || {}).label || styleKey || "";
@@ -876,10 +884,30 @@ function computeSelectionRows(sel, paintColors, C, items) {
   let includedNow = {};
   if (qmap) includedNow = qmap; else if (Array.isArray(legacyArr)) { for (const k of legacyArr) includedNow[k] = 1; }
   const declinedKeys = (sel && Array.isArray(sel.declinedItems)) ? sel.declinedItems : [];
+  // What is currently ON the plan, keyed the way declinedItems is — built-in layout keys plus
+  // catalog fixture ids. Declining an included item does not hide the generic tool for it (the
+  // 2D door picker still lists a declined fixture, and the 3D "Add" row has no decline filter at
+  // all), so a customer can decline an included door or loft and place that same item a click
+  // later. submit-estimate keeps a placed item and skips its credit (its placedKeys guard,
+  // index.ts:1063); mirroring it here is what stops the Details subtotal coming out one credit
+  // BELOW the estimate the customer is emailed. Built-in keys mirror the edge's itemSummary
+  // tests exactly: a CATALOG window is not a built-in "window" (the edge counts only the ones
+  // with no fixtureItemId), while every ramp counts as "ramp" whatever its shape.
+  const placedKeys = new Set();
+  if (Array.isArray(items)) {
+    for (const it of items) {
+      if (!it) continue;
+      if (it.type === "fixtureDoor") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); continue; }
+      if (it.type === "window") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); else placedKeys.add("window"); continue; }
+      if (it.type === "ramp") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); placedKeys.add("ramp"); continue; }
+      if (it.type === "singleDoor" || it.type === "doubleDoor" || it.type === "loft" || it.type === "workbench" || it.type === "roughOpening") placedKeys.add(it.type);
+    }
+  }
   const declinedLines = []; let declinedTotal = 0;
   if (sel && sel.size) {
     for (const k of declinedKeys) {
       if (includedNow[k] == null) continue;
+      if (placedKeys.has(k)) continue;   // placed = kept (and charged/netted below), not a decline
       // Catalog fixture inclusion (key = fixture id): credit its snapshot price × the included qty.
       const fxDecl = (Array.isArray(C.fixtures) ? C.fixtures : []).find((f) => String(f.id) === k);
       if (fxDecl) {
@@ -909,12 +937,14 @@ function computeSelectionRows(sel, paintColors, C, items) {
   }
   // Under-placed included area items (loft, and any sqft_option inclusion): a smaller placed
   // area than the included amount credits the shortfall (mirrors submit-estimate's pushItem,
-  // which credits sqft_option under-placement). Only when actually placed and not declined — a
-  // fully-absent include is handled by the decline flow, not auto-credited. Kept method-scoped
-  // to sqft_option so it stays in lock-step with the edge (lineal_ft is NOT under-credited).
+  // which credits sqft_option under-placement). Only when actually placed — the placedSqft > 0
+  // test is what holds a fully-absent include out of here, since that one belongs to the decline
+  // flow. A DECLINED key is deliberately NOT skipped: once it is back on the plan the loop above
+  // no longer credits it, and the edge under-credits it whatever the decline flag says, so
+  // skipping it here would leave the preview ABOVE the emailed estimate. Kept method-scoped to
+  // sqft_option so it stays in lock-step with the edge (lineal_ft is NOT under-credited).
   if (sel && sel.size && Array.isArray(items)) {
     for (const k in includedNow) {
-      if (declinedKeys.includes(k)) continue;
       const rpk = resolveLp(k);
       if (!rpk || rpk.method !== "sqft_option" || !(rpk.rate > 0)) continue;
       const incQ = Number(includedNow[k]) || 0;
@@ -937,8 +967,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
   const painted = sel && sel.paint === "Painted";
   let pDetail = "Unpainted", pTotal = 0;
   if (painted) {
-    const body = pick(paintColors && paintColors.body, (c) => c.siding);
-    const trim = pick(paintColors && paintColors.trim, (c) => c.trim);
+    const body = pick(paintColors && paintColors.body, (c) => c.siding, true);
+    const trim = pick(paintColors && paintColors.trim, (c) => c.trim, true);
     const seen = {};
     [body, trim].forEach((c) => { if (c && c.id && !seen[c.id]) { seen[c.id] = 1; pTotal += charge(c); } });
     pDetail = `Body: ${(paintColors && paintColors.body) || "TBD"}, Trim: ${(paintColors && paintColors.trim) || "TBD"}`;
@@ -2963,6 +2993,19 @@ function buildShed3DModel(THREE, p) {
   // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
   // raster, the relief style below, and the tile scale.
   const clad = D3_CLADDING[d3NormalizeCladding(p.styleSpec && p.styleSpec.siding)] || D3_CLADDING.panel;
+  // How far the cladding's proudest surface stands from the wall CENTRE-line, and the one
+  // number every trim face must clear. Relief strips sit CLAD_RELIEF_OUT from the centre
+  // with depth 0.1 (lap, batten) or 0.05 (rib), so their outer face lands at 0.23 / 0.205;
+  // panel has no proud geometry, so its reach is the bare wall face (T/2). Corner boards
+  // and opening casings take their size from trimFace rather than their own constants,
+  // because two constants that must agree and live apart WILL drift: lap strips reached
+  // 0.23 while the corner post's face sat at 0.22, so every course line cut through the
+  // board — Carolyn 2026-08-27, circling it: "that piece of trim should just go straight
+  // down… it should be over the top." On panel, trimFace resolves to exactly the old
+  // numbers, so flat-clad styles render byte-identical to before.
+  const CLAD_RELIEF_OUT = T / 2 + 0.03;
+  const cladReach = clad.relief ? CLAD_RELIEF_OUT + (clad.relief === "rib" ? 0.025 : 0.05) : T / 2;
+  const trimFace = cladReach + 0.03;
   const wallKind = clad.tex;
   const wallTex = d3MakeTexture(THREE, wallKind);
   if (wallTex) {
@@ -3230,11 +3273,17 @@ function buildShed3DModel(THREE, p) {
           const depth = clad.relief === "rib" ? 0.05 : 0.1;
           const reliefMat = clad.reliefTrim ? battenMat : wallMat;
           for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
-            wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, 0, H, T / 2 + 0.03, depth));
+            wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, 0, H, CLAD_RELIEF_OUT, depth));
           }
         } else {
+          // Courses DIE INTO the corner boards instead of running to the wall's end — the
+          // clamp bites only when b0/b1 ARE the wall's own ends (interior spans between
+          // openings sit far from 0 / wf.len), so this is a corner rule, not a gap rule.
+          const s0 = Math.max(b0 + 0.03, trimFace);
+          const s1 = Math.min(b1 - 0.03, wf.len - trimFace);
+          if (s1 - s0 < 0.1) return;
           for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
-            wg.add(wallBox(wallMat, wf, b0 + 0.03, b1 - 0.03, y - 0.04, y + 0.04, T / 2 + 0.03, 0.1));
+            wg.add(wallBox(wallMat, wf, s0, s1, y - 0.04, y + 0.04, CLAD_RELIEF_OUT, 0.1));
           }
         }
       };
@@ -3255,9 +3304,14 @@ function buildShed3DModel(THREE, p) {
       // A two-tone catalog door's chosen TRIM color drives its own casing; everything
       // else keeps the building trim (windows deliberately so — their color is the sash).
       const casingMat = (o.it.type === "fixtureDoor" && o.it.trimColorHex) ? mat(o.it.trimColorHex) : trimMat;
-      og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, T + 0.06));
-      og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, T + 0.06));
-      og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, T + 0.06));
+      // Casing sits ON TOP of the cladding, so its faces must clear the relief strips —
+      // the same inversion the corner boards had: lap courses at 0.23 stood 0.05 proud of
+      // a casing face at 0.18 and read as siding drawn through the trim. On panel this
+      // resolves to exactly the old T + 0.06.
+      const casingDepth = Math.max(T + 0.06, trimFace * 2);
+      og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
+      og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
+      og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
       // A catalog fixture's own photo is masked onto the opening when the builder
       // uploaded one — but it is LAYERED IN FRONT of the parametric door/glass, never
       // instead of it, for two reasons that both bit us:
@@ -3285,7 +3339,7 @@ function buildShed3DModel(THREE, p) {
         og.add(mesh);
       };
       if (o.it.type === "window") {
-        og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, T + 0.06));
+        og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, casingDepth));
         // Sill nose: a slightly wider, deeper board under the casing — the one
         // horizontal shadow line that makes the window read as installed.
         og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, T / 2 + 0.04, 0.16));
@@ -3829,8 +3883,13 @@ function buildShed3DModel(THREE, p) {
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
   roofGroup.add(rg);
   // Corner trim boards live in roofGroup so "look inside" hides them with the roof.
+  // Half-extent from trimFace, not a constant of its own: the post must reach past the
+  // cladding's proudest surface or the siding renders through it — the 2026-08-27 lap bug,
+  // where this face sat at 0.22 against strips reaching 0.23. On panel this is the old
+  // T/2 + 0.07 exactly.
   [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
-    const post = box(trimMat, T + 0.14, H, T + 0.14);
+    const half = Math.max(T / 2 + 0.07, trimFace);
+    const post = box(trimMat, half * 2, H, half * 2);
     post.position.set(c[0], H / 2, c[1]);
     roofGroup.add(post);
   });
@@ -10925,9 +10984,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const cur = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
             const declining = !cur.includes(key);
             if (declining) {
-              // Declining removes it from the layout (like Delete) — a declined item can't be placed,
-              // so any already-placed instances are cleared (cascading a door's snapped ramp, like
-              // delSel) and the tool is deselected if active.
+              // Declining clears it off the layout NOW (like Delete): already-placed instances are
+              // removed (cascading a door's snapped ramp, like delSel) and the tool is deselected if
+              // active. It does NOT stop the item being placed again afterwards — the 2D door picker
+              // still lists a declined fixture and the 3D "Add" row has no decline filter — so the
+              // money side is handled at pricing time instead, by the placedKeys guard in
+              // computeSelectionRows (placed = kept and charged, never also credited), which mirrors
+              // submit-estimate index.ts:1063. Don't drop that guard on the strength of this cleanup:
+              // without it a decline-then-place leaves the Details subtotal one credit BELOW the
+              // estimate the customer is emailed.
               setItems((its) => {
                 const removedIds = new Set(its.filter((it) => it.type === key || it.fixtureItemId === key).map((it) => it.id));
                 return its.filter((it) => !(it.type === key || it.fixtureItemId === key) && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
@@ -10949,7 +11014,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           };
           const inclBtn = ([key, rawCfg]) => { const cfg = withQty(key, rawCfg); return declined.includes(key)
             ? (
-              <span key={key} title="You declined this included item — it'll show as a deduction on your estimate"
+              <span key={key} title="You declined this included item — it'll show as a deduction on your estimate unless you place it again"
                 style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, background: "#F1F5F9", color: "#94A3B8", border: "2px dashed #CBD5E1" }}>
                 <span style={{ textDecoration: "line-through" }}>{cfg.label}</span>
                 <button onClick={() => toggleDecline(key)} title="Add it back" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 11 }}>Undo</button>

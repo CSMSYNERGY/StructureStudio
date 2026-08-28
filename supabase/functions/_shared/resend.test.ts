@@ -23,6 +23,7 @@ import {
   rsDeleteDomain,
   rsDomainVerified,
   rsGetDomain,
+  rsInboundReady,
   rsInboundRecords,
   rsReceivingEnabled,
   rsSendEmail,
@@ -437,25 +438,70 @@ Deno.test("rsReceivingEnabled answers a DIFFERENT question from rsDomainVerified
   assertEquals(rsReceivingEnabled(d("verified")), false);
 });
 
-Deno.test("rsInboundRecords returns the MX rows, and never invents one", () => {
-  const rec = (type: string, host: string) =>
-    ({ purpose: "", host, fqdn: host, type, value: "x", verified: false });
-  const d: RsDomain = {
-    id: DOMAIN_ID, status: "verified",
-    records: [
-      rec("TXT", "resend._domainkey"),
-      rec("MX", "reply"),
-      rec("TXT", "send"),
-    ],
-  };
-  assertEquals(rsInboundRecords(d).length, 1);
-  assertEquals(rsInboundRecords(d)[0].host, "reply");
-  // Lowercase `mx` still counts — the filter must not depend on the provider's casing.
-  assertEquals(rsInboundRecords({ ...d, records: [rec("mx", "reply")] }).length, 1);
-  // ⚠️ EMPTY, NOT A GUESS. If Resend returns no MX the caller must fail loudly; hardcoding
-  // inbound-smtp.us-east-1.amazonaws.com would be a hostname that silently rots.
+/** The LIVE shape of a domain with BOTH capabilities on, captured 2026-08-28 from
+ *  reply.csmsynergy.com. The two MX rows are the whole point of this fixture. */
+const BOTH_CAPS_RECORDS = [
+  { purpose: "DKIM", host: "resend._domainkey.reply", fqdn: "", type: "TXT", value: "p=MIGf", verified: false },
+  { purpose: "SPF", host: "send.reply", fqdn: "", type: "MX", value: "feedback-smtp.us-east-1.amazonses.com", verified: true, priority: 10 },
+  { purpose: "SPF", host: "send.reply", fqdn: "", type: "TXT", value: "v=spf1 include:amazonses.com ~all", verified: false },
+  { purpose: "Receiving", host: "reply", fqdn: "", type: "MX", value: "inbound-smtp.us-east-1.amazonaws.com", verified: false, priority: 10 },
+];
+
+Deno.test("rsInboundRecords picks the RECEIVING MX, not the return-path MX", () => {
+  // ⚠️ THE BUG THIS PINS, found against a live response. A domain with sending AND receiving
+  // enabled returns TWO MX rows: the `send.reply` bounce return-path and the `reply` inbound
+  // host. A `type === "MX"` filter returns both, and a builder who publishes the wrong one
+  // gets mail bouncing while the DNS table insists it is correct.
+  const d: RsDomain = { id: DOMAIN_ID, status: "not_started", records: BOTH_CAPS_RECORDS };
+  const got = rsInboundRecords(d);
+  assertEquals(got.length, 1, "exactly one — never the return-path row");
+  assertEquals(got[0].value, "inbound-smtp.us-east-1.amazonaws.com");
+  assertEquals(got[0].priority, 10, "an MX without its priority cannot be created");
+  // ⚠️ EMPTY, NOT A GUESS. The caller must fail loudly rather than render a hardcoded host.
   assertEquals(rsInboundRecords({ ...d, records: [] }).length, 0);
-  assertEquals(rsInboundRecords({ ...d, records: [rec("TXT", "send")] }).length, 0);
+  assertEquals(rsInboundRecords({ ...d, records: [BOTH_CAPS_RECORDS[1]] }).length, 0,
+    "a lone return-path MX is not an inbound record");
+});
+
+Deno.test("rsInboundReady fails neither OPEN on a pending domain nor CLOSED on a receiving-only one", () => {
+  const caps = { sending: "disabled", receiving: "enabled" };
+  const withReceiving = (verified: boolean, status = "not_started"): RsDomain => ({
+    id: DOMAIN_ID, status, capabilities: caps,
+    records: [{ ...BOTH_CAPS_RECORDS[3], verified }],
+  });
+
+  // ⚠️ THE REGRESSION THIS PINS, from live data 2026-08-28. reply.csmsynergy.com looked
+  // exactly like this while its inbound store had received ZERO messages — two sends to it
+  // reported "delivered" (which per Resend's KB only means the MTA returned 250) and nothing
+  // arrived. The first rsInboundReady returned TRUE here, which would flip a tenant to
+  // 'active' and start advertising a reply address that swallows every customer reply.
+  assertEquals(rsInboundReady({
+    id: DOMAIN_ID, status: "pending",
+    capabilities: { sending: "enabled", receiving: "enabled" },
+    records: [BOTH_CAPS_RECORDS[0], BOTH_CAPS_RECORDS[1], BOTH_CAPS_RECORDS[2],
+      { ...BOTH_CAPS_RECORDS[3], verified: true }],
+  }), false, "a verified receiving record over a wholly-pending domain is NOT proof of delivery");
+
+  // ⚠️ THE OPPOSITE FAILURE, equally silent. Resend's domain-level "verified" means verified
+  // FOR SENDING, so gating on rsDomainVerified alone would permanently block the
+  // receiving-only subdomain our own portal creates. partially_verified is Resend's
+  // documented status for "one capability verified while the other is pending".
+  assertEquals(rsInboundReady(withReceiving(true, "verified")), true);
+  assertEquals(rsInboundReady(withReceiving(true, "partially_verified")), true);
+  assertEquals(rsInboundReady(withReceiving(true, "partially_failed")), true,
+    "the OTHER capability failing is not our problem");
+  assertEquals(rsInboundReady(withReceiving(true, "pending")), false);
+  assertEquals(rsInboundReady(withReceiving(true)), false, "not_started is never ready");
+
+  assertEquals(rsInboundReady(withReceiving(false, "verified")), false, "record not seen in DNS yet");
+  // Receiving switched off is never ready, however green the record looks.
+  assertEquals(rsInboundReady({ ...withReceiving(true, "verified"), capabilities: { receiving: "disabled" } }), false);
+  // No receiving record at all must never read as ready.
+  assertEquals(rsInboundReady({ id: DOMAIN_ID, status: "verified", capabilities: caps, records: [] }), false);
+  // A verified return-path MX must not satisfy it either.
+  assertEquals(rsInboundReady({
+    id: DOMAIN_ID, status: "verified", capabilities: caps, records: [BOTH_CAPS_RECORDS[1]],
+  }), false);
 });
 
 // ── Domain lifecycle calls ─────────────────────────────────────────────────────────────────
@@ -471,11 +517,13 @@ Deno.test("rsCreateDomain asks for receiving ONLY when told to", async () => {
 
     calls = stub(() => jsonResponse(UNVERIFIED_DOMAIN));
     await rsCreateDomain("reply.example.com", { receiving: true });
-    // Stringified: this file's assertEquals is a `!==` check, so two structurally identical
-    // objects would always "fail" with an error message showing them as equal.
+    // Sending is asked to be DISABLED. With it on, Resend returns DKIM + SPF rows for the
+    // subdomain too, so the builder must publish FOUR records instead of ONE — on a
+    // subdomain we never send from. Stringified because this file's assertEquals is a `!==`
+    // check, so two structurally identical objects would always "fail".
     assertEquals(
       JSON.stringify(JSON.parse(calls[0].body ?? "{}").capabilities),
-      JSON.stringify({ sending: "enabled", receiving: "enabled" }),
+      JSON.stringify({ sending: "disabled", receiving: "enabled" }),
     );
   } finally {
     teardown();

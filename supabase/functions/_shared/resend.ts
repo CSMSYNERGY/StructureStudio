@@ -279,28 +279,73 @@ function toRsDomain(raw: unknown): RsDomain {
 }
 
 /**
- * The MX record(s) a tenant must publish to RECEIVE mail on this domain.
+ * The record(s) a tenant must publish to RECEIVE mail on this domain.
  *
- * Filtered by record TYPE rather than by `purpose`, because the sending domain also carries
- * an MX — the `send.<domain>` bounce return-path — and the two would otherwise be
- * indistinguishable. On a receiving domain there is no return-path row, so every MX here is
- * an inbound one; the filter is belt-and-braces against a future response that mixes them.
+ * ⚠️ FILTERED ON `purpose === "Receiving"`, NOT ON type === "MX". A domain with BOTH
+ * capabilities on returns TWO MX rows, and they mean opposite things — confirmed against a
+ * live response 2026-08-28:
  *
- * ⚠️ RETURNS AN EMPTY ARRAY RATHER THAN INVENTING A HOSTNAME. Whether the API includes the
- * inbound MX in `records[]` is documented nowhere — Resend's dashboard flow says "copy the
- * MX record" from the UI. If it turns out not to, the caller must FAIL LOUDLY: hardcoding
- * `inbound-smtp.us-east-1.amazonaws.com` would be a guess that silently rots the day Resend
- * changes regions or hosts, and a wrong MX is a tenant's mail bouncing with no error anywhere.
+ *   { record: "SPF",       name: "send.reply", type: "MX", value: "feedback-smtp.…amazonses.com" }
+ *   { record: "Receiving", name: "reply",      type: "MX", value: "inbound-smtp.…amazonaws.com"  }
+ *
+ * The first is the bounce return-path for mail SENT from the subdomain; only the second
+ * receives. A type-based filter hands the builder both and lets them publish the wrong one
+ * as their inbound MX — mail silently bouncing, with the DNS table insisting it is correct.
+ * An earlier version of this function did exactly that, on the reasoning that a receiving
+ * domain has no return-path row. It does.
+ *
+ * ⚠️ RETURNS AN EMPTY ARRAY RATHER THAN INVENTING A HOSTNAME. The caller must fail loudly:
+ * hardcoding `inbound-smtp.us-east-1.amazonaws.com` would be a guess that rots the day
+ * Resend changes region or host, and a wrong MX bounces mail with no error anywhere.
  */
 export function rsInboundRecords(d: RsDomain): RsDnsRecord[] {
-  return (d.records ?? []).filter((r) => String(r.type ?? "").toUpperCase() === "MX");
+  return (d.records ?? []).filter((r) => String(r.purpose ?? "") === "Receiving");
 }
 
-/** Whether Resend says this domain can actually receive. Separate from rsDomainVerified,
- *  which answers the SENDING question — a domain can be verified for one and not the other,
- *  and conflating them is how a UI shows "ready" over a mailbox that does not exist. */
+/** Whether Resend says this domain can accept mail at all. A capability switch, not a DNS
+ *  verdict — pair it with rsInboundReady, which checks whether the record actually resolves. */
 export function rsReceivingEnabled(d: RsDomain): boolean {
   return d.capabilities?.receiving === "enabled";
+}
+
+/**
+ * The ONE meaning of "replies are actually working".
+ *
+ * ⚠️ THIS FUNCTION FAILED OPEN ONCE. An earlier version asked only "is receiving enabled and
+ * is the receiving record verified", and on 2026-08-28 it returned TRUE for
+ * reply.csmsynergy.com — a domain that had received exactly ZERO messages. Two sends to it
+ * reported `delivered` (which per Resend's own KB means only that the receiving MTA returned
+ * 250, and "the server can then... even discard it") while the inbound store stayed empty.
+ * Its records read:
+ *
+ *   DOMAIN: pending    Receiving MX: verified    DKIM: pending    SPF: pending
+ *
+ * A gate that says "ready" over a mailbox nothing has ever arrived at is worse than one that
+ * says "not yet": `active` is what makes sendTenantEmail start advertising the reply address
+ * to real customers, and a reply to a dead address bounces back at the CUSTOMER while the
+ * builder learns nothing.
+ *
+ * ⚠️ BUT DO NOT "FIX" THIS TO rsDomainVerified EITHER. Resend defines domain-level
+ * `verified` as verified FOR SENDING, so that check permanently blocks a receiving-only
+ * subdomain — the exact shape our own portal creates. That was the previous bug, in the
+ * other direction. Both failure modes are silent.
+ *
+ * So: receiving switched on, the receiving record actually seen in DNS, AND the domain not
+ * still in a wholly-unverified state. `partially_verified` is Resend's own documented status
+ * for "one capability verified while the other is pending", which is precisely a
+ * receiving-only domain that has passed.
+ *
+ * ⚠️ STILL NOT PROOF OF DELIVERY. No status string can be — the only honest test is a
+ * message that actually arrived. When the inbound webhook is live, earn `active` from a
+ * received canary rather than from this function.
+ */
+const INBOUND_OK_DOMAIN_STATUS = new Set(["verified", "partially_verified", "partially_failed"]);
+
+export function rsInboundReady(d: RsDomain): boolean {
+  if (!rsReceivingEnabled(d)) return false;
+  if (!INBOUND_OK_DOMAIN_STATUS.has(String(d.status ?? ""))) return false;
+  const inbound = rsInboundRecords(d);
+  return inbound.length > 0 && inbound.every((r) => r.verified);
 }
 
 /**
@@ -322,7 +367,13 @@ export async function rsCreateDomain(
       // Receiving defaults to disabled, so this key is sent only when asked for — a domain
       // created for SENDING must never quietly start accepting mail, and omitting the key
       // keeps the request byte-identical to what it was before receiving existed.
-      ...(opts?.receiving ? { capabilities: { sending: "enabled", receiving: "enabled" } } : {}),
+      //
+      // ⚠️ A RECEIVING DOMAIN ASKS FOR RECEIVING ONLY. With sending also enabled, Resend
+      // returns DKIM + SPF rows for the subdomain as well, so the builder must publish FOUR
+      // records instead of ONE to reach a verified domain — on a subdomain we never send
+      // from. Every extra record is another chance for the hand-off to their web guy to
+      // fail, which is where this flow already dies.
+      ...(opts?.receiving ? { capabilities: { sending: "disabled", receiving: "enabled" } } : {}),
     }),
   });
   return toRsDomain(raw);

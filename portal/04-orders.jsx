@@ -797,8 +797,14 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const fetchAllPayments = async () => {
       const page = 1000; const seen = new Set(); const out = [];
       for (let from = 0; ; from += page) {
+        // id is the TIEBREAKER, not decoration: received_at is stored as local noon of the
+        // chosen day, so every payment taken on one day sorts equal. Postgres is free to
+        // order a tie group differently per page, and then a boundary row comes back twice
+        // (the Set below drops it) while the row it displaced comes back never — the same
+        // silent understatement of "paid" the paging exists to prevent.
         const { data, error: pErr } = await sb.from("payments").select("*").eq("client_id", clientId)
-          .order("received_at", { ascending: false }).range(from, from + page - 1);
+          .order("received_at", { ascending: false }).order("id", { ascending: false })
+          .range(from, from + page - 1);
         if (pErr) return { error: pErr };
         // Dedupe by id: a payment landing mid-pagination (the mount-time GHL sync)
         // shifts the pages and could repeat a row — double-counting real money.
@@ -1180,7 +1186,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
    either/or, Carolyn 2026-08-23. While one is pending, send_invoice 409s server-side.
    Reads/writes are direct RLS (the orders precedent); the guard trigger owns the rules a
    browser must not bypass (co_no assignment, signature acks, frozen-when-acknowledged). */
-function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onChanged }) {
+function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, reloadKey, onChanged }) {
   const [cos, setCos] = useState(null);        // null = loading
   const [msg, setMsg] = useState(null);        // { ok } | { err }
   const [busy, setBusy] = useState(false);
@@ -1206,16 +1212,26 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
     if (error) { setMsg({ err: error.message }); setCos([]); return; }
     setCos(data || []);
   }, [clientId, shortCode]);
-  useEffect(() => { load(); }, [load]);
+  // reloadKey, not just [clientId, shortCode]: staging a change on the document above
+  // UPDATES the pending CO in place, so a card still holding its mount-time list reads
+  // "None." under a banner announcing that CO — and hands its superseded total to
+  // applyAckedTotal, billing the customer a figure the frozen CO no longer states.
+  useEffect(() => { load(); }, [load, reloadKey]);
 
+  // Returns false ONLY when the order-total write failed — a CO with no new total is
+  // nothing to write, so it returns true — and every caller must respect that false:
+  // React batches both setMsg calls across the await, so an unconditional "confirmed
+  // verbally" banner painted straight over this error and the operator walked away from
+  // an acknowledged, frozen CO with the order still at its old total and nothing saying so.
   const applyAckedTotal = async (co) => {
     // The acknowledged total becomes the order's total; 'manual' also shields it from the
     // GHL repricer (sync-design-status skips manual rows).
-    if (co.total_after_cents == null) return;
+    if (co.total_after_cents == null) return true;
     const { error } = await sb.from("orders")
       .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
       .eq("client_id", clientId).eq("short_code", shortCode);
-    if (error) setMsg({ err: `Change recorded, but the order total didn't update: ${error.message}` });
+    if (error) { setMsg({ err: `Change recorded, but the order total didn't update: ${error.message}` }); return false; }
+    return true;
   };
 
   const createCo = async () => {
@@ -1244,8 +1260,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
     if (error) { setMsg({ err: error.message }); return; }
     setFormOpen(false); setDesc(""); setNewTotal(""); setRepName(""); setNote("");
     if (verbal) {
-      await applyAckedTotal(created);
-      setMsg({ ok: `CO-${created.co_no} recorded with your verbal confirmation.` });
+      if (await applyAckedTotal(created)) setMsg({ ok: `CO-${created.co_no} recorded with your verbal confirmation.` });
     } else {
       // Email it for signature right away — a pending CO nobody was told about blocks the
       // invoice forever. sent:false just means print/hand it over; the CO still exists.
@@ -1261,27 +1276,34 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, onC
     if (!vConfirm) { setMsg({ err: "Tick the confirmation box — it is your attestation." }); return; }
     if (!vRep.trim() || !vDate) { setMsg({ err: "Verbal confirmation needs your name and the date of the conversation." }); return; }
     setBusy(true); setMsg(null);
-    // .select() makes the conditional update prove itself: without it, zero rows matched
-    // (the CO was signed or voided elsewhere while this form sat open) still comes back
-    // error:null, and we'd report "confirmed verbally" AND overwrite the order total
-    // from a CO that is no longer pending. The returned ids are the proof the
-    // status guard actually matched a row.
-    const { data: upd, error } = await sb.from("change_orders")
+    // The update is conditional on BOTH the status and the amount this card is showing,
+    // and .select() makes it prove itself: without a returned row, zero rows matched comes
+    // back error:null and we'd report "confirmed verbally" AND overwrite the order total
+    // from a CO that is not the one the rep read out.
+    //   status — it was signed or voided elsewhere while this form sat open.
+    //   amount — staging a design edit rewrites a pending CO's total IN PLACE, and `co` is
+    //     this card's cached copy. Neither figure is usable then: the cached one bills a
+    //     total the frozen CO doesn't state, and the database's one stamps the
+    //     attestation — the rep's name, their conversation date — onto a number they never
+    //     said to the customer. So refuse, reload, and make them re-read it first.
+    // total_after_cents is nullable (a description-only CO) and PostgREST .eq cannot match
+    // NULL, so .is() is the null arm of the same condition.
+    let q = sb.from("change_orders")
       .update({ status: "acknowledged", ack_method: "verbal", verbal_rep_name: vRep.trim(), verbal_conversation_date: vDate, verbal_note: vNote.trim() || null })
-      .eq("id", co.id).eq("status", "pending_ack")
-      .select("id");
+      .eq("id", co.id).eq("status", "pending_ack");
+    q = co.total_after_cents == null ? q.is("total_after_cents", null) : q.eq("total_after_cents", co.total_after_cents);
+    const { data: upd, error } = await q.select("id, total_after_cents");
     setBusy(false);
     if (error) { setMsg({ err: error.message }); return; }
     setVerbalFor(null); setVRep(""); setVNote(""); setVConfirm(false);
     if (!upd || upd.length === 0) {
-      // Nothing was pending to confirm — reload so the list shows the CO's real state,
-      // and leave the order total alone (it may already reflect a signed or voided CO).
-      setMsg({ err: `CO-${co.co_no} is no longer pending — it was signed or voided in the meantime. Nothing was changed.` });
+      // Nothing matched — reload so the list shows the CO as it really stands, and leave
+      // the order total alone (it may already reflect a signed or voided CO).
+      setMsg({ err: `CO-${co.co_no} is not the change you were reading — it was signed, voided, or its amount was restaged while this form was open. Nothing was recorded: check the amount below and go through it with the customer again before confirming.` });
       load(); onChanged();
       return;
     }
-    await applyAckedTotal(co);
-    setMsg({ ok: `CO-${co.co_no} confirmed verbally.` });
+    if (await applyAckedTotal(upd[0])) setMsg({ ok: `CO-${co.co_no} confirmed verbally.` });
     load(); onChanged();
   };
 
@@ -1567,7 +1589,55 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   };
   const discardDraft = () => { setDraft(null); setPreview(null); setPreviewErr(null); if (debounceRef.current) clearTimeout(debounceRef.current); };
 
+  // A change order staged here is priced from the DESIGN snapshot; money moved by hand —
+  // a manual CO (which deliberately never touches the snapshot) or an order total typed in
+  // below — lives only on orders.total_cents. When those two disagree, signing a staged CO
+  // writes the snapshot figure straight over the order, the hand-moved amount leaves the
+  // book of record, and the invoice prints an "Order adjustment" cancelling it back out.
+  // The two can also part company with no hand-moved money at all: discarding a
+  // DESIGNER-raised revision voids the CO but leaves the design carrying it
+  // (void_change_order restores only from a snapshot_before, which that path never
+  // writes), so the snapshot prices out away from the signed total on its own.
+  // So the test is the MONEY, not which kind of CO came last — and the design-side figure to
+  // test is what the design ITSELF prices out at right now, because that is what signing
+  // writes onto the order: total_after_cents is totalFromSnapshot of the design's own lines
+  // with the staged attribute delta applied.
+  // ⚠️ NOT `preview.totalBefore`. Until migration 153 those were the same number and this
+  // read it; they are not the same number any more. The server's baseline is now
+  // designs.accepted_snapshot — the design as of the customer's last AGREEMENT — and for a
+  // DISCARDED designer revision that is precisely the order's total, so a drift measured
+  // against it is structurally zero for the second case above, the one this guard was
+  // written for. The design's own price still sees it (it is carrying the revision), and it
+  // still sees hand-moved money too (there the design prices at the agreed figure and the
+  // order does not). It fires only when something is actually at stake, it is not fooled by
+  // voiding the manual CO (voiding does not put orders.total_cents back), and it clears as
+  // soon as the design carries the amount again — a designer resubmit that prices it in —
+  // instead of shutting the dropdowns off for the life of the order.
+  // The `!pendingCo` term is the one exception: while a design_edit CO is pending, the design
+  // has ALREADY been revised (both writers apply the change to the row at staging time, and
+  // the customer acknowledges after), so it prices away from the still-signed order total by
+  // the pending amount and EVERY pending CO would otherwise read as drift. Blocking would not
+  // save hand-moved money there anyway, since signing that pending CO overwrites the order
+  // total with its own figure regardless.
+  // ⚠️ TRADE-OFF, deliberate: the real fix is server-side (stage_order_attribute_change
+  // deriving totalBefore from orders.total_cents, or carrying the manual delta forward).
+  // Until that lands, an order whose total and design have parted company genuinely cannot
+  // be changed from this document without losing the agreed total, and "+ New change
+  // order" amends the TOTAL ONLY — the design, its PDFs and the build paperwork keep the
+  // roof/cladding/paint they already carry. The message says so rather than implying the
+  // two paths are equivalent, and the banner shows it as soon as the price preview lands,
+  // not at the final click.
+  // No priced lines at all is not a $0 design — the server refuses to stage against one, so
+  // make no claim about it rather than reading it as the order being the whole total adrift.
+  const designPricedCents = lines.length ? Math.round(ssSnapTotals(snap).total * 100) : null;
+  const baselineDriftCents = (design.accepted_at && !pendingCo && designPricedCents != null && o.total_cents != null && o.total_cents !== designPricedCents)
+    ? o.total_cents - designPricedCents
+    : 0;
+  const baselineDriftMsg = baselineDriftCents === 0 ? null
+    : `This order's total (${money(o.total_cents)}) isn't what the design currently prices out at (${money(designPricedCents)}) — the order is ${money(Math.abs(baselineDriftCents))} ${baselineDriftCents > 0 ? "above" : "below"} the design's figure. Either the money was moved on the order alone (a manual change order, or a total typed in below), or a designer revision was discarded — discarding one leaves the design priced at a revision the customer never signed. Either way the order total is the book of record and the design is the side that is out of step. A change staged from this document is priced from the design, so signing it would overwrite the order total with the design's figure and the agreed amount would leave the record. Record this change under Change orders → + New change order below — that amends the total only, so the roof, cladding and paint you just picked will not reach the design, its PDFs or the build paperwork — or have the designer resubmit the design priced at ${money(o.total_cents)}, after which staging from this document works again.`;
+
   const stage = async () => {
+    if (baselineDriftMsg) { onMsg({ err: baselineDriftMsg }); return; }
     setBusy(true); onMsg(null);
     const { data, error } = await sb.functions.invoke("portal-settings", {
       body: { action: "stage_order_attribute_change", shortCode: o.short_code, attrs: eff },
@@ -1750,14 +1820,20 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 )}
               </div>
               <div style={{ fontSize: 12, color: "#92400E", whiteSpace: "pre-wrap", marginTop: 4 }}>{preview.description}</div>
-              <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>
-                {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the quote."}
-              </div>
+              {/* The refusal belongs HERE, with the price it applies to — discovering it
+                  only on the final click means the rep has already picked the colors. */}
+              {baselineDriftMsg
+                ? <div style={{ fontSize: 12, fontWeight: 700, color: "#B91C1C", marginTop: 6 }}>{baselineDriftMsg}</div>
+                : (
+                  <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>
+                    {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the quote."}
+                  </div>
+                )}
             </>
           )}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <button type="button" onClick={stage} disabled={anyBusy || !preview}
-              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5, opacity: anyBusy || !preview ? 0.6 : 1 }}>
+            <button type="button" onClick={stage} disabled={anyBusy || !preview || !!baselineDriftMsg}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5, opacity: anyBusy || !preview || !!baselineDriftMsg ? 0.6 : 1 }}>
               {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the quote")}
             </button>
             <button type="button" onClick={discardDraft} disabled={anyBusy}
@@ -1806,14 +1882,19 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           : ssInvoicePdf
           /* The invoice is OUT but the design is not locked, which since migration 136 can
              only mean one thing: the customer has not signed it yet. Nothing here creates a
-             second invoice — both buttons re-send the same number. */
+             second invoice — every button here re-sends the same number. */
           ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
               <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
               <div style={{ marginTop: 4, color: "#854D0E" }}>
                 They sign it from their quote page. The build schedule unlocks once they do.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
-                {[["Resend invoice", false], ...(ackedAfterInvoice ? [["Regenerate & resend", true]] : [])].map(([label, regen]) => (
+                {/* One offer, never both: a plain resend rebuilds nothing, but it still bumps
+                    invoice_sends.updated_at — the ONLY record anywhere that the PDF predates
+                    the acknowledged CO. That single click clears this warning, the stale badge
+                    on the customer's quote page and customer-accept's refusal at once, and the
+                    customer can then sign a PDF showing the old amount. */}
+                {(ackedAfterInvoice ? [["Regenerate & resend", true]] : [["Resend invoice", false]]).map(([label, regen]) => (
                   <button key={label} type="button" disabled={anyBusy}
                     onClick={async () => {
                       if (!window.confirm(regen
@@ -2096,7 +2177,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               orders don't — the decision was SS-only (Carolyn 2026-08-23). */}
           {ssMode && o.short_code && (
             <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
-              currentTotalCents={o.total_cents} onChanged={changedAll} />
+              currentTotalCents={o.total_cents} reloadKey={ssReload} onChanged={changedAll} />
           )}
 
           <div style={S.card}>
@@ -2190,6 +2271,22 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             </div>
           )}
 
+          {/* THE DOCUMENT SECTION ARRIVES SECOND, AND SAYS SO. Everything above renders
+              from the row the list already had; this needs `ssDoc` — four table reads plus
+              an edge function. It used to be simply ABSENT until they all resolved, so the
+              page grew by two cards under the reader's cursor. Reserving the shape is the
+              "load at segments" half of what Carolyn asked for (36:09): the layout settles
+              once, then fills in. */}
+          {ssMode && !ssDoc && (
+            <div style={{ ...S.card, padding: 12 }}>
+              <SkelBar w="34%" h={11} />
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 10, marginTop: 10 }}>
+                <SkelBar w="100%" h={280} style={{ borderRadius: 8 }} />
+                <SkelBar w="100%" h={280} style={{ borderRadius: 8, opacity: 0.8 }} />
+              </div>
+            </div>
+          )}
+
           {/* Floor plan + 3D as IMAGES, side by side in one card (Carolyn 2026-08-25).
               Thumbnails, not posters: capped height, natural aspect; the click opens the
               full-size plan/picture. Saved by the designer on every submit; older designs
@@ -2208,12 +2305,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {/* Both frames match at 280 tall (Carolyn 2026-08-25); clicks open the
                       in-portal viewer popup, never another tab. */}
                   {ssDesign.plan_image_url
-                    ? <button type="button" title="Open the full plan"
-                        onClick={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
-                        <img src={ssDesign.plan_image_url} alt="Floor plan"
-                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
-                      </button>
+                    ? <ThumbFrame src={ssDesign.plan_image_url} alt="Floor plan" title="Open the full plan"
+                        onOpen={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })} />
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
                       </div>}
@@ -2223,12 +2316,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase" }}>3D view</span>
                   </div>
                   {ssDesign.view3d_image_url
-                    ? <button type="button" title="Open the 3D picture"
-                        onClick={() => setPdfView({ url: ssDesign.view3d_image_url, title: "3D view" })}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, height: 280, width: "100%", cursor: "pointer" }}>
-                        <img src={ssDesign.view3d_image_url} alt="3D view"
-                          style={{ maxHeight: 268, maxWidth: "100%", width: "auto", display: "block" }} />
-                      </button>
+                    ? <ThumbFrame src={ssDesign.view3d_image_url} alt="3D view" title="Open the 3D picture"
+                        onOpen={() => setPdfView({ url: ssDesign.view3d_image_url, title: "3D view" })} />
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
                         <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Open the design, click 🧊 3D View, then resubmit to capture one.</p>
                       </div>}

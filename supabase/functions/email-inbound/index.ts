@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import {
   timingSafeEqual, parseAddress, messageIds, stripQuoted, parseReplyToken,
-  envelopeRecipients, parseThreadMessageId,
+  envelopeRecipients, parseThreadMessageId, UNATTRIBUTED_CLIENT_ID,
 } from "../_shared/emailInbound.ts";
 
 // Inbound email → the CRM conversation. The return leg that makes a conversation two-way.
@@ -27,20 +27,27 @@ import {
 // unparseable payload, an unknown tenant, an unmatchable thread — none of those improve on
 // the second attempt, and a retry storm helps nobody.
 //
-// ⚠️ THE TENANT COMES FROM THE SMTP ENVELOPE AND NOTHING ELSE. Stage A below may read only
-// envelopeRecipients(); the `To:` header, the reply token, a Message-ID and the sender
-// address are all attacker-controlled and may only narrow WITHIN a tenant already proved
-// (stage B). Collapsing the two stages is how a stranger writes onto a builder's record.
+// ⚠️ THE TENANT COMES FROM envelopeRecipients() AND NOTHING ELSE. Stage A below may read only
+// that helper; the `To:` header, the reply token, a Message-ID and the sender address are all
+// attacker-controlled and may only narrow WITHIN a tenant already proved (stage B).
+// Collapsing the two stages is how a stranger writes onto a builder's record. ⚠️ Read that
+// helper's docstring before receiving is switched on: four of the five provider fields it
+// returns are true SMTP-envelope fields, but Resend's `received_for` — the only one that
+// resolves anything on the provider we ship on — is parsed out of Received HEADERS, and
+// whether a sender can plant one has not been tested.
 //
 // ⚠️ THIS FUNCTION MUST NEVER SEND MAIL. It stores a row and returns 200. An auto-reply, a
 // forward or a generated bounce would turn a spam run at a published reply address into US
 // mailing strangers, and the complaints would land on the shared sending account that every
 // other builder depends on. That property is currently free; keep it deliberate.
 //
-// ⚠️ AN UNMATCHED REPLY IS STILL STORED. That is the load-bearing decision in this file. A
-// customer's words are worth more than our ability to file them: an unfiled row is visible
-// to an operator and can be re-linked, a dropped one is gone forever. email_inbound_unmatched_idx
-// exists for exactly that query.
+// ⚠️ AN UNMATCHED REPLY IS STILL STORED — AND SO IS AN UNATTRIBUTABLE ONE. That is the
+// load-bearing decision in this file. A customer's words are worth more than our ability to
+// file them: an unfiled row can still be recovered, a dropped one is gone forever.
+// email_inbound_unmatched_idx exists for exactly that query. When even the TENANT cannot be
+// resolved the row is written under the UNATTRIBUTED_CLIENT_ID sentinel — the no-tenant
+// branch after Stage A says why that is a sentinel and not a null, and what "recovered"
+// actually costs today (raw SQL; there is no screen).
 //
 // Never echo the payload back in a response or an error — inbound mail is customer content,
 // and webhook responses are visible in the provider's dashboard.
@@ -90,10 +97,11 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
 
   // ── THREADING ──────────────────────────────────────────────────────────────────────
   //
-  // TWO STAGES, AND THE ORDER IS THE SECURITY PROPERTY. Stage A picks the TENANT and may
-  // use only the SMTP envelope — the one field a sender cannot forge. Stage B picks the
-  // design/contact WITHIN that tenant and may use anything, because by then the blast
-  // radius is one account that genuinely received the mail.
+  // TWO STAGES, AND THE ORDER IS THE SECURITY PROPERTY. Stage A picks the TENANT and may use
+  // only the recipient the receiving side reported — not one the sender wrote into the
+  // message body (see envelopeRecipients, and the caveat above on Resend's field). Stage B
+  // picks the design/contact WITHIN that tenant and may use anything, because by then the
+  // blast radius is one account that genuinely received the mail.
   //
   // It used to be one stage, and every signal could assign client_id. That was wrong twice
   // over: the `To:` header is written by the sender, and the In-Reply-To join ran with no
@@ -105,7 +113,7 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   let shortCode: string | null = null;
   let matchedRecipient = "";
 
-  // ── STAGE A: the tenant, from the envelope, and from nothing else. ────────────────
+  // ── STAGE A: the tenant, from the reported recipients, and from nothing else. ─────
   // An inbound_domain must also be ACTIVE. A tenant who has typed the domain but not yet
   // proved MX control is in `pending`, and that is precisely the state an attacker would
   // aim at — the outbound side already gates on this (portal-settings' Reply-To stamping)
@@ -134,26 +142,62 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
     }
   }
 
+  // ⚠️ NO TENANT IS STILL A ROW. This branch used to log and return with nothing written,
+  // which quietly turned "we cannot name the tenant" into "the customer's words are deleted"
+  // — the exact inverse of the invariant at the top of this file. It is not a corner case
+  // for the provider we actually ship on: envelopeRecipients() resolves Resend from
+  // `received_for`, which Resend documents as the address a message was FORWARDED for, so if
+  // a direct reply carries none, EVERY direct reply lands here. Storing it unattributed is
+  // the right answer whichever vendor field turns out to be correct, and it stays right once
+  // that question is settled — a dropped reply cannot be recovered by fixing the code later.
+  //
+  // WHY A SENTINEL AND NOT NULL: email_inbound.client_id is `text not null` (migration 135)
+  // and a webhook may not reshape the table, so the unattributable row is filed under
+  // UNATTRIBUTED_CLIENT_ID (defined next to envelopeRecipients so this spelling and the
+  // operator's query cannot drift apart). An underscore cannot occur in a real client id
+  // (they are DNS-safe slugs, [a-z0-9-]+), so the sentinel can never collide with a tenant.
+  // The sentinel also keeps the (client_id, message_id) idempotency index doing its job on a
+  // provider retry, which a NULL client_id would not — NULLs are distinct in a unique index,
+  // so every retry would add another copy of the same reply. The cost is that unattributable
+  // spam is stored too; that is the cheaper mistake by a wide margin.
+  //
+  // ⚠️ NOTHING IN THE PRODUCT CAN SHOW THESE ROWS — RAW SQL IS THE ONLY WAY TO THEM TODAY,
+  // and that is the state, not a temporary gap someone is about to close. RLS
+  // (client_id = current_client_id()) resolves through client_users, and the sentinel is
+  // nobody's tenant; crmFeed filters on client_id AND requires a short_code or contact_id,
+  // both null here; and an operator cannot even view-as the sentinel, because assertClient's
+  // slug test (^[a-z0-9][a-z0-9-]*$) rejects the underscore. So "re-linked later" means
+  // someone querying email_inbound by hand with the service role and updating client_id /
+  // contact_id themselves. Consequently a RUN of these rows is not a queue to work off — it
+  // means the provider recipient field is wrong (see envelopeRecipients) and must be chased
+  // immediately, before more replies pile up somewhere no screen will ever surface them.
   if (!clientId) {
-    // Nothing to attach it to at all. Log it so it is visible, and 200 so the provider does
-    // not retry something a retry cannot fix.
     await logEdgeError({
       fn: "email-inbound", req, clientId: null, code: "inbound_no_tenant",
-      message: "Inbound email could not be attributed to a tenant.",
+      message: "Inbound email could not be attributed to a tenant; stored unattributed.",
+      // The row IS stored, so an envelope we simply do not recognise is ordinary traffic —
+      // spam to a published reply address is the expected case once receiving is live, and
+      // filing it as a fault would bury the real ones. No recipient field AT ALL is the
+      // different failure: that is our wiring or the provider's, and it stays `error`.
+      // (`warn` is outside the `severity = 'error'` triage query but is not dropped.)
+      severity: envelope.length ? "warn" : "error",
       context: {
         hasInReplyTo: Boolean(inReplyTo),
         // Shapes only, never addresses — this row is read by operators and inbound mail is
-        // customer content. The count alone separates "provider sent no envelope" (a wiring
-        // bug on our side) from "envelope present, domain unknown" (mail we should ignore).
+        // customer content. The count alone separates "provider sent no recipient field" (a
+        // wiring bug on our side) from "recipient present, domain unknown" (mail to ignore),
+        // which is the same split the severity above turns on.
         envelopeCount: envelope.length,
         envelopeDomains: envDomains.length,
       },
     });
-    return json({ ok: true, ignored: "no tenant" });
   }
 
   // ── STAGE B: which design/contact, WITHIN the tenant Stage A already proved. ──────
-  // Every branch below is scoped to `clientId`. None of them may widen it.
+  // Every branch below is scoped to `clientId`. None of them may widen it, and the sentinel
+  // never reaches here: `clientId` stays NULL when Stage A proved nothing, which matches no
+  // design, no contact and no threading id, so an unattributed message is stored with both
+  // links empty rather than filed by a signal no tenant vouched for.
 
   // B1. The reply token in the address it actually arrived at. Strongest signal: we chose
   //     that address when we sent, so there is nothing to infer, and it survives the header
@@ -203,7 +247,10 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   //     message on the right person, which is most of the value. Scoped to the tenant, so the
   //     old cross-tenant ambiguity cannot arise: two builders may both know this address, and
   //     only the one that received the mail is considered.
-  if (!contactId) {
+  // `clientId` guards the query as well as scopes it: with no tenant proved there is nobody
+  // to match the sender against, and B1/B2 above are already unreachable in that state (no
+  // matched recipient to read a token from, and no threading id can equal a null tenant).
+  if (!contactId && clientId) {
     const { data: c } = await admin.from("crm_contacts")
       .select("id")
       .eq("client_id", clientId).eq("email_lower", from.email).is("merged_into", null)
@@ -216,7 +263,9 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
 
   const bodyText = stripQuoted(String(m.text ?? m.body_plain ?? m.plain ?? ""));
   const { error } = await admin.from("email_inbound").insert({
-    client_id: clientId,
+    // The sentinel enters here and nowhere else — client_id is NOT NULL, and a row we cannot
+    // attribute is still a row. See the Stage A comment above.
+    client_id: clientId ?? UNATTRIBUTED_CLIENT_ID,
     contact_id: contactId,
     short_code: shortCode,
     from_email: from.email,
@@ -235,12 +284,21 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // failure, and it must not be logged as one or every retry becomes noise.
   if (error && (error as any).code !== "23505") {
     await logEdgeError({
+      // `clientId`, not the sentinel: app_errors.client_id names a real tenant or nobody, and
+      // filing a fault under a fake one would put it in a builder's triage that isn't theirs.
       fn: "email-inbound", req, clientId, code: "inbound_insert_failed",
       message: `Could not store an inbound email: ${error.message}`,
-      context: { matchedContact: Boolean(contactId), matchedDesign: Boolean(shortCode) },
+      context: {
+        matchedContact: Boolean(contactId), matchedDesign: Boolean(shortCode),
+        // The one that matters most: this is the customer's words lost, not merely misfiled.
+        unattributed: !clientId,
+      },
     });
     return json({ ok: true, stored: false });
   }
 
-  return json({ ok: true, stored: true, matched: contactId ? "contact" : (shortCode ? "design" : "tenant") });
+  return json({
+    ok: true, stored: true,
+    matched: !clientId ? "none" : (contactId ? "contact" : (shortCode ? "design" : "tenant")),
+  });
 }));

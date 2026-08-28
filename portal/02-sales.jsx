@@ -234,9 +234,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
     // SS mode completes the invoice even when the email couldn't go out (paper-first) —
     // say which half happened rather than claiming "sent" for an email that never left.
+    //
+    // And say where the DESIGN stands, which is not the same answer on both branches.
+    // `issuedBy` is the server naming the branch it actually took, and the SS one
+    // deliberately leaves the status Accepted (migration 136 — the customer's signature is
+    // the only writer of 'invoiced' now). "is now Invoiced" was false there every time: the
+    // load() below repaints the row as Accepted under a green banner saying otherwise, and
+    // the owner then finds the build board empty, because portal-schedule create_job takes
+    // only 'invoiced'/'delivered'. Same words the Orders tab uses for this state.
+    const outcome = data && data.issuedBy === "structurestudio"
+      ? `${est} is awaiting the customer's signature`
+      : `${est} is now Invoiced`;
     setInvMsg(data && data.sent === false
-      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${est} is Invoiced, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
-      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${est} is now Invoiced.` });
+      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${outcome}, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${outcome}.` });
     load();
   };
 
@@ -684,7 +695,15 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // having, but it would not have fixed this: the wait was one round-trip, not 30 rows.
     const paint = (rowsIn, browsingIn) => {
       // Group by person: normalized phone, else email, else name (fallback: short_code).
-      const normPhone = (p) => String(p || "").replace(/\D/g, "");
+      // normPhone is migration 132's crm_phone_key, in JS: an 11-digit string starting with
+      // 1 is a US/Canada number written with its country code, so take the last 10. A bare
+      // digit filter is NOT a phone normalizer — it split one customer who typed
+      // "+1 707-362-5667" once and "707-362-5667" the next time into two rows, each showing
+      // half his designs and half his history, while both linked to the SAME crm_contacts
+      // record (the server resolves through crm_phone_key) and opened the same page. The
+      // list contradicted the record it links to. Nothing else is guessed at, for 132's
+      // reason: collapsing international formats would fuse two genuinely different people.
+      const normPhone = (p) => { const d = String(p || "").replace(/\D/g, ""); return d.length === 11 && d[0] === "1" ? d.slice(1) : d; };
       const groups = new Map();
       rowsIn.forEach((r) => { // newest-first
         const c = r.contact || {};
@@ -722,7 +741,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
       browsingIn.forEach((l) => {
         const em = String(l.email || "").trim().toLowerCase();
-        if (groups.has(l.phone_digits) || (em && groupEmails.has(em))) return;
+        // captured_leads.phone_digits is the raw digit filter (capture-lead), so it has to
+        // go through the same key or a lead captured as "+1 …" survives as a third row for
+        // a person who has already submitted designs.
+        if (groups.has(normPhone(l.phone_digits)) || (em && groupEmails.has(em))) return;
         groups.set("lead-" + l.id, {
           key: "lead-" + l.id, browsing: true, source: l.source,
           name: l.name || "", email: l.email || "", phone: l.phone || "",
@@ -1096,18 +1118,27 @@ const CRM_TABS = [
   //
   // WhatsApp is still not a feature, and nothing here reserves a slot for it.
   //
-  // THREE different things disable this tab and it names which one, for the same reason the
+  // FOUR different things disable this tab and it names which one, for the same reason the
   // Email tab's hint is a function: a rep without contacts:edit was once shown "this contact
   // has no email address" while the address sat rendered directly above it. "Not available"
   // sends somebody off editing a contact that is fine.
+  //
+  // The fourth is the contact with no ROW behind it: a design whose crm_ensure_contact call
+  // was swallowed by 133's exception guard carries contact_id null, and the server hands us
+  // a contact synthesized from the design's jsonb blob (id null). Texting is the one action
+  // in this group that cannot fall back to the short code, so sendSms posted contactId null
+  // and the server answered "A text has to be addressed to a contact." — printed underneath
+  // the phone number this very tab renders. Same rule, same words as the Person panel.
   {
     key: "sms", label: "SMS",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone) && !!(c.sms && c.sms.ready),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready),
     hint: (c) => (!c.canEdit
       ? "You don't have permission to text contacts."
       : !(c.contact && c.contact.phone)
         ? "This contact has no phone number on file."
-        : "Texting switches on once this account's number clears carrier registration."),
+        : !(c.contact && c.contact.id)
+          ? "This design predates contact records, so there is no contact to text yet. It gets its own contact the next time this customer submits."
+          : "Texting switches on once this account's number clears carrier registration."),
   },
   // Conversations were email ONLY, until the tab above. Email remains the channel that
   // carries a document — a quote, an invoice, anything with a link — and needs an address to
@@ -1136,8 +1167,26 @@ const CRM_TABS = [
   // looking at. Design Documents is what WE generated (quote PDFs, floor plans, invoices);
   // Customer Uploads is what THEY sent us. The names now carry the distinction, so the two
   // can never read as interchangeable tabs.
-  { key: "files", label: "Customer Uploads", enabled: () => false, hint: "Arrives with customer file storage — nothing they send is lost in the meantime, it is still on the email." },
-  { key: "documents", label: "Design Documents", enabled: () => true },
+  // Live since migration 151. The hint it used to carry — "arrives with customer file
+  // storage; nothing they send is lost in the meantime, it is still on the email" — was a
+  // promise, and this is it kept. Only a contact record has somewhere to put a file: a
+  // design's uploads belong to the person, not to one of their quotes.
+  {
+    key: "files", label: "Customer Uploads",
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.id),
+    hint: (c) => (c.canEdit
+      ? "This design has no contact record yet, so there is nowhere to file an upload."
+      : "You don't have permission to add files to contacts."),
+  },
+  // NO "Design Documents" TAB. Carolyn, 2026-08-26 24:01, having found the same documents
+  // listed both here and in History: "the top part is about things to do. The bottom part is
+  // about history … instead of in two places", and at 26:29 — "this shows all of the past
+  // emails … all of the past notes, all of the past activities, all of that down here. Up
+  // here is where you set what you're going to do."
+  //
+  // A quote PDF is not something you DO. So the list moved into the History feed under the
+  // Documents chip, which now carries the files themselves (crmFeed emits `quote_pdf` and
+  // `floor_plan` with a url) instead of only the events describing them.
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
 ];
 
@@ -1155,7 +1204,10 @@ const CRM_CHIPS = [
   // Shown only once the account can actually text: a permanently empty filter teaches
   // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
   { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
-  { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
+  // Where the documents live now — ours AND theirs, one list, because "I don't want it all
+  // mixed together" was about the two NAMES being interchangeable, not about them being far
+  // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
+  { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent", "quote_pdf", "floor_plan", "customer_file"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
   // Everything that happened, not three types two of which were never emitted — see the
@@ -1227,6 +1279,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // past the guard — React #310, and the whole record page goes white the instant its data
   // arrives. That shipped once (13ca37e) and was caught before release; do not move them.
   const [text, setText] = useState("");
+  // Customer Uploads. In the top hook block with the rest — CrmRecord returns early on
+  // `!data`, and a hook below that guard is React #310 and a white page (13ca37e).
+  const [upBusy, setUpBusy] = useState(false);
+  const [upMsg, setUpMsg] = useState(null);
   const [textMsg, setTextMsg] = useState(null);
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
   // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
@@ -1362,6 +1418,75 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // ⚠️ THE BODY CARRIES IDS, NEVER A PHONE NUMBER. The server reads the number off
   // crm_contacts and normalizes it there. Posting a number from here would let anyone with
   // a portal login text any handset from the tenant's registered number.
+  // ── UPLOAD A FILE THE CUSTOMER SENT ─────────────────────────────────────────────────
+  // Three steps, and the bytes never touch the edge function: ask for a signed URL (which
+  // is where the quota is enforced), PUT straight to storage, then record what landed.
+  //
+  // The bucket has NO storage policies, so this cannot be a direct sb.storage.upload() —
+  // that would 403. It also means the same code path works for an operator in view-as,
+  // which a tenant-prefix policy would have broken silently. See migration 151.
+  const uploadFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUpBusy(true); setUpMsg(null);
+    let ok = 0;
+    for (const file of files) {
+      try {
+        const { data: signed, error: sErr } = await sb.functions.invoke("portal-settings", {
+          body: {
+            action: "crm_file_sign",
+            contactId: (data.contact && data.contact.id) || null,
+            name: file.name, size: file.size,
+          },
+        });
+        const failSign = (signed && signed.error) || (sErr ? await fnError(sErr) : null);
+        // Stop the whole run on a quota refusal — every following file would fail the same
+        // way, and five identical "storage is full" messages is not five pieces of news.
+        if (failSign) { setUpMsg({ err: failSign }); break; }
+
+        const up = await sb.storage.from("customer-uploads")
+          .uploadToSignedUrl(signed.path, signed.token, file, { contentType: file.type || undefined });
+        if (up.error) {
+          // The bucket's own MIME allow-list and 25 MB cap answer here, and the raw message
+          // is unhelpful ("mime type ... is not supported"), so name the file instead.
+          setUpMsg({ err: `"${file.name}" couldn't be uploaded — we take images, PDFs, Word documents and text files, up to 25 MB.` });
+          break;
+        }
+
+        const { data: att, error: aErr } = await sb.functions.invoke("portal-settings", {
+          body: {
+            action: "crm_file_attach",
+            contactId: (data.contact && data.contact.id) || null,
+            shortCode: kind === "design" ? recordId : null,
+            path: signed.path, name: file.name, size: file.size, mime: file.type || null,
+          },
+        });
+        const failAtt = (att && att.error) || (aErr ? await fnError(aErr) : null);
+        // The object is in the bucket but unlisted. Say so rather than claiming success —
+        // an upload nobody can find is worse than one that visibly failed.
+        if (failAtt) { setUpMsg({ err: `"${file.name}" uploaded but couldn't be filed — ${failAtt}` }); break; }
+        ok += 1;
+      } catch (e) {
+        setUpMsg({ err: `"${file.name}" couldn't be uploaded.` });
+        break;
+      }
+    }
+    setUpBusy(false);
+    if (ok) { setUpMsg((m) => (m && m.err) ? m : { ok: `${ok} file${ok === 1 ? "" : "s"} added.` }); load(); }
+  };
+
+  const deleteFile = async (f) => {
+    if (!window.confirm(`Delete "${f.name}"? This removes the customer's file for good.`)) return;
+    setUpBusy(true); setUpMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "crm_file_delete", id: f.id },
+    });
+    setUpBusy(false);
+    const fail = (r && r.error) || (error ? await fnError(error) : null);
+    if (fail) { setUpMsg({ err: fail }); return; }
+    load();
+  };
+
   const sendSms = async () => {
     const body = text.trim();
     if (!body) return;
@@ -1795,31 +1920,29 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             {/* DOCUMENTS. Everything this record has actually produced, as links. The tab was
                 enabled and rendered nothing, which reads as a broken page rather than an
                 empty one — and on a record with a quote there is never nothing to show. */}
-            {tab === "documents" && (
+            {/* CUSTOMER UPLOADS — the CONTROL only. The list of what has been sent lives in
+                the History feed under Documents, with everything else that happened
+                (Carolyn 2026-08-26 24:01: "the top part is about things to do. The bottom
+                part is about history"). Uploading IS something you do, so the button stays
+                here; the files it produces belong down there. */}
+            {tab === "files" && canEdit && data.contact && data.contact.id && (
               <div style={{ marginBottom: 12 }}>
-                {(() => {
-                  const docs = [];
-                  (data.designs || []).forEach((d) => {
-                    const what = [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code;
-                    if (d.ss_quote_pdf_url) docs.push({ k: `q:${d.short_code}`, label: `Quote ${d.ss_quote_number || ""}`.trim() + ` — ${what}`, url: d.ss_quote_pdf_url });
-                    if (d.image_url) docs.push({ k: `p:${d.short_code}`, label: `Floor plan — ${what}`, url: d.image_url });
-                  });
-                  if (docs.length === 0) {
-                    return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No documents yet. A quote PDF appears here as soon as one is sent.</div>;
-                  }
-                  // Pop-up, never a new tab (Carolyn 2026-08-26 21:15). This is the list she
-                  // was looking at when she said it.
-                  return docs.map((doc) => (
-                    <button key={doc.k} type="button" onClick={() => setPdf({ url: doc.url, title: doc.label })}
-                      style={{
-                        display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
-                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, cursor: "pointer", fontFamily: "inherit",
-                      }}>📄 {doc.label}</button>
-                  ));
-                })()}
+                <label style={{
+                  display: "inline-block", ...S.btn(ACCENT, "#FFF"),
+                  cursor: upBusy ? "default" : "pointer", opacity: upBusy ? 0.6 : 1,
+                }}>
+                  {upBusy ? "Uploading…" : "Add files"}
+                  <input type="file" multiple disabled={upBusy}
+                    onChange={(e) => { uploadFiles(e.target.files); e.target.value = ""; }}
+                    style={{ display: "none" }} />
+                </label>
+                <span style={{ fontSize: 11.5, color: "#94A3B8", marginLeft: 9 }}>
+                  Images, PDFs, Word documents or text — up to 25&nbsp;MB each. They appear below, under Documents.
+                </span>
+                {upMsg && upMsg.err && <div style={{ ...S.err, marginTop: 7 }}>{upMsg.err}</div>}
+                {upMsg && upMsg.ok && <div style={{ ...S.okMsg, marginTop: 7 }}>{upMsg.ok}</div>}
               </div>
             )}
-
             {/* INVOICE. Invoicing lives on the order, which is where payments, change orders
                 and the schedule already are — a second invoice button on a second screen is
                 how two sources of truth for money get built. So this routes rather than
@@ -1930,6 +2053,50 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                         💬 {e.actor || "Customer"} texted
                       </div>
                       {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap" }}>{e.body}</div>}
+                    </div>
+                  ) : e.url ? (
+                    /* A DOCUMENT ROW *IS* THE FILE. This is where the Design Documents tab's
+                       list went (Carolyn 2026-08-26 24:01) — ours and the customer's, in one
+                       timeline. Opens in the pop-up viewer, never a new tab (21:15). */
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button type="button" onClick={() => setPdf({ url: e.url, title: e.title })}
+                        style={{ flex: 1, minWidth: 0, textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", cursor: "pointer", fontFamily: "inherit" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {e.type === "customer_file" ? "📎" : "📄"} {e.title}
+                        </div>
+                        {e.body && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>{e.body}</div>}
+                      </button>
+                      {/* Only the customer's own uploads can be deleted here. A quote PDF or
+                          floor plan is generated paperwork — removing it is a design deletion,
+                          which has its own dialog and its own consequences. */}
+                      {e.type === "customer_file" && canEdit && e.meta && e.meta.fileId && (
+                        <button type="button" disabled={upBusy}
+                          onClick={() => deleteFile({ id: e.meta.fileId, name: e.title })}
+                          title="Delete this file"
+                          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
+                          onMouseEnter={(ev) => { ev.currentTarget.style.color = "#DC2626"; }}
+                          onMouseLeave={(ev) => { ev.currentTarget.style.color = "#94A3B8"; }}>
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  ) : e.type === "customer_file" ? (
+                    /* The object is gone but the row is not: that the customer sent something
+                       is worth seeing even when the file itself has vanished. Delete stays
+                       available here — without it a broken row could never be cleared, which
+                       is the one state that genuinely has nothing left to look at. */
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#94A3B8" }}>📎 {e.title} — file missing</div>
+                      {canEdit && e.meta && e.meta.fileId && (
+                        <button type="button" disabled={upBusy}
+                          onClick={() => deleteFile({ id: e.meta.fileId, name: e.title })}
+                          title="Remove this entry"
+                          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
+                          onMouseEnter={(ev) => { ev.currentTarget.style.color = "#DC2626"; }}
+                          onMouseLeave={(ev) => { ev.currentTarget.style.color = "#94A3B8"; }}>
+                          Delete
+                        </button>
+                      )}
                     </div>
                   ) : e.type === "note" ? (
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>

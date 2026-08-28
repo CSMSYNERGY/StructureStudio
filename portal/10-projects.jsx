@@ -197,9 +197,11 @@ function PMDrawer({ onClose, labelledBy, children }) {
     const raf = requestAnimationFrame(() => setShown(true));
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { cancelAnimationFrame(raf); window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+    // Counted, NOT saved-and-restored: PdfModal opens on top of this drawer for an
+    // attachment and locks the page too, and two independent save/restore pairs leave the
+    // page permanently unscrollable when both close together. See ssLockBodyScroll.
+    const unlock = ssLockBodyScroll();
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("keydown", onKey); unlock(); };
   }, [onClose]);
   return (
     <div onClick={onClose} role="presentation"

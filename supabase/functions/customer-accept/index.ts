@@ -528,7 +528,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // ── The design, owned by this verified phone ────────────────────────────────────────
   const { data: design, error: designErr } = await admin
     .from("designs")
-    .select("short_code, status, contact, ss_quote_number, ss_quote_pdf_url, estimate_lines, accepted_at, inventory_unit_id")
+    // selections + paint_colors ride along only for the accepted_snapshot stamp below (153).
+    .select("short_code, status, contact, ss_quote_number, ss_quote_pdf_url, estimate_lines, selections, paint_colors, accepted_at, inventory_unit_id")
     .eq("client_id", identity.clientId)
     .eq("short_code", quoteRef)
     .maybeSingle();
@@ -630,7 +631,23 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // preserves whatever is written here.
   let promoteWarning: string | null = null;
   {
-    const patch: Record<string, unknown> = { accepted_at: acceptedAtIso, updated_at: acceptedAtIso };
+    // accepted_snapshot (153) is THE agreement, frozen here: the priced lines and the
+    // selections/paint they were priced from, as of this signature. Every later change order
+    // is a diff against this, never against designs.estimate_lines — which the two
+    // design_edit CO writers overwrite in the same handler that raises the CO, so reading it
+    // back as "what the customer signed" is how a customer came to sign against a previous
+    // total they never approved (audit finding 16). Stamped exactly once: accept_quote
+    // early-returns above when accepted_at is already set. From here on the trigger
+    // change_orders_stamp_agreed() moves it, on each acknowledged design_edit CO.
+    const patch: Record<string, unknown> = {
+      accepted_at: acceptedAtIso,
+      updated_at: acceptedAtIso,
+      accepted_snapshot: {
+        estimateLines: design.estimate_lines,
+        selections: design.selections,
+        paintColors: design.paint_colors,
+      },
+    };
     if (status === "sent" || status === "") patch.status = "accepted";
     const { error: updErr } = await admin.from("designs").update(patch)
       .eq("client_id", identity.clientId).eq("short_code", quoteRef);

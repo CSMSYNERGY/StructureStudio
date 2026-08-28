@@ -62,6 +62,21 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
 const SS_ERR_SOURCE = "portal";
+// The tenant every row is filed under. This read `window.__SS_CLIENT_ID__`, which nothing in
+// the repo has ever assigned, and the portal's own URLs carry `?view=`, never `?client=` — so
+// every row this page wrote landed with client_id NULL. The ones with a server-side twin
+// survive that (logEdgeError files those under the tenant the function resolved); the
+// browser-only ones do not, and they are exactly the ones that need it: the 4xx refusals the
+// invoke wrapper logs, session_reconnecting, window.onerror. Support could not scope
+// app_errors to the builder who was on the phone. Latched further down from the tenant
+// portal-settings reports it resolved — the one tenant id this page is handed as fact rather
+// than as a request — EXCEPT during operator view-as, where the tenant on screen is the
+// armed view-as target and no status call is made to echo anything (see the latch in the
+// invoke wrapper and the stamp in 11-shell.jsx). Declared above ssLogError because the boot
+// guard below calls it during module evaluation, and a TDZ throw there would swallow the
+// row entirely. (Same reason ssLogError does NOT read ssTargetClientId directly: that one is
+// declared below the boot-guard call, so a read here would TDZ-throw and lose the row.)
+let ssResolvedClientId = null;
 // `severity` is optional and defaults to "error", so every existing call site keeps its
 // current meaning. Pass "info" for a REFUSAL — the product correctly declining something
 // ("send the invoice first", "that width isn't valid"). Those still get a row, because a
@@ -77,7 +92,7 @@ function ssLogError(source, message, code, context, severity) {
         p_source: String(source || SS_ERR_SOURCE).slice(0, 100),
         p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
         p_code: code == null ? null : String(code).slice(0, 100),
-        p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
+        p_client_id: ssResolvedClientId || params.get("client") || null,
         p_url: location.href.slice(0, 600),
         p_context: context || null,
         p_severity: severity || "error",
@@ -152,6 +167,14 @@ __ssFunctions.invoke = async (name, opts) => {
   // the tripwire below only fires when the server disagrees with `injected`, and here it
   // agrees. Mid-flight view-as already poisoned a call once (audit 2026-08-20). Capture the
   // value synchronously; the session guard runs after.
+  //
+  // Captured in the same tick and for the same reason: which view-as target — if any — was
+  // armed when this call was ISSUED. The attribution stamp at the bottom compares it against
+  // the target armed when the response LANDS, and declines the server's echo when they
+  // differ. `injected` cannot stand in for it: 03-catalog.jsx's `scoped()` puts
+  // targetClientId on the body itself while viewing, and an explicit value skips the
+  // injection below, so a call can be scoped to the viewed tenant with `injected` still null.
+  const armedAtIssue = ssTargetClientId;
   let injected = null;
   if (
     ssTargetClientId &&
@@ -204,6 +227,19 @@ __ssFunctions.invoke = async (name, opts) => {
   // real reason was never even looked at: the builder got "non-2xx", and so did app_errors.
   // That is how seven fixture failures on 2026-08-05 recorded nothing anyone could act on.
   // Reading it once, here, fixes the message for every action and every call site at once.
+  // ⚠️ THE STATUS IS READ FIRST, AND UNCONDITIONALLY. It used to be set only inside the
+  // block below — i.e. only when supabase-js had produced its generic "non-2xx" wording AND
+  // the body parsed as JSON AND that JSON carried an `error`/`message` field. Every 4xx that
+  // missed any of those three fell through with `ssStatus` undefined and was filed as a
+  // FAULT by the severity split further down, which keys on it. Two real cases:
+  //   • the GATEWAY's own 401 ("Invalid JWT"), answered before our function runs — its
+  //     message never says "non-2xx", so the block was skipped entirely;
+  //   • any refusal whose body is not our JSON shape (an HTML error page from the edge).
+  // Both are refusals, and the split is meant to key on the STATUS, never on the wording of
+  // a client library's message. Read it once, here, and let the block below own the message.
+  if (res && res.error && res.error.context && typeof res.error.context.status === "number") {
+    res.error.ssStatus = res.error.context.status;
+  }
   if (res && res.error && res.error.context && typeof res.error.context.json === "function"
       && /non-2xx/i.test(res.error.message || "")) {
     try {
@@ -212,7 +248,6 @@ __ssFunctions.invoke = async (name, opts) => {
       if (serverMsg) {
         const status = res.error.context.status;
         res.error.message = String(serverMsg);
-        res.error.ssStatus = status;
         // resolveTenant now classifies WHY a 401 happened ("missing" | "anon_key" |
         // "rejected"). Carry it into the log context below — that enum is the difference
         // between "this tab's session had gone" and "a real token was refused", which the
@@ -257,6 +292,52 @@ __ssFunctions.invoke = async (name, opts) => {
     ssLogError(SS_ERR_SOURCE, "operator view: server resolved a different tenant", null,
       { fn: name, asked: injected, got: res.data.clientId });
     return { data: null, error: new Error("This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists.") };
+  }
+  // Same echo, put to a second use: it is what gives ssLogError a tenant. Read only from the
+  // tenant-scoped list, because admin-catalog also answers with a `clientId` and that one is
+  // the builder an operator is CREATING or deleting, not the portal on screen. Set AFTER the
+  // tripwire so a response we just refused never becomes the tenant later rows are filed
+  // under.
+  //
+  // ⛔ THE ECHO DOES NOT FOLLOW VIEW-AS ON ITS OWN — an earlier version of this comment said
+  // it did ("the next status call restamps it") and that was false in both directions.
+  // 11-shell.jsx SKIPS its portal-settings `status` call for the whole duration of a view-as
+  // session, deliberately (see its own comment), so there is no next status call; and three
+  // of the five tenant-scoped functions — portal-billing, sync-design-status,
+  // portal-schedule — echo no clientId at all, so most responses inside a viewed portal
+  // cannot restamp anything either. Left to the echo alone, every row written while an
+  // operator has builder B open stays filed under whoever was latched last: the operator's
+  // own tenant, or builder A from the previous view-as. That is WORSE than the NULL this
+  // latch replaced — a wrong attribution is BELIEVED, and `where client_id = 'junior-barns'`
+  // then serves another tenant's rows as fact. (Not a leak: the payload is the operator's
+  // own activity and the `url` carries ?view=. It is triage that breaks.)
+  //
+  // So the armed view-as target wins outright, and it is read HERE rather than with
+  // `injected` at the top on purpose: attribution must describe the portal on screen when
+  // the row is written, not the tenant the call was issued for. 11-shell.jsx stamps the
+  // same value the moment `viewing` changes (in the tick, beside the ssTargetClientId
+  // lockstep), which covers the gap before the first response of a view-as session lands
+  // and the reverse gap on the way out; this keeps it right for anything still in flight.
+  //
+  // ⛔ AND THE ECHO IS REFUSED OUTRIGHT WHEN THE VIEW-AS SESSION MOVED UNDER IT. 11-shell.jsx
+  // stamping the operator's own tenant on exit does NOT close the way out on its own, because
+  // a call issued while builder B was on screen can still be in flight when the operator
+  // leaves. Its response echoes B — correctly, the server did resolve B — and the second
+  // branch below then re-stamps B onto a portal that is now the operator's own, so an error
+  // row written seconds AFTER the operator left is filed under the tenant they were viewing.
+  // That is the same believed-wrong-attribution this latch exists to avoid, arriving by the
+  // back door. So the second branch runs only when the target armed at issue is still the
+  // target armed now: nothing armed then, nothing armed now.
+  //
+  // A generation counter on the view-as session would also close it, and this is smaller —
+  // no counter, no bump in openAccount/exitAccount/onPop, nothing for a fourth entry point
+  // added later to remember. It is not weaker either: the one case an equality check cannot
+  // tell apart from "never left" is leaving B and re-entering B, and there the first branch
+  // stamps B, which is the right answer because B is what is on screen.
+  if (ssTargetClientId) {
+    ssResolvedClientId = String(ssTargetClientId);
+  } else if (armedAtIssue === ssTargetClientId && SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 && res && res.data && res.data.clientId) {
+    ssResolvedClientId = String(res.data.clientId);
   }
   return res;
 };
@@ -331,6 +412,27 @@ function ssParsePath() {
   if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
   return { page: parts[1] || null, sub: parts[2] || null };
 }
+
+// Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
+// group (and its teaser routes) exist at all — Carolyn approved hiding them from
+// production on 2026-08-27 ("Go ahead and do it, yes"). HOSTNAME is the only signal there
+// is: the two workers serve identical bytes with no env vars, and one Supabase project
+// serves both deployments, so no DB flag can tell them apart (the same reasoning as the
+// designer's betaMode telemetry check, which this deliberately does NOT reuse — that one
+// is documented as side-effect-free forever, and this one exists to have a side effect).
+// The beta label must be exactly `beta` or `beta-…` so a tenant subdomain that merely
+// starts with "beta" can never match; workers.dev previews and localhost count as beta,
+// because both exist to look at unreleased work.
+function ssIsBetaHost() {
+  const h = String(window.location.hostname || "").toLowerCase();
+  if (h === "localhost" || h === "127.0.0.1" || /\.workers\.dev$/.test(h)) return true;
+  return /(^|\.)beta(-[a-z0-9-]+)?(\.|--)/.test(h);
+}
+
+// The four teaser tabs the Coming Soon group points at. On a production host the nav
+// group is hidden AND these routes clamp (hiding a nav item does not remove its route —
+// TAB_META is what grants routability, and bookmarked deep links exist).
+const SS_SOON_TABS = ["on-demand-pricing", "rent-to-own-contracts", "reports", "self-serve-display-units"];
 
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
 // every navigation) and drops any hash.
@@ -434,6 +536,10 @@ function ssFallbackTab(access) {
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
 function ssClampTab(tab, isOperator, canAdmin, access) {
+  // Teaser routes exist only where the Coming Soon group renders. Checked before the
+  // role branches on purpose: an admin bookmark to /portal/reports on production should
+  // land on a real page, not an unreleased teaser the sidebar no longer offers.
+  if (SS_SOON_TABS.includes(tab) && !ssIsBetaHost()) return ssFallbackTab(access);
   if (tab === "accounts" || tab === "admin" || tab === "projects") return isOperator ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
@@ -788,6 +894,45 @@ const ssSafeUrl = (u) => {
   } catch { return null; }
 };
 
+// ─── ONE BODY SCROLL LOCK, COUNTED ───
+// Overlays NEST — an attachment pop-up opens on top of the Projects slide-in — and both of
+// them lock the page behind. The save-my-predecessor's-value-and-restore-it idiom each one
+// used independently breaks the moment two overlap, because the second to mount captures the
+// FIRST one's "hidden" as the value to put back:
+//
+//   drawer mounts   → prev = ""       → overflow = "hidden"
+//   pop-up mounts   → prev = "hidden" → overflow = "hidden"
+//   both unmount    → React deletes siblings FIRST-TO-LAST, so the drawer restores "" and
+//                     then the pop-up restores "hidden" over the top of it
+//
+// The page is left unscrollable with nothing open, until a reload. Found live on beta
+// 2026-08-28 and reproduced in one gesture: Projects → open an item with an attachment →
+// open the attachment → press Escape ONCE (both overlays listen for it) → `document.body`
+// still reads `overflow: hidden` with zero `[role=dialog]` on the page, and the board no
+// longer scrolls.
+//
+// A COUNTER fixes every pairing rather than the one pairing we happened to find: the first
+// lock records the page's real value, the last release restores it. Each caller gets its own
+// release function, and calling it twice is a no-op — an effect cleanup must be idempotent,
+// and a double release would drop the count below the number of open overlays and unlock the
+// page under one that is still up.
+let ssScrollLockCount = 0;
+let ssScrollLockPrev = "";
+function ssLockBodyScroll() {
+  if (ssScrollLockCount === 0) {
+    ssScrollLockPrev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  ssScrollLockCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    ssScrollLockCount = Math.max(0, ssScrollLockCount - 1);
+    if (ssScrollLockCount === 0) document.body.style.overflow = ssScrollLockPrev;
+  };
+}
+
 // ─── PDF pop-up ───
 // Carolyn, 2026-08-26 21:15: "I want PDFs to open in a pop-up always. I don't want another
 // tab to open."
@@ -814,10 +959,10 @@ function PdfModal({ url, title, onClose, image }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
-    // The page behind a modal must not scroll under it.
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+    // The page behind a modal must not scroll under it. Counted, not saved-and-restored —
+    // this modal opens on top of the Projects drawer, which locks too. See ssLockBodyScroll.
+    const unlock = ssLockBodyScroll();
+    return () => { window.removeEventListener("keydown", onKey); unlock(); };
   }, [onClose]);
   return (
     <div onClick={onClose} role="presentation"
@@ -1136,6 +1281,62 @@ function SkelRows({ cols = 5, rows = 6, widths = null }) {
         </tr>
       ))}
     </>
+  );
+}
+
+// ─── Thumbnail frame ───
+// Carolyn, 2026-08-26, on the order screen: "it's taking a little bit for it to load here
+// … these are images." Then, once Ahsan showed her the grey blocks: "can we put things in
+// place to load … at segments".
+//
+// The frame is reserved at a fixed height either way, so nothing on the page moves when the
+// picture arrives — that part was already right. What was missing is that the reserved box
+// sat BLANK WHITE for the whole download, which is the same "there's nothing there" she
+// complained about on Contacts, one level down.
+//
+// Three things do the work:
+//   * `loading="lazy"` — these sit well below the fold on the order document, so on a page
+//     somebody opens to check a balance the bytes are never fetched at all.
+//   * `decoding="async"` — decoding a large plan render is not free, and it has no business
+//     blocking the main thread while the rest of the page is still settling.
+//   * a skeleton INSIDE the reserved box until `onLoad` fires, so the space reads as
+//     "coming" rather than as "empty".
+//
+// A failed image says so in words. The default is a broken-image glyph, which on a screen
+// full of a customer's paperwork reads as "their design is gone" rather than "this picture
+// did not load".
+function ThumbFrame({ src, alt, title, onOpen, height = 280 }) {
+  const [state, setState] = useState("loading"); // loading | ok | error
+  const box = {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8,
+    padding: 5, height, width: "100%", boxSizing: "border-box",
+  };
+  if (state === "error") {
+    return (
+      <div style={{ ...box, background: "#F8FAFC", borderStyle: "dashed" }}>
+        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45, textAlign: "center", margin: 0 }}>
+          This picture didn&rsquo;t load.{onOpen ? " Use Full ↗ to open it directly." : ""}
+        </p>
+      </div>
+    );
+  }
+  return (
+    <button type="button" title={title} onClick={onOpen}
+      style={{ ...box, cursor: onOpen ? "pointer" : "default", position: "relative" }}>
+      {state === "loading" && (
+        <SkelBar w="82%" h={Math.max(40, height - 90)} style={{ position: "absolute", borderRadius: 6 }} />
+      )}
+      <img src={src} alt={alt} loading="lazy" decoding="async"
+        onLoad={() => setState("ok")} onError={() => setState("error")}
+        style={{
+          maxHeight: height - 12, maxWidth: "100%", width: "auto", display: "block",
+          position: "relative",
+          // Hidden rather than unmounted: the <img> has to be in the DOM for the browser to
+          // start fetching it at all, and unmounting on load would restart the download.
+          opacity: state === "ok" ? 1 : 0,
+        }} />
+    </button>
   );
 }
 

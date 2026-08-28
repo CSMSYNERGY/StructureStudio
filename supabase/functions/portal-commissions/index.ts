@@ -550,10 +550,10 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       }
 
       // ── compute/refresh the ledger from orders × settings × rates (owner or full_access) ──
-      // Reconciles commission_entries against current orders WITHOUT disturbing rows the owner
-      // has finalized (status='paid') or hand-edited (is_override). The pre-tax base is filled
-      // best-effort from the GHL estimate subtotal; if GHL is unreachable the entry is still
-      // created with a null base/amount so the order shows on the report to be resolved.
+      // Reconciles commission_entries against current orders WITHOUT disturbing rows the owner has
+      // approved (status='payable'), finalized (status='paid') or hand-edited (is_override). The
+      // pre-tax base is filled best-effort from the GHL estimate subtotal; if GHL is unreachable the
+      // entry is still created with a null base/amount so the order shows on the report to be resolved.
       case "compute": {
         if (!canSeeRates) return json({ error: "Only the owner or a full-access admin can run commissions." }, 403);
         const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();
@@ -637,7 +637,13 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           const amount = (baseCents != null && rate != null) ? Math.round(baseCents * rate / 100) : null;
 
           const ex = existByOrder.get(o.id) || [];
-          if (ex.some((e) => e.status === "paid" || e.is_override)) continue;   // finalized — never auto-touch
+          // `payable` is finalized too, not just `paid`: approving a period is the owner committing to
+          // those exact amounts, and this runs on every mount of the Commissions tab — a rate correction
+          // between Approve and "Mark period paid" used to rewrite the approved line in place (status and
+          // approved_at left untouched), so the rep was paid a number nobody approved. The same UPDATE
+          // also moved period_key, which could strand an approved line where mark_paid never found it.
+          // Un-approve the period to hand a line back to compute.
+          if (ex.some((e) => e.status === "paid" || e.status === "payable" || e.is_override)) continue;   // finalized — never auto-touch
           const autoRow = ex.find((e) => !e.is_override && e.status !== "paid");
           const rowData: any = {
             client_id: clientId, order_id: o.id, earner_user_id: earner,

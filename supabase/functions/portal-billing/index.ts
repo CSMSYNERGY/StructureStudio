@@ -300,7 +300,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // change — exactly one tenant had a live QuickBooks connection (structure-studio, CSM
   // Synergy's own account), and operators are never gated, so no builder lost a working
   // integration.
-  const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync"]);
+  //
+  // on_demand_pricing joined 2026-08-28, as the Real-Time Pricing build started (Carolyn
+  // 2026-08-27: "There's an upcharge if they want to utilize the real-time pricing").
+  // Same shape as quickbooks_sync: the plan has been on sale since 124 with nothing
+  // behind it, so the moment real code appears the exempt blanket would hand it to every
+  // pre-gate tenant free. Pay-only BEFORE any frontend read ships is what keeps the
+  // feature dark. Server enforcement mirror: _shared/featureCheck.ts (portal-settings
+  // rtp_* actions) — its state rules and this set must stay in agreement.
+  const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing"]);
 
   // OPERATOR GRANTS (migration 109). An operator can comp one feature to one tenant before it
   // is on sale — Carolyn 2026-08-18, about showing 3D to chosen builders. Read here because

@@ -38,3 +38,42 @@
   X-Frame-Options: DENY
 /my-quotes.html
   X-Frame-Options: DENY
+
+# ── CACHING ────────────────────────────────────────────────────────────────────────
+# Everything used to be served `public, max-age=0, must-revalidate` — including the four
+# compiled bundles and the vendored libraries. That is correct for HTML and wrong for
+# these: it makes the browser send a conditional request for EVERY one of them on EVERY
+# page load. The 304s come back empty, so it costs no bandwidth, but it costs a
+# round trip per file BEFORE the app can boot, serialized behind the HTML. On the
+# connections Carolyn's builders actually have — the ones behind "shed suite is so slow
+# right now… bad internet plus bad backend makes it really bad" — that is the difference
+# between a warm load feeling instant and feeling like a cold one.
+#
+# ⚠️ THE RULE FOR `immutable` IS THAT THE URL MUST CHANGE WHEN THE BYTES DO, and it does
+# for exactly these paths and no others:
+#   * the four compiled artifacts are ALWAYS requested with `?v=<content-hash>`, which
+#     `npm run compile` rewrites into the pages (verified: no reference anywhere omits it,
+#     and preflight enforces the buster lockstep between index.html and portal.html);
+#   * /vendor/ filenames carry their version (react-18.2.0.production.min.js), and
+#     vendor/README.md's update recipe adds a new file rather than editing one in place.
+# A year of browser cache is safe under that rule and a year of stale JS under any other,
+# so do not extend these globs to a path whose URL can stay the same while its bytes move.
+#
+# DELIBERATELY NOT LISTED — these must keep revalidating:
+#   * the HTML pages, which carry the busters and are how a new build is discovered at all;
+#   * /sw.js, the service worker (a pinned one would outlive several deploys);
+#   * /manifest.json, favicons and images, which are edited in place under one name.
+#
+# Cloudflare's own edge cache is separate from this and already reports HIT; these headers
+# are about the BROWSER's cache. Re-check with:
+#   curl -sI https://beta.structurestudiosuite.com/portal.app.compiled.js?v=<hash> | grep -i cache
+/vendor/*
+  Cache-Control: public, max-age=31536000, immutable
+/portal.app.compiled.js
+  Cache-Control: public, max-age=31536000, immutable
+/admin.app.compiled.js
+  Cache-Control: public, max-age=31536000, immutable
+/index.mount.compiled.js
+  Cache-Control: public, max-age=31536000, immutable
+/structure-studio.component.compiled.js
+  Cache-Control: public, max-age=31536000, immutable

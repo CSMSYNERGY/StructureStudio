@@ -46,18 +46,37 @@ export function messageIds(raw: unknown): string[] {
 
 /** Strip the quoted history off a reply so the feed shows what the person actually wrote.
  *  Conservative on purpose: if none of the markers hit, the whole body is kept. Losing a
- *  customer's sentence to an over-eager regex is worse than showing some quoted text. */
+ *  customer's sentence to an over-eager regex is worse than showing some quoted text.
+ *
+ * ⚠️ THE `>` HISTORY IS FILTERED OUT, NOT CUT AT. Cutting at the first quoted line read an
+ * INLINE reply — the shape Gmail and Apple Mail both encourage — as if it ended where the
+ * quote began: "Yes, let's go ahead." was stored and "But change the door to the 6ft, and I
+ * need it by the 12th" underneath it was dropped, with nothing in the feed to say so and no
+ * second surface to recover it from (crmFeed never selects body_html, and a plain-text
+ * sender has none at all). Quoted lines carry their own `>` tag, so they can be removed
+ * wherever they sit and the writer's own lines survive on either side of them.
+ *
+ * The Outlook trailers below still CUT, because they introduce the original message with no
+ * per-line prefix: nothing tells its lines apart from the writer's, so everything under one
+ * of them is history.
+ */
 export function stripQuoted(body: string): string {
   const text = String(body ?? "").replace(/\r\n/g, "\n");
   const cuts = [
-    text.search(/\n>\s*[^\n]/),                                  // quoted block
-    text.search(/\nOn .{5,120}\bwrote:\s*\n/),                   // Gmail / Apple Mail
     text.search(/\n-{2,}\s*Original Message\s*-{2,}/i),          // Outlook
     text.search(/\n_{10,}\n/),                                   // Outlook rule
     text.search(/\nFrom:\s.+\nSent:\s/i),                        // Outlook headers
   ].filter((i) => i > 0);
-  const at = cuts.length ? Math.min(...cuts) : -1;
-  const kept = (at > 0 ? text.slice(0, at) : text).trim();
+  const head = cuts.length ? text.slice(0, Math.min(...cuts)) : text;
+  const lines = head.split("\n");
+  const own = lines.filter((ln) =>
+    !/^\s*>/.test(ln) &&                            // a quoted line
+    !/^\s*On .{5,120}\bwrote:\s*$/.test(ln)         // Gmail / Apple Mail attribution
+  );
+  // Re-flow only when something was actually removed: a quote lifted out of the middle leaves
+  // a run of blank lines where it stood and the feed renders pre-wrap, but a body we did not
+  // touch must reach the builder exactly as the customer typed it.
+  const kept = (own.length === lines.length ? head : own.join("\n").replace(/\n{3,}/g, "\n\n")).trim();
   return kept || text.trim();
 }
 
@@ -119,24 +138,90 @@ export function buildReplyAddress(
   return `${local.toLowerCase()}@${dom}`;
 }
 
-/** The SMTP envelope recipients (RCPT TO), which is the only recipient a sender cannot forge.
+/** The client_id an inbound message is filed under when no tenant can be proved.
+ *
+ * Lives here, not inline in the webhook, because the recovery story depends on this exact
+ * string: the operator's `where client_id = …` query has to match what the insert wrote, and
+ * a re-typed literal that drifts by one character strands the rows silently. An underscore
+ * cannot occur in a real client id (they are DNS-safe slugs, `[a-z0-9-]+`), so this can never
+ * collide with a tenant. See envelopeRecipients' closing paragraphs for what reaching this
+ * state means and for why the row is written at all.
+ */
+export const UNATTRIBUTED_CLIENT_ID = "__unattributed__";
+
+/** Every recipient address the RECEIVING side reported, for choosing a tenant from.
  *
  * ⚠️ THIS IS A SECURITY BOUNDARY, not a convenience. The `To:` header is written by whoever
- * composed the message; the envelope is written by the sending MTA and is what actually
- * routed the mail to us. Choosing a tenant from `To:` lets anyone who has seen a quote link
- * — and those get forwarded to spouses, lenders and Facebook groups — mail us with
+ * composed the message; the SMTP envelope (RCPT TO) is written by the sending MTA and is what
+ * actually routed the mail to us. Choosing a tenant from `To:` lets anyone who has seen a
+ * quote link — and those get forwarded to spouses, lenders and Facebook groups — mail us with
  * `To: d.SS-XXXX@reply.someoneelse.com` and post whatever they like onto that builder's
  * conversation feed. The short code is a capability for READING a design, never a
  * capability for writing to a tenant's record.
  *
- * Every provider spells the envelope differently, so this returns ALL candidates in
- * confidence order and the caller takes the first that resolves to a tenant:
- *   Resend      data.to[] (+ received_for[] when the mail was forwarded)
- *   Mailgun     recipient
- *   SendGrid    envelope (a JSON *string*) -> { to: [...] }
- *   SES via SNS receipt.recipients[]
- *   CloudMailin envelope.to
- * Header `to`/`To` is deliberately EXCLUDED. It is fine for display; it is never evidence.
+ * Every provider spells its recipient field differently, so this returns every candidate it
+ * can find and the caller takes whichever resolves to a tenant. ⚠️ THE ENTRIES ARE NOT ALL
+ * THE SAME GRADE OF EVIDENCE, and this function does not mark which is which — read the list
+ * before you trust one, and do NOT read the order as a ranking:
+ *
+ *   TRUE SMTP-ENVELOPE FIELDS — the address the accepting MTA was handed at RCPT TO, which
+ *   the sender does not get to choose the text of:
+ *     SES via SNS  receipt.recipients[]
+ *     SendGrid     envelope (a JSON *string*) -> { to: [...] }
+ *     Mailgun      recipient
+ *     CloudMailin  envelope.to
+ *
+ *   NOT AN ENVELOPE FIELD — PARSED OUT OF MESSAGE HEADERS, forgeability UNPROVEN:
+ *     Resend       received_for — see the ⚠️ below. It stays in the list because without it
+ *                  Resend, the provider we actually ship on, resolves nothing at all.
+ *
+ * ⛔ NO PROVIDER'S `to` IS READ, IN EITHER SPELLING. It is fine for display; it is never
+ * evidence. This used to push Resend's `data.to[]` on the strength of a comment calling it
+ * "an envelope-derived array" — an assumption nobody had checked against a live payload, and
+ * a false one for SendGrid, listed right above, whose `to` is documented as taken from the
+ * message HEADERS with `envelope` as the separate SMTP field. One crafted reply — envelope
+ * to a domain the sender legitimately holds a design on, `To:` naming another builder's
+ * reply domain — was enough to file a stranger's words onto that builder's conversation.
+ *
+ * ⚠️ RESEND'S `received_for` IS HEADER-PARSED, SO THE UNFORGEABILITY THIS COMMENT OPENS WITH
+ * IS NOT ESTABLISHED FOR IT. Resend documents the field as "the recipient addresses the email
+ * was FORWARDED for, taken from the `for` clause of the message's Received headers". Only the
+ * TOPMOST Received header is written by the MTA that accepted the mail; every header below it
+ * arrived inside the message the sender composed, so a sender can put
+ * `Received: … for <d.SS-XXXX@reply.someoneelse.com>` into their own message and hope it is
+ * read back out. Whether Resend reads only its own header or walks the stack is undocumented
+ * and untested here. Nor is it documented whether the field is populated at all on a DIRECT
+ * (non-forwarded) reply, and no Resend webhook has ever round-tripped here — so if it is
+ * absent this returns [] for every ordinary reply, not for an edge case.
+ *
+ * ⚠️ THE LIVE ROUND TRIP BEFORE RECEIVING GOES LIVE MUST BE A FORGERY TEST, NOT A PRESENCE
+ * TEST. Sending one clean message and watching an address appear proves only that the field
+ * is populated; it says nothing about WHO chose the value, which is the whole question. Send
+ * a message to a tenant's reply address carrying its own
+ * `Received: … for <address at ANOTHER tenant's domain>` header and read what the webhook
+ * posted (`GET /emails/receiving/{id}` shows the same object, and the parsed `headers` carry
+ * the delivered recipient). If the forged address surfaces in `received_for`, this field
+ * chooses a tenant from sender-supplied text and must stop feeding the tenant decision. If
+ * only the genuinely delivered address appears, record that test here and the field can be
+ * moved up into the envelope list. If it is simply missing, add whichever field DOES carry
+ * the delivered recipient — never fall back to `to`, whose forgeability is the whole point of
+ * the ⛔ above.
+ *
+ * A PAYLOAD CARRYING NO USABLE RECIPIENT THEREFORE RESOLVES NOTHING, and the caller does not
+ * discard it: email-inbound/index.ts logs `inbound_no_tenant` (shapes only, no addresses) and
+ * STILL INSERTS the row, with contact_id and short_code null and client_id set to the
+ * UNATTRIBUTED_CLIENT_ID sentinel above — email_inbound.client_id is NOT NULL, so an unfilable
+ * row cannot carry a null tenant.
+ *
+ * ⚠️ THOSE ROWS ARE REACHABLE ONLY BY RAW SQL TODAY. There is no screen, and no product
+ * surface can show them: RLS (`client_id = current_client_id()`) resolves through client_users
+ * and the sentinel is nobody's tenant; crmFeed filters on client_id AND requires a short_code
+ * or a contact_id, both null on these rows; and operator view-as cannot even name the
+ * sentinel, because assertClient's slug test (`^[a-z0-9][a-z0-9-]*$`) rejects the underscore.
+ * So re-linking one means an operator running SQL against the database by hand. A RUN of them
+ * is therefore not a backlog to work through later — it means the provider field above is
+ * wrong and must be chased immediately. The trade is stated plainly: refusing to guess a
+ * tenant costs an unfiled row here, never a deleted one.
  */
 export function envelopeRecipients(payload: unknown, m: unknown): string[] {
   const out: string[] = [];
@@ -164,9 +249,8 @@ export function envelopeRecipients(payload: unknown, m: unknown): string[] {
     push((env as Record<string, unknown>).to);
   }
 
-  push(msg.recipient ?? p.recipient);   // Mailgun
-  push(msg.received_for);               // Resend, forwarded mail
-  push(msg.to);                         // Resend `data.to[]` — an envelope-derived array
+  push(msg.recipient ?? p.recipient);   // Mailgun — envelope
+  push(msg.received_for);               // Resend — HEADER-parsed, not envelope; see the docstring
   return out;
 }
 

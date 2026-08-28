@@ -67,6 +67,20 @@ Deno.test("stripQuoted removes the reply history but never the reply", () => {
   // CRLF is what actually arrives over the wire; a stripper that only knows \n silently
   // does nothing on real mail.
   assertEquals(stripQuoted("Great.\r\n\r\n> quoted"), "Great.");
+
+  // ⚠️ THE INLINE REPLY. Gmail and Apple Mail both encourage answering inside the quote, so
+  // the customer's own words sit BELOW quoted lines. Cutting at the first `>` kept only the
+  // preamble: the builder read "Yes, let's go ahead." and never saw the door change or the
+  // deadline, with nothing in the feed to say anything had been removed.
+  const inline = "Yes, let's go ahead.\n\nOn Mon, 25 Aug 2026 at 09:14, Jane <j@x.com> wrote:\n" +
+    "> Here is your quote\n> Door: 4ft\n\nBut change the door to the 6ft, and I need it by the 12th.";
+  assertEquals(stripQuoted(inline),
+    "Yes, let's go ahead.\n\nBut change the door to the 6ft, and I need it by the 12th.");
+
+  // Point-by-point is the same shape one level finer — every answer is a line between two
+  // quoted ones, so a stripper that truncates keeps nothing but the greeting.
+  assertEquals(stripQuoted("Answers inline:\n\n> What colour?\nBarn red.\n> What date?\nThe 12th."),
+    "Answers inline:\n\nBarn red.\nThe 12th.");
 });
 
 Deno.test("stripQuoted keeps the whole body when it cannot find a boundary", () => {
@@ -143,8 +157,9 @@ Deno.test("buildReplyAddress refuses anything but a genuinely active domain", ()
 });
 
 Deno.test("envelopeRecipients reads the envelope for every provider shape", () => {
-  // Resend: data.to[] (the caller passes the unwrapped `data` as `m`).
-  assertEquals(envelopeRecipients({}, { to: ["D.SS-9R8UHJGTDJ@Reply.JrBarns.com"] }),
+  // Resend: received_for, the address the message was received FOR (the caller passes the
+  // unwrapped `data` as `m`). Its `to` is NOT read — see the header test below.
+  assertEquals(envelopeRecipients({}, { received_for: ["D.SS-9R8UHJGTDJ@Reply.JrBarns.com"] }),
     ["d.ss-9r8uhjgtdj@reply.jrbarns.com"]);
   // Mailgun: `recipient`.
   assertEquals(envelopeRecipients({}, { recipient: "c.abc@reply.jrbarns.com" }),
@@ -158,11 +173,12 @@ Deno.test("envelopeRecipients reads the envelope for every provider shape", () =
     ["a@reply.x.com"]);
   // CloudMailin: envelope as an object.
   assertEquals(envelopeRecipients({}, { envelope: { to: "a@reply.x.com" } }), ["a@reply.x.com"]);
-  // Forwarded mail: Resend puts the address it was originally for in received_for, and it
-  // ranks ABOVE `to` because `to` then holds the forwarding mailbox.
+  // Forwarded mail: received_for holds the address it was originally for while `to` holds the
+  // forwarding mailbox — one more reason `to` is evidence of nothing. Only the envelope side
+  // comes back.
   assertEquals(
     envelopeRecipients({}, { received_for: ["d.ss-1@reply.x.com"], to: ["fwd@elsewhere.com"] }),
-    ["d.ss-1@reply.x.com", "fwd@elsewhere.com"],
+    ["d.ss-1@reply.x.com"],
   );
 });
 
@@ -172,6 +188,23 @@ Deno.test("envelopeRecipients NEVER reads the To: header", () => {
   // tenant, anyone who has seen a quote could post onto that builder's conversation feed.
   assertEquals(envelopeRecipients({}, { To: "d.ss-9r8uhjgtdj@reply.jrbarns.com" }), []);
   assertEquals(envelopeRecipients({ To: "d.ss-1@reply.x.com" }, {}), []);
+  // ⛔ AND THE LOWERCASE SPELLING, which is the one that actually shipped. The boundary
+  // cannot be a case distinction in a JSON key — no provider guarantees that, and SendGrid
+  // documents its `to` as taken from the headers — so a payload carrying only `to` must
+  // select NO tenant rather than the one the sender typed.
+  assertEquals(envelopeRecipients({}, { to: "d.ss-9r8uhjgtdj@reply.jrbarns.com" }), []);
+  assertEquals(envelopeRecipients({}, { to: ["d.ss-victim@reply.yoderbarns.com"] }), []);
+  assertEquals(envelopeRecipients({ to: ["d.ss-1@reply.x.com"] }, {}), []);
+  // A forged header alongside a real envelope must not even add a candidate: the attack is
+  // one message with RCPT TO the sender's own builder and `To:` naming another builder's
+  // reply domain, and only the envelope may come back.
+  assertEquals(
+    envelopeRecipients({}, {
+      recipient: "d.ss-mine@reply.jrbarns.com",
+      to: ["d.ss-victim@reply.yoderbarns.com"],
+    }),
+    ["d.ss-mine@reply.jrbarns.com"],
+  );
   // Present-but-useless envelopes must yield nothing rather than falling back to a header.
   assertEquals(envelopeRecipients({}, { envelope: "not json at all", To: "a@b.com" }), []);
   assertEquals(envelopeRecipients({}, {}), []);

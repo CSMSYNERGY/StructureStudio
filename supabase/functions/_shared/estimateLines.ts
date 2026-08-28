@@ -77,6 +77,17 @@ export function totalFromSnapshot(snap: any): number | null {
  * order, or drift), one explicit adjustment line reconciles the difference instead of the
  * document quietly disagreeing with the books.
  *
+ * ONE LINE PER CHANGE, NOT PER CHANGE ORDER (2026-08-28). "It never rewrites estimate_lines"
+ * above is true of a MANUAL change order and false of a `design_edit` one: submit-estimate's
+ * post-acceptance resubmit and the order card's option change each raise the CO and rewrite
+ * estimate_lines in the SAME handler, so the $250 side door that CO bills for is already a
+ * priced line in the snapshot we are handed. Charging it again printed a phantom "Change
+ * order CO-1 … $250.00" directly under the real door line, and the reconciliation below then
+ * credited it back as "Order adjustment / Recorded on the order / −$250.00" — two wrong rows
+ * that happen to cancel, on paperwork the customer countersigns, on the ordinary
+ * post-acceptance change path rather than the drift the adjustment row was written for. The
+ * amount owed was never wrong; the document was. `alreadyInSnapshot` tells the two apart.
+ *
  * Every money consumer routes through here for the same reason the file already existed:
  * the PDF, the customer's screen and the signed acceptance record must never be able to
  * name three different numbers for one bill.
@@ -99,8 +110,34 @@ export const changeOrderDelta = (co: any): number =>
 const coSort = (a: any, b: any) => (Number(a?.co_no) || 0) - (Number(b?.co_no) || 0);
 
 /**
- * The invoice document: the snapshot's lines plus one line per acknowledged change order,
- * reconciled to the order's own total.
+ * Which acknowledged change orders the snapshot ALREADY prices — as indexes into a
+ * co_no-sorted list. Those must not be billed a second time as lines of their own.
+ *
+ * `change_orders.source` names them outright ('design_edit' vs 'manual'), but none of the
+ * three callers selects that column, so this reads the signature the two design_edit writers
+ * leave in the columns they do select: both compute total_before/total_after with
+ * totalFromSnapshot and persist the new snapshot in the same handler, so a design edit's
+ * `total_after` IS a snapshot total and its `total_before` is the previous one's. Hence the
+ * walk backwards from the snapshot we were handed. A manual CO stacked on top is stepped
+ * over rather than stopping the walk — it moved the order total without touching the lines,
+ * so the design edit beneath it is still the one the snapshot prices.
+ */
+const alreadyInSnapshot = (cos: any[], snapshotTotal: number): Set<number> => {
+  const priced = new Set<number>();
+  let chain = snapshotTotal;
+  for (let i = cos.length - 1; i >= 0; i--) {
+    const co = cos[i];
+    if (co?.total_after_cents == null) continue;
+    if (round2(Number(co.total_after_cents) / 100) !== chain) continue;
+    priced.add(i);
+    if (co?.total_before_cents != null) chain = round2(Number(co.total_before_cents) / 100);
+  }
+  return priced;
+};
+
+/**
+ * The invoice document: the snapshot's lines, one line per acknowledged change order the
+ * snapshot does not already price, reconciled to the order's own total.
  *
  * `acked` must contain ONLY acknowledged change orders — a pending one is not owed, and
  * the callers already refuse to invoice while one is outstanding. Zero-delta rows (a
@@ -127,9 +164,27 @@ export function amendedInvoiceDocument(
   for (const li of baseLines) subtotal += round2((Number(li?.qty) || 0) * (Number(li?.amount) || 0));
   subtotal = round2(subtotal);
 
+  const orderTotal = orderTotalCents == null || !Number.isFinite(Number(orderTotalCents))
+    ? null
+    : round2(Number(orderTotalCents) / 100);
+
+  // Count each change exactly once: a design edit is already priced in `baseLines`, so it
+  // gets no line of its own. Only go looking when the deltas do NOT already reconcile to the
+  // order — a manual chain that nets back to the snapshot total (an upgrade added, then
+  // cancelled) is indistinguishable from a design edit by the totals alone, and it is owed
+  // both of its rows.
+  const cos = [...(acked ?? [])].sort(coSort);
+  const deltas = cos.map(changeOrderDelta);
+  const summed = round2(deltas.reduce((a, b) => a + b, 0));
+  const priced = orderTotal != null && Math.max(0, round2(subtotal + summed - discount)) === orderTotal
+    ? new Set<number>()
+    : alreadyInSnapshot(cos, Math.max(0, round2(subtotal - discount)));
+
   const extra: any[] = [];
-  for (const co of [...(acked ?? [])].sort(coSort)) {
-    const delta = changeOrderDelta(co);
+  for (let i = 0; i < cos.length; i++) {
+    if (priced.has(i)) continue;
+    const co = cos[i];
+    const delta = deltas[i];
     if (delta === 0) continue;
     const label = co?.co_no == null ? "Change order" : `Change order CO-${co.co_no}`;
     extra.push({
@@ -144,9 +199,6 @@ export function amendedInvoiceDocument(
     subtotal = round2(subtotal + delta);
   }
 
-  const orderTotal = orderTotalCents == null || !Number.isFinite(Number(orderTotalCents))
-    ? null
-    : round2(Number(orderTotalCents) / 100);
   if (orderTotal != null && Math.max(0, round2(subtotal - discount)) !== orderTotal) {
     // The order is the book of record. Name the difference rather than silently printing a
     // number the line items do not support.

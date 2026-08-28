@@ -50,6 +50,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .ss-user-wrap:hover .ss-user-menu,.ss-user-wrap:focus-within .ss-user-menu{display:block}
 .ss-user-menu button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
 .ss-user-menu button:hover{background:#FEF2F2;color:#DC2626}
+/* Operator account switcher — click-toggled (NOT hover: the hover menu popping over
+   content is what Carolyn flagged), opens UPWARD like .ss-user-menu. Its initials tile
+   restyles .ss-clogo for the white rail (the original is white-on-dark for the topbar). */
+.ss-switch-wrap{position:relative;margin-bottom:10px}
+.ss-switch{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:9px;border:1px solid #E2E8F0;background:#F8FAFC;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch:hover{background:#F1F5F9}
+.ss-switch .ss-clogo{width:30px;height:30px;background:#3D3672;border-color:#3D3672;color:#FFF;font-size:11px}
+.ss-switch .stext{min-width:0;display:flex;flex-direction:column}
+.ss-switch .sname{font-size:12.5px;font-weight:800;color:#1E293B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-switch .srole{font-size:10.5px;font-weight:600;color:#94A3B8;white-space:nowrap}
+.ss-switch .uchev{width:13px;height:13px;margin-left:auto;color:#94A3B8;flex-shrink:0}
+.ss-switch-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:90}
+.ss-switch-menu input{width:100%;box-sizing:border-box;border:1px solid #CBD5E1;border-radius:7px;padding:7px 9px;font-size:12.5px;font-family:inherit;margin-bottom:5px}
+.ss-switch-list{max-height:264px;overflow-y:auto}
+.ss-switch-list button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:12.5px;font-weight:700;padding:7px 8px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch-list button:hover{background:#F1F5F9}
+.ss-switch-list button.cur{background:#FEF3C7}
+.ss-switch-list .ss-clogo.sm{width:24px;height:24px;background:#EEF2FF;border-color:#C7D2FE;color:#3D3672;font-size:10px}
+.ss-switch-list .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-switch-list .vw{margin-left:auto;font-size:10.5px;font-weight:800;color:#92400E;background:#FEF3C7;border-radius:6px;padding:2px 7px;flex-shrink:0}
+.ss-switch-note{font-size:12px;color:#94A3B8;font-weight:600;padding:8px}
+.ss-switch-exit{display:block;width:100%;margin-top:5px;background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;font-size:12.5px;font-weight:800;padding:8px 10px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch-exit:hover{background:#FFEDD5}
 /* Sign Out owns the red hover; a neutral item must not look destructive. */
 .ss-user-menu button.neutral:hover{background:#F1F5F9;color:#1E293B}
 .ss-user-menu button svg{width:15px;height:15px;flex-shrink:0}
@@ -82,7 +105,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      mistakable for a stray line. There is no square mark in this logo (the favicon is
      deliberately favicon-only), so the collapsed rail goes purely to icons. */
   .ss-brand{display:none}
-  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext{display:none}
+  /* The switcher needs readable tenant names; a 48px-wide list serves nobody, and the
+     sidebar's own overflow-y would clip a fly-out. The Accounts page covers this mode. */
+  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext,.ss-switch-wrap{display:none}
   .ss-nav{width:100%}
   .ss-nav a,.ss-nav button{justify-content:center;gap:0;padding:10px 0}
   .ss-newlink{justify-content:center;padding:0}
@@ -132,8 +157,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script defer src="/structure-studio.component.compiled.js?v=bdf882a4"></script>
-<script defer src="/portal.app.compiled.js?v=91758521"></script>
+<script defer src="/structure-studio.component.compiled.js?v=f7893e66"></script>
+<script defer src="/portal.app.compiled.js?v=941e3fb0"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

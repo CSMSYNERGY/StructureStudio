@@ -2022,7 +2022,7 @@ function CommissionsReport() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [assign, setAssign] = useState(null);  // entry id whose rep dropdown is open
-  const [splitFor, setSplitFor] = useState(null); // { entry, rows:[{userId, share}] } while the split modal is open
+  const [splitFor, setSplitFor] = useState(null); // { orderId, orderNo, rows:[{userId, share}], alsoRemoved } while the split modal is open
   // Filter / sort / search state for the report view.
   const [q, setQ] = useState("");
   const [fRep, setFRep] = useState("");        // earnerUserId | "__none__" (unassigned) | ""
@@ -2116,20 +2116,39 @@ function CommissionsReport() {
     const cur = e.amountCents != null ? (e.amountCents / 100).toFixed(2) : "";
     const v = window.prompt(`Set the commission amount for order #${e.orderNo} (dollars):`, cur);
     if (v == null) return;
-    const cents = Math.round(Number(String(v).replace(/[^0-9.\-]/g, "")) * 100);
-    if (!Number.isFinite(cents)) { setMsg({ err: "Enter a dollar amount." }); return; }
+    // Test the CLEANED string, not only the number it parses to. An emptied prompt — or "n/a",
+    // "same as last time" — strips to "" and Number("") is 0, which passed the finite check and
+    // wrote a PERMANENT $0.00: adjust_amount stamps is_override, so compute never rebuilds the
+    // line and only Reset-to-default on the whole order clears it. Zero and negatives typed on
+    // purpose stay legal (a negative is a real adjustment; it renders red below).
+    const cleaned = String(v).replace(/[^0-9.\-]/g, "");
+    const cents = Math.round(Number(cleaned) * 100);
+    if (!cleaned || !Number.isFinite(cents)) { setMsg({ err: "Enter a dollar amount." }); return; }
     act({ action: "adjust_amount", entryId: e.id, amountCents: cents });
   };
   // ORDER-level allocation editor (Carolyn 2026-08-05): opening Split shows EVERYONE currently
   // on the order with their shares — add or remove people here; shares always apply to the
   // order's FULL base. (The old per-line split compounded: splitting an already-split line
   // halved a half.) Saving replaces the order's unpaid lines via split_order.
+  //
+  // ⚠️ "Everyone" is only as complete as `data.entries`, and split_order DELETES every unpaid
+  // commission line on the order before re-inserting what was submitted — so anything missing
+  // from these rows is destroyed, silently and with no record of what it was. Two gaps, both
+  // closed here rather than left to the modal copy:
+  //   • Rows the caller may not see. list_entries scopes the response to the caller's own lines
+  //     unless they have "sees all payouts", so a Full-access/not-sees-all admin would author a
+  //     one-person allocation and take an unseen rep's commission with it. The Split button is
+  //     gated on `seesAll` below for that reason — this list is only trustworthy there.
+  //   • Excluded and unassigned lines. They carry no share so they cannot be listed as people,
+  //     but the delete does not spare them, so COUNT them and warn in the modal. Reset-to-default
+  //     already words the same removal plainly; Split was the one path that stayed quiet.
   const openSplit = (e) => {
-    const sibs = ((data && data.entries) || []).filter((x) => x.orderId === e.orderId && x.kind === "commission" && x.status !== "paid" && x.status !== "excluded" && x.earnerUserId);
+    const onOrder = ((data && data.entries) || []).filter((x) => x.orderId === e.orderId && x.kind === "commission" && x.status !== "paid");
+    const sibs = onOrder.filter((x) => x.status !== "excluded" && x.earnerUserId);
     const rows = sibs.length
       ? sibs.map((x) => ({ userId: x.earnerUserId, share: String(x.splitShare != null ? Number(x.splitShare) : Math.round(100 / sibs.length)) }))
       : [{ userId: e.earnerUserId || "", share: "100" }];
-    setSplitFor({ orderId: e.orderId, orderNo: e.orderNo, rows });
+    setSplitFor({ orderId: e.orderId, orderNo: e.orderNo, rows, alsoRemoved: onOrder.length - sibs.length });
   };
   const saveSplit = () => {
     const rows = splitFor.rows;
@@ -2374,8 +2393,27 @@ function CommissionsReport() {
                   {pendingRows.length > 0 && (g.key
                     ? <button onClick={() => approvePeriod(g.key)} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px" }}>Approve period</button>
                     : <span title="These commissions don't have a pay period yet — usually the order isn't fully collected. Once a line lands in a period, approve it there." style={{ fontSize: 11.5, fontWeight: 700, color: "#94A3B8", cursor: "help" }}>Approval waits for a pay period</span>)}
-                  {approvedRows.length > 0 && <button onClick={() => unapprovePeriod(g.key)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>Un-approve</button>}
-                  {approvedRows.length > 0 && <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), padding: "6px 13px" }}>Mark period paid</button>}
+                  {/* unapprove_period and mark_paid reject a null period_key exactly as approve_period
+                      does, so these two needed the same g.key gate and never had it, and both buttons
+                      answered 400 — leaving the rep's approved commission neither payable nor
+                      reversible from here. Say what happened instead of offering dead controls.
+                      ⚠️ But do NOT promise the wait ends. An approved line landed here because compute
+                      re-derived period_key on an already-approved row and an "on collected" line loses
+                      that date when a payment is voided; compute now skips `payable` rows outright
+                      (portal-commissions/index.ts:646), which both stops new strandings AND removes the
+                      only thing that could ever put one back in a period. There is no automatic
+                      recovery, so this branch draws only for lines stranded before that fix shipped.
+                      The one real route out is Split → "Reset to default" on the row: reset_order
+                      deletes the order's unpaid lines and rebuilds the standard PENDING one, which
+                      picks up a period the next time compute runs. It costs that order's split and
+                      adjustments, which is why it stays a deliberate two-step behind a confirm rather
+                      than a button here — name it in the copy instead. */}
+                  {approvedRows.length > 0 && (g.key
+                    ? <>
+                        <button onClick={() => unapprovePeriod(g.key)} disabled={busy} style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit" }}>Un-approve</button>
+                        <button onClick={() => markPeriodPaid(g.key, g.label)} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), padding: "6px 13px" }}>Mark period paid</button>
+                      </>
+                    : <span title="These lines were approved, then lost their pay period — a payment on the order was voided, so it stopped counting as collected. Nothing puts them back on its own. To clear one: open Split on the row, then “Reset to default” — that rebuilds the order's commission as a pending line, which joins a pay period again once the order collects, and can be approved and paid there. Note it also removes any split or adjustment on that order." style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309", cursor: "help" }}>Approved — no pay period</span>)}
                 </div>
               )}
             </div>
@@ -2425,7 +2463,11 @@ function CommissionsReport() {
                             )
                             : (
                               <span style={{ display: "inline-flex", gap: 10, flexWrap: "wrap" }}>
-                                {e.earnerUserId && <button onClick={() => openSplit(e)} disabled={busy} style={actLink("#3D3672")}>Split</button>}
+                                {/* seesAll, not canSeeRates: the two grants are independent, and a
+                                    Full-access admin without "sees all payouts" is served only their
+                                    OWN lines — Split would then delete a colleague's line it never
+                                    showed them. Editing an allocation needs the whole order. */}
+                                {seesAll && e.earnerUserId && <button onClick={() => openSplit(e)} disabled={busy} style={actLink("#3D3672")}>Split</button>}
                                 {e.earnerUserId && <button onClick={() => adjustEntry(e)} disabled={busy} style={actLink("#3D3672")}>Adjust</button>}
                                 <button onClick={() => act({ action: "set_excluded", entryId: e.id, excluded: true })} disabled={busy} style={actLink("#94A3B8")}>Exclude</button>
                                 <button onClick={() => deleteEntry(e)} disabled={busy} title="Completely remove this line — unlike Exclude it won't show on any report" style={actLink("#DC2626")}>Delete</button>
@@ -2453,6 +2495,11 @@ function CommissionsReport() {
             <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", fontSize: 15.5, fontWeight: 800 }}>Order #{splitFor.orderNo} — who earns on this sale</div>
             <div style={{ padding: "16px 18px" }}>
               <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px" }}>Everyone on this order and their share of the sale. Each person earns their own rate on their share of the <b>full order</b>. Add or ✕ remove people; shares must total 100%.</p>
+              {splitFor.alsoRemoved > 0 && (
+                <p style={{ fontSize: 12, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", margin: "0 0 12px", lineHeight: 1.55 }}>
+                  Saving also removes {splitFor.alsoRemoved} other unpaid line{splitFor.alsoRemoved === 1 ? "" : "s"} on this order — excluded or not yet assigned to a rep, so {splitFor.alsoRemoved === 1 ? "it isn't" : "they aren't"} listed above. {splitFor.alsoRemoved === 1 ? "It won't" : "They won't"} come back.
+                </p>
+              )}
               {splitFor.rows.map((r, i) => (
                 <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
                   <select value={r.userId} onChange={(ev) => setSplitFor((s) => ({ ...s, rows: s.rows.map((x, j) => j === i ? { ...x, userId: ev.target.value } : x) }))} style={{ ...S.input, flex: 1 }}>
@@ -2479,7 +2526,7 @@ function CommissionsReport() {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, access = null, setup3d = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -2547,7 +2594,14 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         ))}
       </div>
       <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
-      {sub === "structures" && <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />}
+      {/* Real-Time Pricing renders UNDER the pricing card (Carolyn 2026-08-27: "will you
+          build another block down here … underneath here that has the real time pricing in
+          it"). The component gates itself on rtpUnlocked — not-entitled renders a compact
+          teaser with a Billing deep link, so the block is also the feature's shop window. */}
+      {sub === "structures" && (<>
+        <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
+        <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
+      </>)}
       {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
