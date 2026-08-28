@@ -3,8 +3,9 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import {
   timingSafeEqual, parseAddress, messageIds, stripQuoted, parseReplyToken,
-  envelopeRecipients, parseThreadMessageId, UNATTRIBUTED_CLIENT_ID,
+  envelopeRecipients, parseThreadMessageId, UNATTRIBUTED_CLIENT_ID, senderVerdict,
 } from "../_shared/emailInbound.ts";
+import { rsGetReceivedEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 
 // Inbound email → the CRM conversation. The return leg that makes a conversation two-way.
 //
@@ -71,9 +72,45 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
 
   // Providers wrap the message differently (`data`, `email`, or the root). Take the first
   // shape that carries a sender rather than hard-coding one vendor's envelope.
-  const m = payload?.data ?? payload?.email ?? payload ?? {};
+  let m = payload?.data ?? payload?.email ?? payload ?? {};
   const from = parseAddress(m.from ?? m.sender ?? m.From);
   if (!from.email || !from.email.includes("@")) return json({ ok: true, ignored: "no sender" });
+
+  // ── The second call: fetch the body Resend's webhook does not send ─────────────────
+  //
+  // ⚠️ RESEND'S `email.received` IS METADATA ONLY — from/to/subject/message_id and
+  // attachment descriptors, with NO body and NO headers (their reason is serverless
+  // request-size limits). Without this, every customer reply stores blank and NOTHING
+  // ERRORS: the row appears on the record page as if the customer sent an empty message,
+  // and the header-threading fallback has no headers to work with.
+  //
+  // Gated on "looks like metadata only" rather than on the vendor, so a provider that DOES
+  // post a body keeps working untouched and costs no extra request. Enrichment is
+  // BEST-EFFORT: if the fetch fails we still store what the webhook gave us, because a
+  // reply filed with a missing body beats a reply dropped on the floor.
+  const looksMetadataOnly = !m.text && !m.html && !m.body_plain && !m.body_html && !m.plain;
+  const receivedId = typeof m.email_id === "string" ? m.email_id : "";
+  if (looksMetadataOnly && receivedId && resendConfigured()) {
+    try {
+      const full = await rsGetReceivedEmail(receivedId);
+      m = {
+        ...m,
+        text: full.text || m.text,
+        html: full.html || m.html,
+        headers: Object.keys(full.headers).length ? full.headers : m.headers,
+        subject: m.subject || full.subject,
+        message_id: m.message_id || full.messageId,
+      };
+    } catch (e) {
+      await logEdgeError({
+        fn: "email-inbound", req, clientId: null, code: "inbound_body_fetch_failed",
+        message: `could not fetch the received email body: ${
+          e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
+        }`,
+        context: { receivedId },
+      });
+    }
+  }
 
   // Display only. NEVER used to choose a tenant — see envelopeRecipients' header comment.
   const toRaw = Array.isArray(m.to) ? m.to[0] : (m.to ?? m.To ?? m.recipient);
@@ -277,7 +314,12 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
     message_id: ownMessageId,
     in_reply_to: messageIds(inReplyTo)[0] ?? null,
     references_raw: referencesRaw.slice(0, 2000) || null,
-    spam_verdict: String(m.spam_verdict ?? m.spamVerdict ?? "").slice(0, 40) || null,
+    // The provider's own call on the SENDER, stored not acted on. Prefer an explicit field
+    // if a provider gives one; otherwise read the verdicts out of the headers, which is
+    // where Resend's live (added by the SES layer beneath it). Null means "we were told
+    // nothing" — never "clean".
+    spam_verdict: String(m.spam_verdict ?? m.spamVerdict ?? "").slice(0, 40) ||
+      senderVerdict(headers) || null,
   });
 
   // 23505 is the idempotency index doing its job on a provider retry — a success, not a

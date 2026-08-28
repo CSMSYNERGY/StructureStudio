@@ -398,6 +398,62 @@ export async function rsVerifyDomain(id: string): Promise<RsDomain> {
   return toRsDomain(await rsFetch(key, `/domains/${id}`));
 }
 
+/**
+ * One RECEIVED email, fetched in full.
+ *
+ * ⚠️ THIS CALL IS NOT OPTIONAL. Resend's `email.received` webhook is METADATA ONLY — it
+ * carries from/to/subject/message_id and attachment descriptors, and NO body and NO headers
+ * (their stated reason is serverless request-size limits). Without this second call every
+ * customer reply stores with an empty body and no threading headers, and nothing errors:
+ * the row appears in the feed, blank, as if the customer sent nothing.
+ *
+ * Confirmed against a live received message 2026-08-28 — `headers` comes back as a flat
+ * lowercase-keyed object, and carries the SES sender-auth verdicts (`x-ses-spam-verdict`,
+ * `x-ses-virus-verdict`, `authentication-results`, `received-spf`) that are the only defence
+ * we have against a forged `From`.
+ */
+export type RsReceivedEmail = {
+  id: string;
+  from: string;
+  to: string[];
+  receivedFor: string[];
+  subject: string;
+  text: string;
+  html: string;
+  messageId: string;
+  headers: Record<string, string>;
+};
+
+export async function rsGetReceivedEmail(id: string): Promise<RsReceivedEmail> {
+  const key = requireKey();
+  const raw = (await rsFetch(key, `/emails/receiving/${id}`) ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const arr = (v: unknown): string[] =>
+    Array.isArray(v) ? v.map((x) => str(x)).filter(Boolean) : (str(v) ? [str(v)] : []);
+
+  // Flattened to strings so the caller never has to care that a repeated header (Received:)
+  // arrives as an array while every other one is a scalar.
+  const headers: Record<string, string> = {};
+  const rawHeaders = raw.headers;
+  if (rawHeaders && typeof rawHeaders === "object" && !Array.isArray(rawHeaders)) {
+    for (const [k, v] of Object.entries(rawHeaders as Record<string, unknown>)) {
+      headers[k.toLowerCase()] = Array.isArray(v) ? v.map((x) => str(x)).join(" ") : str(v);
+    }
+  }
+
+  return {
+    id: str(raw.id) || id,
+    from: str(raw.from),
+    to: arr(raw.to),
+    receivedFor: arr(raw.received_for),
+    subject: str(raw.subject),
+    text: str(raw.text),
+    html: str(raw.html),
+    messageId: str(raw.message_id),
+    headers,
+  };
+}
+
 /** Remove a domain from the Resend account (the disconnect path). */
 export async function rsDeleteDomain(id: string): Promise<void> {
   const key = requireKey();

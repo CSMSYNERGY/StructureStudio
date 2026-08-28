@@ -103,6 +103,47 @@ export function parseReplyToken(addr: unknown): { kind: "design" | "contact"; id
     : { kind: "contact", id: m[2] };
 }
 
+/** Summarise what the receiving side concluded about the SENDER, for email_inbound.spam_verdict.
+ *
+ * ⚠️ NOTHING IN THIS PIPELINE VERIFIES THAT A REPLY IS REALLY FROM THE CUSTOMER. A forged
+ * `From` puts words in their mouth on a builder's screen, in a UI whose whole job is to look
+ * like the customer said them. These verdicts are the only evidence we get, so they are
+ * stored on every row — including the failures, which are the ones worth reading.
+ *
+ * Provider-shaped by header NAME rather than by vendor, because the values arrive from
+ * whatever MTA sat in front of us. Resend's are added by the SES layer underneath it and
+ * were confirmed live 2026-08-28:
+ *
+ *   x-ses-spam-verdict: PASS   x-ses-virus-verdict: PASS   received-spf: pass
+ *   authentication-results: amazonses.com; spf=pass (…)
+ *
+ * Returns a compact `spam=PASS virus=PASS spf=pass` string, or null when the provider told
+ * us nothing — null meaning "unknown", never "clean". Deliberately NOT acted on here:
+ * migration 135 stores the provider's call rather than dropping mail on it, because a
+ * customer's words are worth more than our confidence in a spam score.
+ */
+export function senderVerdict(headers: Record<string, unknown>): string | null {
+  const get = (name: string): string => {
+    const k = Object.keys(headers ?? {}).find((h) => h.toLowerCase() === name);
+    return k ? String(headers[k] ?? "").trim() : "";
+  };
+  const parts: string[] = [];
+  const spam = get("x-ses-spam-verdict") || get("x-spam-status");
+  const virus = get("x-ses-virus-verdict");
+  // `received-spf` leads with the result word; authentication-results needs the spf= pulled out.
+  const spf = get("received-spf").split(/[\s(;]/)[0] ||
+    (/\bspf=([a-z]+)/i.exec(get("authentication-results"))?.[1] ?? "");
+  const dkim = /\bdkim=([a-z]+)/i.exec(get("authentication-results"))?.[1] ?? "";
+  const dmarc = /\bdmarc=([a-z]+)/i.exec(get("authentication-results"))?.[1] ?? "";
+
+  if (spam) parts.push(`spam=${spam.slice(0, 24)}`);
+  if (virus) parts.push(`virus=${virus.slice(0, 24)}`);
+  if (spf) parts.push(`spf=${spf.slice(0, 16)}`);
+  if (dkim) parts.push(`dkim=${dkim.slice(0, 16)}`);
+  if (dmarc) parts.push(`dmarc=${dmarc.slice(0, 16)}`);
+  return parts.length ? parts.join(" ").slice(0, 200) : null;
+}
+
 /** Build the routable reply address — the exact inverse of parseReplyToken, and its neighbour
  *  so the two spellings can never drift apart.
  *
