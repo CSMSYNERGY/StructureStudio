@@ -143,12 +143,18 @@ async function pmLiftLocalViews(board) {
   let local = [];
   try { local = JSON.parse(localStorage.getItem(pmViewsKey(board.slug)) || "[]"); } catch (_) { return false; }
   if (!Array.isArray(local) || !local.length) return false;
+  let allSaved = true;
   for (const v of local) {
     if (!v || typeof v.name !== "string" || !v.snap) continue;
     try { await pmCall({ action: "save_view", boardId: board.id, name: v.name, snap: v.snap }); }
-    catch (_) { /* a failed lift must not block the board */ }
+    catch (_) { allSaved = false; /* a failed lift must not block the board */ }
   }
-  try { localStorage.removeItem(pmViewsKey(board.slug)); } catch (_) { /* private mode */ }
+  // Only drop the local copy once every view is safely on the server — clearing it after a
+  // failed save would silently destroy the one thing this function exists to rescue. A
+  // retained key just means the next load tries again.
+  if (allSaved) {
+    try { localStorage.removeItem(pmViewsKey(board.slug)); } catch (_) { /* private mode */ }
+  }
   return true;
 }
 
