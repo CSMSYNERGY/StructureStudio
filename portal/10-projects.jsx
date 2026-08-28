@@ -590,8 +590,15 @@ function ProjectsTab({ sub, onSub }) {
   const viewDirty = filtersOn || view.groupBy !== "groups" || view.sortKey !== "name"
     || view.sortDir !== "asc" || (view.hiddenCols || []).length > 0;
 
+  // The toolbar's "Clear filters" does exactly what it says - filters only, leaving the
+  // arrangement alone. The "All items" CHIP is a view like any other, so it restores the
+  // board's default arrangement too, or it would sit unlit next to the view it just applied.
   const clearFilters = () => {
     setQ(""); setFacets({}); setWhenCond("any"); setWhenA(""); setWhenB(""); setWhenMonth(""); setWhenN("");
+  };
+  const resetToDefault = () => {
+    clearFilters();
+    setViewPart({ groupBy: "groups", sortKey: "name", sortDir: "asc", hiddenCols: [] });
   };
   const applyView = (v) => {
     const s = v.snap || {};
@@ -725,7 +732,7 @@ function ProjectsTab({ sub, onSub }) {
                 "which view am I in" then "how is it filtered". */}
             <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, marginRight: 2 }}>Views</span>
-              <button type="button" onClick={clearFilters}
+              <button type="button" onClick={resetToDefault}
                 style={{ ...PM_VIEW_CHIP, background: !viewDirty && !activeView ? ACCENT : "#FFF", color: !viewDirty && !activeView ? "#FFF" : "#334155", borderColor: !viewDirty && !activeView ? ACCENT : "#CBD5E1" }}>
                 All items
               </button>
