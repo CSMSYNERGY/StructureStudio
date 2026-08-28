@@ -3,6 +3,14 @@
 <!-- PWA: the portal is the installable "StructureStudio" app (one branded app,
      tenants log in). The customer-facing designer stays a plain web link — it
      deliberately has NO manifest, so visitors never see an install prompt. -->
+<!-- Open the connection to Supabase while the page is still parsing. Every screen in the
+     portal starts with a call there (the session check, then the tab's own read), and
+     without this the first one pays DNS + TCP + TLS before it can even ask. `crossorigin`
+     is required, not decoration: supabase-js issues non-credentialed CORS requests, and
+     those can only reuse a connection opened in the anonymous pool — drop the attribute and
+     the browser warms a socket the app never touches. -->
+<link rel="preconnect" href="https://jzeamjbhdrsbygdnphbm.supabase.co" crossorigin/>
+<link rel="dns-prefetch" href="https://jzeamjbhdrsbygdnphbm.supabase.co"/>
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <link rel="manifest" href="/manifest.json"/>
 <meta name="theme-color" content="#3D3672"/>
@@ -158,7 +166,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
 <script defer src="/structure-studio.component.compiled.js?v=f7893e66"></script>
-<script defer src="/portal.app.compiled.js?v=941e3fb0"></script>
+<script defer src="/portal.app.compiled.js?v=d0c08281"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

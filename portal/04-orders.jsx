@@ -2463,8 +2463,19 @@ function InventoryTable({
   // button let a building be sold with no invoice behind it. The one write left on this page
   // is the admin-only Release under a SOLD chip, because a sale correction IS a status
   // change and there is no invoice-void anywhere in this product to do it for us.
-  const [rows, setRows] = useState(null);      // null = loading
-  const [locations, setLocations] = useState([]);
+  // Seed from the tab cache in the INITIALIZER, not an effect: this component is unmounted
+  // every time the tab is left, so a revisit starts from scratch. Reading here means the
+  // first render already has rows and the skeleton never appears for data we still hold;
+  // load() below refreshes it in the background. An initializer also adds no hook, which
+  // keeps clear of this file's early-return/hook-order hazard.
+  const [rows, setRows] = useState(() => {
+    const c = ssCacheGet("portal-settings", "list_inventory", clientId);
+    return c ? (c.units || []) : null;         // null = loading
+  });
+  const [locations, setLocations] = useState(() => {
+    const c = ssCacheGet("portal-settings", "list_inventory", clientId);
+    return c ? (c.locations || []) : [];
+  });
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
   // One filter object rather than three loose states, so "no contradictory combination is
@@ -2485,28 +2496,61 @@ function InventoryTable({
     const units = data.units || [];
     setRows(units);
     setLocations(data.locations || []);
+    ssCachePut("portal-settings", "list_inventory", clientId, data);
     // list_inventory reports each estimate's CACHED designs.status, and nothing else on this
     // tab talks to GHL. sync-design-status is ALSO the safety-net sale path: an invoice the
     // tenant raised directly in GoHighLevel (or a GHL "paid") is what it notices and records.
-    // So this re-loads afterwards rather than patching statuses locally — a sale it just
-    // persisted, the buyer's name and the recomputed stage all have to come from the server
-    // to agree. Additive: any failure just leaves what we already rendered.
     //
-    // There is no paint() closure here the way LeadsTable has one, and none is needed: every
-    // derivation on this tab (bucketOf, counts, filtered, statusCell) runs in render off
-    // `rows`, so the setRows below IS the repaint. What matters is that the setRows above
-    // already sits IN FRONT of this leg — do not "tidy" the ordering by awaiting the sync
-    // first. sync-design-status is the same eight-second call that held Contacts on
-    // "Loading…" for eight of its 9.7 seconds; on Inventory it was never in front of the
-    // paint, so the only thing that ever made this tab feel slow was the word "Loading"
-    // standing in for a table while the (much cheaper) list_inventory read was in flight.
+    // ⚠️ THE ORDERING IS LOAD-BEARING: the setRows above sits IN FRONT of this leg and must
+    // stay there. sync-design-status is the same eight-second call that held Contacts on
+    // "Loading…" for eight of its 9.7 seconds — awaiting it before the first paint is
+    // exactly the mistake that made this tab feel broken. There is no paint() closure here
+    // the way LeadsTable has one, and none is needed: every derivation on this tab
+    // (bucketOf, counts, filtered, statusCell) runs in render off `rows`, so setRows IS the
+    // repaint.
+    //
+    // What the sync leg does with its answer changed on 2026-08-28. It used to re-read the
+    // ENTIRE list_inventory payload — four waves of joins across five tables — to pick up
+    // status chips that the sync's own response already contained. Now the statuses are
+    // merged locally and the full re-read is kept for the one case that genuinely needs the
+    // server: a sale the sync just recorded (see below).
     const codes = units.flatMap((u) => (u.estimates || []).map((e) => e.shortCode)).filter(Boolean);
     if (codes.length) {
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: codes } });
         if (sync && sync.statuses) {
-          const { data: fresh } = await sb.functions.invoke("portal-settings", { body: { action: "list_inventory" } });
-          if (fresh && fresh.units) { setRows(fresh.units); setLocations(fresh.locations || []); }
+          // The statuses come back in the sync's own response, so merge them into the rows
+          // already on screen instead of re-reading the entire multi-table payload for a
+          // handful of chips. `statuses` is keyed by estimate short code, which is exactly
+          // what each unit's estimates carry.
+          const merged = units.map((u) => {
+            const ests = (u.estimates || []).map((e) => {
+              const next = sync.statuses[e.shortCode];
+              return (next && next !== e.status) ? { ...e, status: next } : e;
+            });
+            return ests.some((e, i) => e !== (u.estimates || [])[i]) ? { ...u, estimates: ests } : u;
+          });
+          setRows(merged);
+          ssCachePut("portal-settings", "list_inventory", clientId, { ...data, units: merged });
+          // The ONE thing a status map cannot carry: the safety-net SALE. When an unsold
+          // unit's estimate has just reached invoiced/delivered, the sync may have claimed
+          // the unit server-side — writing sale_state, the buyer's first name and a
+          // recomputed stage, none of which are in `statuses`. That has to be re-read, so
+          // this keeps the full refetch for exactly that case and skips it otherwise. The
+          // threshold mirrors the server's own trigger; widening it here would just restore
+          // the second read for everyone.
+          const saleMayHaveLanded = units.some((u) => !invSold(u) && (u.estimates || []).some((e) => {
+            const s = sync.statuses[e.shortCode];
+            return s === "invoiced" || s === "delivered";
+          }));
+          if (saleMayHaveLanded) {
+            const { data: fresh } = await sb.functions.invoke("portal-settings", { body: { action: "list_inventory" } });
+            if (fresh && fresh.units) {
+              setRows(fresh.units);
+              setLocations(fresh.locations || []);
+              ssCachePut("portal-settings", "list_inventory", clientId, fresh);
+            }
+          }
         }
       } catch (_e) { /* what we already rendered stands */ }
     }

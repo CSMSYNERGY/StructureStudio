@@ -447,6 +447,24 @@ function Dashboard({ session }) {
     })();
   }, [session.access_token, viewing]);
 
+  // ── Warm the schedule and commissions isolates ────────────────────────────────
+  // Boot already invokes portal-settings and portal-billing, so those two are usually warm
+  // by the time anyone clicks. portal-schedule and portal-commissions are not, and a cold
+  // Deno isolate costs ~2.5 SECONDS before the function runs its first query — measured
+  // against this project, and the largest single component of "the schedule tab is slow".
+  //
+  // Fire-and-forget, and deliberately behind a delay: the boot chain (client_users →
+  // client_configs → status, plus billing and the profile read below) owns the first moment
+  // of the page, and a warm-up that competes with it would trade a fast first tab for a slow
+  // first paint. A module-level flag keeps it to once per page rather than once per
+  // Dashboard mount (view-as remounts this component).
+  useEffect(() => {
+    if (window.__ssWarmed) return undefined;
+    window.__ssWarmed = true;
+    const t = setTimeout(() => { ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions"); }, 1500);
+    return () => clearTimeout(t);
+  }, []);
+
   // ── Who the signed-in person is, and the operator's user editor ────────────────
   // `profile` is the caller's own client_users row. needsDetails drives a one-time nudge:
   // every user predating migration 060 has no name, and until they enter one the portal has
@@ -1412,7 +1430,9 @@ function Dashboard({ session }) {
                   instead. Ask an owner there to run it, or use the Admin console.
                 </div>
               ) : (
-                <CommissionsReport />
+                // Only ever the caller's own tenant (the view-as branch above refuses),
+                // but the cache key is explicit rather than implied.
+                <CommissionsReport clientId={effClientId} />
               )
             )}
             {!gateLocked && activeTab === "reports" && (
@@ -1664,11 +1684,20 @@ function PortalApp() {
         ssLogError(SS_ERR_SOURCE, "recovery link produced no session (type=" + linkType + ")", "recovery_no_session");
       }
       if (linkType || code) scrubUrl();
-      if (!cancelled) setSession(data.session || null);
+      if (!cancelled) {
+        ssSetCurrentUser(data.session && data.session.user ? data.session.user.id : null);
+        setSession(data.session || null);
+      }
     };
     bootstrap();
 
     const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
+      // Who the cached tab payloads belong to. Signing out does NOT reload this page — it
+      // swaps to the login view — so without this the next person to sign in on a shared
+      // shop computer would inherit the previous one's cached rows, and the commissions
+      // ledger is scoped to the CALLER. ssSetCurrentUser clears the cache whenever the id
+      // changes, which covers sign-out (null) and a different sign-in alike.
+      ssSetCurrentUser(sess && sess.user ? sess.user.id : null);
       setSession(sess || null);
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
       if (event === "SIGNED_IN") { setExpired(false); setLinkError(null); } // fresh login clears both notices
