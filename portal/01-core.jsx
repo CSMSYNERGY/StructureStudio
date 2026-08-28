@@ -413,6 +413,27 @@ function ssParsePath() {
   return { page: parts[1] || null, sub: parts[2] || null };
 }
 
+// Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
+// group (and its teaser routes) exist at all — Carolyn approved hiding them from
+// production on 2026-08-27 ("Go ahead and do it, yes"). HOSTNAME is the only signal there
+// is: the two workers serve identical bytes with no env vars, and one Supabase project
+// serves both deployments, so no DB flag can tell them apart (the same reasoning as the
+// designer's betaMode telemetry check, which this deliberately does NOT reuse — that one
+// is documented as side-effect-free forever, and this one exists to have a side effect).
+// The beta label must be exactly `beta` or `beta-…` so a tenant subdomain that merely
+// starts with "beta" can never match; workers.dev previews and localhost count as beta,
+// because both exist to look at unreleased work.
+function ssIsBetaHost() {
+  const h = String(window.location.hostname || "").toLowerCase();
+  if (h === "localhost" || h === "127.0.0.1" || /\.workers\.dev$/.test(h)) return true;
+  return /(^|\.)beta(-[a-z0-9-]+)?(\.|--)/.test(h);
+}
+
+// The four teaser tabs the Coming Soon group points at. On a production host the nav
+// group is hidden AND these routes clamp (hiding a nav item does not remove its route —
+// TAB_META is what grants routability, and bookmarked deep links exist).
+const SS_SOON_TABS = ["on-demand-pricing", "rent-to-own-contracts", "reports", "self-serve-display-units"];
+
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
 // every navigation) and drops any hash.
 function ssPagePath(page, sub) {
@@ -515,6 +536,10 @@ function ssFallbackTab(access) {
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
 function ssClampTab(tab, isOperator, canAdmin, access) {
+  // Teaser routes exist only where the Coming Soon group renders. Checked before the
+  // role branches on purpose: an admin bookmark to /portal/reports on production should
+  // land on a real page, not an unreleased teaser the sidebar no longer offers.
+  if (SS_SOON_TABS.includes(tab) && !ssIsBetaHost()) return ssFallbackTab(access);
   if (tab === "accounts" || tab === "admin" || tab === "projects") return isOperator ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.

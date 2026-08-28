@@ -225,6 +225,44 @@ function Dashboard({ session }) {
     try { window.history.replaceState({ page: "accounts", sub: null }, "", "/portal/accounts"); } catch (_e) {}
   };
 
+  // ── Sidebar account switcher (operators only) ──────────────────────────────────────
+  // GHL-style: the current builder at the BOTTOM of the rail, a click opens an upward
+  // list of every builder, picking one runs the SAME openAccount the Accounts page uses
+  // (Carolyn 2026-08-27: "put it down at the bottom … just do a similar version of
+  // GoHighLevel"). Click-toggled with outside-click dismiss, deliberately NOT the
+  // hover-only pattern .ss-user-menu uses — that popping over content is the exact thing
+  // she flagged ("sometimes it gets in the way. Sometimes I'm trying to click on
+  // features"). The client list loads on FIRST open only: an operator who never touches
+  // the switcher pays nothing, and the Accounts page keeps its own copy.
+  // Hooks HERE, with the others, above Dashboard's early returns (React #310).
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerClients, setPickerClients] = useState(null);  // null = never loaded
+  const [pickerQ, setPickerQ] = useState("");
+  const pickerRef = useRef(null);
+  useEffect(() => {
+    if (!pickerOpen || pickerClients !== null) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "list_clients" } });
+      if (cancelled) return;
+      // An error resolves to [] rather than staying null so the menu shows "no accounts"
+      // instead of a spinner forever; reopening after a failure retries via the reset below.
+      if (error || !data || !Array.isArray(data.clients)) { setPickerClients([]); return; }
+      setPickerClients(data.clients);
+    })();
+    return () => { cancelled = true; };
+  }, [pickerOpen, pickerClients]);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDoc = (e) => { if (pickerRef.current && !pickerRef.current.contains(e.target)) setPickerOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [pickerOpen]);
+  const pickAccount = (c) => {
+    setPickerOpen(false); setPickerQ("");
+    if (!viewing || viewing.clientId !== c.clientId) openAccount({ clientId: c.clientId, companyName: c.companyName });
+  };
+
   // Back/forward. Reads the URL rather than the state object, so a hand-edited address
   // and a history entry are treated identically. Every view-as history entry carries its
   // ?view= (ssPagePath preserves search), so `viewing` has to follow the restored URL too:
@@ -820,6 +858,11 @@ function Dashboard({ session }) {
               TAB_AREA and the clamp, neither of which reads the nav. */}
         </nav>
 
+        {/* Beta only (Carolyn 2026-08-27, Ahsan's proposal: "Go ahead and do it, yes").
+            Production tenants see finished work, not a list of promises; beta is where
+            unreleased things are looked at. The routes clamp too (ssClampTab reads the
+            same predicate) — hiding a nav item never removed its URL. */}
+        {ssIsBetaHost() && (<>
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {soonItem("on-demand-pricing", "RealTime Pricing", "3rd Qtr")}
@@ -831,6 +874,7 @@ function Dashboard({ session }) {
           {soonItem("reports", "Reports", "4th Qtr")}
           {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
         </nav>
+        </>)}
 
         {isOperator && (<>
         <div className="ss-navlabel">Operator</div>
@@ -854,6 +898,56 @@ function Dashboard({ session }) {
         )}
 
         <div className="ss-foot">
+          {/* Operator account switcher — see the pickerOpen hooks above for the design
+              rationale. Keeps the red topbar pill and the Accounts page untouched: this is
+              an ADDITIONAL entry point to the same openAccount/exitAccount, not a new
+              mechanism. Hidden on the collapsed icon rail (portal.html media query) —
+              a 52px-wide tenant list helps nobody; the Accounts page covers that mode. */}
+          {isOperator && (
+            <div className="ss-switch-wrap" ref={pickerRef}>
+              <button type="button" className="ss-switch" onClick={() => setPickerOpen((o) => !o)}
+                aria-haspopup="listbox" aria-expanded={pickerOpen}
+                title={viewing ? `Viewing ${shownBusiness} — switch account` : "Switch account"}>
+                <div className="ss-clogo" aria-hidden="true">{tenantInitials}</div>
+                <span className="stext">
+                  <span className="sname">{shownBusiness}</span>
+                  <span className="srole">{viewing ? "Viewing as operator" : "Your account"}</span>
+                </span>
+                <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+              </button>
+              {pickerOpen && (
+                <div className="ss-switch-menu" role="listbox" aria-label="Switch account">
+                  <input type="search" placeholder="Search builders…" value={pickerQ} autoFocus
+                    onChange={(e) => setPickerQ(e.target.value)} />
+                  <div className="ss-switch-list">
+                    {pickerClients === null && <div className="ss-switch-note">Loading accounts…</div>}
+                    {pickerClients !== null && pickerClients
+                      .filter((c) => {
+                        const q = pickerQ.trim().toLowerCase();
+                        return !q || String(c.companyName || "").toLowerCase().includes(q) || String(c.clientId || "").toLowerCase().includes(q);
+                      })
+                      .map((c) => {
+                        const isCur = viewing && viewing.clientId === c.clientId;
+                        return (
+                          <button type="button" key={c.clientId} role="option" aria-selected={!!isCur}
+                            className={isCur ? "cur" : ""} onClick={() => pickAccount(c)}>
+                            <span className="ss-clogo sm" aria-hidden="true">{String(c.companyName || c.clientId || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")}</span>
+                            <span className="nm">{c.companyName || c.clientId}</span>
+                            {isCur && <span className="vw">Viewing</span>}
+                          </button>
+                        );
+                      })}
+                    {pickerClients !== null && pickerClients.length === 0 && <div className="ss-switch-note">No accounts.</div>}
+                  </div>
+                  {viewing && (
+                    <button type="button" className="ss-switch-exit" onClick={() => { setPickerOpen(false); setPickerQ(""); exitAccount(); }}>
+                      ← Exit {shownBusiness}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <button type="button" className="ss-newlink" onClick={() => navigate("releases")} title="New features / Bug fixes">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
             <span>New features / Bug fixes</span>
