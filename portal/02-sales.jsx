@@ -1136,7 +1136,17 @@ const CRM_TABS = [
   // looking at. Design Documents is what WE generated (quote PDFs, floor plans, invoices);
   // Customer Uploads is what THEY sent us. The names now carry the distinction, so the two
   // can never read as interchangeable tabs.
-  { key: "files", label: "Customer Uploads", enabled: () => false, hint: "Arrives with customer file storage — nothing they send is lost in the meantime, it is still on the email." },
+  // Live since migration 151. The hint it used to carry — "arrives with customer file
+  // storage; nothing they send is lost in the meantime, it is still on the email" — was a
+  // promise, and this is it kept. Only a contact record has somewhere to put a file: a
+  // design's uploads belong to the person, not to one of their quotes.
+  {
+    key: "files", label: "Customer Uploads",
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.id),
+    hint: (c) => (c.canEdit
+      ? "This design has no contact record yet, so there is nowhere to file an upload."
+      : "You don't have permission to add files to contacts."),
+  },
   { key: "documents", label: "Design Documents", enabled: () => true },
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
 ];
@@ -1227,6 +1237,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // past the guard — React #310, and the whole record page goes white the instant its data
   // arrives. That shipped once (13ca37e) and was caught before release; do not move them.
   const [text, setText] = useState("");
+  // Customer Uploads. In the top hook block with the rest — CrmRecord returns early on
+  // `!data`, and a hook below that guard is React #310 and a white page (13ca37e).
+  const [upBusy, setUpBusy] = useState(false);
+  const [upMsg, setUpMsg] = useState(null);
   const [textMsg, setTextMsg] = useState(null);
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
   // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
@@ -1362,6 +1376,75 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // ⚠️ THE BODY CARRIES IDS, NEVER A PHONE NUMBER. The server reads the number off
   // crm_contacts and normalizes it there. Posting a number from here would let anyone with
   // a portal login text any handset from the tenant's registered number.
+  // ── UPLOAD A FILE THE CUSTOMER SENT ─────────────────────────────────────────────────
+  // Three steps, and the bytes never touch the edge function: ask for a signed URL (which
+  // is where the quota is enforced), PUT straight to storage, then record what landed.
+  //
+  // The bucket has NO storage policies, so this cannot be a direct sb.storage.upload() —
+  // that would 403. It also means the same code path works for an operator in view-as,
+  // which a tenant-prefix policy would have broken silently. See migration 151.
+  const uploadFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUpBusy(true); setUpMsg(null);
+    let ok = 0;
+    for (const file of files) {
+      try {
+        const { data: signed, error: sErr } = await sb.functions.invoke("portal-settings", {
+          body: {
+            action: "crm_file_sign",
+            contactId: (data.contact && data.contact.id) || null,
+            name: file.name, size: file.size,
+          },
+        });
+        const failSign = (signed && signed.error) || (sErr ? await fnError(sErr) : null);
+        // Stop the whole run on a quota refusal — every following file would fail the same
+        // way, and five identical "storage is full" messages is not five pieces of news.
+        if (failSign) { setUpMsg({ err: failSign }); break; }
+
+        const up = await sb.storage.from("customer-uploads")
+          .uploadToSignedUrl(signed.path, signed.token, file, { contentType: file.type || undefined });
+        if (up.error) {
+          // The bucket's own MIME allow-list and 25 MB cap answer here, and the raw message
+          // is unhelpful ("mime type ... is not supported"), so name the file instead.
+          setUpMsg({ err: `"${file.name}" couldn't be uploaded — we take images, PDFs, Word documents and text files, up to 25 MB.` });
+          break;
+        }
+
+        const { data: att, error: aErr } = await sb.functions.invoke("portal-settings", {
+          body: {
+            action: "crm_file_attach",
+            contactId: (data.contact && data.contact.id) || null,
+            shortCode: kind === "design" ? recordId : null,
+            path: signed.path, name: file.name, size: file.size, mime: file.type || null,
+          },
+        });
+        const failAtt = (att && att.error) || (aErr ? await fnError(aErr) : null);
+        // The object is in the bucket but unlisted. Say so rather than claiming success —
+        // an upload nobody can find is worse than one that visibly failed.
+        if (failAtt) { setUpMsg({ err: `"${file.name}" uploaded but couldn't be filed — ${failAtt}` }); break; }
+        ok += 1;
+      } catch (e) {
+        setUpMsg({ err: `"${file.name}" couldn't be uploaded.` });
+        break;
+      }
+    }
+    setUpBusy(false);
+    if (ok) { setUpMsg((m) => (m && m.err) ? m : { ok: `${ok} file${ok === 1 ? "" : "s"} added.` }); load(); }
+  };
+
+  const deleteFile = async (f) => {
+    if (!window.confirm(`Delete "${f.name}"? This removes the customer's file for good.`)) return;
+    setUpBusy(true); setUpMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "crm_file_delete", id: f.id },
+    });
+    setUpBusy(false);
+    const fail = (r && r.error) || (error ? await fnError(error) : null);
+    if (fail) { setUpMsg({ err: fail }); return; }
+    load();
+  };
+
   const sendSms = async () => {
     const body = text.trim();
     if (!body) return;
@@ -1795,6 +1878,65 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             {/* DOCUMENTS. Everything this record has actually produced, as links. The tab was
                 enabled and rendered nothing, which reads as a broken page rather than an
                 empty one — and on a record with a quote there is never nothing to show. */}
+            {/* CUSTOMER UPLOADS — what THEY sent, never mixed with what we generated
+                (Carolyn 2026-08-26). Files ride the record's single crm_record fetch,
+                already carrying one-hour signed URLs; the browser cannot mint those itself
+                because the bucket has no storage policies. See migration 151. */}
+            {tab === "files" && canEdit && data.contact && data.contact.id && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{
+                  display: "inline-block", ...S.btn(ACCENT, "#FFF"),
+                  cursor: upBusy ? "default" : "pointer", opacity: upBusy ? 0.6 : 1, marginBottom: 8,
+                }}>
+                  {upBusy ? "Uploading…" : "Add files"}
+                  <input type="file" multiple disabled={upBusy}
+                    onChange={(e) => { uploadFiles(e.target.files); e.target.value = ""; }}
+                    style={{ display: "none" }} />
+                </label>
+                <span style={{ fontSize: 11.5, color: "#94A3B8", marginLeft: 9 }}>
+                  Images, PDFs, Word documents or text — up to 25&nbsp;MB each.
+                </span>
+                {upMsg && upMsg.err && <div style={{ ...S.err, marginTop: 7 }}>{upMsg.err}</div>}
+                {upMsg && upMsg.ok && <div style={{ ...S.okMsg, marginTop: 7 }}>{upMsg.ok}</div>}
+
+                {(data.files || []).length === 0 && !upMsg && (
+                  <div style={{ fontSize: 12.5, color: "#94A3B8", marginTop: 8 }}>
+                    Nothing from this customer yet. Anything they send you — a site photo, a permit,
+                    a sketch — belongs here rather than in an email nobody else can find.
+                  </div>
+                )}
+                {(data.files || []).map((f) => (
+                  <div key={f.id} style={{
+                    display: "flex", alignItems: "center", gap: 8, background: "#F8FAFC",
+                    border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginTop: 6,
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {/* A row whose object has gone is listed WITHOUT a link rather than
+                          hidden — that the customer sent something is worth seeing even when
+                          the file itself is missing. */}
+                      {f.url ? (
+                        <button type="button" onClick={() => setPdf({ url: f.url, title: f.name })}
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, color: ACCENT, textAlign: "left", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>
+                          📎 {f.name}
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 13, fontWeight: 700, color: "#94A3B8" }}>📎 {f.name} — file missing</span>
+                      )}
+                      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>
+                        {fmtDate(f.at)}{f.size ? ` · ${f.size < 1048576 ? Math.max(1, Math.round(f.size / 1024)) + " KB" : (f.size / 1048576).toFixed(1) + " MB"}` : ""}
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => deleteFile(f)} disabled={upBusy}
+                      title="Delete this file"
+                      style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = "#DC2626"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = "#94A3B8"; }}>
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             {tab === "documents" && (
               <div style={{ marginBottom: 12 }}>
                 {(() => {
