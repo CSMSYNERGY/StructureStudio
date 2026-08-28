@@ -378,6 +378,9 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                     {r.feedback_submission_id && (
                       <span title="From a client's portal" style={{ fontSize: 9, fontWeight: 800, color: "#1B7895", background: "#E6F7FA", border: "1px solid #BEE9F1", borderRadius: 4, padding: "1px 5px", marginLeft: 7, verticalAlign: 1, letterSpacing: 0.4 }}>CLIENT</span>
                     )}
+                    {r.release_note_id && (
+                      <span title="On the roadmap tenants can see in What's New" style={{ fontSize: 9, fontWeight: 800, color: "#4F46E5", background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 4, padding: "1px 5px", marginLeft: 7, verticalAlign: 1, letterSpacing: 0.4 }}>ROADMAP</span>
+                    )}
                   </td>
                   {visCols.map((c) => (
                     <td key={c.id} onClick={cellClick(r, c)}

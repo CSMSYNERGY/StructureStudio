@@ -22,6 +22,7 @@ import { withErrorLog } from "../_shared/logError.ts";
 //     Changing a linked item's status to such a label updates the tenant-facing mirror
 //     row; labels without one are pure-internal and touch nothing tenant-side.
 //   * Saved views (pm_views) are per BOARD and shared by the whole operator team.
+//   * The Roadmap board MIRRORS unshipped release_notes (one-way, create-only).
 //   * ASSIGNABLE PEOPLE (pm_people) and OPERATOR ACCESS (app_operators) are two
 //     different things since migration 148, joined by pm_people.user_id so one profile
 //     can hold both. Assigning work grants nothing; operator access grants everything.
@@ -283,6 +284,75 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     return data;
   };
 
+  // ── The roadmap, mirrored into Projects ────────────────────────────────────
+  // Carolyn 2026-08-27: "everything that is actually on the roadmap [should] show in
+  // Projects as well". The roadmap tenants see is release_notes rows that have not
+  // shipped — kind 'requested' plus anything still sitting at roadmap/planned.
+  //
+  // ONE-WAY and CREATE-ONLY, both deliberate:
+  //   * one-way, because release_notes is a publication to every tenant and is
+  //     hand-authored by rule — a board edit must never republish itself to customers;
+  //   * create-only, because once an item is on the board its name, status and notes
+  //     belong to the team. A sync that "kept them in step" would silently undo triage
+  //     every time someone opened the board.
+  // deno-lint-ignore no-explicit-any
+  const syncRoadmap = async (board: any): Promise<number> => {
+    const { data: notes, error } = await admin.from("release_notes")
+      .select("id, title, detail, status, kind, released_at")
+      .in("status", ["roadmap", "planned", "requested"])
+      .order("released_at", { ascending: false });
+    if (error) throw error;
+    if (!notes || !notes.length) return 0;
+
+    const { data: existing } = await admin.from("pm_items")
+      .select("release_note_id").eq("board_id", board.id).not("release_note_id", "is", null);
+    const have = new Set((existing || []).map((r: { release_note_id: string }) => r.release_note_id));
+    const missing = notes.filter((n) => !have.has(n.id));
+    if (!missing.length) return 0;
+
+    const columns = await boardColumns(board.id);
+    const statusCol = columns.find((c) => c.type === "status");
+    const notesCol = columns.find((c) => c.type === "long_text");
+    // Status is set ONCE, at creation, from how real the roadmap entry is — and never
+    // touched again.
+    // deno-lint-ignore no-explicit-any
+    const labels: any[] = statusCol?.settings?.labels || [];
+    // deno-lint-ignore no-explicit-any
+    const byWord = (w: string) => labels.find((l: any) => String(l.label).toLowerCase().includes(w));
+    const idea = byWord("idea") || labels[0];
+    const planned = byWord("planned") || idea;
+
+    const { data: groups } = await admin.from("pm_groups").select("id, name")
+      .eq("board_id", board.id).order("position");
+    // Prefer a group actually called Roadmap; fall back to the first one.
+    const group = (groups || []).find((g: { name: string }) => g.name.toLowerCase().includes("roadmap")) || (groups || [])[0];
+    if (!group) return 0;
+
+    const { data: maxRow } = await admin.from("pm_items").select("position")
+      .eq("group_id", group.id).order("position", { ascending: false }).limit(1).maybeSingle();
+    let pos = (maxRow?.position || 0) + 1024;
+
+    let added = 0;
+    for (const n of missing) {
+      const values: Record<string, unknown> = {};
+      const label = n.status === "planned" ? planned : idea;
+      if (statusCol && label) values[statusCol.id] = label.id;
+      if (notesCol && n.detail) values[notesCol.id] = String(n.detail).slice(0, 8000);
+      const { error: iErr } = await admin.from("pm_items").insert({
+        board_id: board.id, group_id: group.id,
+        name: String(n.title || "Untitled").slice(0, 200),
+        values, position: pos, release_note_id: n.id,
+        created_by_email: "roadmap",
+      });
+      // A single clashing row must not abort the whole board load.
+      if (iErr) { console.error("roadmap sync failed for note", n.id, iErr.message); continue; }
+      pos += 1024;
+      added++;
+    }
+    if (added) await act(board.id, null, "sync_roadmap", { added });
+    return added;
+  };
+
   // Propagate a status change to the tenant mirror when the label maps to a client
   // status and the item is linked to a feedback submission.
   // deno-lint-ignore no-explicit-any
@@ -329,6 +399,14 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .eq("id", boardId).maybeSingle();
         if (bErr) throw bErr;
         if (!board) return json({ error: "Board not found." }, 404);
+        // Opening the roadmap board pulls in any new roadmap entries. Only for an
+        // operator who can write — a read-only account should never trigger inserts —
+        // and never fatal: a sync problem must not take the board down with it.
+        if (board.slug === "roadmap" && op.can_write) {
+          try { await syncRoadmap(board); } catch (e) {
+            console.error("roadmap sync:", e instanceof Error ? e.message : String(e));
+          }
+        }
         const [columns, groupsRes, itemsRes, opsRes, viewsRes] = await Promise.all([
           boardColumns(boardId),
           admin.from("pm_groups").select("*").eq("board_id", boardId).order("position"),
