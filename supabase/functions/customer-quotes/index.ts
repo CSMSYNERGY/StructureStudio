@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
-import { totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amountOwed, totalFromSnapshot } from "../_shared/estimateLines.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
@@ -131,6 +131,12 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // work out whether a sent invoice predates an approved change, in which case the amount
   // printed on it is no longer the amount owed and it must not be signed (migration 136).
   const lastAckByCode = new Map<string, number>();
+  // The acknowledged changes themselves, which DO move the amount due (2026-08-27). Kept
+  // per code so the invoice card can name the same number the invoice prints — a manual
+  // change order amends the total without touching estimate_lines, so the snapshot alone
+  // would show the customer a stale figure and have them sign for it.
+  // deno-lint-ignore no-explicit-any
+  const ackedByCode = new Map<string, any[]>();
   if (ssMode && mine.length > 0) {
     const { data: cos } = await admin.from("change_orders")
       .select("id, short_code, co_no, description, total_before_cents, total_after_cents, created_at, status, acknowledged_at")
@@ -141,6 +147,9 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
       if (co.status === "acknowledged") {
         const t = Date.parse(String(co.acknowledged_at || "")) || 0;
         if (t > (lastAckByCode.get(co.short_code) ?? 0)) lastAckByCode.set(co.short_code, t);
+        const acked = ackedByCode.get(co.short_code) ?? [];
+        acked.push(co);
+        ackedByCode.set(co.short_code, acked);
         continue;
       }
       const list = cosByCode.get(co.short_code) ?? [];
@@ -162,6 +171,17 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // a number, a PDF link, and the two timestamps the card renders.
   // deno-lint-ignore no-explicit-any
   const invByCode = new Map<string, any>();
+  // The order's own total — the book of record for what is owed once changes are approved.
+  const orderTotalByCode = new Map<string, number>();
+  if (ssMode && mine.length > 0) {
+    const { data: ords } = await admin.from("orders")
+      .select("short_code, total_cents")
+      .eq("client_id", identity.clientId)
+      .in("short_code", mine.map((d) => d.short_code));
+    for (const o of ords ?? []) {
+      if (o?.total_cents != null) orderTotalByCode.set(String(o.short_code), Number(o.total_cents));
+    }
+  }
   if (ssMode && mine.length > 0) {
     const { data: invs } = await admin.from("invoice_sends")
       .select("short_code, invoice_number, invoice_pdf_url, status, signed_at, updated_at")
@@ -219,7 +239,18 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // The 3D snapshot of their own building — the card's thumbnail.
           view3dImageUrl: d.view3d_image_url || null,
           // The invoice, once one is out (migration 136). Null until the builder sends it.
-          invoice: invByCode.get(d.short_code) ?? null,
+          // `amountDue` is what the invoice actually bills — the quote total plus every
+          // acknowledged change — so the card, the PDF and the sentence they sign agree.
+          invoice: invByCode.has(d.short_code)
+            ? {
+              ...invByCode.get(d.short_code),
+              amountDue: amountOwed(
+                d.estimate_lines,
+                ackedByCode.get(d.short_code) ?? [],
+                orderTotalByCode.get(d.short_code) ?? null,
+              ),
+            }
+            : null,
           // Whether the SIGN button may appear. Every condition the server enforces in
           // customer-accept's sign_invoice is mirrored here, so the button is absent
           // rather than present-and-then-rejected: an invoice exists, it is unsigned, it

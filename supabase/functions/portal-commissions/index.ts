@@ -645,7 +645,18 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             earned_on: earnedDate, period_key: period?.key ?? null, kind: "commission", updated_at: new Date().toISOString(),
           };
           if (autoRow) { await admin.from("commission_entries").update(rowData).eq("id", autoRow.id); updated++; }
-          else { await admin.from("commission_entries").insert({ ...rowData, status: "pending" }); computed++; }
+          else {
+            // 23505 here is NOT a failure — it is the database holding the one invariant this
+            // function cannot hold itself. `existing` was snapshotted before this loop, so a
+            // compute that started while ours was running may already have inserted this
+            // order's line; migration 148's partial unique index refuses the duplicate. The
+            // desired end state (exactly one auto row for the order) is satisfied either way,
+            // so skip it rather than aborting a compute that is otherwise correct. Anything
+            // else is a real error and still surfaces.
+            const { error: insErr } = await admin.from("commission_entries").insert({ ...rowData, status: "pending" });
+            if (insErr && insErr.code !== "23505") throw new Error(insErr.message);
+            if (!insErr) computed++;
+          }
         }
 
         if (p.debug && diag.length) {

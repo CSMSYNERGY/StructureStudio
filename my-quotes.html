@@ -695,7 +695,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     head.textContent = "Invoice " + (inv.number ? String(inv.number) : "") + " — ready for your signature";
     box.appendChild(head);
 
-    var amt = fmtMoney(q.total);
+    // The INVOICE's amount, not the quote's: an acknowledged change order moves what is
+    // owed without touching the quote snapshot, and this figure sits directly above the
+    // button that signs for it. Falls back to the quote total for a pre-2026-08-27 payload.
+    var amt = fmtMoney(inv.amountDue == null ? q.total : inv.amountDue);
     if (amt) {
       var totals = document.createElement("div");
       totals.style.cssText = "font-size:15px;font-weight:700;margin-top:6px;color:#0F172A";
@@ -962,7 +965,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     } else if (inv) {
       // Mirrors consentSentenceInvoice() in customer-accept — see the note in
       // toggleAcceptPanel about why these two compositions must not drift.
-      var invTotalText = fmtMoney(q.total);
+      // amountDue, not q.total — the server composes the stored consent_text from the same
+      // figure, and the two sentences must not name different money.
+      var invTotalText = fmtMoney(inv.amountDue == null ? q.total : inv.amountDue);
       var invNumText = inv.number != null ? String(inv.number) : "your invoice";
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept invoice " +
         invNumText + (invTotalText ? " for " + invTotalText : "") + ".";

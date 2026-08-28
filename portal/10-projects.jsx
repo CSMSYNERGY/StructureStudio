@@ -563,71 +563,112 @@ function PMLabelEditor({ col, run }) {
   );
 }
 
-// The people behind the Assignee column (Carolyn 2026-08-27). This IS app_operators, so
-// the copy says what a row really means rather than calling them "users": everyone here
-// can be assigned work AND can open any builder's account. Adding is deliberately limited
-// to people who already have a login — this screen never creates accounts or handles
-// passwords — and new people arrive read-only.
+// The people behind the Assignee column (Carolyn 2026-08-27). TWO SEPARATE THINGS on
+// purpose, after she asked for the split:
+//   * being on this list makes someone ASSIGNABLE — that is all it does, and a name is
+//     enough, so a subcontractor or a support person can be assigned work with no login;
+//   * "Can open builder accounts" is OPERATOR ACCESS, the real privilege, and it needs a
+//     login to attach to. One profile can hold both, which is why they sit on one row.
 function PMPeopleEditor({ onChanged }) {
   const [rows, setRows] = useState(null);
   const [me, setMe] = useState(null);
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
-    pmCall({ action: "list_operators" })
-      .then((d) => { setRows(d.operators || []); setMe(d.me); })
+    pmCall({ action: "list_people" })
+      .then((d) => { setRows(d.people || []); setMe(d.me); })
       .catch((e) => setErr(e.message));
   }, []);
   useEffect(() => { load(); }, [load]);
 
   const run = async (body, after) => {
-    setBusy(true); setErr("");
-    try { await pmCall(body); load(); if (after) after(); if (onChanged) onChanged(); }
+    setBusy(true); setErr(""); setNote("");
+    try { const d = await pmCall(body); load(); if (after) after(d); if (onChanged) onChanged(); }
     catch (e) { setErr(e.message); }
     setBusy(false);
+  };
+
+  const add = () => {
+    if (!name.trim()) return;
+    run({ action: "add_person", name: name.trim(), email: email.trim() }, (d) => {
+      setName(""); setEmail("");
+      setNote(d && d.linked
+        ? "Added, and matched to their StructureStudio login — you can give them operator access below."
+        : "Added. They can be assigned work now; a matching login is only needed for operator access.");
+    });
   };
 
   return (
     <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", margin: "4px 0 8px" }}>
       {err && <div style={S.err}>{err}</div>}
+      {note && <div style={S.okMsg}>{note}</div>}
       {!rows && !err && <div style={{ fontSize: 12, color: "#94A3B8" }}>Loading the team…</div>}
-      {(rows || []).map((o) => (
-        <div key={o.user_id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.5, flexWrap: "wrap" }}>
-          <span style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(o.user_id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center" }}>
+
+      {rows && rows.length > 0 && (
+        <div style={{ display: "flex", gap: 8, fontSize: 10, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "2px 0 4px" }}>
+          <span style={{ width: 180 }}>Assignable person</span>
+          <span style={{ width: 170 }}>Email (for their login)</span>
+          <span>Can open builder accounts</span>
+        </div>
+      )}
+
+      {(rows || []).filter((o) => o.active).map((o) => (
+        <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.5, flexWrap: "wrap" }}>
+          <span style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(o.id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             {pmInitials(o)}
           </span>
-          <input defaultValue={o.display_name || ""} placeholder={(o.email || "").split("@")[0]}
-            style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
-            onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.display_name || "")) run({ action: "save_operator", userId: o.user_id, displayName: v }); }} />
-          <span style={{ color: "#64748B", fontSize: 11.5, minWidth: 160 }}>{o.email}</span>
-          <label style={{ fontSize: 11.5, fontWeight: 600, color: "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
-            title="Off means they can see the boards but not change anything, anywhere.">
-            <input type="checkbox" checked={!!o.can_write} disabled={busy}
-              onChange={(e) => run({ action: "save_operator", userId: o.user_id, canWrite: e.target.checked })} />
-            can edit
+          <input defaultValue={o.name} style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
+            onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.name) run({ action: "save_person", id: o.id, name: v }); }} />
+          <input defaultValue={o.email || ""} placeholder="no login" style={{ ...S.input, width: 170, padding: "3px 7px", fontSize: 12 }}
+            onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.email || "")) run({ action: "save_person", id: o.id, email: v }); }} />
+
+          <label style={{ fontSize: 11.5, fontWeight: 600, color: o.user_id ? "#334155" : "#94A3B8", display: "inline-flex", alignItems: "center", gap: 4 }}
+            title={o.user_id ? "Operator access — they can open ANY builder's account." : "Needs a StructureStudio login first."}>
+            <input type="checkbox" checked={!!o.isOperator} disabled={busy || !o.user_id}
+              onChange={(ev) => {
+                if (ev.target.checked) {
+                  if (!window.confirm(`Give ${o.name} operator access? They will be able to open ANY builder's account (read-only until you tick "can edit"). This is separate from being assignable.`)) { load(); return; }
+                } else if (!window.confirm(`Remove ${o.name}'s operator access? They stay on the list and can still be assigned work.`)) { load(); return; }
+                run({ action: "set_operator_access", id: o.id, enabled: ev.target.checked });
+              }} />
+            operator
           </label>
+          {o.isOperator && (
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
+              title="Off means they can look at builders' accounts but change nothing.">
+              <input type="checkbox" checked={!!o.canWrite} disabled={busy}
+                onChange={(ev) => run({ action: "set_operator_write", id: o.id, canWrite: ev.target.checked })} />
+              can edit
+            </label>
+          )}
+
           {o.user_id === me
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>
             : (
               <button type="button" disabled={busy}
-                onClick={() => { if (window.confirm(`Remove ${o.display_name || o.email} from the team? They lose access to the Projects boards AND to every builder's account. Their login itself is untouched.`)) run({ action: "remove_operator", userId: o.user_id }); }}
+                onClick={() => { if (window.confirm(`Remove ${o.name} from the assignable list? Work already assigned to them keeps their name, and this does not change their access to builder accounts.`)) run({ action: "remove_person", id: o.id }); }}
                 style={{ marginLeft: "auto", background: "none", border: "none", color: "#DC2626", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Remove</button>
             )}
         </div>
       ))}
+
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
-        <input placeholder="their@email.com" value={email} onChange={(e) => setEmail(e.target.value)}
-          style={{ ...S.input, maxWidth: 220, padding: "5px 8px", fontSize: 12.5 }} />
-        <button type="button" style={S.btn("#EEF2FF", ACCENT)} disabled={!email.trim() || busy}
-          onClick={() => { if (window.confirm(`Add ${email.trim()} to the team? They will be able to be assigned work, see every board, and open any builder's account (read-only until you tick "can edit").`)) run({ action: "add_operator", email: email.trim() }, () => setEmail("")); }}>
-          ＋ Add person
-        </button>
+        <input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)}
+          style={{ ...S.input, maxWidth: 150, padding: "5px 8px", fontSize: 12.5 }}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
+        <input placeholder="their@email.com (optional)" value={email} onChange={(e) => setEmail(e.target.value)}
+          style={{ ...S.input, maxWidth: 200, padding: "5px 8px", fontSize: 12.5 }}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
+        <button type="button" style={S.btn("#EEF2FF", ACCENT)} disabled={!name.trim() || busy} onClick={add}>＋ Add person</button>
       </div>
       <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6, lineHeight: 1.45 }}>
-        Everyone here can be assigned work — and can open any builder's account, so keep the list to your own team.
-        People must already have a StructureStudio login before they can be added.
+        Anyone here can be assigned work — a name is enough, no login needed. <b>Operator</b> is the separate,
+        bigger thing: it lets them open any builder's account, so it can only be given to someone whose email
+        matches a StructureStudio login.
       </div>
     </div>
   );
@@ -694,8 +735,8 @@ function ProjectsTab({ sub, onSub }) {
   });
 
   const ctx = useMemo(() => ({
-    operators: (data && data.operators) || [],
-    operatorsById: Object.fromEntries(((data && data.operators) || []).map((o) => [o.user_id, o])),
+    people: (data && data.people) || [],
+    peopleById: Object.fromEntries(((data && data.people) || []).map((o) => [o.id, o])),
   }), [data]);
 
   // Optimistic local patch + server call; a failed write reloads so the screen never lies.
@@ -907,6 +948,9 @@ function ProjectsTab({ sub, onSub }) {
         </div>
         {err && <div style={S.err}>{err}</div>}
         {!boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
+        {/* The board body has its own wait: the first open after new roadmap entries also
+            runs the sync, and a silent blank panel reads as a broken screen. */}
+        {boards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
 
         {data && (
           <>
