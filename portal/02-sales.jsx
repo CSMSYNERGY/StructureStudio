@@ -143,16 +143,31 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       } catch (e) { setError(e.message || String(e)); setRows([]); }
       return;
     }
-    const { data, error: err } = await sb
-      .from("designs")
-      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
-      .eq("client_id", clientId)
-      .order("created_at", { ascending: false });
-    if (err) { setError(err.message); setRows([]); return; }
-    const list = (data || []).filter(notInventory);
+    // The list and its version history are independent reads, so they go out together.
+    // Version history (newest first), grouped by design; owner-scoped by RLS. It used to be
+    // fetched at the very END of this function — behind the GHL sync below — so the history
+    // a row expands to show did not exist until an eight-second call nothing about it needed
+    // had finished.
+    const [dRes, vRes] = await Promise.all([
+      sb.from("designs")
+        .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
+        .eq("client_id", clientId)
+        .order("created_at", { ascending: false }),
+      sb.from("design_versions")
+        .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
+        .eq("client_id", clientId)
+        .order("version", { ascending: false })
+        .then((r) => r, () => ({ data: [] })),
+    ]);
+    if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
+    const list = (dRes.data || []).filter(notInventory);
     setRows(list); // show cached statuses immediately
+    const map = {};
+    (vRes.data || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+    setVmap(map);
     // Refresh fulfillment status from GHL (read-only projection). Non-fatal: if the sync
     // errors or GHL isn't configured, the cached designs.status values above stay shown.
+    // LAST on purpose — everything above is already on screen before this starts.
     if (list.length > 0) {
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
@@ -160,15 +175,6 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         if (statuses) setRows((rs) => (rs || []).map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r));
       } catch (_e) { /* keep cached statuses */ }
     }
-    // Version history (newest first), grouped by design. Owner-scoped by RLS.
-    const { data: vdata } = await sb
-      .from("design_versions")
-      .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
-      .eq("client_id", clientId)
-      .order("version", { ascending: false });
-    const map = {};
-    (vdata || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
-    setVmap(map);
   }, [fetchDesigns]);
 
   // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
@@ -669,7 +675,10 @@ function buildContactTimeline(act) {
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
 function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null, onOpenRecord = null }) {
-  const [rows, setRows] = useState(null); // null = loading
+  // Cache-seeded so returning to Contacts paints the grouped list at once and refreshes
+  // behind it (see ssTabCache in 01-core). Operator view-as reads through a different path
+  // and is left uncached — those rows are service-role and audit-logged.
+  const [rows, setRows] = useState(() => (fetchDesigns ? null : ssCacheGet("rest", "contacts", clientId))); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
 
@@ -754,7 +763,12 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           codes: [],
         });
       });
-      setRows([...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0)));
+      const out = [...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0));
+      setRows(out);
+      // Cache the GROUPED result, not the raw reads: regrouping is the expensive part of
+      // this function and the shape the table renders from. Operator view-as is excluded —
+      // those rows come from a service-role path and belong to someone else's tenant.
+      if (!fetchDesigns) ssCachePut("rest", "contacts", clientId, out);
     };
     if (fetchDesigns) {
       // Operator view-as: rows from operator-portal (service-role, audit-logged);
@@ -762,22 +776,28 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       try { const res = await fetchDesigns(); list = (res.designs || []).filter(notInventoryLead); browsing = res.capturedLeads || []; }
       catch (e) { setError(e.message || String(e)); setRows([]); return; }
     } else {
-    const { data, error: err } = await sb
-      .from("designs")
-      .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id")
-      .eq("client_id", clientId)
-      .order("created_at", { ascending: false });
-    if (err) { setError(err.message); setRows([]); return; }
-    list = (data || []).filter(notInventoryLead);
+    // Both reads at once. They share nothing — browsing leads are matched to designs in
+    // `paint` AFTER both are in hand — so awaiting one before starting the other simply
+    // added a full network round trip in front of the first paint. On a normal connection
+    // that is most of what this tab's wait was.
+    //
     // Browsing leads (migration 062): people who passed the public designer's gate or
     // opened quote Details but never submitted. RLS scopes the read to this tenant.
-    // Additive — a failure here must never block the design list.
-    try {
-      const { data: cl } = await sb.from("captured_leads")
+    // Additive — a failure there must never block the design list, which is why its result
+    // is read defensively rather than destructured with the designs error.
+    const [dRes, clRes] = await Promise.all([
+      sb.from("designs")
+        .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id")
+        .eq("client_id", clientId)
+        .order("created_at", { ascending: false }),
+      sb.from("captured_leads")
         .select("id, name, phone, phone_digits, email, source, created_at, updated_at")
-        .eq("client_id", clientId).order("updated_at", { ascending: false });
-      browsing = cl || [];
-    } catch (_e) { /* leads are additive */ }
+        .eq("client_id", clientId).order("updated_at", { ascending: false })
+        .then((r) => r, () => ({ data: [] })),
+    ]);
+    if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
+    list = (dRes.data || []).filter(notInventoryLead);
+    browsing = clRes.data || [];
     // PAINT NOW, on the cached statuses. Everything below only ever improves them.
     paint(list, browsing);
     // Freshen fulfillment status from GHL (read-only projection); non-fatal. The rows

@@ -749,7 +749,11 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
 function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null }) {
-  const [rows, setRows] = useState(null);   // null = loading; [{order, design, paid}]
+  // Seeded from the tab cache so a revisit shows the order rows at once instead of a
+  // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
+  // below starts false on every mount: every figure renders as pending until this load's
+  // own payment read lands. Structure arrives early; money still never does.
+  const [rows, setRows] = useState(() => ssCacheGet("rest", "orders", clientId));   // null = loading; [{order, design, paid}]
   const [error, setError] = useState(null);
   const [schedLinks, setSchedLinks] = useState(null);   // { byDesign, saleDesigns, … }
   const [schedBusy, setSchedBusy] = useState(null);
@@ -812,6 +816,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         if (!data || data.length < page) return { data: out };
       }
     };
+    // ⏱ The money reads start HERE, not after the paint, and overlap the designs read below.
+    // Neither depends on designs, so awaiting the paint before starting them just added a
+    // round trip to how long the figures showed as pending. They are still CONSUMED after
+    // the paint — nothing about the ordering of what appears on screen changes.
+    //
+    // ⛔ These cannot be moved in FRONT of the paint, and the designs read cannot be
+    // parallelised with the orders read: `ssOrders` below decides which orders this tab
+    // shows at all, using each design's ss_quote_number. Painting before designs land would
+    // list GHL-quoted orders and then remove them.
+    const paysP = fetchAllPayments().then((r) => r, (e) => ({ error: e }));
+    // Pending change orders (migration 126): the row wears an amber chip, and the server
+    // 409s an invoice while one is open — the chip is the courtesy half of that rule.
+    const coP = (codes.length
+      ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack").in("short_code", codes)
+      : Promise.resolve({ data: [] })
+    ).then((r) => r, (e) => ({ error: e }));
+
     const dsnRes = codes.length
       ? await sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
       : { data: [] };
@@ -831,14 +852,8 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     // read while moneyReady is false — every consumer of it is gated below.
     setRows(ssOrders.map((o) => ({ o, d: byCode[o.short_code] || null, pays: [], paid: 0, coPending: false })));
 
-    const [paysRes, coRes] = await Promise.all([
-      fetchAllPayments(),
-      // Pending change orders (migration 126): the row wears an amber chip, and the server
-      // 409s an invoice while one is open — the chip is the courtesy half of that rule.
-      codes.length
-        ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack").in("short_code", codes)
-        : Promise.resolve({ data: [] }),
-    ]);
+    // Both were started before the designs read above; by now they are usually already in.
+    const [paysRes, coRes] = await Promise.all([paysP, coP]);
     // A failed payments read must not render every order as unpaid — that's the same
     // silent understatement the paging above exists to prevent. moneyReady stays false, so
     // the figures stay pending rather than resolving to a wrong number behind an error.
@@ -848,14 +863,18 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     if (coRes.error) { setError(coRes.error.message); return; }
     const payByOrder = {}; (paysRes.data || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
     const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
-    setRows(ssOrders.map((o) => {
+    const settled = ssOrders.map((o) => {
       const ps = payByOrder[o.id] || [];
       return {
         o, d: byCode[o.short_code] || null, pays: ps,
         paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
         coPending: pendingCo.has(o.short_code),
       };
-    }));
+    });
+    setRows(settled);
+    // Cached only once the money is real — a half-loaded row set (paid: 0 everywhere) must
+    // never be what a revisit paints from, even behind the pending flag.
+    ssCachePut("rest", "orders", clientId, settled);
     setMoneyReady(true);
   }, [clientId]);
 
